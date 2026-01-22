@@ -19,7 +19,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["Meerkat Contributors"]
-repository = "https://github.com/meerkat-rs/meerkat"
+repository = "https://github.com/lukacf/meerkat"
 
 [workspace.dependencies]
 # Async runtime

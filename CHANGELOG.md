@@ -26,5 +26,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 Initial development release.
 
-[Unreleased]: https://github.com/meerkat-rs/meerkat/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/meerkat-rs/meerkat/releases/tag/v0.1.0
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/lukacf/meerkat/releases/tag/v0.1.0

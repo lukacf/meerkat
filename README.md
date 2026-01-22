@@ -1,14 +1,14 @@
-# RAIK
+# Meerkat
 
 **Rust Agentic Interface Kit** — A minimal, high-performance agent harness for LLM-powered applications.
 
-[![Crates.io](https://img.shields.io/crates/v/raik.svg)](https://crates.io/crates/raik)
-[![Documentation](https://docs.rs/raik/badge.svg)](https://docs.rs/raik)
+[![Crates.io](https://img.shields.io/crates/v/meerkat.svg)](https://crates.io/crates/meerkat)
+[![Documentation](https://docs.rs/meerkat/badge.svg)](https://docs.rs/meerkat)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         RAIK                                │
+│                         Meerkat                                │
 ├─────────────────────────────────────────────────────────────┤
 │  1. LLM Client      - Call models with tool definitions     │
 │  2. Tool Router     - Dispatch tool calls to MCP servers    │
@@ -31,22 +31,22 @@
 
 ### Installation
 
-Add RAIK to your `Cargo.toml`:
+Add Meerkat to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-raik = "0.1"
+meerkat = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
 ### Simple Agent
 
 ```rust
-use raik::prelude::*;
+use meerkat::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let result = raik::with_anthropic(std::env::var("ANTHROPIC_API_KEY")?)
+    let result = meerkat::with_anthropic(std::env::var("ANTHROPIC_API_KEY")?)
         .model("claude-sonnet-4")
         .system_prompt("You are a helpful assistant.")
         .run("What is the capital of France?")
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### With Tools
 
 ```rust
-use raik::{AgentBuilder, AgentToolDispatcher, ToolDef};
+use meerkat::{AgentBuilder, AgentToolDispatcher, ToolDef};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -100,47 +100,47 @@ impl AgentToolDispatcher for Calculator {
 
 ```bash
 # Install
-cargo install raik-cli
+cargo install meerkat-cli
 
 # Run a simple prompt
-raik run "Explain quantum computing in simple terms"
+rkat run "Explain quantum computing in simple terms"
 
 # Resume a session
-raik resume <session-id> "Can you elaborate on that?"
+rkat resume <session-id> "Can you elaborate on that?"
 
 # With options
-raik run --model claude-opus-4-5 --max-tokens 2048 "Write a haiku"
+rkat run --model claude-opus-4-5 --max-tokens 2048 "Write a haiku"
 
 # Output as JSON
-raik run --output json "What is 2+2?"
+rkat run --output json "What is 2+2?"
 ```
 
 ## Architecture
 
-RAIK is organized as a workspace of focused crates:
+Meerkat is organized as a workspace of focused crates:
 
 ```
-raik/
-├── raik-core/        # Agent loop, types, budget, retry logic
-├── raik-client/      # LLM provider clients (Anthropic, OpenAI, Gemini)
-├── raik-store/       # Session persistence (JSONL, memory)
-├── raik-tools/       # Tool registry and validation
-├── raik-mcp-client/  # MCP protocol client
-├── raik-mcp-server/  # Expose RAIK as MCP tools
-├── raik-rest/        # Optional REST API server
-├── raik-cli/         # Command-line interface
-└── raik/             # Facade crate (main entry point)
+meerkat/
+├── meerkat-core/        # Agent loop, types, budget, retry logic
+├── meerkat-client/      # LLM provider clients (Anthropic, OpenAI, Gemini)
+├── meerkat-store/       # Session persistence (JSONL, memory)
+├── meerkat-tools/       # Tool registry and validation
+├── meerkat-mcp-client/  # MCP protocol client
+├── meerkat-mcp-server/  # Expose Meerkat as MCP tools
+├── meerkat-rest/        # Optional REST API server
+├── meerkat-cli/         # Command-line interface
+└── meerkat/             # Facade crate (main entry point)
 ```
 
 ### Access Patterns
 
-RAIK can be consumed in multiple ways:
+Meerkat can be consumed in multiple ways:
 
 | Pattern | Use Case | Entry Point |
 |---------|----------|-------------|
-| **SDK** | Embed in Rust applications | `raik::with_anthropic()` |
-| **CLI** | Shell scripts, automation | `raik run "prompt"` |
-| **MCP Server** | Claude Code, other MCP clients | `raik_run`, `raik_resume` tools |
+| **SDK** | Embed in Rust applications | `meerkat::with_anthropic()` |
+| **CLI** | Shell scripts, automation | `rkat run "prompt"` |
+| **MCP Server** | Claude Code, other MCP clients | `meerkat_run`, `meerkat_resume` tools |
 | **REST API** | HTTP clients, web apps | `POST /sessions` |
 
 ## Core Concepts
@@ -194,10 +194,10 @@ let result = resumed.run("Continue the task").await?;
 Control resource usage with budget limits:
 
 ```rust
-use raik::BudgetLimits;
+use meerkat::BudgetLimits;
 use std::time::Duration;
 
-let result = raik::with_anthropic(api_key)
+let result = meerkat::with_anthropic(api_key)
     .with_budget(BudgetLimits {
         max_tokens: Some(10_000),
         max_duration: Some(Duration::from_secs(60)),
@@ -212,7 +212,7 @@ let result = raik::with_anthropic(api_key)
 Connect to MCP servers for tool access:
 
 ```rust
-use raik::{McpRouter, McpServerConfig};
+use meerkat::{McpRouter, McpServerConfig};
 
 let config = McpServerConfig {
     name: "filesystem".to_string(),
@@ -234,7 +234,7 @@ let agent = AgentBuilder::new()
 ### Anthropic (Default)
 
 ```rust
-raik::with_anthropic(api_key)
+meerkat::with_anthropic(api_key)
     .model("claude-sonnet-4")  // or claude-opus-4-5
     .run("Hello")
     .await?;
@@ -243,7 +243,7 @@ raik::with_anthropic(api_key)
 ### OpenAI
 
 ```rust
-raik::with_openai(api_key)
+meerkat::with_openai(api_key)
     .model("gpt-4o")
     .run("Hello")
     .await?;
@@ -252,7 +252,7 @@ raik::with_openai(api_key)
 ### Gemini
 
 ```rust
-raik::with_gemini(api_key)
+meerkat::with_gemini(api_key)
     .model("gemini-2.0-flash-exp")
     .run("Hello")
     .await?;
@@ -263,7 +263,7 @@ raik::with_gemini(api_key)
 Start the REST server:
 
 ```bash
-ANTHROPIC_API_KEY=your-key cargo run --package raik-rest
+ANTHROPIC_API_KEY=your-key cargo run --package meerkat-rest
 ```
 
 Endpoints:
@@ -288,13 +288,13 @@ curl http://localhost:8080/sessions/{id}/events
 
 ## MCP Server
 
-RAIK can be exposed as an MCP server for use with Claude Code or other MCP clients:
+Meerkat can be exposed as an MCP server for use with Claude Code or other MCP clients:
 
 ```json
 {
   "mcpServers": {
-    "raik": {
-      "command": "raik-mcp-server",
+    "meerkat": {
+      "command": "meerkat-mcp-server",
       "env": {
         "ANTHROPIC_API_KEY": "your-key"
       }
@@ -304,8 +304,8 @@ RAIK can be exposed as an MCP server for use with Claude Code or other MCP clien
 ```
 
 Available tools:
-- `raik_run` — Run a new agent with a prompt
-- `raik_resume` — Resume an existing session
+- `meerkat_run` — Run a new agent with a prompt
+- `meerkat_resume` — Resume an existing session
 
 ## Configuration
 
@@ -316,15 +316,15 @@ Available tools:
 | `ANTHROPIC_API_KEY` | Anthropic API key | — |
 | `OPENAI_API_KEY` | OpenAI API key | — |
 | `GOOGLE_API_KEY` | Google/Gemini API key | — |
-| `RAIK_MODEL` | Default model | `claude-sonnet-4` |
-| `RAIK_MAX_TOKENS` | Default max tokens | `4096` |
-| `RAIK_STORE_PATH` | Session storage path | `~/.local/share/raik/sessions` |
+| `RKAT_MODEL` | Default model | `claude-sonnet-4` |
+| `RKAT_MAX_TOKENS` | Default max tokens | `4096` |
+| `RKAT_STORE_PATH` | Session storage path | `~/.local/share/meerkat/sessions` |
 
 ### Feature Flags
 
 ```toml
 [dependencies]
-raik = { version = "0.1", features = ["anthropic", "openai", "gemini"] }
+meerkat = { version = "0.1", features = ["anthropic", "openai", "gemini"] }
 ```
 
 | Feature | Description |
@@ -338,11 +338,11 @@ raik = { version = "0.1", features = ["anthropic", "openai", "gemini"] }
 
 ## Examples
 
-See the [`examples/`](./raik/examples) directory:
+See the [`examples/`](./meerkat/examples) directory:
 
-- [`simple.rs`](./raik/examples/simple.rs) — Basic usage with the SDK
-- [`with_tools.rs`](./raik/examples/with_tools.rs) — Custom tool implementation
-- [`multi_turn_tools.rs`](./raik/examples/multi_turn_tools.rs) — Multi-turn conversation with tools
+- [`simple.rs`](./meerkat/examples/simple.rs) — Basic usage with the SDK
+- [`with_tools.rs`](./meerkat/examples/with_tools.rs) — Custom tool implementation
+- [`multi_turn_tools.rs`](./meerkat/examples/multi_turn_tools.rs) — Multi-turn conversation with tools
 
 Run an example:
 
@@ -357,17 +357,17 @@ ANTHROPIC_API_KEY=your-key cargo run --example simple
 cargo test --workspace
 
 # Run integration tests
-cargo test --package raik --test integration
+cargo test --package meerkat --test integration
 
 # Run E2E tests (requires API keys)
-cargo test --package raik --test e2e -- --ignored
+cargo test --package meerkat --test e2e -- --ignored
 ```
 
 ## Documentation
 
 - [Design Document](./DESIGN.md) — Architecture and design decisions
 - [Implementation Plan](./IMPLEMENTATION_PLAN.md) — Development methodology
-- [API Documentation](https://docs.rs/raik) — Rust API reference
+- [API Documentation](https://docs.rs/meerkat) — Rust API reference
 
 ## License
 

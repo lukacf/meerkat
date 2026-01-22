@@ -1081,6 +1081,175 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "meerkat-client",
+ "meerkat-core",
+ "meerkat-mcp-client",
+ "meerkat-store",
+ "meerkat-tools",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "meerkat-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dirs",
+ "futures",
+ "humantime",
+ "meerkat",
+ "meerkat-client",
+ "meerkat-core",
+ "meerkat-mcp-client",
+ "meerkat-store",
+ "meerkat-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "meerkat-client"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures",
+ "meerkat-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "meerkat-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "humantime-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "meerkat-mcp-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "http",
+ "meerkat-core",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sse-stream",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "meerkat-mcp-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "futures",
+ "futures-util",
+ "meerkat",
+ "meerkat-client",
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "meerkat-rest"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum",
+ "chrono",
+ "dirs",
+ "futures",
+ "meerkat",
+ "meerkat-client",
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "meerkat-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "meerkat-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "jsonschema",
+ "meerkat-core",
+ "meerkat-mcp-client",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1352,9 +1521,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.105"
+version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "535d180e0ecab6268a3e718bb9fd44db66bbbc256257165fc699dadf70d16fe7"
+checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
@@ -1387,175 +1556,6 @@ name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
-
-[[package]]
-name = "raik"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "raik-client",
- "raik-core",
- "raik-mcp-client",
- "raik-store",
- "raik-tools",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "raik-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "dirs",
- "futures",
- "humantime",
- "raik",
- "raik-client",
- "raik-core",
- "raik-mcp-client",
- "raik-store",
- "raik-tools",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "toml_edit",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "raik-client"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "futures",
- "raik-core",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "raik-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "humantime-serde",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "raik-mcp-client"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "http",
- "raik-core",
- "reqwest",
- "rmcp",
- "serde",
- "serde_json",
- "sse-stream",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "raik-mcp-server"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dirs",
- "futures",
- "futures-util",
- "raik",
- "raik-client",
- "raik-core",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "raik-rest"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "axum",
- "chrono",
- "dirs",
- "futures",
- "raik",
- "raik-client",
- "raik-core",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "raik-store"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "raik-core",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "raik-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "jsonschema",
- "raik-core",
- "raik-mcp-client",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "redox_syscall"

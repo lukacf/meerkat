@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "raik-core",
-    "raik-client",
-    "raik-store",
-    "raik-tools",
-    "raik-mcp-client",
-    "raik-mcp-server",
-    "raik-cli",
-    "raik-rest",
-    "raik",
+    "meerkat-core",
+    "meerkat-client",
+    "meerkat-store",
+    "meerkat-tools",
+    "meerkat-mcp-client",
+    "meerkat-mcp-server",
+    "meerkat-cli",
+    "meerkat-rest",
+    "meerkat",
     "test-fixtures/mcp-test-server",
 ]
 
@@ -18,8 +18,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-authors = ["RAIK Contributors"]
-repository = "https://github.com/raik-rs/raik"
+authors = ["Meerkat Contributors"]
+repository = "https://github.com/meerkat-rs/meerkat"
 
 [workspace.dependencies]
 # Async runtime
@@ -68,12 +68,12 @@ rmcp = "0.13"
 tempfile = "3.14"
 
 # Internal crates
-raik-core = { path = "raik-core" }
-raik-client = { path = "raik-client" }
-raik-store = { path = "raik-store" }
-raik-tools = { path = "raik-tools" }
-raik-mcp-client = { path = "raik-mcp-client" }
-raik-mcp-server = { path = "raik-mcp-server" }
-raik-cli = { path = "raik-cli" }
-raik-rest = { path = "raik-rest" }
-raik = { path = "raik" }
+meerkat-core = { path = "meerkat-core" }
+meerkat-client = { path = "meerkat-client" }
+meerkat-store = { path = "meerkat-store" }
+meerkat-tools = { path = "meerkat-tools" }
+meerkat-mcp-client = { path = "meerkat-mcp-client" }
+meerkat-mcp-server = { path = "meerkat-mcp-server" }
+meerkat-cli = { path = "meerkat-cli" }
+meerkat-rest = { path = "meerkat-rest" }
+meerkat = { path = "meerkat" }

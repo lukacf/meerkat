@@ -1,0 +1,36 @@
+[package]
+name = "meerkat-rest"
+description = "REST API server for Meerkat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "meerkat-rest"
+path = "src/main.rs"
+
+[dependencies]
+meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
+meerkat-core = { workspace = true }
+meerkat-client = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

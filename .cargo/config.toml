@@ -1,4 +1,4 @@
-# RAIK cargo configuration
+# Meerkat cargo configuration
 
 [env]
 # Run provider tests serially to avoid rate limits
@@ -8,6 +8,6 @@ RUST_TEST_THREADS = "1"
 # Run all RCT tests
 rct = "test --workspace --lib"
 # Run integration tests
-int = "test --package raik --test integration"
+int = "test --package meerkat --test integration"
 # Run E2E tests (ignored by default)
-e2e = "test --package raik --test e2e -- --ignored"
+e2e = "test --package meerkat --test e2e -- --ignored"

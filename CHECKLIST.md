@@ -1,11 +1,11 @@
-# RAIK Implementation Checklist
+# Meerkat Implementation Checklist
 
-> **Reference**: [DESIGN.md](./DESIGN.md) - The authoritative design specification for RAIK.
-> **Reference**: [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) - The authoritative design specification for RAIK.
+> **Reference**: [DESIGN.md](./DESIGN.md) - The authoritative design specification for Meerkat.
+> **Reference**: [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) - The authoritative design specification for Meerkat.
 
 ## Instructions
 
-This checklist follows the RCT (Representation Contract Tests) methodology for implementing RAIK.
+This checklist follows the RCT (Representation Contract Tests) methodology for implementing Meerkat.
 
 ### How to Use This Checklist
 
@@ -38,16 +38,16 @@ GOOGLE_API_KEY=...  # For Gemini
 ```bash
 # Run all RCT tests (Gate 0)
 # Provider tests run serially to avoid rate limits
-RUST_TEST_THREADS=1 cargo test --package raik-client --lib
-cargo test --package raik-core --lib
-cargo test --package raik-store --lib
+RUST_TEST_THREADS=1 cargo test --package meerkat-client --lib
+cargo test --package meerkat-core --lib
+cargo test --package meerkat-store --lib
 
 # Run integration tests (Gate 2)
-cargo test --package raik --test integration
+cargo test --package meerkat --test integration
 
 # Run E2E tests (Gate 1 / Gate 3)
 # E2E tests are marked #[ignore] - run explicitly
-cargo test --package raik --test e2e -- --ignored
+cargo test --package meerkat --test e2e -- --ignored
 
 # Run all tests
 RUST_TEST_THREADS=1 cargo test
@@ -62,17 +62,17 @@ RUST_TEST_THREADS=1 cargo test
 ### 1.1 Workspace Setup
 
 - [x] Create `Cargo.toml` workspace root with all member crates
-- [x] Create `raik-core/Cargo.toml` (serde, uuid, thiserror, tokio)
-- [x] Create `raik-client/Cargo.toml` (reqwest, tokio, async-trait, futures)
-- [x] Create `raik-store/Cargo.toml` (tokio, serde_json)
-- [x] Create `raik-tools/Cargo.toml` (jsonschema, serde_json)
-- [x] Create `raik-mcp-client/Cargo.toml` (rmcp or equivalent)
-- [x] Create `raik/Cargo.toml` (facade crate)
+- [x] Create `meerkat-core/Cargo.toml` (serde, uuid, thiserror, tokio)
+- [x] Create `meerkat-client/Cargo.toml` (reqwest, tokio, async-trait, futures)
+- [x] Create `meerkat-store/Cargo.toml` (tokio, serde_json)
+- [x] Create `meerkat-tools/Cargo.toml` (jsonschema, serde_json)
+- [x] Create `meerkat-mcp-client/Cargo.toml` (rmcp or equivalent)
+- [x] Create `meerkat/Cargo.toml` (facade crate)
 - [x] Create `tests/` directory structure (rct/, integration/, e2e/)
 - [x] Create `.cargo/config.toml` with `RUST_TEST_THREADS=1` for provider tests
 - [x] Create test runner script `scripts/test-rct.sh`
 
-### 1.2 Core Types (`raik-core/src/types/`)
+### 1.2 Core Types (`meerkat-core/src/types/`)
 
 - [x] Define `SessionId` (UUID v7 newtype wrapper)
 - [x] Define `Message` enum:
@@ -90,7 +90,7 @@ RUST_TEST_THREADS=1 cargo test
 - [x] Define `RunResult` struct (text, session_id, usage, turns, tool_calls)
 - [x] Implement Serialize/Deserialize for all types with `#[serde(rename_all = "snake_case")]`
 
-### 1.3 Operation Types (`raik-core/src/types/`)
+### 1.3 Operation Types (`meerkat-core/src/types/`)
 
 - [x] Define `WorkKind` enum (ToolCall, ShellCommand, SubAgent)
 - [x] Define `ResultShape` enum (Single, Stream, Batch)
@@ -104,7 +104,7 @@ RUST_TEST_THREADS=1 cargo test
 - [x] Define `LoopState` enum (CallingLlm, WaitingForOps, DrainingEvents, Cancelling, ErrorRecovery, Completed)
 - [x] Define `ArtifactRef` struct (id: String, session_id: SessionId, size_bytes: u64, ttl_seconds: Option<u64>, version: u32)
 
-### 1.4 Config Types (`raik-core/src/config.rs`)
+### 1.4 Config Types (`meerkat-core/src/config.rs`)
 
 - [x] Define `Config` struct (agent, provider, storage, budget, retry, tools)
 - [x] Define `AgentConfig` struct (model, system_prompt, max_turns)
@@ -113,12 +113,12 @@ RUST_TEST_THREADS=1 cargo test
 - [x] Define `BudgetConfig` struct (max_tokens, max_duration, max_tool_calls)
 - [x] Define `RetryConfig` struct (max_retries, initial_delay, max_delay, multiplier)
 - [x] Implement config file loading (TOML)
-- [x] Implement environment variable overlay (RAIK_* prefix)
+- [x] Implement environment variable overlay (RKAT_* prefix)
 - [x] Implement CLI argument overlay
 - [x] Implement type coercion (string → Duration)
 - [x] Implement defaults
 
-### 1.5 LLM Client Types (`raik-client/src/`)
+### 1.5 LLM Client Types (`meerkat-client/src/`)
 
 - [x] Define `LlmClient` trait (stream method returning Stream<Item=LlmEvent>)
 - [x] Define `LlmEvent` enum (TextDelta, ToolCallDelta, ToolCallComplete, UsageUpdate, Done)
@@ -126,7 +126,7 @@ RUST_TEST_THREADS=1 cargo test
 - [x] Implement `LlmError::is_retryable()` method
 - [x] Define `LlmRequest` struct
 
-### 1.6 Session Persistence (`raik-store/src/`)
+### 1.6 Session Persistence (`meerkat-store/src/`)
 
 - [x] Define `SessionStore` trait (save, load, list, delete)
 - [x] Define `SessionFilter` struct (updated_after, limit, offset)
@@ -143,7 +143,7 @@ RUST_TEST_THREADS=1 cargo test
 - [x] Implement `fail` tool (always returns error)
 - [x] Implement MCP protocol handler (initialize, tools/list, tools/call)
 
-### 1.8 Anthropic Normalizer (`raik-client/src/anthropic.rs`)
+### 1.8 Anthropic Normalizer (`meerkat-client/src/anthropic.rs`)
 
 - [x] Implement HTTP client with streaming
 - [x] Implement SSE parser for `message_start`, `content_block_delta`, `message_delta`, `message_stop`
@@ -154,7 +154,7 @@ RUST_TEST_THREADS=1 cargo test
 - [x] Extract usage from `message_delta`
 - [x] Map HTTP errors → `LlmError` variants
 
-### 1.9 OpenAI Normalizer (`raik-client/src/openai.rs`)
+### 1.9 OpenAI Normalizer (`meerkat-client/src/openai.rs`)
 
 - [x] Implement HTTP client with streaming
 - [x] Implement SSE parser for chat completion chunks
@@ -164,7 +164,7 @@ RUST_TEST_THREADS=1 cargo test
 - [x] Extract usage from final chunk
 - [x] Map HTTP errors → `LlmError` variants
 
-### 1.10 Gemini Normalizer (`raik-client/src/gemini.rs`)
+### 1.10 Gemini Normalizer (`meerkat-client/src/gemini.rs`)
 
 - [x] Implement HTTP client with streaming
 - [x] Implement stream parser for GenerateContent responses
@@ -176,42 +176,42 @@ RUST_TEST_THREADS=1 cargo test
 
 ### 1.11 RCT Tests - Internal (Fixtures)
 
-- [x] `raik-core/src/types/tests.rs::test_session_checkpoint_empty`
-- [x] `raik-core/src/types/tests.rs::test_session_checkpoint_complex` (50+ messages)
-- [x] `raik-core/src/types/tests.rs::test_session_id_encoding` (UUID v7 format)
-- [x] `raik-core/src/types/tests.rs::test_session_meta_timestamps` (ISO8601)
-- [x] `raik-core/src/config/tests.rs::test_config_layering` (defaults + env + file + CLI)
-- [x] `raik-core/src/types/tests.rs::test_agent_event_json_schema` (all variants)
-- [x] `raik-core/src/types/tests.rs::test_run_result_json_schema`
-- [x] `raik-core/src/types/tests.rs::test_context_strategy_serialization`
-- [x] `raik-core/src/types/tests.rs::test_fork_budget_policy_serialization`
-- [x] `raik-core/src/types/tests.rs::test_tool_access_policy_serialization`
-- [x] `raik-core/src/types/tests.rs::test_artifact_ref_serialization`
-- [x] `raik-store/src/tests.rs::test_jsonl_store_roundtrip`
+- [x] `meerkat-core/src/types/tests.rs::test_session_checkpoint_empty`
+- [x] `meerkat-core/src/types/tests.rs::test_session_checkpoint_complex` (50+ messages)
+- [x] `meerkat-core/src/types/tests.rs::test_session_id_encoding` (UUID v7 format)
+- [x] `meerkat-core/src/types/tests.rs::test_session_meta_timestamps` (ISO8601)
+- [x] `meerkat-core/src/config/tests.rs::test_config_layering` (defaults + env + file + CLI)
+- [x] `meerkat-core/src/types/tests.rs::test_agent_event_json_schema` (all variants)
+- [x] `meerkat-core/src/types/tests.rs::test_run_result_json_schema`
+- [x] `meerkat-core/src/types/tests.rs::test_context_strategy_serialization`
+- [x] `meerkat-core/src/types/tests.rs::test_fork_budget_policy_serialization`
+- [x] `meerkat-core/src/types/tests.rs::test_tool_access_policy_serialization`
+- [x] `meerkat-core/src/types/tests.rs::test_artifact_ref_serialization`
+- [x] `meerkat-store/src/tests.rs::test_jsonl_store_roundtrip`
 
 ### 1.12 RCT Tests - Provider (Real API)
 
-- [x] `raik-client/src/anthropic/tests.rs::test_streaming_text_delta_normalization`
-- [x] `raik-client/src/anthropic/tests.rs::test_tool_call_normalization`
-- [x] `raik-client/src/anthropic/tests.rs::test_stop_reason_mapping`
-- [x] `raik-client/src/anthropic/tests.rs::test_usage_mapping`
-- [x] `raik-client/src/anthropic/tests.rs::test_error_response_mapping`
-- [x] `raik-client/src/openai/tests.rs::test_streaming_text_delta_normalization`
-- [x] `raik-client/src/openai/tests.rs::test_tool_call_normalization`
-- [x] `raik-client/src/openai/tests.rs::test_stop_reason_mapping`
-- [x] `raik-client/src/openai/tests.rs::test_usage_mapping`
-- [x] `raik-client/src/openai/tests.rs::test_error_response_mapping`
-- [x] `raik-client/src/gemini/tests.rs::test_streaming_text_delta_normalization`
-- [x] `raik-client/src/gemini/tests.rs::test_function_call_normalization`
-- [x] `raik-client/src/gemini/tests.rs::test_stop_reason_mapping`
-- [x] `raik-client/src/gemini/tests.rs::test_usage_mapping`
-- [x] `raik-client/src/gemini/tests.rs::test_error_response_mapping`
+- [x] `meerkat-client/src/anthropic/tests.rs::test_streaming_text_delta_normalization`
+- [x] `meerkat-client/src/anthropic/tests.rs::test_tool_call_normalization`
+- [x] `meerkat-client/src/anthropic/tests.rs::test_stop_reason_mapping`
+- [x] `meerkat-client/src/anthropic/tests.rs::test_usage_mapping`
+- [x] `meerkat-client/src/anthropic/tests.rs::test_error_response_mapping`
+- [x] `meerkat-client/src/openai/tests.rs::test_streaming_text_delta_normalization`
+- [x] `meerkat-client/src/openai/tests.rs::test_tool_call_normalization`
+- [x] `meerkat-client/src/openai/tests.rs::test_stop_reason_mapping`
+- [x] `meerkat-client/src/openai/tests.rs::test_usage_mapping`
+- [x] `meerkat-client/src/openai/tests.rs::test_error_response_mapping`
+- [x] `meerkat-client/src/gemini/tests.rs::test_streaming_text_delta_normalization`
+- [x] `meerkat-client/src/gemini/tests.rs::test_function_call_normalization`
+- [x] `meerkat-client/src/gemini/tests.rs::test_stop_reason_mapping`
+- [x] `meerkat-client/src/gemini/tests.rs::test_usage_mapping`
+- [x] `meerkat-client/src/gemini/tests.rs::test_error_response_mapping`
 
 ### 1.13 RCT Tests - MCP Protocol
 
-- [x] `raik-mcp-client/src/connection.rs::test_mcp_initialize_handshake`
-- [x] `raik-mcp-client/src/connection.rs::test_mcp_tools_list_schema_parse`
-- [x] `raik-mcp-client/src/connection.rs::test_mcp_tools_call_round_trip`
+- [x] `meerkat-mcp-client/src/connection.rs::test_mcp_initialize_handshake`
+- [x] `meerkat-mcp-client/src/connection.rs::test_mcp_tools_list_schema_parse`
+- [x] `meerkat-mcp-client/src/connection.rs::test_mcp_tools_call_round_trip`
 
 ---
 
@@ -242,23 +242,23 @@ RUST_TEST_THREADS=1 cargo test --workspace
 
 **Goal**: E2E and integration tests exist and run (failures expected).
 
-### 2.1 Minimal CLI (`raik-cli/`)
+### 2.1 Minimal CLI (`meerkat-cli/`)
 
-- [x] Create `raik-cli/Cargo.toml` with clap dependency
-- [x] Implement `raik run "<prompt>"` command
-- [x] Implement `raik resume <session-id> "<prompt>"` command
+- [x] Create `meerkat-cli/Cargo.toml` with clap dependency
+- [x] Implement `rkat run "<prompt>"` command
+- [x] Implement `rkat resume <session-id> "<prompt>"` command
 - [x] Implement `--model` flag
 - [x] Implement `--max-tokens` flag
 - [x] Implement `--output json` flag
 - [x] Implement `--stream` flag (flag present, functionality in Phase 4)
-- [x] Wire CLI to raik-core Agent
+- [x] Wire CLI to meerkat-core Agent
 - [x] Add preflight check for API keys (fail fast with clear error)
 
 ### 2.2 E2E Test Harness
 
-> Note: Tests are in `raik/tests/e2e.rs` (single file with modules).
+> Note: Tests are in `meerkat/tests/e2e.rs` (single file with modules).
 
-- [x] Create `raik/tests/e2e.rs` with test utilities
+- [x] Create `meerkat/tests/e2e.rs` with test utilities
 - [x] API key skip helpers (`skip_if_no_anthropic_key`, etc.)
 - [x] Sanity tests that don't require API keys
 
@@ -278,10 +278,10 @@ RUST_TEST_THREADS=1 cargo test --workspace
 
 ### 2.4 Integration Test Harness
 
-> Note: Tests are in `raik/tests/integration.rs` (single file with modules).
+> Note: Tests are in `meerkat/tests/integration.rs` (single file with modules).
 
-- [x] Create `raik/tests/integration.rs` with test structure
-- [x] Import types from raik SDK facade
+- [x] Create `meerkat/tests/integration.rs` with test structure
+- [x] Import types from meerkat SDK facade
 
 ### 2.5 Full Integration Tests (Choke Points)
 
@@ -308,7 +308,7 @@ RUST_TEST_THREADS=1 cargo test --workspace
 **Run after completing Phase 2.**
 
 ```bash
-cargo test --package raik --test e2e -- --ignored 2>&1 | head -100
+cargo test --package meerkat --test e2e -- --ignored 2>&1 | head -100
 ```
 
 **Criteria**: All 7 E2E tests **start and fail for expected reasons** (not "couldn't boot", "missing binary", or "connection refused").
@@ -328,7 +328,7 @@ cargo test --package raik --test e2e -- --ignored 2>&1 | head -100
 
 **Goal**: All integration tests pass.
 
-### 3.1 Tool Router (`raik-tools/`)
+### 3.1 Tool Router (`meerkat-tools/`)
 
 - [x] Implement `ToolRegistry` struct (tool definitions storage)
 - [x] Implement `register()` method
@@ -337,18 +337,18 @@ cargo test --package raik --test e2e -- --ignored 2>&1 | head -100
 - [x] Implement `ToolDispatcher` struct
 - [x] Implement `dispatch_one()` with configurable timeout
 - [x] Implement `dispatch_parallel()` with `futures::future::join_all`
-- [x] Pass tool_dispatch tests in `raik/tests/integration.rs`
+- [x] Pass tool_dispatch tests in `meerkat/tests/integration.rs`
 
-### 3.2 Retry Policy (`raik-core/src/retry.rs`)
+### 3.2 Retry Policy (`meerkat-core/src/retry.rs`)
 
 - [x] Implement `RetryPolicy` struct
 - [x] Implement `delay_for_attempt()` method with exponential backoff
 - [x] Implement jitter (±10% randomization)
 - [x] Implement `should_retry()` method
 - [x] Integrate retry policy with Agent LLM calls
-- [x] Pass retry_policy tests in `raik/tests/integration.rs`
+- [x] Pass retry_policy tests in `meerkat/tests/integration.rs`
 
-### 3.3 Budget Enforcement (`raik-core/src/budget.rs`)
+### 3.3 Budget Enforcement (`meerkat-core/src/budget.rs`)
 
 - [x] Implement `Budget` struct (tracks tokens, time, calls for individual runs)
 - [x] Implement `BudgetPool` struct (allocation for sub-agents)
@@ -358,27 +358,27 @@ cargo test --package raik --test e2e -- --ignored 2>&1 | head -100
 - [x] Implement `BudgetPool::reserve()` for sub-agent budget allocation
 - [x] Implement `BudgetPool::reclaim()` for unused budget return
 - [x] Implement graceful exhaustion (return partial results)
-- [x] Pass budget_enforcement tests in `raik/tests/integration.rs`
+- [x] Pass budget_enforcement tests in `meerkat/tests/integration.rs`
 
-### 3.4 MCP Client (`raik-mcp-client/`)
+### 3.4 MCP Client (`meerkat-mcp-client/`)
 
 - [x] Implement `McpConnection` struct (using rmcp crate)
 - [x] Implement `initialize` handshake
 - [x] Implement `tools/list` call
 - [x] Implement `tools/call` dispatch
 - [x] Implement `McpRouter` for multi-server routing
-- [x] Pass mcp_protocol tests in `raik/tests/integration.rs`
+- [x] Pass mcp_protocol tests in `meerkat/tests/integration.rs`
 
-### 3.5 Operation Types (`raik-core/src/ops.rs`)
+### 3.5 Operation Types (`meerkat-core/src/ops.rs`)
 
 - [x] Implement operation types (OperationId, OperationSpec, OperationResult)
 - [x] Implement OpEvent enum with all variants
 - [x] Implement ConcurrencyLimits struct
 - [x] Implement ContextStrategy, ForkBudgetPolicy, ToolAccessPolicy
 - [x] Implement WorkKind and ResultShape enums
-- [x] Pass operation_injection tests in `raik/tests/integration.rs`
+- [x] Pass operation_injection tests in `meerkat/tests/integration.rs`
 
-### 3.6 State Machine (`raik-core/src/state.rs`)
+### 3.6 State Machine (`meerkat-core/src/state.rs`)
 
 - [x] Implement `LoopState` transition functions
 - [x] Implement `CallingLlm` → `WaitingForOps` | `DrainingEvents` | `Completed` | `ErrorRecovery`
@@ -387,9 +387,9 @@ cargo test --package raik --test e2e -- --ignored 2>&1 | head -100
 - [x] Implement `Cancelling` → `Completed`
 - [x] Implement `ErrorRecovery` → `CallingLlm` | `Completed`
 - [x] Add invalid transition assertions (error on impossible transitions)
-- [x] Pass state_machine tests in `raik/tests/integration.rs`
+- [x] Pass state_machine tests in `meerkat/tests/integration.rs`
 
-### 3.7 Core Loop (`raik-core/src/agent.rs`)
+### 3.7 Core Loop (`meerkat-core/src/agent.rs`)
 
 - [x] Implement `Agent` struct (client, dispatcher, session, store, budget, retry, config)
 - [x] Implement `run()` method (returns RunResult)
@@ -408,7 +408,7 @@ cargo test --package raik --test e2e -- --ignored 2>&1 | head -100
 **Run after completing Phase 3.**
 
 ```bash
-cargo test --package raik --test integration
+cargo test --package meerkat --test integration
 ```
 
 **Criteria**: All 13 choke point tests pass.
@@ -432,29 +432,29 @@ cargo test --package raik --test integration
 
 **Goal**: All E2E tests pass, system is functional.
 
-### 4.1 Complete CLI (`raik-cli/`)
+### 4.1 Complete CLI (`meerkat-cli/`)
 
-- [x] Implement `raik sessions list` command
-- [x] Implement `raik sessions show <id>` command
+- [x] Implement `rkat sessions list` command
+- [x] Implement `rkat sessions show <id>` command
 - [x] Implement `--max-duration` flag
 - [x] Implement `--max-tool-calls` flag
 - [x] Implement proper exit codes (0 success, 1 error, 2 budget exhausted)
-- [x] Pass simple_chat tests in `raik/tests/e2e.rs`
-- [x] Pass tool_invocation tests in `raik/tests/e2e.rs`
-- [x] Pass multi_turn tests in `raik/tests/e2e.rs`
+- [x] Pass simple_chat tests in `meerkat/tests/e2e.rs`
+- [x] Pass tool_invocation tests in `meerkat/tests/e2e.rs`
+- [x] Pass multi_turn tests in `meerkat/tests/e2e.rs`
 
 ### 4.2 Session Resume
 
 - [x] Implement checkpoint loading in Agent
 - [x] Implement session continuation (append to existing messages)
 - [x] Implement session ID validation
-- [x] Pass session_resume tests in `raik/tests/e2e.rs`
+- [x] Pass session_resume tests in `meerkat/tests/e2e.rs`
 
 ### 4.3 Budget Enforcement E2E
 
 - [x] Wire BudgetLimits to CLI flags (simplified from BudgetPool)
 - [x] Implement graceful stop message on exhaustion
-- [x] Pass budget_exhaustion tests in `raik/tests/e2e.rs`
+- [x] Pass budget_exhaustion tests in `meerkat/tests/e2e.rs`
 
 ### 4.4 Sub-Agents
 
@@ -464,8 +464,8 @@ cargo test --package raik --test integration
 - [ ] Implement `ToolAccessPolicy` enforcement
 - [ ] Implement sub-agent result collection and injection
 - [ ] Implement steering message queue and application at turn boundaries
-- [x] Pass sub_agent_fork tests in `raik/tests/e2e.rs` (type structure verification)
-- [x] Pass parallel_tools tests in `raik/tests/e2e.rs`
+- [x] Pass sub_agent_fork tests in `meerkat/tests/e2e.rs` (type structure verification)
+- [x] Pass parallel_tools tests in `meerkat/tests/e2e.rs`
 
 ---
 
@@ -474,7 +474,7 @@ cargo test --package raik --test integration
 **Run after completing Phase 4.**
 
 ```bash
-cargo test --package raik --test e2e -- --ignored
+cargo test --package meerkat --test e2e -- --ignored
 ```
 
 **Criteria**: All 7 E2E tests pass.
@@ -498,16 +498,16 @@ cargo test --package raik --test e2e -- --ignored
 
 **Goal**: All access patterns working.
 
-### 5.1 MCP Server (`raik-mcp-server/`)
+### 5.1 MCP Server (`meerkat-mcp-server/`)
 
-- [x] Create `raik-mcp-server/Cargo.toml`
+- [x] Create `meerkat-mcp-server/Cargo.toml`
 - [x] Implement MCP server binary
-- [x] Implement `raik_run` tool (prompt, system_prompt, model, max_tokens)
-- [x] Implement `raik_resume` tool (session_id, prompt)
+- [x] Implement `meerkat_run` tool (prompt, system_prompt, model, max_tokens)
+- [x] Implement `meerkat_resume` tool (session_id, prompt)
 - [x] Generate JSON Schema for tool inputs
 - [x] Test with external MCP client
 
-### 5.2 SDK (`raik/`)
+### 5.2 SDK (`meerkat/`)
 
 - [x] Create facade crate re-exporting public API
 - [x] Implement `AgentBuilder` with fluent API
@@ -518,9 +518,9 @@ cargo test --package raik --test e2e -- --ignored
 - [x] Create `examples/simple.rs`
 - [x] Create `examples/with_tools.rs`
 
-### 5.3 REST API (`raik-rest/`)
+### 5.3 REST API (`meerkat-rest/`)
 
-- [x] Create `raik-rest/Cargo.toml` (axum or actix-web)
+- [x] Create `meerkat-rest/Cargo.toml` (axum or actix-web)
 - [x] Implement `POST /sessions` endpoint (create and run)
 - [x] Implement `POST /sessions/:id/messages` endpoint (continue)
 - [x] Implement `GET /sessions/:id` endpoint (get session)
@@ -541,7 +541,7 @@ RUST_TEST_THREADS=1 cargo test --workspace
 cargo build --release
 
 # Smoke test
-./target/release/raik run "Say hello"
+./target/release/rkat run "Say hello"
 ```
 
 **Criteria**:
@@ -572,7 +572,7 @@ cargo build --release
 ### RCT Guardian
 
 ```
-You are the RCT Guardian for the RAIK project.
+You are the RCT Guardian for the Meerkat project.
 
 SCOPE (you may ONLY block for these reasons):
 1. A representation boundary was added/changed without corresponding RCT test
@@ -608,7 +608,7 @@ YOU MAY NOT BLOCK FOR:
 ### Integration Sheriff
 
 ```
-You are the Integration Sheriff for the RAIK project.
+You are the Integration Sheriff for the Meerkat project.
 
 SCOPE (you may ONLY block for these reasons):
 1. A choke point was touched without integration test coverage
@@ -651,7 +651,7 @@ YOU MAY NOT BLOCK FOR:
 ### Spec Auditor
 
 ```
-You are the Spec Auditor for the RAIK project.
+You are the Spec Auditor for the Meerkat project.
 
 SCOPE (you may ONLY block for these reasons):
 1. A MUST/REQUIRED behavior from DESIGN.md is missing or contradicted
@@ -692,7 +692,7 @@ YOU MAY NOT BLOCK FOR:
 ### Concurrency/Ordering Gate
 
 ```
-You are the Concurrency/Ordering Gate for the RAIK project.
+You are the Concurrency/Ordering Gate for the Meerkat project.
 
 SCOPE (you may ONLY block for these reasons):
 1. Race condition in parallel tool execution
@@ -729,7 +729,7 @@ YOU MAY NOT BLOCK FOR:
 ### Ops/Deployability Gate
 
 ```
-You are the Ops/Deployability Gate for the RAIK project.
+You are the Ops/Deployability Gate for the Meerkat project.
 
 SCOPE (you may ONLY block for these reasons):
 1. Session checkpoint format change without version bump
@@ -767,7 +767,7 @@ YOU MAY NOT BLOCK FOR:
 ### State Machine Gate
 
 ```
-You are the State Machine Gate for the RAIK project.
+You are the State Machine Gate for the Meerkat project.
 
 SCOPE (you may ONLY block for these reasons):
 1. Invalid LoopState transition exists in code
@@ -810,7 +810,7 @@ YOU MAY NOT BLOCK FOR:
 ### Turn Boundary Gate
 
 ```
-You are the Turn Boundary Gate for the RAIK project.
+You are the Turn Boundary Gate for the Meerkat project.
 
 SCOPE (you may ONLY block for these reasons):
 1. Operation result injected outside turn boundary
@@ -852,7 +852,7 @@ YOU MAY NOT BLOCK FOR:
 ### Provider Parity Gate
 
 ```
-You are the Provider Parity Gate for the RAIK project.
+You are the Provider Parity Gate for the Meerkat project.
 
 SCOPE (you may ONLY block for these reasons):
 1. Provider normalizes to different LlmEvent semantics than others
@@ -899,10 +899,10 @@ YOU MAY NOT BLOCK FOR:
 
 > **IMPORTANT**: Unlike other gates, this gate runs SEQUENTIALLY after all other gates for the phase have passed. Do NOT run it in parallel with other gates.
 
-> **HOW TO RUN**: Use the Force MCP `work_with` tool (NOT `consult_with`) so the agent has full file system access to verify implementations. Example: `work_with(agent="gpt-5.2", task="<prompt below>", session_id="raik-completeness-phase-N")`
+> **HOW TO RUN**: Use the Force MCP `work_with` tool (NOT `consult_with`) so the agent has full file system access to verify implementations. Example: `work_with(agent="gpt-5.2", task="<prompt below>", session_id="meerkat-completeness-phase-N")`
 
 ```
-You are the Completeness Gate for the RAIK project.
+You are the Completeness Gate for the Meerkat project.
 
 EXECUTION MODEL:
 This gate runs AFTER all other gates for the phase have passed. It performs a final verification that the checked items in CHECKLIST.md actually align with the implementation.

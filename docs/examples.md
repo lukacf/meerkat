@@ -1,10 +1,10 @@
 # Examples Guide
 
-This guide provides detailed examples for common RAIK use cases.
+This guide provides detailed examples for common Meerkat use cases.
 
 ## Running Examples
 
-All examples are in the `raik/examples/` directory:
+All examples are in the `meerkat/examples/` directory:
 
 ```bash
 # Set your API key
@@ -20,16 +20,16 @@ cargo run --example multi_turn_tools
 
 ### Simple Chat
 
-The simplest way to use RAIK:
+The simplest way to use Meerkat:
 
 ```rust
-use raik::prelude::*;
+use meerkat::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
 
-    let result = raik::with_anthropic(api_key)
+    let result = meerkat::with_anthropic(api_key)
         .model("claude-sonnet-4")
         .run("What is the meaning of life?")
         .await?;
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Guide the model's behavior:
 
 ```rust
-let result = raik::with_anthropic(api_key)
+let result = meerkat::with_anthropic(api_key)
     .model("claude-sonnet-4")
     .system_prompt(r#"
         You are a pirate captain. You speak like a pirate.
@@ -68,7 +68,7 @@ struct Analysis {
     key_topics: Vec<String>,
 }
 
-let result = raik::with_anthropic(api_key)
+let result = meerkat::with_anthropic(api_key)
     .system_prompt("Respond only with valid JSON matching this schema: {sentiment: string, confidence: number, key_topics: string[]}")
     .run("Analyze: The product exceeded expectations and the team delivered on time.")
     .await?;
@@ -83,7 +83,7 @@ println!("Sentiment: {} ({:.0}%)", analysis.sentiment, analysis.confidence * 100
 
 ```rust
 use async_trait::async_trait;
-use raik::{AgentToolDispatcher, ToolDef};
+use meerkat::{AgentToolDispatcher, ToolDef};
 use serde_json::{json, Value};
 
 struct Calculator;
@@ -329,7 +329,7 @@ println!("Total tokens: {}", result3.usage.total_tokens());
 ### Session Resume
 
 ```rust
-use raik::{JsonlStore, SessionId};
+use meerkat::{JsonlStore, SessionId};
 
 // Run initial conversation
 let store = Arc::new(JsonlStore::new("./sessions"));
@@ -360,7 +360,7 @@ println!("Response: {}", result.text);  // Should mention ALPHA-7
 ### Using MCP Servers
 
 ```rust
-use raik::{McpRouter, McpServerConfig};
+use meerkat::{McpRouter, McpServerConfig};
 use std::collections::HashMap;
 
 // Configure MCP servers
@@ -401,7 +401,7 @@ let agent = AgentBuilder::new()
 ### Graceful Degradation
 
 ```rust
-let result = raik::with_anthropic(api_key)
+let result = meerkat::with_anthropic(api_key)
     .with_budget(BudgetLimits {
         max_tokens: Some(1000),
         max_duration: Some(Duration::from_secs(30)),
@@ -429,9 +429,9 @@ match result {
 ### Retry Logic
 
 ```rust
-use raik::RetryPolicy;
+use meerkat::RetryPolicy;
 
-let result = raik::with_anthropic(api_key)
+let result = meerkat::with_anthropic(api_key)
     .with_retry_policy(RetryPolicy {
         max_retries: 5,                              // More retries
         initial_delay: Duration::from_secs(1),       // Start slower
@@ -458,7 +458,7 @@ let prompts = vec![
 ];
 
 let futures: Vec<_> = prompts.iter().map(|prompt| {
-    raik::with_anthropic(api_key.clone())
+    meerkat::with_anthropic(api_key.clone())
         .model("claude-sonnet-4")
         .run(*prompt)
 }).collect();
@@ -478,7 +478,7 @@ for (i, result) in results.into_iter().enumerate() {
 Get responses as they arrive:
 
 ```rust
-use raik::{AgentBuilder, AgentEvent};
+use meerkat::{AgentBuilder, AgentEvent};
 use tokio::sync::mpsc;
 
 let (tx, mut rx) = mpsc::channel(100);
@@ -517,7 +517,7 @@ let result = handle.await??;
 Force step-by-step reasoning:
 
 ```rust
-let result = raik::with_anthropic(api_key)
+let result = meerkat::with_anthropic(api_key)
     .system_prompt(r#"
         You are a careful reasoner. For every question:
         1. First, break down the problem into steps

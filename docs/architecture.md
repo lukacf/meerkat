@@ -1,16 +1,16 @@
 # Architecture Guide
 
-This document explains RAIK's internal architecture, design decisions, and extension points.
+This document explains Meerkat's internal architecture, design decisions, and extension points.
 
 ## Overview
 
-RAIK is designed as a **minimal, composable agent harness**. It provides the core execution loop for LLM-powered agents without opinions about prompts, tools, or output formatting.
+Meerkat is designed as a **minimal, composable agent harness**. It provides the core execution loop for LLM-powered agents without opinions about prompts, tools, or output formatting.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              Access Patterns                                 │
 ├───────────────┬───────────────┬─────────────────────┬───────────────────────┤
-│   raik-cli    │  raik-mcp     │     raik (SDK)      │   raik-rest (opt)     │
+│   meerkat-cli    │  meerkat-mcp     │     meerkat (SDK)      │   meerkat-rest (opt)     │
 │   (headless)  │  (server)     │                     │   (HTTP API)          │
 └───────┬───────┴───────┬───────┴──────────┬──────────┴───────────┬───────────┘
         │               │                  │                      │
@@ -18,7 +18,7 @@ RAIK is designed as a **minimal, composable agent harness**. It provides the cor
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              raik-core                                       │
+│                              meerkat-core                                       │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │  Agent                                                                  │ │
@@ -35,7 +35,7 @@ RAIK is designed as a **minimal, composable agent harness**. It provides the cor
                     │             │             │
                     ▼             ▼             ▼
             ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-            │ raik-client │ │ raik-tools  │ │ raik-store  │
+            │ meerkat-client │ │ meerkat-tools  │ │ meerkat-store  │
             │             │ │             │ │             │
             │ Anthropic   │ │ Registry    │ │ JsonlStore  │
             │ OpenAI      │ │ Dispatcher  │ │ MemoryStore │
@@ -44,7 +44,7 @@ RAIK is designed as a **minimal, composable agent harness**. It provides the cor
                                    │
                                    ▼
                            ┌─────────────────┐
-                           │ raik-mcp-client │
+                           │ meerkat-mcp-client │
                            │                 │
                            │ MCP Protocol    │
                            │ Tool Discovery  │
@@ -54,9 +54,9 @@ RAIK is designed as a **minimal, composable agent harness**. It provides the cor
 
 ## Crate Structure
 
-### raik-core
+### meerkat-core
 
-The heart of RAIK. Contains:
+The heart of Meerkat. Contains:
 
 - **Agent**: The main execution engine
 - **Types**: `Message`, `Session`, `ToolCall`, `ToolResult`, `Usage`, etc.
@@ -65,7 +65,7 @@ The heart of RAIK. Contains:
 - **State Machine**: `LoopState` for agent lifecycle management
 - **Sub-agents**: Fork and spawn operations
 
-### raik-client
+### meerkat-client
 
 LLM provider implementations:
 
@@ -90,7 +90,7 @@ pub enum LlmEvent {
 }
 ```
 
-### raik-store
+### meerkat-store
 
 Session persistence:
 
@@ -98,7 +98,7 @@ Session persistence:
 - **MemoryStore**: In-memory storage for testing
 - **SessionStore trait**: Implement for custom backends
 
-### raik-tools
+### meerkat-tools
 
 Tool management:
 
@@ -106,7 +106,7 @@ Tool management:
 - **ToolDispatcher**: Route tool calls with timeout handling
 - **Schema validation**: JSON Schema validation of tool arguments
 
-### raik-mcp-client
+### meerkat-mcp-client
 
 MCP protocol implementation:
 
@@ -114,7 +114,7 @@ MCP protocol implementation:
 - **McpRouter**: Routes tool calls to appropriate MCP servers
 - **Protocol handling**: Initialize, tools/list, tools/call
 
-### raik (facade)
+### meerkat (facade)
 
 The main entry point. Re-exports types and provides SDK helpers:
 
@@ -125,9 +125,9 @@ pub fn with_openai(api_key: impl Into<String>) -> QuickBuilder<OpenAiClient>;
 pub fn with_gemini(api_key: impl Into<String>) -> QuickBuilder<GeminiClient>;
 
 // Re-exports all public types
-pub use raik_core::{Agent, AgentBuilder, Session, Message, ...};
-pub use raik_client::{LlmClient, LlmEvent, ...};
-pub use raik_store::{SessionStore, ...};
+pub use meerkat_core::{Agent, AgentBuilder, Session, Message, ...};
+pub use meerkat_client::{LlmClient, LlmEvent, ...};
+pub use meerkat_store::{SessionStore, ...};
 ```
 
 ## Agent Loop
@@ -285,7 +285,7 @@ pub trait AgentSessionStore: Send + Sync {
 
 ## Sub-Agents
 
-RAIK supports spawning child agents for parallel work:
+Meerkat supports spawning child agents for parallel work:
 
 ### Fork
 
@@ -447,6 +447,6 @@ emit(AgentEvent::CheckpointSaved { session_id });
 1. **API Key Isolation**: Keys are passed explicitly, never stored
 2. **Tool Sandboxing**: Tools execute in MCP server processes
 3. **Input Validation**: JSON Schema validation for tool arguments
-4. **No Arbitrary Execution**: RAIK doesn't execute code directly
+4. **No Arbitrary Execution**: Meerkat doesn't execute code directly
 
 See [DESIGN.md §15](../DESIGN.md#15-security-considerations) for full security considerations.

@@ -1,0 +1,26 @@
+[package]
+name = "meerkat-mcp-server"
+description = "MCP server exposing Meerkat as a tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
+meerkat-core = { workspace = true }
+meerkat-client = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+futures-util = "0.3"
+dirs = "5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

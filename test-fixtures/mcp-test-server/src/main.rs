@@ -1,4 +1,4 @@
-//! MCP Test Server for RAIK testing
+//! MCP Test Server for Meerkat testing
 //!
 //! Provides simple tools for testing MCP integration:
 //! - echo: Returns input as output

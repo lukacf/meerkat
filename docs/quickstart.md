@@ -1,6 +1,6 @@
 # Quickstart Guide
 
-This guide will get you running your first RAIK agent in under 5 minutes.
+This guide will get you running your first Meerkat agent in under 5 minutes.
 
 ## Prerequisites
 
@@ -14,24 +14,24 @@ This guide will get you running your first RAIK agent in under 5 minutes.
 
 ### As a Library
 
-Add RAIK to your project:
+Add Meerkat to your project:
 
 ```bash
-cargo add raik tokio --features tokio/full
+cargo add meerkat tokio --features tokio/full
 ```
 
 Or manually in `Cargo.toml`:
 
 ```toml
 [dependencies]
-raik = "0.1"
+meerkat = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
 ### As a CLI
 
 ```bash
-cargo install raik-cli
+cargo install meerkat-cli
 ```
 
 ## Your First Agent
@@ -47,7 +47,7 @@ export ANTHROPIC_API_KEY="your-api-key-here"
 Create `src/main.rs`:
 
 ```rust
-use raik::prelude::*;
+use meerkat::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
 
     // Create and run an agent
-    let result = raik::with_anthropic(api_key)
+    let result = meerkat::with_anthropic(api_key)
         .model("claude-sonnet-4")
         .system_prompt("You are a helpful coding assistant.")
         .max_tokens(1024)
@@ -112,16 +112,16 @@ If you installed the CLI, you can run agents directly from your terminal:
 
 ```bash
 # Simple prompt
-raik run "What is the capital of Japan?"
+rkat run "What is the capital of Japan?"
 
 # With options
-raik run --model claude-opus-4-5 --max-tokens 2048 "Explain quantum entanglement"
+rkat run --model claude-opus-4-5 --max-tokens 2048 "Explain quantum entanglement"
 
 # JSON output for scripting
-raik run --output json "What is 2+2?" | jq '.text'
+rkat run --output json "What is 2+2?" | jq '.text'
 
 # Resume a previous session
-raik resume 01936f8a-7b2c-7000-8000-000000000001 "Can you explain step 3 in more detail?"
+rkat resume 01936f8a-7b2c-7000-8000-000000000001 "Can you explain step 3 in more detail?"
 ```
 
 ## Adding Tools
@@ -129,7 +129,7 @@ raik resume 01936f8a-7b2c-7000-8000-000000000001 "Can you explain step 3 in more
 Agents become powerful when they can use tools. Here's a simple calculator tool:
 
 ```rust
-use raik::{AgentBuilder, AgentToolDispatcher, ToolDef, AgentLlmClient, AgentSessionStore};
+use meerkat::{AgentBuilder, AgentToolDispatcher, ToolDef, AgentLlmClient, AgentSessionStore};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -204,7 +204,7 @@ println!("Tool calls made: {}", result.tool_calls);
 ### OpenAI
 
 ```rust
-let result = raik::with_openai(std::env::var("OPENAI_API_KEY")?)
+let result = meerkat::with_openai(std::env::var("OPENAI_API_KEY")?)
     .model("gpt-4o")
     .run("Hello!")
     .await?;
@@ -213,7 +213,7 @@ let result = raik::with_openai(std::env::var("OPENAI_API_KEY")?)
 ### Gemini
 
 ```rust
-let result = raik::with_gemini(std::env::var("GOOGLE_API_KEY")?)
+let result = meerkat::with_gemini(std::env::var("GOOGLE_API_KEY")?)
     .model("gemini-2.0-flash-exp")
     .run("Hello!")
     .await?;
@@ -224,7 +224,7 @@ let result = raik::with_gemini(std::env::var("GOOGLE_API_KEY")?)
 ### Token Limits
 
 ```rust
-let result = raik::with_anthropic(api_key)
+let result = meerkat::with_anthropic(api_key)
     .max_tokens(500)  // Limit response length
     .run("Write a very long story")
     .await?;
@@ -233,10 +233,10 @@ let result = raik::with_anthropic(api_key)
 ### Budget Limits
 
 ```rust
-use raik::BudgetLimits;
+use meerkat::BudgetLimits;
 use std::time::Duration;
 
-let result = raik::with_anthropic(api_key)
+let result = meerkat::with_anthropic(api_key)
     .with_budget(BudgetLimits {
         max_tokens: Some(10_000),           // Total tokens across all turns
         max_duration: Some(Duration::from_secs(30)),  // Time limit
@@ -249,10 +249,10 @@ let result = raik::with_anthropic(api_key)
 ### Retry Policy
 
 ```rust
-use raik::RetryPolicy;
+use meerkat::RetryPolicy;
 use std::time::Duration;
 
-let result = raik::with_anthropic(api_key)
+let result = meerkat::with_anthropic(api_key)
     .with_retry_policy(RetryPolicy {
         max_retries: 3,
         initial_delay: Duration::from_millis(500),
@@ -265,7 +265,7 @@ let result = raik::with_anthropic(api_key)
 
 ## Next Steps
 
-- Read the [Architecture Guide](./architecture.md) to understand how RAIK works
+- Read the [Architecture Guide](./architecture.md) to understand how Meerkat works
 - See [Examples](./examples.md) for more complex use cases
 - Check the [Configuration Guide](./configuration.md) for all options
-- Browse the [API Reference](https://docs.rs/raik) for detailed documentation
+- Browse the [API Reference](https://docs.rs/meerkat) for detailed documentation

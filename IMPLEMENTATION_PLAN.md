@@ -1,4 +1,4 @@
-# RAIK Implementation Plan (RCT Methodology)
+# Meerkat Implementation Plan (RCT Methodology)
 
 ## Overview
 
@@ -13,11 +13,11 @@ Key principle: RCT tests use **real API calls** to validate that our normalized 
 
 The following variations from this plan were made during implementation:
 
-1. **Test Layout**: Tests are organized per-crate (`raik/tests/e2e.rs`, `raik/tests/integration.rs`, `raik-client/src/*.rs` tests) instead of `tests/rct/`, `tests/integration/`, `tests/e2e/` directories. This follows Rust conventions for in-crate tests.
+1. **Test Layout**: Tests are organized per-crate (`meerkat/tests/e2e.rs`, `meerkat/tests/integration.rs`, `meerkat-client/src/*.rs` tests) instead of `tests/rct/`, `tests/integration/`, `tests/e2e/` directories. This follows Rust conventions for in-crate tests.
 
-2. **OpManager**: Operation result injection is handled directly in `Agent::run_loop()` in `raik-core/src/agent.rs` rather than through a separate `OpManager` type. The functionality (turn-boundary injection, event ordering) is preserved.
+2. **OpManager**: Operation result injection is handled directly in `Agent::run_loop()` in `meerkat-core/src/agent.rs` rather than through a separate `OpManager` type. The functionality (turn-boundary injection, event ordering) is preserved.
 
-3. **BudgetPool**: CLI uses `BudgetLimits` directly for budget enforcement rather than a full `BudgetPool` allocation system. `BudgetPool` is implemented in `raik-core/src/budget.rs` for sub-agent budget sharing but not wired to CLI.
+3. **BudgetPool**: CLI uses `BudgetLimits` directly for budget enforcement rather than a full `BudgetPool` allocation system. `BudgetPool` is implemented in `meerkat-core/src/budget.rs` for sub-agent budget sharing but not wired to CLI.
 
 ---
 
@@ -40,7 +40,7 @@ The following variations from this plan were made during implementation:
 |----------|------|-----|------|
 | AgentEvent stream | Internal events | JSON stream | Public streaming API (§5) |
 | RunResult | Internal result | JSON output | CLI/SDK return format (§12) |
-| MCP tool schemas | Internal types | JSON Schema | raik_run/raik_resume inputs (§12) |
+| MCP tool schemas | Internal types | JSON Schema | meerkat_run/meerkat_resume inputs (§12) |
 
 ### 1.3 Persistence Boundaries
 
@@ -220,19 +220,19 @@ tests/integration/
 
 **Goal**: All representation types defined, all RCT tests passing.
 
-1. **Core types crate** (`raik-core`)
+1. **Core types crate** (`meerkat-core`)
    - Define all representation types (Message, ToolCall, Session, etc.)
    - Define Op types (OpEvent, OperationResult, ContextStrategy, etc.)
    - Implement Serialize/Deserialize with version fields
    - Write internal RCT tests as types are defined
 
-2. **Provider normalizers** (`raik-client`)
+2. **Provider normalizers** (`meerkat-client`)
    - Anthropic event normalizer + RCT (real API)
    - OpenAI event normalizer + RCT (real API)
    - Gemini event normalizer + RCT (real API)
    - Message format converters per provider
 
-3. **Session persistence** (`raik-store`)
+3. **Session persistence** (`meerkat-store`)
    - Checkpoint format with version field
    - SessionStore trait + JSONL implementation
    - RCT for round-trip
@@ -241,8 +241,8 @@ tests/integration/
 
 **Goal**: E2E and integration tests exist and run (failures expected).
 
-4. **Minimal CLI** (`raik-cli`)
-   - Basic `raik run` command
+4. **Minimal CLI** (`meerkat-cli`)
+   - Basic `rkat run` command
    - JSON output mode
    - Enough for E2E tests to invoke
 
@@ -259,37 +259,37 @@ tests/integration/
 
 **Goal**: All integration tests pass.
 
-7. **Tool router** (`raik-tools`)
+7. **Tool router** (`meerkat-tools`)
    - ToolRegistry with schema validation
    - ToolDispatcher with timeouts
    - Pass CP-TOOL-DISCOVERY, CP-TOOL-DISPATCH
 
-8. **Config loader** (`raik-core`)
+8. **Config loader** (`meerkat-core`)
    - Layered config (CLI/env/user/project/defaults)
    - Type coercion (string → Duration, etc.)
    - Pass CP-CONFIG-MERGE
 
-9. **Retry policy** (`raik-core`)
+9. **Retry policy** (`meerkat-core`)
    - RetryPolicy implementation
    - Integration with LlmError.is_retryable()
    - Pass CP-RETRY-POLICY
 
-10. **Operation manager** (`raik-core`)
+10. **Operation manager** (`meerkat-core`)
     - OpManager with event buffering
     - Turn-boundary injection
     - Pass CP-OP-INJECT, CP-EVENT-ORDERING
 
-11. **State machine** (`raik-core`)
+11. **State machine** (`meerkat-core`)
     - LoopState transitions
     - Side effect coordination
     - Pass CP-STATE-MACHINE
 
-12. **MCP client** (`raik-mcp-client`)
+12. **MCP client** (`meerkat-mcp-client`)
     - Connection management
     - Tool discovery
     - Pass CP-MCP-WIRE
 
-13. **Core loop** (`raik-core`)
+13. **Core loop** (`meerkat-core`)
     - Main executor integrating all components
     - Pass remaining integration tests
 
@@ -297,7 +297,7 @@ tests/integration/
 
 **Goal**: All E2E tests pass, system is functional.
 
-14. **Complete CLI** (`raik-cli`)
+14. **Complete CLI** (`meerkat-cli`)
     - Full command set (run, resume, sessions)
     - Event streaming output
     - Pass simple_chat, tool_invocation, multi_turn
@@ -319,16 +319,16 @@ tests/integration/
 
 **Goal**: All access patterns working.
 
-18. **MCP server** (`raik-mcp-server`)
-    - Expose raik_run, raik_resume tools
+18. **MCP server** (`meerkat-mcp-server`)
+    - Expose meerkat_run, meerkat_resume tools
     - Protocol compliance
 
-19. **SDK** (`raik` crate)
+19. **SDK** (`meerkat` crate)
     - Public API surface
     - Builder patterns
     - Documentation
 
-20. **REST API** (optional, `raik-rest`)
+20. **REST API** (optional, `meerkat-rest`)
     - HTTP endpoints
     - OpenAPI spec
 
@@ -339,12 +339,12 @@ tests/integration/
 Aligned with DESIGN.md §4:
 
 ```
-raik/
+meerkat/
 ├── Cargo.toml                    # Workspace root
 ├── DESIGN.md
 ├── IMPLEMENTATION_PLAN.md
 │
-├── raik-core/                    # Core agent logic
+├── meerkat-core/                    # Core agent logic
 │   ├── src/
 │   │   ├── types/                # Message, ToolCall, Session, Op types
 │   │   ├── traits/               # LlmClient, SessionStore, ToolProvider
@@ -356,7 +356,7 @@ raik/
 │   │   └── lib.rs
 │   └── Cargo.toml
 │
-├── raik-client/                  # LLM provider implementations
+├── meerkat-client/                  # LLM provider implementations
 │   ├── src/
 │   │   ├── traits.rs             # LlmClient trait, LlmEvent, LlmError
 │   │   ├── anthropic.rs
@@ -365,14 +365,14 @@ raik/
 │   │   └── lib.rs
 │   └── Cargo.toml
 │
-├── raik-tools/                   # Tool validation and dispatch
+├── meerkat-tools/                   # Tool validation and dispatch
 │   ├── src/
 │   │   ├── registry.rs           # ToolRegistry + schema validation
 │   │   ├── dispatcher.rs         # ToolDispatcher + timeouts
 │   │   └── lib.rs
 │   └── Cargo.toml
 │
-├── raik-store/                   # Session persistence
+├── meerkat-store/                   # Session persistence
 │   ├── src/
 │   │   ├── traits.rs             # SessionStore trait
 │   │   ├── jsonl.rs              # JSONL file store
@@ -380,7 +380,7 @@ raik/
 │   │   └── lib.rs
 │   └── Cargo.toml
 │
-├── raik-mcp-client/              # MCP client (connect to tool servers)
+├── meerkat-mcp-client/              # MCP client (connect to tool servers)
 │   ├── src/
 │   │   ├── router.rs
 │   │   ├── connection.rs
@@ -388,18 +388,18 @@ raik/
 │   │   └── lib.rs
 │   └── Cargo.toml
 │
-├── raik-mcp-server/              # MCP server (expose RAIK as tool)
+├── meerkat-mcp-server/              # MCP server (expose Meerkat as tool)
 │   ├── src/
 │   │   ├── server.rs
-│   │   ├── tools.rs              # raik_run, raik_resume
+│   │   ├── tools.rs              # meerkat_run, meerkat_resume
 │   │   └── lib.rs
 │   └── Cargo.toml
 │
-├── raik-cli/                     # CLI binary
+├── meerkat-cli/                     # CLI binary
 │   ├── src/main.rs
 │   └── Cargo.toml
 │
-├── raik/                         # SDK facade crate
+├── meerkat/                         # SDK facade crate
 │   ├── src/lib.rs
 │   └── Cargo.toml
 │

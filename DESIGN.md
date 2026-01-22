@@ -1,4 +1,4 @@
-# RAIK Design Document
+# Meerkat Design Document
 
 **Rust Agentic Interface Kit**
 
@@ -33,16 +33,16 @@ Last Updated: 2026-01-20
 
 ## 1. Overview
 
-RAIK is a minimal, high-performance agent harness written in Rust. It provides the core execution loop for LLM-powered agents without the overhead of IDE integration, interactive prompts, or complex output formatting.
+Meerkat is a minimal, high-performance agent harness written in Rust. It provides the core execution loop for LLM-powered agents without the overhead of IDE integration, interactive prompts, or complex output formatting.
 
-### What RAIK Is
+### What Meerkat Is
 
 - A library for building and running LLM agents
 - A headless executor for agentic workloads
 - A bridge between LLM providers and MCP tool servers
 - Embeddable in other applications via SDK, CLI, MCP, or REST
 
-### What RAIK Is Not
+### What Meerkat Is Not
 
 - An interactive CLI tool (use Claude Code, Codex CLI, or Gemini CLI for that)
 - An IDE extension or editor integration
@@ -53,7 +53,7 @@ RAIK is a minimal, high-performance agent harness written in Rust. It provides t
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         RAIK                                │
+│                         Meerkat                                │
 ├─────────────────────────────────────────────────────────────┤
 │  1. LLM Client      - Call models with tool definitions     │
 │  2. Tool Router     - Dispatch tool calls to MCP servers    │
@@ -83,7 +83,7 @@ RAIK is a minimal, high-performance agent harness written in Rust. It provides t
 
 | Non-Goal | Rationale |
 |----------|-----------|
-| Interactive TUI | Other tools do this well; RAIK is headless |
+| Interactive TUI | Other tools do this well; Meerkat is headless |
 | Built-in tools | MCP provides tool abstraction; no reason to duplicate |
 | Prompt templates | Keep core focused; users bring their own prompts |
 | Complex multi-agent orchestration | Sub-agents supported (§18); higher-level patterns are a layer above |
@@ -99,10 +99,10 @@ RAIK is a minimal, high-performance agent harness written in Rust. It provides t
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              Access Patterns                                 │
 ├───────────────┬───────────────┬─────────────────────┬───────────────────────┤
-│   raik-cli    │  raik-mcp     │     raik (SDK)      │   raik-rest (opt)     │
+│   meerkat-cli    │  meerkat-mcp     │     meerkat (SDK)      │   meerkat-rest (opt)     │
 │   (headless)  │  (server)     │                     │   (HTTP API)          │
 │               │               │                     │                       │
-│  $ raik run   │  Expose as    │  Agent::new(cfg)    │   POST /sessions      │
+│  $ rkat run   │  Expose as    │  Agent::new(cfg)    │   POST /sessions      │
 │    "prompt"   │  MCP tool     │    .run(prompt)     │   POST /sessions/:id  │
 └───────┬───────┴───────┬───────┴──────────┬──────────┴───────────┬───────────┘
         │               │                  │                      │
@@ -110,7 +110,7 @@ RAIK is a minimal, high-performance agent harness written in Rust. It provides t
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              raik-core                                       │
+│                              meerkat-core                                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
@@ -138,7 +138,7 @@ RAIK is a minimal, high-performance agent harness written in Rust. It provides t
                     │             │             │
                     ▼             ▼             ▼
             ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-            │ raik-client │ │ raik-tools  │ │ raik-store  │
+            │ meerkat-client │ │ meerkat-tools  │ │ meerkat-store  │
             │             │ │             │ │             │
             │ Anthropic   │ │ Registry    │ │ JsonlStore  │
             │ OpenAI      │ │ Dispatcher  │ │ MemoryStore │
@@ -147,7 +147,7 @@ RAIK is a minimal, high-performance agent harness written in Rust. It provides t
                                    │
                                    ▼
                            ┌─────────────┐
-                           │ raik-mcp    │
+                           │ meerkat-mcp    │
                            │   -client   │
                            │             │
                            │ McpRouter   │
@@ -202,12 +202,12 @@ RunResult { text, usage, session_id }
 ### Workspace Layout
 
 ```
-raik/
+meerkat/
 ├── Cargo.toml                    # Workspace root
 ├── DESIGN.md                     # This document
 ├── README.md                     # User-facing documentation
 │
-├── raik-core/                    # Core agent logic (no I/O deps)
+├── meerkat-core/                    # Core agent logic (no I/O deps)
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
@@ -218,7 +218,7 @@ raik/
 │       ├── types.rs              # Shared types (Message, ToolCall, etc.)
 │       └── event.rs              # Agent events for streaming
 │
-├── raik-client/                  # LLM provider abstraction
+├── meerkat-client/                  # LLM provider abstraction
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs                # LlmClient trait
@@ -227,7 +227,7 @@ raik/
 │       ├── openai.rs             # OpenAI Chat Completions API
 │       └── gemini.rs             # Google Gemini API
 │
-├── raik-tools/                   # Tool validation and dispatch
+├── meerkat-tools/                   # Tool validation and dispatch
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
@@ -235,14 +235,14 @@ raik/
 │       ├── dispatcher.rs         # Parallel dispatch with timeouts
 │       └── error.rs              # Tool-specific errors
 │
-├── raik-store/                   # Session persistence
+├── meerkat-store/                   # Session persistence
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs                # SessionStore trait
 │       ├── jsonl.rs              # JSONL file store
 │       └── memory.rs             # In-memory store (tests)
 │
-├── raik-mcp-client/              # MCP client (connect to tool servers)
+├── meerkat-mcp-client/              # MCP client (connect to tool servers)
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
@@ -250,30 +250,30 @@ raik/
 │       ├── connection.rs         # MCP connection management
 │       └── discovery.rs          # Tool discovery from servers
 │
-├── raik-mcp-server/              # MCP server (expose RAIK as tool)
+├── meerkat-mcp-server/              # MCP server (expose Meerkat as tool)
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
-│       └── server.rs             # raik:run MCP tool
+│       └── server.rs             # meerkat:run MCP tool
 │
-├── raik-cli/                     # Headless CLI
+├── meerkat-cli/                     # Headless CLI
 │   ├── Cargo.toml
 │   └── src/
 │       ├── main.rs
 │       ├── commands/
-│       │   ├── run.rs            # raik run "prompt"
-│       │   ├── resume.rs         # raik resume <session-id>
-│       │   └── list.rs           # raik sessions list
+│       │   ├── run.rs            # rkat run "prompt"
+│       │   ├── resume.rs         # rkat resume <session-id>
+│       │   └── list.rs           # rkat sessions list
 │       └── output.rs             # JSON/streaming output
 │
-├── raik-rest/                    # Optional REST API
+├── meerkat-rest/                    # Optional REST API
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
 │       ├── routes.rs
 │       └── handlers.rs
 │
-└── raik/                         # SDK facade crate
+└── meerkat/                         # SDK facade crate
     ├── Cargo.toml
     └── src/
         └── lib.rs                # pub use re-exports
@@ -285,7 +285,7 @@ raik/
                     ┌─────────────────────────────────────────┐
                     │            Application Layer             │
                     ├──────────┬──────────┬──────────┬────────┤
-                    │ raik-cli │ raik-mcp │ raik-rest│  user  │
+                    │ meerkat-cli │ meerkat-mcp │ meerkat-rest│  user  │
                     │          │  -server │ (opt)    │  code  │
                     └────┬─────┴────┬─────┴────┬─────┴───┬────┘
                          │          │          │         │
@@ -293,19 +293,19 @@ raik/
                                          │
                                          ▼
                     ┌─────────────────────────────────────────┐
-                    │               raik (SDK)                 │
-                    │  pub use raik_core::*;                   │
-                    │  pub use raik_client::*;                 │
-                    │  pub use raik_tools::*;                  │
-                    │  pub use raik_store::*;                  │
-                    │  pub use raik_mcp_client::*;             │
+                    │               meerkat (SDK)                 │
+                    │  pub use meerkat_core::*;                   │
+                    │  pub use meerkat_client::*;                 │
+                    │  pub use meerkat_tools::*;                  │
+                    │  pub use meerkat_store::*;                  │
+                    │  pub use meerkat_mcp_client::*;             │
                     └────────────────────┬────────────────────┘
                                          │
               ┌──────────────────────────┼──────────────────────────┐
               │                          │                          │
               ▼                          ▼                          ▼
 ┌─────────────────────────┐ ┌─────────────────────────┐ ┌─────────────────────┐
-│       raik-core         │ │      raik-client        │ │      raik-store     │
+│       meerkat-core         │ │      meerkat-client        │ │      meerkat-store     │
 │                         │ │                         │ │                     │
 │ - Agent                 │ │ - LlmClient trait       │ │ - SessionStore trait│
 │ - Session               │ │ - AnthropicClient       │ │ - JsonlStore        │
@@ -316,7 +316,7 @@ raik/
              │
              ▼
 ┌─────────────────────────┐
-│       raik-tools        │
+│       meerkat-tools        │
 │                         │
 │ - ToolRegistry          │
 │ - ToolDispatcher        │
@@ -325,7 +325,7 @@ raik/
              │
              ▼
 ┌─────────────────────────┐
-│     raik-mcp-client     │
+│     meerkat-mcp-client     │
 │                         │
 │ - McpRouter             │
 │ - Connection mgmt       │
@@ -343,23 +343,23 @@ raik/
 ### Feature Flags
 
 ```toml
-# raik/Cargo.toml
+# meerkat/Cargo.toml
 [features]
 default = ["anthropic", "jsonl-store"]
 
 # LLM providers
-anthropic = ["raik-client/anthropic"]
-openai = ["raik-client/openai"]
-gemini = ["raik-client/gemini"]
+anthropic = ["meerkat-client/anthropic"]
+openai = ["meerkat-client/openai"]
+gemini = ["meerkat-client/gemini"]
 all-providers = ["anthropic", "openai", "gemini"]
 
 # Storage backends
-jsonl-store = ["raik-store/jsonl"]
-memory-store = ["raik-store/memory"]
+jsonl-store = ["meerkat-store/jsonl"]
+memory-store = ["meerkat-store/memory"]
 
 # Optional components
-rest = ["raik-rest"]
-mcp-server = ["raik-mcp-server"]
+rest = ["meerkat-rest"]
+mcp-server = ["meerkat-mcp-server"]
 ```
 
 ---
@@ -369,7 +369,7 @@ mcp-server = ["raik-mcp-server"]
 ### Message Types
 
 ```rust
-// raik-core/src/types.rs
+// meerkat-core/src/types.rs
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -503,7 +503,7 @@ pub struct ToolDef {
 ### Agent Events
 
 ```rust
-// raik-core/src/event.rs
+// meerkat-core/src/event.rs
 
 use crate::types::*;
 use std::path::PathBuf;
@@ -639,7 +639,7 @@ pub enum BudgetType {
 ### Agent Structure
 
 ```rust
-// raik-core/src/agent.rs
+// meerkat-core/src/agent.rs
 
 use crate::{
     event::AgentEvent,
@@ -648,9 +648,9 @@ use crate::{
     retry::RetryPolicy,
     types::*,
 };
-use raik_client::LlmClient;
-use raik_tools::ToolDispatcher;
-use raik_store::SessionStore;
+use meerkat_client::LlmClient;
+use meerkat_tools::ToolDispatcher;
+use meerkat_store::SessionStore;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -1084,11 +1084,11 @@ impl Agent {
 ### Agent Errors
 
 ```rust
-// raik-core/src/error.rs
+// meerkat-core/src/error.rs
 
 use crate::types::SessionId;
-use raik_client::LlmError;
-use raik_store::StoreError;
+use meerkat_client::LlmError;
+use meerkat_store::StoreError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -1128,7 +1128,7 @@ pub enum AgentError {
 ### Trait Definition
 
 ```rust
-// raik-client/src/lib.rs
+// meerkat-client/src/lib.rs
 
 use async_trait::async_trait;
 use futures::Stream;
@@ -1199,7 +1199,7 @@ pub enum LlmEvent {
 ### Error Taxonomy
 
 ```rust
-// raik-client/src/error.rs
+// meerkat-client/src/error.rs
 
 use std::time::Duration;
 
@@ -1287,7 +1287,7 @@ impl LlmError {
 ### Anthropic Client Implementation (Sketch)
 
 ```rust
-// raik-client/src/anthropic.rs
+// meerkat-client/src/anthropic.rs
 
 use crate::{LlmClient, LlmEvent, LlmError, LlmRequest};
 use async_trait::async_trait;
@@ -1477,9 +1477,9 @@ impl LlmClient for AnthropicClient {
 ### Tool Registry
 
 ```rust
-// raik-tools/src/registry.rs
+// meerkat-tools/src/registry.rs
 
-use raik_core::types::{ToolCall, ToolDef, ToolResult};
+use meerkat_core::types::{ToolCall, ToolDef, ToolResult};
 use jsonschema::Validator;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1596,11 +1596,11 @@ impl ToolValidationError {
 ### Tool Dispatcher
 
 ```rust
-// raik-tools/src/dispatcher.rs
+// meerkat-tools/src/dispatcher.rs
 
 use crate::registry::{ToolRegistry, ToolValidationError};
-use raik_core::types::{ToolCall, ToolDef, ToolResult};
-use raik_mcp_client::McpRouter;
+use meerkat_core::types::{ToolCall, ToolDef, ToolResult};
+use meerkat_mcp_client::McpRouter;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -1687,7 +1687,7 @@ impl ToolDispatcher {
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
     #[error("MCP error: {0}")]
-    Mcp(#[from] raik_mcp_client::McpError),
+    Mcp(#[from] meerkat_mcp_client::McpError),
 
     #[error("Registry error: {0}")]
     Registry(#[from] crate::registry::RegistryError),
@@ -1701,7 +1701,7 @@ pub enum DispatchError {
 ### Session Structure
 
 ```rust
-// raik-core/src/session.rs
+// meerkat-core/src/session.rs
 
 use crate::types::*;
 use std::time::SystemTime;
@@ -1841,10 +1841,10 @@ impl From<&Session> for SessionMeta {
 ### Session Store Trait
 
 ```rust
-// raik-store/src/lib.rs
+// meerkat-store/src/lib.rs
 
 use async_trait::async_trait;
-use raik_core::{Session, SessionId, SessionMeta};
+use meerkat_core::{Session, SessionId, SessionMeta};
 
 /// Filter for listing sessions
 #[derive(Debug, Clone, Default)]
@@ -1896,10 +1896,10 @@ pub enum StoreError {
 ### JSONL Store Implementation
 
 ```rust
-// raik-store/src/jsonl.rs
+// meerkat-store/src/jsonl.rs
 
 use super::{SessionStore, SessionFilter, StoreError};
-use raik_core::{Session, SessionId, SessionMeta, Message};
+use meerkat_core::{Session, SessionId, SessionMeta, Message};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use tokio::fs;
@@ -2041,10 +2041,10 @@ impl SessionStore for JsonlStore {
 ### In-Memory Store (for testing)
 
 ```rust
-// raik-store/src/memory.rs
+// meerkat-store/src/memory.rs
 
 use super::{SessionStore, SessionFilter, StoreError};
-use raik_core::{Session, SessionId, SessionMeta};
+use meerkat_core::{Session, SessionId, SessionMeta};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
@@ -2116,7 +2116,7 @@ impl SessionStore for MemoryStore {
 ## 10. Budget Enforcement
 
 ```rust
-// raik-core/src/budget.rs
+// meerkat-core/src/budget.rs
 
 use crate::error::AgentError;
 use std::time::{Duration, Instant};
@@ -2271,13 +2271,13 @@ pub struct BudgetUsage {
 ### Configuration Structure
 
 ```rust
-// raik-core/src/config.rs
+// meerkat-core/src/config.rs
 
 use std::path::PathBuf;
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
-/// Complete configuration for RAIK
+/// Complete configuration for Meerkat
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -2425,7 +2425,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             backend: StorageBackend::Jsonl,
-            directory: dirs::data_dir().map(|d| d.join("raik/sessions")),
+            directory: dirs::data_dir().map(|d| d.join("rkat/sessions")),
         }
     }
 }
@@ -2493,14 +2493,14 @@ Configuration follows a layered approach inspired by Codex CLI:
 ```
 Priority (highest to lowest):
 1. CLI arguments (--model, --max-tokens, etc.)
-2. Environment variables (RAIK_MODEL, ANTHROPIC_API_KEY, etc.)
-3. Project config (.raik/config.toml in current directory or parents)
-4. User config (~/.config/raik/config.toml)
+2. Environment variables (RKAT_MODEL, ANTHROPIC_API_KEY, etc.)
+3. Project config (.rkat/config.toml in current directory or parents)
+4. User config (~/.config/meerkat/config.toml)
 5. Defaults
 ```
 
 ```rust
-// raik-core/src/config/loader.rs
+// meerkat-core/src/config/loader.rs
 
 impl Config {
     /// Load configuration from all sources
@@ -2528,13 +2528,13 @@ impl Config {
     }
 
     fn user_config_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("raik").join("config.toml"))
+        dirs::config_dir().map(|d| d.join("meerkat").join("config.toml"))
     }
 
     fn find_project_config() -> Option<PathBuf> {
         let mut dir = std::env::current_dir().ok()?;
         loop {
-            let config_path = dir.join(".raik").join("config.toml");
+            let config_path = dir.join(".rkat").join("config.toml");
             if config_path.exists() {
                 return Some(config_path);
             }
@@ -2558,12 +2558,12 @@ impl Config {
         }
 
         // Model override
-        if let Ok(model) = std::env::var("RAIK_MODEL") {
+        if let Ok(model) = std::env::var("RKAT_MODEL") {
             self.agent.model = model;
         }
 
         // Budget overrides
-        if let Ok(tokens) = std::env::var("RAIK_MAX_TOKENS") {
+        if let Ok(tokens) = std::env::var("RKAT_MAX_TOKENS") {
             if let Ok(n) = tokens.parse() {
                 self.budget.max_tokens = Some(n);
             }
@@ -2575,7 +2575,7 @@ impl Config {
 ### Example Configuration File
 
 ```toml
-# ~/.config/raik/config.toml
+# ~/.config/meerkat/config.toml
 
 [agent]
 model = "claude-sonnet-4-20250514"
@@ -2602,7 +2602,7 @@ env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
 
 [storage]
 backend = "jsonl"
-directory = "~/.local/share/raik/sessions"
+directory = "~/.local/share/meerkat/sessions"
 
 [budget]
 max_tokens = 100000
@@ -2620,16 +2620,16 @@ multiplier = 2.0
 
 ## 12. Access Patterns
 
-### CLI (raik-cli)
+### CLI (meerkat-cli)
 
 ```rust
-// raik-cli/src/main.rs
+// meerkat-cli/src/main.rs
 
 use clap::{Parser, Subcommand};
-use raik::{Agent, Config, RunResult};
+use meerkat::{Agent, Config, RunResult};
 
 #[derive(Parser)]
-#[command(name = "raik")]
+#[command(name = "meerkat")]
 #[command(about = "Rust Agentic Interface Kit")]
 struct Cli {
     #[command(subcommand)]
@@ -2812,39 +2812,39 @@ fn print_event(event: &AgentEvent, format: OutputFormat) {
 
 ```bash
 # Basic run
-raik run "Analyze the code in src/ and suggest improvements"
+rkat run "Analyze the code in src/ and suggest improvements"
 
 # With budget limits
-raik run "Refactor the auth module" --max-tokens 50000 --max-duration 5m
+rkat run "Refactor the auth module" --max-tokens 50000 --max-duration 5m
 
 # Stream events
-raik run "Debug the failing tests" --stream --output json-stream
+rkat run "Debug the failing tests" --stream --output json-stream
 
 # Resume session
-raik resume abc123 "Now fix the issues you identified"
+rkat resume abc123 "Now fix the issues you identified"
 
 # List sessions
-raik sessions list --limit 20
+rkat sessions list --limit 20
 
 # Show session
-raik sessions show abc123
+rkat sessions show abc123
 
 # JSON output for scripting
-raik run "Generate a summary" --output json | jq '.text'
+rkat run "Generate a summary" --output json | jq '.text'
 ```
 
-### MCP Server (raik-mcp-server)
+### MCP Server (meerkat-mcp-server)
 
-Exposes RAIK as an MCP tool that other agents can use.
+Exposes Meerkat as an MCP tool that other agents can use.
 
 ```rust
-// raik-mcp-server/src/server.rs
+// meerkat-mcp-server/src/server.rs
 
 use rmcp::{Server, Tool, ToolResult};
-use raik::{Agent, Config};
+use meerkat::{Agent, Config};
 use serde::{Deserialize, Serialize};
 
-/// MCP server that exposes RAIK as a tool
+/// MCP server that exposes Meerkat as a tool
 pub struct RaikMcpServer {
     config: Config,
 }
@@ -2855,7 +2855,7 @@ impl RaikMcpServer {
     }
 
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
-        let server = Server::new("raik", "0.1.0")
+        let server = Server::new("meerkat", "0.1.0")
             .with_tool(RaikRunTool { config: self.config.clone() })
             .with_tool(RaikResumeTool { config: self.config.clone() });
 
@@ -2882,7 +2882,7 @@ struct RaikRunTool {
 #[async_trait]
 impl Tool for RaikRunTool {
     fn name(&self) -> &str {
-        "raik_run"
+        "meerkat_run"
     }
 
     fn description(&self) -> &str {
@@ -2931,34 +2931,34 @@ impl Tool for RaikRunTool {
 
 ```bash
 # Start the MCP server
-raik mcp-server
+rkat mcp-server
 
 # Or in an MCP config file
 {
   "mcpServers": {
-    "raik": {
-      "command": "raik",
+    "meerkat": {
+      "command": "meerkat",
       "args": ["mcp-server"]
     }
   }
 }
 ```
 
-### SDK (raik)
+### SDK (meerkat)
 
 The SDK crate re-exports all public APIs for embedding.
 
 ```rust
-// raik/src/lib.rs
+// meerkat/src/lib.rs
 
-//! RAIK - Rust Agentic Interface Kit
+//! Meerkat - Rust Agentic Interface Kit
 //!
 //! A minimal, high-performance agent harness for LLM-powered applications.
 //!
 //! # Quick Start
 //!
 //! ```rust,no_run
-//! use raik::{Agent, AgentBuilder, Config};
+//! use meerkat::{Agent, AgentBuilder, Config};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -2975,7 +2975,7 @@ The SDK crate re-exports all public APIs for embedding.
 //! ```
 
 // Re-export core types
-pub use raik_core::{
+pub use meerkat_core::{
     Agent, AgentConfig, AgentError, AgentEvent,
     Session, SessionId, SessionMeta,
     Message, UserMessage, AssistantMessage, SystemMessage,
@@ -2987,25 +2987,25 @@ pub use raik_core::{
 };
 
 // Re-export client types
-pub use raik_client::{
+pub use meerkat_client::{
     LlmClient, LlmEvent, LlmError, LlmRequest,
     AnthropicClient, OpenAiClient, GeminiClient,
 };
 
 // Re-export tools
-pub use raik_tools::{
+pub use meerkat_tools::{
     ToolRegistry, ToolDispatcher,
     ToolValidationError, DispatchError,
 };
 
 // Re-export store
-pub use raik_store::{
+pub use meerkat_store::{
     SessionStore, SessionFilter, StoreError,
     JsonlStore, MemoryStore,
 };
 
 // Re-export MCP client
-pub use raik_mcp_client::{
+pub use meerkat_mcp_client::{
     McpRouter, McpError, McpServerConfig,
 };
 
@@ -3017,7 +3017,7 @@ pub use builder::AgentBuilder;
 ### Builder Pattern for SDK
 
 ```rust
-// raik/src/builder.rs
+// meerkat/src/builder.rs
 
 use crate::*;
 use std::sync::Arc;
@@ -3178,7 +3178,7 @@ pub enum BuildError {
 **SDK Usage Example:**
 
 ```rust
-use raik::{AgentBuilder, AgentEvent};
+use meerkat::{AgentBuilder, AgentEvent};
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -3299,7 +3299,7 @@ impl Agent {
 Expose metrics for monitoring:
 
 ```rust
-// raik-core/src/metrics.rs
+// meerkat-core/src/metrics.rs
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3393,7 +3393,7 @@ pub struct MetricsSnapshot {
 
 | Reason | Benefit |
 |--------|---------|
-| **Separation of concerns** | RAIK focuses on the loop, not tool implementation |
+| **Separation of concerns** | Meerkat focuses on the loop, not tool implementation |
 | **Flexibility** | Any MCP server works, including custom ones |
 | **Ecosystem** | Leverage existing MCP servers |
 | **Security** | Tools run in separate processes |
@@ -3418,7 +3418,7 @@ pub struct MetricsSnapshot {
 
 ### Sub-Agent Design Philosophy
 
-Claude Code spawns sub-agents for complex tasks. RAIK supports sub-agents with explicit design constraints (see §18):
+Claude Code spawns sub-agents for complex tasks. Meerkat supports sub-agents with explicit design constraints (see §18):
 
 1. **Turn-based control**: All operations synchronize at turn boundaries
 2. **Resource control**: BudgetPool with explicit allocation and reclamation
@@ -3470,7 +3470,7 @@ Claude Code spawns sub-agents for complex tasks. RAIK supports sub-agents with e
 
 ## 18. Async Operations & Sub-Agents
 
-RAIK treats async operations and sub-agents as **first-class features**, not bolt-on additions. This section describes the unified operation model that enables parallel tool execution, sub-agent spawning, forking, and inter-agent communication.
+Meerkat treats async operations and sub-agents as **first-class features**, not bolt-on additions. This section describes the unified operation model that enables parallel tool execution, sub-agent spawning, forking, and inter-agent communication.
 
 ### 18.1 Design Philosophy
 
@@ -4216,8 +4216,8 @@ impl Agent {
 
 ### API Stability
 
-- `raik-core` types: Stable after 1.0
-- `raik-client` trait: Stable after 1.0
+- `meerkat-core` types: Stable after 1.0
+- `meerkat-client` trait: Stable after 1.0
 - Event stream: May evolve, versioned
 - Config format: Backward compatible migrations
 

@@ -1,6 +1,6 @@
 # Configuration Guide
 
-RAIK supports configuration through multiple layers: environment variables, configuration files, and programmatic settings.
+Meerkat supports configuration through multiple layers: environment variables, configuration files, and programmatic settings.
 
 ## Environment Variables
 
@@ -16,11 +16,11 @@ RAIK supports configuration through multiple layers: environment variables, conf
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `RAIK_MODEL` | Default model name | Provider-dependent |
-| `RAIK_MAX_TOKENS` | Default max tokens per turn | `4096` |
-| `RAIK_STORE_PATH` | Session storage directory | `~/.local/share/raik/sessions` |
-| `RAIK_HOST` | REST API host | `127.0.0.1` |
-| `RAIK_PORT` | REST API port | `8080` |
+| `RKAT_MODEL` | Default model name | Provider-dependent |
+| `RKAT_MAX_TOKENS` | Default max tokens per turn | `4096` |
+| `RKAT_STORE_PATH` | Session storage directory | `~/.local/share/meerkat/sessions` |
+| `RKAT_HOST` | REST API host | `127.0.0.1` |
+| `RKAT_PORT` | REST API port | `8080` |
 
 ### Testing Variables
 
@@ -32,10 +32,10 @@ RAIK supports configuration through multiple layers: environment variables, conf
 
 ## CLI Options
 
-### raik run
+### rkat run
 
 ```bash
-raik run [OPTIONS] <PROMPT>
+rkat run [OPTIONS] <PROMPT>
 ```
 
 | Option | Description | Default |
@@ -48,10 +48,10 @@ raik run [OPTIONS] <PROMPT>
 | `--output`, `-o` | Output format (`text`, `json`) | `text` |
 | `--stream` | Stream output as it arrives | `false` |
 
-### raik resume
+### rkat resume
 
 ```bash
-raik resume [OPTIONS] <SESSION_ID> <PROMPT>
+rkat resume [OPTIONS] <SESSION_ID> <PROMPT>
 ```
 
 | Option | Description | Default |
@@ -60,11 +60,11 @@ raik resume [OPTIONS] <SESSION_ID> <PROMPT>
 | `--max-tokens`, `-t` | Maximum tokens | `4096` |
 | `--output`, `-o` | Output format | `text` |
 
-### raik sessions
+### rkat sessions
 
 ```bash
-raik sessions list [--limit N]
-raik sessions show <SESSION_ID>
+rkat sessions list [--limit N]
+rkat sessions show <SESSION_ID>
 ```
 
 ## Feature Flags
@@ -73,7 +73,7 @@ Configure features in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-raik = { version = "0.1", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.1", default-features = false, features = ["anthropic"] }
 ```
 
 ### Provider Features
@@ -96,13 +96,13 @@ raik = { version = "0.1", default-features = false, features = ["anthropic"] }
 
 ```toml
 # Anthropic only (smallest binary)
-raik = { version = "0.1", features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "0.1", features = ["anthropic", "jsonl-store"] }
 
 # All providers
-raik = { version = "0.1", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "0.1", features = ["all-providers", "jsonl-store"] }
 
 # Testing (in-memory storage)
-raik = { version = "0.1", features = ["anthropic", "memory-store"] }
+meerkat = { version = "0.1", features = ["anthropic", "memory-store"] }
 ```
 
 ## Programmatic Configuration
@@ -110,10 +110,10 @@ raik = { version = "0.1", features = ["anthropic", "memory-store"] }
 ### Quick Builder (SDK Helpers)
 
 ```rust
-use raik::BudgetLimits;
+use meerkat::BudgetLimits;
 use std::time::Duration;
 
-let result = raik::with_anthropic(api_key)
+let result = meerkat::with_anthropic(api_key)
     .model("claude-opus-4-5")           // Model selection
     .system_prompt("You are helpful.")   // System prompt
     .max_tokens(2048)                    // Tokens per turn
@@ -137,7 +137,7 @@ let result = raik::with_anthropic(api_key)
 For complete control:
 
 ```rust
-use raik::{AgentBuilder, BudgetLimits, RetryPolicy};
+use meerkat::{AgentBuilder, BudgetLimits, RetryPolicy};
 
 let mut agent = AgentBuilder::new()
     // Model settings
@@ -284,7 +284,7 @@ Where `jitter` is a random factor between 0.9 and 1.1.
 ### Via Code
 
 ```rust
-use raik::{McpRouter, McpServerConfig};
+use meerkat::{McpRouter, McpServerConfig};
 use std::collections::HashMap;
 
 let config = McpServerConfig {
@@ -307,21 +307,21 @@ router.add_server(config).await?;
 ### Environment Variables
 
 ```bash
-export RAIK_HOST=0.0.0.0      # Bind to all interfaces
-export RAIK_PORT=3000          # Custom port
-export RAIK_MODEL=claude-opus-4-5  # Default model
-export RAIK_MAX_TOKENS=8192    # Default max tokens
+export RKAT_HOST=0.0.0.0      # Bind to all interfaces
+export RKAT_PORT=3000          # Custom port
+export RKAT_MODEL=claude-opus-4-5  # Default model
+export RKAT_MAX_TOKENS=8192    # Default max tokens
 ```
 
 ### Running the Server
 
 ```bash
 # Development
-cargo run --package raik-rest
+cargo run --package meerkat-rest
 
 # Production
-cargo build --release --package raik-rest
-./target/release/raik-rest
+cargo build --release --package meerkat-rest
+./target/release/meerkat-rest
 ```
 
 ## Session Storage
@@ -331,7 +331,7 @@ cargo build --release --package raik-rest
 Sessions are stored as JSONL files:
 
 ```
-~/.local/share/raik/sessions/
+~/.local/share/meerkat/sessions/
 ├── 01936f8a-7b2c-7000-8000-000000000001.jsonl
 ├── 01936f8a-7b2c-7000-8000-000000000002.jsonl
 └── ...
@@ -342,13 +342,13 @@ Each file contains the complete session state, updated after each turn.
 ### Custom Storage Path
 
 ```bash
-export RAIK_STORE_PATH=/custom/path/to/sessions
+export RKAT_STORE_PATH=/custom/path/to/sessions
 ```
 
 Or programmatically:
 
 ```rust
-use raik::JsonlStore;
+use meerkat::JsonlStore;
 
 let store = JsonlStore::new("/custom/path/to/sessions");
 store.init().await?;
@@ -359,7 +359,7 @@ store.init().await?;
 For tests or ephemeral usage:
 
 ```rust
-use raik::MemoryStore;
+use meerkat::MemoryStore;
 
 let store = MemoryStore::new();
 // Sessions exist only in memory
@@ -367,14 +367,14 @@ let store = MemoryStore::new();
 
 ## Logging
 
-RAIK uses the `tracing` crate. Configure via `RUST_LOG`:
+Meerkat uses the `tracing` crate. Configure via `RUST_LOG`:
 
 ```bash
 # Basic info logging
 export RUST_LOG=info
 
-# Debug for RAIK, info for dependencies
-export RUST_LOG=raik=debug,info
+# Debug for Meerkat, info for dependencies
+export RUST_LOG=meerkat=debug,info
 
 # Full trace logging
 export RUST_LOG=trace

@@ -1,8 +1,8 @@
 # API Reference
 
-This document provides a comprehensive reference for all public types, traits, and functions in RAIK.
+This document provides a comprehensive reference for all public types, traits, and functions in Meerkat.
 
-## Module: `raik`
+## Module: `meerkat`
 
 The main entry point. Re-exports types from all sub-crates.
 
@@ -64,7 +64,7 @@ impl<C: LlmClient> QuickBuilder<C> {
 Import common types:
 
 ```rust
-pub use raik::prelude::*;
+pub use meerkat::prelude::*;
 
 // Includes:
 // - Agent, AgentBuilder
@@ -77,7 +77,7 @@ pub use raik::prelude::*;
 
 ---
 
-## Module: `raik_core`
+## Module: `meerkat_core`
 
 Core agent implementation and types.
 
@@ -583,7 +583,7 @@ pub trait AgentSessionStore: Send + Sync {
 
 ---
 
-## Module: `raik_client`
+## Module: `meerkat_client`
 
 LLM provider implementations.
 
@@ -747,7 +747,7 @@ impl LlmClient for GeminiClient { ... }
 
 ---
 
-## Module: `raik_store`
+## Module: `meerkat_store`
 
 Session persistence implementations.
 
@@ -790,7 +790,7 @@ impl AgentSessionStore for MemoryStore { ... }
 
 ---
 
-## Module: `raik_mcp_client`
+## Module: `meerkat_mcp_client`
 
 MCP protocol client.
 
@@ -894,7 +894,7 @@ pub enum McpError {
 
 ---
 
-## Module: `raik_tools`
+## Module: `meerkat_tools`
 
 Tool registry and validation.
 
@@ -1045,10 +1045,10 @@ impl Agent {
 
 ## CLI Commands
 
-### raik run
+### rkat run
 
 ```
-raik run [OPTIONS] <PROMPT>
+rkat run [OPTIONS] <PROMPT>
 
 Arguments:
   <PROMPT>  The prompt to send to the agent
@@ -1064,10 +1064,10 @@ Options:
   -h, --help                   Print help
 ```
 
-### raik resume
+### rkat resume
 
 ```
-raik resume [OPTIONS] <SESSION_ID> <PROMPT>
+rkat resume [OPTIONS] <SESSION_ID> <PROMPT>
 
 Arguments:
   <SESSION_ID>  Session ID to resume
@@ -1080,20 +1080,20 @@ Options:
   -h, --help               Print help
 ```
 
-### raik sessions
+### rkat sessions
 
 ```
-raik sessions <COMMAND>
+rkat sessions <COMMAND>
 
 Commands:
   list   List recent sessions
   show   Show session details
 
-raik sessions list [OPTIONS]
+rkat sessions list [OPTIONS]
 Options:
   --limit <N>  Maximum sessions to list [default: 10]
 
-raik sessions show <SESSION_ID>
+rkat sessions show <SESSION_ID>
 ```
 
 ---
@@ -1179,9 +1179,9 @@ Event types:
 
 ## MCP Server Tools
 
-When running as an MCP server, RAIK exposes these tools:
+When running as an MCP server, Meerkat exposes these tools:
 
-### raik_run
+### meerkat_run
 
 Run a new agent with a prompt.
 
@@ -1195,7 +1195,7 @@ Input:
 }
 ```
 
-### raik_resume
+### meerkat_resume
 
 Resume an existing session.
 

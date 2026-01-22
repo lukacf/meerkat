@@ -1,0 +1,96 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Install: cargo install cargo-deny
+# Run: cargo deny check
+
+[graph]
+# Target triples to check for
+targets = []
+# Exclude dev dependencies from checks
+exclude-dev = true
+
+# ============================================================================
+# Advisories - Check for known security vulnerabilities
+# ============================================================================
+[advisories]
+# Path to the advisory database
+db-path = "~/.cargo/advisory-db"
+# URL to the advisory database git repo
+url = "https://github.com/rustsec/advisory-db"
+# How to handle advisories that have been yanked
+yanked = "warn"
+# Ignore specific advisories (use sparingly, document why)
+ignore = [
+    # Example: "RUSTSEC-2020-0001",  # Reason for ignoring
+]
+
+# ============================================================================
+# Licenses - Ensure dependencies use acceptable licenses
+# ============================================================================
+[licenses]
+# Confidence threshold for license detection
+confidence-threshold = 0.8
+
+# List of allowed licenses (SPDX identifiers)
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unlicense",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+]
+
+# Deny specific licenses
+deny = [
+    # "GPL-3.0",  # Uncomment to deny GPL
+]
+
+# Clarify license for specific crates
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# ============================================================================
+# Bans - Block specific crates or versions
+# ============================================================================
+[bans]
+# Lint level for multiple versions of the same crate
+multiple-versions = "warn"
+# Lint level for crates that have been marked as unmaintained
+wildcards = "allow"
+# Allow specific duplicates (document why)
+skip = []
+# Skip checking tree for specific crates
+skip-tree = []
+
+# Deny specific crates entirely
+deny = [
+    # Example: { name = "openssl" }  # Use rustls instead
+]
+
+# ============================================================================
+# Sources - Restrict where crates can come from
+# ============================================================================
+[sources]
+# Lint level for crates not from an allowed source
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# Allowed registries
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# Allowed git sources (for private dependencies)
+allow-git = []
+
+# Allow specific organizations' git repos
+[sources.allow-org]
+# github = ["your-org"]
+# gitlab = ["your-org"]

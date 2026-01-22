@@ -81,51 +81,51 @@ When completing a phase:
 
 ### Tasks - Crate Setup
 
-- [ ] Create `meerkat-comms/Cargo.toml` with dependencies (Done when: `cargo check -p meerkat-comms` exits 0)
-- [ ] Create `meerkat-comms/src/lib.rs` as empty module file (Done when: file exists with `// meerkat-comms` comment)
-- [ ] Add `mod types;` declaration to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
-- [ ] Add `mod identity;` declaration to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
-- [ ] Add `mod trust;` declaration to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
-- [ ] Create `meerkat-comms/src/types.rs` (Done when: file exists)
-- [ ] Create `meerkat-comms/src/identity.rs` (Done when: file exists)
-- [ ] Create `meerkat-comms/src/trust.rs` (Done when: file exists)
+- [x] Create `meerkat-comms/Cargo.toml` with dependencies (Done when: `cargo check -p meerkat-comms` exits 0)
+- [x] Create `meerkat-comms/src/lib.rs` as empty module file (Done when: file exists with `// meerkat-comms` comment)
+- [x] Add `mod types;` declaration to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
+- [x] Add `mod identity;` declaration to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
+- [x] Add `mod trust;` declaration to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
+- [x] Create `meerkat-comms/src/types.rs` (Done when: file exists)
+- [x] Create `meerkat-comms/src/identity.rs` (Done when: file exists)
+- [x] Create `meerkat-comms/src/trust.rs` (Done when: file exists)
 
 ### Tasks - Identity Types (`identity.rs`)
 
-- [ ] Define `PubKey` newtype wrapping `[u8; 32]` (Done when: `test_pubkey_size` passes asserting size_of::<PubKey>() == 32)
-- [ ] Define `Signature` newtype wrapping `[u8; 64]` (Done when: `test_signature_size` passes asserting size_of::<Signature>() == 64)
-- [ ] Derive `Serialize`/`Deserialize` for `PubKey` (Done when: `test_pubkey_cbor_roundtrip` passes)
-- [ ] Derive `Serialize`/`Deserialize` for `Signature` (Done when: `test_signature_cbor_roundtrip` passes)
+- [x] Define `PubKey` newtype wrapping `[u8; 32]` (Done when: `test_pubkey_size` passes asserting size_of::<PubKey>() == 32)
+- [x] Define `Signature` newtype wrapping `[u8; 64]` (Done when: `test_signature_size` passes asserting size_of::<Signature>() == 64)
+- [x] Derive `Serialize`/`Deserialize` for `PubKey` (Done when: `test_pubkey_cbor_roundtrip` passes)
+- [x] Derive `Serialize`/`Deserialize` for `Signature` (Done when: `test_signature_cbor_roundtrip` passes)
 
 ### Tasks - Core Types (`types.rs`)
 
-- [ ] Define `Status` enum with `Accepted`, `Completed`, `Failed` variants (Done when: `test_status_variants` passes checking all 3 variants exist)
-- [ ] Define `MessageKind::Message` variant with `body: String` (Done when: `test_message_kind_message_fields` passes)
-- [ ] Define `MessageKind::Request` variant with `intent: String`, `params: JsonValue` (Done when: `test_message_kind_request_fields` passes)
-- [ ] Define `MessageKind::Response` variant with `in_reply_to: Uuid`, `status: Status`, `result: JsonValue` (Done when: `test_message_kind_response_fields` passes)
-- [ ] Define `MessageKind::Ack` variant with `in_reply_to: Uuid` (Done when: `test_message_kind_ack_fields` passes)
-- [ ] Define `Envelope` struct with `id`, `from`, `to`, `kind`, `sig` fields (Done when: `test_envelope_fields` passes)
-- [ ] Derive `Serialize`/`Deserialize` for `Status` (Done when: `test_status_cbor_roundtrip` passes)
-- [ ] Derive `Serialize`/`Deserialize` for `MessageKind` (Done when: `test_message_kind_cbor_roundtrip` passes)
-- [ ] Derive `Serialize`/`Deserialize` for `Envelope` (Done when: `test_envelope_cbor_roundtrip` passes)
+- [x] Define `Status` enum with `Accepted`, `Completed`, `Failed` variants (Done when: `test_status_variants` passes checking all 3 variants exist)
+- [x] Define `MessageKind::Message` variant with `body: String` (Done when: `test_message_kind_message_fields` passes)
+- [x] Define `MessageKind::Request` variant with `intent: String`, `params: JsonValue` (Done when: `test_message_kind_request_fields` passes)
+- [x] Define `MessageKind::Response` variant with `in_reply_to: Uuid`, `status: Status`, `result: JsonValue` (Done when: `test_message_kind_response_fields` passes)
+- [x] Define `MessageKind::Ack` variant with `in_reply_to: Uuid` (Done when: `test_message_kind_ack_fields` passes)
+- [x] Define `Envelope` struct with `id`, `from`, `to`, `kind`, `sig` fields (Done when: `test_envelope_fields` passes)
+- [x] Derive `Serialize`/`Deserialize` for `Status` (Done when: `test_status_cbor_roundtrip` passes)
+- [x] Derive `Serialize`/`Deserialize` for `MessageKind` (Done when: `test_message_kind_cbor_roundtrip` passes)
+- [x] Derive `Serialize`/`Deserialize` for `Envelope` (Done when: `test_envelope_cbor_roundtrip` passes)
 
 ### Tasks - Trust Types (`trust.rs`)
 
-- [ ] Define `TrustedPeer` struct with `name: String`, `pubkey: PubKey`, `addr: String` (Done when: `test_trusted_peer_fields` passes)
-- [ ] Define `TrustedPeers` struct with `peers: Vec<TrustedPeer>` (Done when: `test_trusted_peers_fields` passes)
-- [ ] Derive `Serialize`/`Deserialize` for `TrustedPeer` (Done when: `test_trusted_peer_json_roundtrip` passes)
-- [ ] Derive `Serialize`/`Deserialize` for `TrustedPeers` (Done when: `test_trusted_peers_json_roundtrip` passes)
+- [x] Define `TrustedPeer` struct with `name: String`, `pubkey: PubKey`, `addr: String` (Done when: `test_trusted_peer_fields` passes)
+- [x] Define `TrustedPeers` struct with `peers: Vec<TrustedPeer>` (Done when: `test_trusted_peers_fields` passes)
+- [x] Derive `Serialize`/`Deserialize` for `TrustedPeer` (Done when: `test_trusted_peer_json_roundtrip` passes)
+- [x] Derive `Serialize`/`Deserialize` for `TrustedPeers` (Done when: `test_trusted_peers_json_roundtrip` passes)
 
 ### Tasks - Inbox Types (`types.rs`)
 
-- [ ] Define `InboxItem::External` variant with `envelope: Envelope` (Done when: `test_inbox_item_external_fields` passes)
-- [ ] Define `InboxItem::SubagentResult` variant with `subagent_id: Uuid`, `result: JsonValue`, `summary: String` (Done when: `test_inbox_item_subagent_fields` passes)
-- [ ] Derive `Serialize`/`Deserialize` for `InboxItem` (Done when: `test_inbox_item_cbor_roundtrip` passes)
+- [x] Define `InboxItem::External` variant with `envelope: Envelope` (Done when: `test_inbox_item_external_fields` passes)
+- [x] Define `InboxItem::SubagentResult` variant with `subagent_id: Uuid`, `result: JsonValue`, `summary: String` (Done when: `test_inbox_item_subagent_fields` passes)
+- [x] Derive `Serialize`/`Deserialize` for `InboxItem` (Done when: `test_inbox_item_cbor_roundtrip` passes)
 
 ### Tasks - RCT Invariant Tests
 
-- [ ] Write test: `Status` encodes as string, not ordinal (Done when: `test_status_encodes_as_string` passes verifying CBOR contains "Accepted" not 0)
-- [ ] Write test: `MessageKind` variant tags are strings (Done when: `test_message_kind_tags_are_strings` passes)
+- [x] Write test: `Status` encodes as string, not ordinal (Done when: `test_status_encodes_as_string` passes verifying CBOR contains "Accepted" not 0)
+- [x] Write test: `MessageKind` variant tags are strings (Done when: `test_message_kind_tags_are_strings` passes)
 
 ### Phase 0 Gate Verification Commands
 

@@ -10,6 +10,7 @@ members = [
     "meerkat-cli",
     "meerkat-rest",
     "meerkat",
+    "meerkat-comms",
     "test-fixtures/mcp-test-server",
 ]
 
@@ -77,6 +78,7 @@ meerkat-mcp-server = { path = "meerkat-mcp-server" }
 meerkat-cli = { path = "meerkat-cli" }
 meerkat-rest = { path = "meerkat-rest" }
 meerkat = { path = "meerkat" }
+meerkat-comms = { path = "meerkat-comms" }
 
 [workspace.lints.rust]
 # unsafe_code = "forbid"  # Enable after stabilizing

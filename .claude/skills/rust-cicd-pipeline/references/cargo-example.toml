@@ -1,0 +1,131 @@
+# Example Cargo.toml for CI/CD pipeline
+# Customize for your project
+
+[package]
+name = "{{CRATE_NAME}}"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75.0"  # Minimum supported Rust version
+authors = ["Your Name <your.email@example.com>"]
+description = "A brief description of your crate"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-org/your-repo"
+readme = "README.md"
+keywords = ["keyword1", "keyword2"]
+categories = ["category"]
+
+# See more keys at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# Add your dependencies here
+# serde = { version = "1.0", features = ["derive"] }
+# tokio = { version = "1.0", features = ["full"] }
+
+[dev-dependencies]
+# Test dependencies
+# mockall = "0.12"          # Mocking framework
+# proptest = "1.4"          # Property-based testing
+# criterion = "0.5"         # Benchmarking
+# test-case = "3.3"         # Parameterized tests
+# rstest = "0.18"           # Fixtures and parameterized tests
+
+[build-dependencies]
+# Build-time dependencies (if needed)
+
+[features]
+default = []
+# Feature flags for conditional compilation
+# integration-tests = []    # Enable integration test features
+# unstable = []             # Unstable/experimental features
+
+# ============================================================================
+# Lints - Configure compiler and clippy warnings
+# ============================================================================
+
+[lints.rust]
+# Forbid unsafe code (remove if unsafe is needed)
+unsafe_code = "forbid"
+# Warn on missing docs for public items (optional)
+# missing_docs = "warn"
+
+[lints.clippy]
+# Enable all clippy lints as warnings
+all = { level = "warn", priority = -1 }
+# Enable pedantic lints (stricter)
+pedantic = { level = "warn", priority = -1 }
+# Enable nursery lints (newer, potentially unstable)
+# nursery = { level = "warn", priority = -1 }
+
+# Customize specific lints
+missing_errors_doc = "allow"           # Don't require error docs on every Result fn
+missing_panics_doc = "allow"           # Don't require panic docs
+module_name_repetitions = "allow"      # Allow types like ConfigConfig
+too_many_lines = "allow"               # Allow long functions when needed
+must_use_candidate = "allow"           # Don't require #[must_use] everywhere
+
+# ============================================================================
+# Profiles - Build configuration
+# ============================================================================
+
+[profile.dev]
+# Development build settings
+debug = true
+opt-level = 0
+
+[profile.release]
+# Release build settings
+debug = false
+opt-level = 3
+lto = "thin"           # Link-time optimization
+codegen-units = 1      # Better optimization, slower compile
+strip = true           # Strip symbols for smaller binary
+
+[profile.test]
+# Test build settings
+debug = true
+opt-level = 0
+
+[profile.bench]
+# Benchmark build settings
+debug = false
+opt-level = 3
+
+# ============================================================================
+# Binary/Library configuration (uncomment as needed)
+# ============================================================================
+
+# For a library crate
+# [lib]
+# name = "{{CRATE_NAME}}"
+# path = "src/lib.rs"
+
+# For a binary crate
+# [[bin]]
+# name = "{{CRATE_NAME}}"
+# path = "src/main.rs"
+
+# For multiple binaries
+# [[bin]]
+# name = "cli"
+# path = "src/bin/cli.rs"
+#
+# [[bin]]
+# name = "server"
+# path = "src/bin/server.rs"
+
+# ============================================================================
+# Workspace configuration (for multi-crate projects)
+# ============================================================================
+
+# [workspace]
+# members = [
+#     "crates/core",
+#     "crates/cli",
+#     "crates/server",
+# ]
+# resolver = "2"
+
+# [workspace.dependencies]
+# # Shared dependencies across workspace
+# serde = { version = "1.0", features = ["derive"] }
+# tokio = { version = "1.0", features = ["full"] }

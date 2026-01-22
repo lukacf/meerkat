@@ -1,0 +1,31 @@
+# rust-toolchain.toml
+# Pin the Rust version for consistent builds across machines and CI
+#
+# Place this file in your project root as `rust-toolchain.toml`
+# Rustup will automatically use this version when entering the directory
+
+[toolchain]
+# Stable channel with specific version
+channel = "1.75.0"
+
+# Required components for CI
+components = [
+    "rustfmt",   # Code formatting
+    "clippy",    # Linting
+    "rust-src",  # Source code for rust-analyzer (optional)
+]
+
+# Cross-compilation targets (optional)
+# Uncomment targets you need
+# targets = [
+#     "x86_64-unknown-linux-gnu",
+#     "x86_64-unknown-linux-musl",
+#     "x86_64-apple-darwin",
+#     "aarch64-apple-darwin",
+#     "x86_64-pc-windows-msvc",
+# ]
+
+# Alternative: Use latest stable (less reproducible)
+# [toolchain]
+# channel = "stable"
+# components = ["rustfmt", "clippy"]

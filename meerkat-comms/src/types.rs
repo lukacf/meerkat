@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
-use crate::identity::{PubKey, Signature};
+use crate::identity::{Keypair, PubKey, Signature};
 
 /// Response status for Request messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +46,30 @@ pub struct Envelope {
     pub kind: MessageKind,
     /// Ed25519 signature over canonical CBOR of [id, from, to, kind].
     pub sig: Signature,
+}
+
+impl Envelope {
+    /// Compute the canonical CBOR bytes to sign: [id, from, to, kind]
+    /// Field order is fixed per spec for cross-implementation compatibility.
+    pub fn signable_bytes(&self) -> Vec<u8> {
+        // Create a tuple of (id, from, to, kind) for canonical encoding
+        let signable = (&self.id, &self.from, &self.to, &self.kind);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&signable, &mut buf).expect("CBOR serialization failed");
+        buf
+    }
+
+    /// Sign the envelope with the given keypair, updating the sig field.
+    pub fn sign(&mut self, keypair: &Keypair) {
+        let bytes = self.signable_bytes();
+        self.sig = keypair.sign(&bytes);
+    }
+
+    /// Verify the signature using the sender's public key.
+    pub fn verify(&self) -> bool {
+        let bytes = self.signable_bytes();
+        self.from.verify(&bytes, &self.sig)
+    }
 }
 
 /// An item in the agent's inbox.
@@ -304,5 +328,60 @@ mod tests {
             "MessageKind should use string tags, got: {:?}",
             buf
         );
+    }
+
+    // Phase 1: Envelope signing tests
+
+    #[test]
+    fn test_signable_bytes_deterministic() {
+        let envelope = Envelope {
+            id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            from: PubKey::new([1u8; 32]),
+            to: PubKey::new([2u8; 32]),
+            kind: MessageKind::Message {
+                body: "test".to_string(),
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+        let bytes1 = envelope.signable_bytes();
+        let bytes2 = envelope.signable_bytes();
+        assert_eq!(bytes1, bytes2, "signable_bytes must be deterministic");
+    }
+
+    #[test]
+    fn test_envelope_sign() {
+        use crate::identity::Keypair;
+
+        let keypair = Keypair::generate();
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: keypair.public_key(),
+            to: PubKey::new([2u8; 32]),
+            kind: MessageKind::Message {
+                body: "test".to_string(),
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+        envelope.sign(&keypair);
+        // Verify sig field is no longer all zeros
+        assert_ne!(envelope.sig, Signature::new([0u8; 64]));
+    }
+
+    #[test]
+    fn test_envelope_verify() {
+        use crate::identity::Keypair;
+
+        let keypair = Keypair::generate();
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: keypair.public_key(),
+            to: PubKey::new([2u8; 32]),
+            kind: MessageKind::Message {
+                body: "test".to_string(),
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+        envelope.sign(&keypair);
+        assert!(envelope.verify(), "signed envelope should verify");
     }
 }

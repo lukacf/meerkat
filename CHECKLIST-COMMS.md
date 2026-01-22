@@ -74,6 +74,7 @@ When completing a phase:
 ---
 
 ## Phase 0: Representation Contracts (RCT Gate 0 - MUST BE GREEN)
+<!-- Phase 0: APPROVED -->
 
 **Goal:** All types compile, serialize, and round-trip through CBOR/JSON. No behavior yet - only data shapes.
 
@@ -144,6 +145,7 @@ Spawn reviewers IN PARALLEL:
 ---
 
 ## Phase 1: Cryptographic Identity
+<!-- Phase 1: APPROVED -->
 
 **Goal:** Key generation, signing, verification, and PeerId conversion work correctly.
 
@@ -151,38 +153,38 @@ Spawn reviewers IN PARALLEL:
 
 ### Tasks - PeerId Conversion (`identity.rs`)
 
-- [ ] Implement `PubKey::to_peer_id() -> String` returning "ed25519:" + base64 (Done when: `test_pubkey_to_peer_id` passes)
-- [ ] Implement `PubKey::from_peer_id(s: &str) -> Result<PubKey>` parsing "ed25519:..." (Done when: `test_pubkey_from_peer_id` passes)
-- [ ] Write test: peer_id format matches "ed25519:<base64>" pattern (Done when: `test_peer_id_format` passes with regex validation)
-- [ ] Write test: peer_id round-trips correctly (Done when: `test_peer_id_roundtrip` passes: to_peer_id → from_peer_id → equals original)
+- [x] Implement `PubKey::to_peer_id() -> String` returning "ed25519:" + base64 (Done when: `test_pubkey_to_peer_id` passes)
+- [x] Implement `PubKey::from_peer_id(s: &str) -> Result<PubKey>` parsing "ed25519:..." (Done when: `test_pubkey_from_peer_id` passes)
+- [x] Write test: peer_id format matches "ed25519:<base64>" pattern (Done when: `test_peer_id_format` passes with regex validation)
+- [x] Write test: peer_id round-trips correctly (Done when: `test_peer_id_roundtrip` passes: to_peer_id → from_peer_id → equals original)
 
 ### Tasks - Keypair (`identity.rs`)
 
-- [ ] Define `Keypair` struct holding secret and public key (Done when: `test_keypair_struct` passes)
-- [ ] Implement `Keypair::generate()` (Done when: `test_keypair_generate` passes verifying pubkey is 32 bytes)
-- [ ] Implement `Keypair::public_key() -> PubKey` (Done when: `test_keypair_public_key` passes)
-- [ ] Implement `Keypair::sign(data: &[u8]) -> Signature` (Done when: `test_keypair_sign` passes verifying signature is 64 bytes)
-- [ ] Implement `PubKey::verify(data: &[u8], sig: &Signature) -> bool` (Done when: `test_pubkey_verify` passes)
+- [x] Define `Keypair` struct holding secret and public key (Done when: `test_keypair_struct` passes)
+- [x] Implement `Keypair::generate()` (Done when: `test_keypair_generate` passes verifying pubkey is 32 bytes)
+- [x] Implement `Keypair::public_key() -> PubKey` (Done when: `test_keypair_public_key` passes)
+- [x] Implement `Keypair::sign(data: &[u8]) -> Signature` (Done when: `test_keypair_sign` passes verifying signature is 64 bytes)
+- [x] Implement `PubKey::verify(data: &[u8], sig: &Signature) -> bool` (Done when: `test_pubkey_verify` passes)
 
 ### Tasks - Envelope Signing (`types.rs`)
 
-- [ ] Implement `Envelope::signable_bytes()` returning canonical CBOR of `[id, from, to, kind]` (Done when: `test_signable_bytes_deterministic` passes verifying same envelope produces identical bytes)
-- [ ] Implement `Envelope::sign(&mut self, keypair: &Keypair)` (Done when: `test_envelope_sign` passes verifying sig field is set)
-- [ ] Implement `Envelope::verify(&self) -> bool` (Done when: `test_envelope_verify` passes)
+- [x] Implement `Envelope::signable_bytes()` returning canonical CBOR of `[id, from, to, kind]` (Done when: `test_signable_bytes_deterministic` passes verifying same envelope produces identical bytes)
+- [x] Implement `Envelope::sign(&mut self, keypair: &Keypair)` (Done when: `test_envelope_sign` passes verifying sig field is set)
+- [x] Implement `Envelope::verify(&self) -> bool` (Done when: `test_envelope_verify` passes)
 
 ### Tasks - Key Persistence (`identity.rs`)
 
-- [ ] Implement `Keypair::save(dir: &Path)` writing `identity.key` and `identity.pub` (Done when: `test_keypair_save` passes verifying files exist)
-- [ ] Implement `Keypair::load(dir: &Path)` reading key files (Done when: `test_keypair_load` passes)
-- [ ] Implement `Keypair::load_or_generate(dir: &Path)` loading existing keys (Done when: `test_keypair_load_or_generate_existing` passes)
-- [ ] Implement `Keypair::load_or_generate(dir: &Path)` generating new keys (Done when: `test_keypair_load_or_generate_new` passes)
+- [x] Implement `Keypair::save(dir: &Path)` writing `identity.key` and `identity.pub` (Done when: `test_keypair_save` passes verifying files exist)
+- [x] Implement `Keypair::load(dir: &Path)` reading key files (Done when: `test_keypair_load` passes)
+- [x] Implement `Keypair::load_or_generate(dir: &Path)` loading existing keys (Done when: `test_keypair_load_or_generate_existing` passes)
+- [x] Implement `Keypair::load_or_generate(dir: &Path)` generating new keys (Done when: `test_keypair_load_or_generate_new` passes)
 
 ### Tasks - Security Tests
 
-- [ ] Write test: sign then verify succeeds (Done when: `test_sign_verify_roundtrip` passes)
-- [ ] Write test: tampered data fails verification (Done when: `test_tamper_detection` passes)
-- [ ] Write test: wrong key fails verification (Done when: `test_wrong_key_rejection` passes)
-- [ ] Write test: keypair persistence round-trips (Done when: `test_keypair_persistence_roundtrip` passes: save → load → sign → verify)
+- [x] Write test: sign then verify succeeds (Done when: `test_sign_verify_roundtrip` passes)
+- [x] Write test: tampered data fails verification (Done when: `test_tamper_detection` passes)
+- [x] Write test: wrong key fails verification (Done when: `test_wrong_key_rejection` passes)
+- [x] Write test: keypair persistence round-trips (Done when: `test_keypair_persistence_roundtrip` passes: save → load → sign → verify)
 
 ### Phase 1 Gate Verification Commands
 

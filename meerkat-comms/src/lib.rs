@@ -5,6 +5,6 @@ pub mod identity;
 pub mod trust;
 pub mod types;
 
-pub use identity::{PubKey, Signature};
+pub use identity::{IdentityError, Keypair, PubKey, Signature};
 pub use trust::{TrustedPeer, TrustedPeers};
 pub use types::{Envelope, InboxItem, MessageKind, Status};

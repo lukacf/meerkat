@@ -1,156 +1,84 @@
 # Meerkat Comms Implementation Checklist
 
-**Purpose:** Task-oriented checklist for agentic AI execution of the inter-agent communication system.
-
-**Specification:** See `DESIGN-COMMS.md` for authoritative requirements.
+**Specification:** See `DESIGN-COMMS.md`
 
 ---
 
-## RCT Methodology Overview
+## RCT Methodology
 
-This implementation follows the **RCT (Representation Contract Tests)** methodology. Key principles:
+**Representations first. Behavior second. Internals last.**
 
-1. **Gate 0 Must Be Green First** - Representation contracts must pass before any behavior implementation
-2. **Representations First, Behavior Second, Internals Last**
-3. **Integration Tests Over Unit Tests** - System proof trumps local correctness
-4. **No Platonic Completion** - Passing tests are the source of truth, not code quality
-
-### RCT Gate Progression (Methodology Gates)
-- **RCT Gate 0**: RCT tests green (round-trip, encoding, NULL semantics)
-- **RCT Gate 1**: E2E scenarios written and executable (red OK)
-- **RCT Gate 2**: Integration choke-point tests written and executable (red OK)
-- **RCT Gate 3**: Unit tests as needed to support integration
-
-> **Note:** These are **methodology gates**, separate from the Phase Gates below.
-
----
-
-## Global Dependencies
-
-- `meerkat-comms` crate must exist before any phase tasks
-- Ed25519 crypto library (e.g., `ed25519-dalek`) required for Phase 1+
-- CBOR library with canonical encoding (e.g., `ciborium`) required for Phase 0+
-- All types in Phase 0 must compile before Phase 1+ can proceed
-
----
-
-## Phase Completion Protocol
-
-When completing a phase, use this checklist:
-
-1. [ ] All phase checklist items marked complete
-2. [ ] Run relevant tests, note results
-3. [ ] Spawn reviewer agents IN PARALLEL (single message, multiple Task calls)
-4. [ ] Collect all verdicts
-5. [ ] If any BLOCK verdicts:
-   - Address blocking issues
-   - Re-run *all* reviewers
-6. [ ] Record phase completion with reviewer verdicts
-7. [ ] Proceed to next phase
+- Phase 0: Types + round-trip tests (MUST BE GREEN)
+- Phase 1+: Behavior implementation
+- Final: E2E scenarios
 
 ---
 
 ## Phase 0: Representation Contracts (RCT Gate 0 - MUST BE GREEN)
 
-**Goal:** Lock down all core types with serialization round-trips. No behavior yet.
+**Goal:** All types compile and round-trip through CBOR serialization.
 
-**Dependencies:** None (this is the foundation)
+**Dependencies:** None
 
 ### Tasks - Crate Setup
 
-- [ ] Create `meerkat-comms/Cargo.toml` with workspace dependencies (Done when: `cargo check -p meerkat-comms` succeeds)
-- [ ] Create `meerkat-comms/src/lib.rs` with module declarations (Done when: compiles with `mod model; mod identity;`)
+- [ ] Create `meerkat-comms/Cargo.toml` (Done when: `cargo check -p meerkat-comms` succeeds)
+- [ ] Add dependencies: `serde`, `ciborium`, `uuid`, `ed25519-dalek`, `serde_json`, `tokio` (Done when: Cargo.toml has deps)
+- [ ] Create `meerkat-comms/src/lib.rs` with module declarations (Done when: `mod types; mod identity;` compiles)
 
 ### Tasks - Identity Types (`identity.rs`)
 
-- [ ] Implement `PubKey` newtype in `identity.rs` (Done when: compiles with 32-byte array wrapper)
-- [ ] Implement `NodeId` newtype in `identity.rs` (Done when: compiles as hash of PubKey)
-- [ ] Implement `Signature` newtype in `identity.rs` (Done when: compiles with 64-byte array wrapper)
+- [ ] Implement `PubKey` newtype as 32-byte array (Done when: compiles)
+- [ ] Implement `Signature` newtype as 64-byte array (Done when: compiles)
+- [ ] Implement `PubKey::to_peer_id() -> String` returning "ed25519:" + base64 (Done when: compiles)
+- [ ] Implement `PubKey::from_peer_id(s: &str) -> Result<PubKey>` (Done when: compiles)
 - [ ] Derive Serialize/Deserialize for `PubKey` (Done when: serde derives compile)
-- [ ] Derive Serialize/Deserialize for `NodeId` (Done when: serde derives compile)
 - [ ] Derive Serialize/Deserialize for `Signature` (Done when: serde derives compile)
 
-### Tasks - Core Enums (`model.rs`)
+### Tasks - Core Types (`types.rs`)
 
-- [ ] Implement `Role` enum in `model.rs` (Done when: compiles with Observer, Member, Operator, Admin variants)
-- [ ] Implement `Status` enum in `model.rs` (Done when: compiles with Accepted, Rejected, Completed, Failed variants)
-- [ ] Implement `PresenceState` enum in `model.rs` (Done when: compiles with Online, Away, Offline variants)
-- [ ] Implement `Priority` enum in `model.rs` (Done when: compiles with High, Normal, Low variants)
-- [ ] Implement `Destination` enum in `model.rs` (Done when: compiles with Channel(Uuid), Peer(PubKey) variants)
-- [ ] Derive Serialize/Deserialize for all enums (Done when: serde derives compile for Role, Status, PresenceState, Priority, Destination)
-
-### Tasks - MessageKind Enum (`model.rs`)
-
-- [ ] Implement `MessageKind::Message` variant (Done when: compiles with `body: String`)
-- [ ] Implement `MessageKind::Request` variant (Done when: compiles with request_id, intent, params, reply_to, hop fields)
-- [ ] Implement `MessageKind::Response` variant (Done when: compiles with request_id, status, result fields)
-- [ ] Implement `MessageKind::Presence` variant (Done when: compiles with state, seq fields)
-- [ ] Implement `MessageKind::HistoryRequest` variant (Done when: compiles with channel_id, since_ts, since_seq_by_sender, max_messages, max_bytes fields)
-- [ ] Implement `MessageKind::HistoryResponse` variant (Done when: compiles with channel_id, messages fields)
+- [ ] Implement `Status` enum with Accepted, Completed, Failed (Done when: compiles)
+- [ ] Implement `MessageKind::Message` variant with body field (Done when: compiles)
+- [ ] Implement `MessageKind::Request` variant with intent, params fields (Done when: compiles)
+- [ ] Implement `MessageKind::Response` variant with in_reply_to, status, result fields (Done when: compiles)
+- [ ] Implement `MessageKind::Ack` variant with in_reply_to field (Done when: compiles)
+- [ ] Implement `Envelope` struct with id, from, to, kind, sig fields (Done when: compiles)
+- [ ] Derive Serialize/Deserialize for `Status` (Done when: serde derives compile)
 - [ ] Derive Serialize/Deserialize for `MessageKind` (Done when: serde derives compile)
-
-### Tasks - Envelope Struct (`model.rs`)
-
-- [ ] Implement `Envelope` struct (Done when: compiles with id, from_pubkey, to, kind, ts, ttl_secs, sender_seq, sender_epoch, sig fields per spec)
 - [ ] Derive Serialize/Deserialize for `Envelope` (Done when: serde derives compile)
 
-### Tasks - Roster Types (`model.rs`)
+### Tasks - Trust Types (`trust.rs`)
 
-- [ ] Implement `RosterMember` struct (Done when: compiles with pubkey, role, archive fields)
-- [ ] Implement `RosterSignature` struct (Done when: compiles with pubkey, sig fields)
-- [ ] Implement `Roster` struct (Done when: compiles with org_id, version, timestamp, members, signatures fields)
-- [ ] Derive Serialize/Deserialize for roster types (Done when: serde derives compile for RosterMember, RosterSignature, Roster)
+- [ ] Implement `TrustedPeer` struct with name, pubkey, addr fields (Done when: compiles)
+- [ ] Implement `TrustedPeers` struct with peers vec (Done when: compiles)
+- [ ] Derive Serialize/Deserialize for trust types (Done when: serde derives compile)
 
-### Tasks - Channel Types (`model.rs`)
+### Tasks - Inbox Types (`types.rs`)
 
-- [ ] Implement `ChannelPolicy` struct (Done when: compiles with channel_id, name, readers, writers, admins, signature, retention_hours, retention_messages, allow_history_fetch fields)
-- [ ] Derive Serialize/Deserialize for `ChannelPolicy` (Done when: serde derives compile)
+- [ ] Implement `InboxItem::External` variant with envelope field (Done when: compiles)
+- [ ] Implement `InboxItem::SubagentResult` variant with subagent_id, result, summary fields (Done when: compiles)
+- [ ] Derive Serialize/Deserialize for `InboxItem` (Done when: serde derives compile)
 
-### Tasks - Inbox Types (`model.rs`)
+### Tasks - RCT Round-Trip Tests
 
-- [ ] Implement `InboxSource` enum (Done when: compiles with Channel(Uuid), Dm(PubKey) variants)
-- [ ] Implement `InboxItem::External` variant (Done when: compiles with envelope, source, priority fields)
-- [ ] Implement `InboxItem::SubagentResult` variant (Done when: compiles with subagent_id, result, summary fields)
-- [ ] Derive Serialize/Deserialize for inbox types (Done when: serde derives compile)
-
-### Tasks - Config Types (`model.rs`)
-
-- [ ] Implement `ForkBudget` enum (Done when: compiles with Shared, Fixed(u64) variants)
-- [ ] Implement `ForkConfig` struct (Done when: compiles with budget field)
-- [ ] Derive Serialize/Deserialize for config types (Done when: serde derives compile)
-
-### Tasks - Handshake Types (`model.rs`)
-
-- [ ] Implement `Hello` struct (Done when: compiles with node_id, pubkey, nonce, roster_version fields)
-- [ ] Implement `HelloAck` struct (Done when: compiles with node_id, pubkey, nonce, sig, roster_version fields)
-- [ ] Derive Serialize/Deserialize for handshake types (Done when: serde derives compile)
-
-### Tasks - RCT Tests (Round-Trip)
-
-- [ ] Write round-trip test for `PubKey` (Done when: test_pubkey_roundtrip passes)
-- [ ] Write round-trip test for `NodeId` (Done when: test_nodeid_roundtrip passes)
-- [ ] Write round-trip test for `Signature` (Done when: test_signature_roundtrip passes)
-- [ ] Write round-trip test for `Role` (Done when: test_role_roundtrip passes)
-- [ ] Write round-trip test for `Status` (Done when: test_status_roundtrip passes)
-- [ ] Write round-trip test for `PresenceState` (Done when: test_presence_state_roundtrip passes)
-- [ ] Write round-trip test for `Destination` (Done when: test_destination_roundtrip passes)
-- [ ] Write round-trip test for `MessageKind` (all variants) (Done when: test_message_kind_roundtrip passes)
-- [ ] Write round-trip test for `Envelope` (Done when: test_envelope_roundtrip passes)
-- [ ] Write round-trip test for `Roster` (Done when: test_roster_roundtrip passes)
-- [ ] Write round-trip test for `ChannelPolicy` (Done when: test_channel_policy_roundtrip passes)
+- [ ] Write round-trip test for `PubKey` CBOR (Done when: test_pubkey_cbor_roundtrip passes)
+- [ ] Write round-trip test for `Signature` CBOR (Done when: test_signature_cbor_roundtrip passes)
+- [ ] Write round-trip test for `Status` CBOR (Done when: test_status_cbor_roundtrip passes)
+- [ ] Write round-trip test for `MessageKind::Message` (Done when: test_message_kind_message_roundtrip passes)
+- [ ] Write round-trip test for `MessageKind::Request` (Done when: test_message_kind_request_roundtrip passes)
+- [ ] Write round-trip test for `MessageKind::Response` (Done when: test_message_kind_response_roundtrip passes)
+- [ ] Write round-trip test for `MessageKind::Ack` (Done when: test_message_kind_ack_roundtrip passes)
+- [ ] Write round-trip test for `Envelope` (Done when: test_envelope_cbor_roundtrip passes)
+- [ ] Write round-trip test for `TrustedPeers` JSON (Done when: test_trusted_peers_json_roundtrip passes)
 - [ ] Write round-trip test for `InboxItem` (Done when: test_inbox_item_roundtrip passes)
 
-### Tasks - RCT Tests (Invariants)
+### Tasks - RCT Invariant Tests
 
-- [ ] Write invariant test: Role enum encodes as string (Done when: test_role_encodes_as_string passes)
-- [ ] Write invariant test: Status enum encodes as string (Done when: test_status_encodes_as_string passes)
-- [ ] Write invariant test: PresenceState enum encodes as string (Done when: test_presence_state_encodes_as_string passes)
-- [ ] Write invariant test: Envelope with expired TTL is detectable (Done when: test_envelope_ttl_expiry passes)
-- [ ] Write invariant test: Roster version monotonicity check (Done when: test_roster_version_monotonic passes)
-- [ ] Write invariant test: Request hop limit enforced (Done when: test_request_hop_limit passes)
-- [ ] Write invariant test: canonical CBOR produces deterministic bytes (Done when: test_canonical_cbor_determinism passes)
+- [ ] Write invariant test: Status encodes as string not ordinal (Done when: test_status_string_encoding passes)
+- [ ] Write invariant test: PubKey peer_id format "ed25519:base64" (Done when: test_pubkey_peer_id_format passes)
+- [ ] Write invariant test: PubKey peer_id round-trip (Done when: test_pubkey_peer_id_roundtrip passes)
 
-### Phase 0 Gate Verification Commands
+### Phase 0 Gate Verification
 
 ```bash
 cargo test -p meerkat-comms
@@ -158,39 +86,46 @@ cargo test -p meerkat-comms
 
 ### Phase 0 Gate Review
 
-Spawn reviewers IN PARALLEL:
-- **RCT Guardian**: Verify representation round-trips for all types in model.rs and identity.rs
-- **Spec Auditor**: Verify all fields match DESIGN-COMMS.md spec exactly
+- **RCT Guardian**: Verify all types round-trip through CBOR/JSON
+- **Spec Auditor**: Verify all fields match DESIGN-COMMS.md
 
 ---
 
 ## Phase 1: Cryptographic Identity
 
-**Goal:** Keypair generation, signing, and verification work correctly.
+**Goal:** Key generation, signing, and verification work.
 
-**Dependencies:** Phase 0 (all types compile and round-trip)
+**Dependencies:** Phase 0
 
-### Tasks - Keypair Operations (`identity.rs`)
+### Tasks - Keypair (`identity.rs`)
 
-- [ ] Implement `Keypair` struct (Done when: compiles with secret + public key)
-- [ ] Implement `Keypair::generate()` (Done when: generates valid Ed25519 keypair)
-- [ ] Implement `Keypair::sign(data: &[u8])` (Done when: returns Signature)
-- [ ] Implement `PubKey::verify(data: &[u8], sig: &Signature)` (Done when: returns bool)
-- [ ] Implement `PubKey::to_node_id()` (Done when: returns hash of pubkey)
+- [ ] Implement `Keypair` struct (Done when: holds secret + public key)
+- [ ] Implement `Keypair::generate()` (Done when: test_keypair_generate passes)
+- [ ] Implement `Keypair::sign(data: &[u8]) -> Signature` (Done when: returns signature)
+- [ ] Implement `PubKey::verify(data: &[u8], sig: &Signature) -> bool` (Done when: returns bool)
+- [ ] Implement `Keypair::public_key() -> PubKey` (Done when: returns pubkey)
 
-### Tasks - Envelope Signing (`model.rs`)
+### Tasks - Envelope Signing (`types.rs`)
 
-- [ ] Implement `Envelope::signable_bytes()` using canonical CBOR (Done when: returns deterministic bytes for signing)
-- [ ] Implement `Envelope::sign(keypair: &Keypair)` (Done when: sets sig field)
-- [ ] Implement `Envelope::verify(&self)` (Done when: returns bool based on signature validity)
+- [ ] Implement `Envelope::signable_bytes() -> Vec<u8>` using canonical CBOR array [id, from, to, kind] (Done when: returns deterministic bytes)
+- [ ] Implement `Envelope::sign(&mut self, keypair: &Keypair)` (Done when: sets sig field)
+- [ ] Implement `Envelope::verify(&self) -> bool` (Done when: verifies sig against from pubkey)
 
-### Tasks - Integration Tests
+### Tasks - Key Persistence (`identity.rs`)
 
-- [ ] Write test: sign and verify envelope (Done when: test_envelope_sign_verify passes)
-- [ ] Write test: tampered envelope fails verification (Done when: test_envelope_tamper_detection passes)
-- [ ] Write test: wrong key fails verification (Done when: test_envelope_wrong_key passes)
+- [ ] Implement `Keypair::load(dir: &Path) -> Result<Keypair>` (Done when: loads identity.key + identity.pub)
+- [ ] Implement `Keypair::save(&self, dir: &Path) -> Result<()>` (Done when: saves to files)
+- [ ] Implement `Keypair::load_or_generate(dir: &Path) -> Keypair` (Done when: loads or creates new)
 
-### Phase 1 Gate Verification Commands
+### Tasks - Tests
+
+- [ ] Write test: sign then verify succeeds (Done when: test_sign_verify passes)
+- [ ] Write test: tampered data fails verify (Done when: test_tamper_fails passes)
+- [ ] Write test: wrong key fails verify (Done when: test_wrong_key_fails passes)
+- [ ] Write test: keypair save and load roundtrip (Done when: test_keypair_persistence passes)
+- [ ] Write test: signable_bytes is deterministic (Done when: test_signable_bytes_deterministic passes)
+
+### Phase 1 Gate Verification
 
 ```bash
 cargo test -p meerkat-comms
@@ -198,47 +133,33 @@ cargo test -p meerkat-comms
 
 ### Phase 1 Gate Review
 
-Spawn reviewers IN PARALLEL:
-- **RCT Guardian**: Verify signing/verification round-trips correctly
-- **Integration Sheriff**: Verify sign → verify → tamper → fail flow works
+- **RCT Guardian**: Verify sign/verify round-trip, canonical CBOR determinism
+- **Integration Sheriff**: Verify tamper detection works
 
 ---
 
-## Phase 2: Roster Management
+## Phase 2: Trust Management
 
-**Goal:** Roster parsing, validation, version comparison, and admin signature verification.
+**Goal:** Load trusted peers, check membership.
 
-**Dependencies:** Phase 1 (signing/verification works)
+**Dependencies:** Phase 1
 
-### Tasks - Roster Module (`roster.rs`)
+### Tasks - Trust Module (`trust.rs`)
 
-- [ ] Create `roster.rs` module (Done when: module compiles)
-- [ ] Implement `Roster::is_member(pubkey: &PubKey) -> bool` (Done when: checks membership)
-- [ ] Implement `Roster::get_role(pubkey: &PubKey) -> Option<Role>` (Done when: returns role if member)
-- [ ] Implement `Roster::admins() -> Vec<&RosterMember>` (Done when: filters admin members)
-- [ ] Implement `Roster::verify_signatures() -> bool` (Done when: verifies all signatures from admins)
-- [ ] Implement `Roster::is_newer_than(other: &Roster) -> bool` (Done when: compares versions with monotonicity)
-- [ ] Implement `Roster::can_accept_update(new: &Roster) -> Result<(), RosterError>` (Done when: validates version > current and signatures valid)
+- [ ] Implement `TrustedPeers::load(path: &Path) -> Result<TrustedPeers>` (Done when: loads JSON file)
+- [ ] Implement `TrustedPeers::save(&self, path: &Path) -> Result<()>` (Done when: saves JSON file)
+- [ ] Implement `TrustedPeers::is_trusted(&self, pubkey: &PubKey) -> bool` (Done when: checks membership)
+- [ ] Implement `TrustedPeers::get_peer(&self, pubkey: &PubKey) -> Option<&TrustedPeer>` (Done when: returns peer info)
+- [ ] Implement `TrustedPeers::get_by_name(&self, name: &str) -> Option<&TrustedPeer>` (Done when: finds by name)
 
-### Tasks - Roster Errors
+### Tasks - Tests
 
-- [ ] Implement `RosterError` enum (Done when: compiles with InvalidSignature, VersionNotNewer, NotAnAdmin variants)
+- [ ] Write test: load trusted peers from JSON (Done when: test_load_trusted_peers passes)
+- [ ] Write test: is_trusted returns true for listed peer (Done when: test_is_trusted passes)
+- [ ] Write test: is_trusted returns false for unknown peer (Done when: test_untrusted_rejected passes)
+- [ ] Write test: get_by_name finds peer (Done when: test_get_by_name passes)
 
-### Tasks - Role Permissions
-
-- [ ] Implement `Role::can_read() -> bool` (Done when: returns true for all roles)
-- [ ] Implement `Role::can_write() -> bool` (Done when: returns true for member+)
-- [ ] Implement `Role::can_send_requests() -> bool` (Done when: returns true for operator+)
-- [ ] Implement `Role::can_manage_acls() -> bool` (Done when: returns true for admin only)
-
-### Tasks - Integration Tests
-
-- [ ] Write test: roster membership check (Done when: test_roster_membership passes)
-- [ ] Write test: roster signature verification (Done when: test_roster_signature_verification passes)
-- [ ] Write test: roster update with older version rejected (Done when: test_roster_version_rollback_rejected passes)
-- [ ] Write test: role permission checks (Done when: test_role_permissions passes)
-
-### Phase 2 Gate Verification Commands
+### Phase 2 Gate Verification
 
 ```bash
 cargo test -p meerkat-comms
@@ -246,48 +167,52 @@ cargo test -p meerkat-comms
 
 ### Phase 2 Gate Review
 
-Spawn reviewers IN PARALLEL:
-- **RCT Guardian**: Verify Roster round-trips and signature verification
-- **Spec Auditor**: Verify role permissions match spec table exactly
-- **Integration Sheriff**: Verify roster update flow rejects rollbacks
+- **Spec Auditor**: Verify JSON format matches spec trusted_peers.json example
 
 ---
 
-## Phase 3: Transport Layer (UDS)
+## Phase 3: Transport Layer
 
-**Goal:** Unix domain socket transport with handshake flow.
+**Goal:** UDS and TCP transports with length-prefix framing.
 
-**Dependencies:** Phase 2 (roster validation works)
+**Dependencies:** Phase 0 (types)
 
-### Tasks - Transport Trait (`transport/mod.rs`)
+### Tasks - Framing (`transport/mod.rs`)
 
-- [ ] Create `transport/mod.rs` module (Done when: module compiles)
-- [ ] Define `PeerTransport` trait (Done when: trait compiles with connect, accept, send, recv methods)
-- [ ] Define `TransportError` enum (Done when: compiles with IoError, HandshakeFailed, Timeout variants)
+- [ ] Implement `write_envelope(writer, envelope)` with length-prefix (Done when: writes 4-byte len + CBOR)
+- [ ] Implement `read_envelope(reader) -> Result<Envelope>` with length-prefix (Done when: reads and deserializes)
+- [ ] Implement max payload size check (1 MB) (Done when: rejects oversized messages)
+- [ ] Define `TransportError` enum with Io, Timeout, MessageTooLarge variants (Done when: compiles)
 
 ### Tasks - UDS Transport (`transport/uds.rs`)
 
-- [ ] Create `transport/uds.rs` module (Done when: module compiles)
-- [ ] Implement `UdsTransport` struct (Done when: compiles with socket path)
-- [ ] Implement `UdsTransport::bind(path)` for server (Done when: creates listening socket)
-- [ ] Implement `UdsTransport::connect(path)` for client (Done when: connects to socket)
-- [ ] Implement `UdsTransport::send(envelope)` (Done when: serializes and writes to socket)
-- [ ] Implement `UdsTransport::recv() -> Envelope` (Done when: reads and deserializes from socket)
+- [ ] Implement `UdsListener::bind(path)` (Done when: creates listening socket)
+- [ ] Implement `UdsListener::accept() -> UdsStream` (Done when: accepts connection)
+- [ ] Implement `UdsStream::connect(path)` (Done when: connects to socket)
+- [ ] Implement send/recv envelope over UdsStream using framing (Done when: uses write_envelope/read_envelope)
 
-### Tasks - Handshake (`transport/mod.rs`)
+### Tasks - TCP Transport (`transport/tcp.rs`)
 
-- [ ] Implement `perform_handshake_client(transport, keypair, roster)` (Done when: sends Hello, receives HelloAck, verifies)
-- [ ] Implement `perform_handshake_server(transport, keypair, roster)` (Done when: receives Hello, sends HelloAck, verifies)
-- [ ] Implement roster version exchange during handshake (Done when: newer roster is shared)
+- [ ] Implement `TcpListener::bind(addr)` (Done when: creates listening socket)
+- [ ] Implement `TcpListener::accept() -> TcpStream` (Done when: accepts connection)
+- [ ] Implement `TcpStream::connect(addr)` (Done when: connects)
+- [ ] Implement send/recv envelope over TcpStream using framing (Done when: uses write_envelope/read_envelope)
 
-### Tasks - Integration Tests
+### Tasks - Address Parsing
 
-- [ ] Write test: UDS connect and send envelope (Done when: test_uds_send_recv passes)
-- [ ] Write test: handshake succeeds between valid peers (Done when: test_handshake_success passes)
-- [ ] Write test: handshake fails with unknown peer (Done when: test_handshake_unknown_peer_rejected passes)
-- [ ] Write test: handshake exchanges roster update (Done when: test_handshake_roster_sync passes)
+- [ ] Implement `PeerAddr` enum with Uds(PathBuf), Tcp(SocketAddr) (Done when: compiles)
+- [ ] Implement `PeerAddr::parse(s: &str) -> Result<PeerAddr>` (Done when: parses "uds://..." and "tcp://...")
 
-### Phase 3 Gate Verification Commands
+### Tasks - Tests
+
+- [ ] Write test: framing round-trip (Done when: test_framing_roundtrip passes)
+- [ ] Write test: reject oversized message (Done when: test_reject_oversized passes)
+- [ ] Write test: UDS send and recv envelope (Done when: test_uds_roundtrip passes)
+- [ ] Write test: TCP send and recv envelope (Done when: test_tcp_roundtrip passes)
+- [ ] Write test: parse UDS address (Done when: test_parse_uds_addr passes)
+- [ ] Write test: parse TCP address (Done when: test_parse_tcp_addr passes)
+
+### Phase 3 Gate Verification
 
 ```bash
 cargo test -p meerkat-comms
@@ -295,50 +220,51 @@ cargo test -p meerkat-comms
 
 ### Phase 3 Gate Review
 
-Spawn reviewers IN PARALLEL:
-- **RCT Guardian**: Verify Envelope serialization over UDS round-trips
-- **Integration Sheriff**: Verify handshake flow with roster validation
-- **Spec Auditor**: Verify handshake matches spec flow diagram
+- **RCT Guardian**: Verify envelope survives framing + transport round-trip
+- **Integration Sheriff**: Verify both UDS and TCP work
 
 ---
 
-## Phase 4: Inbox and Wake Logic
+## Phase 4: IO Task and Inbox
 
-**Goal:** Inbox queue with priority handling and wake rules.
+**Goal:** Thread-safe inbox, IO task handles validation and ack.
 
-**Dependencies:** Phase 0 (InboxItem types)
+**Dependencies:** Phase 1 (signing), Phase 2 (trust), Phase 3 (transport)
 
-### Tasks - Inbox Module (`inbox.rs`)
+### Tasks - Inbox (`inbox.rs`)
 
-- [ ] Create `inbox.rs` module (Done when: module compiles)
-- [ ] Implement `Inbox` struct (Done when: compiles with internal queue)
-- [ ] Implement `Inbox::push(item: InboxItem)` (Done when: adds item to queue)
-- [ ] Implement `Inbox::drain() -> Vec<InboxItem>` (Done when: returns and clears all items)
-- [ ] Implement `Inbox::is_empty() -> bool` (Done when: checks if queue empty)
-- [ ] Implement `Inbox::has_wake_items() -> bool` (Done when: checks for High/Normal priority)
+- [ ] Implement `Inbox` struct wrapping mpsc channel (Done when: compiles)
+- [ ] Implement `Inbox::new() -> (Inbox, InboxSender)` (Done when: returns inbox + sender handle)
+- [ ] Implement `InboxSender::send(item: InboxItem)` (Done when: sends to channel)
+- [ ] Implement `Inbox::recv() -> InboxItem` async (Done when: awaits next item)
+- [ ] Implement `Inbox::try_drain() -> Vec<InboxItem>` (Done when: drains available items)
 
-### Tasks - Priority Assignment
+### Tasks - IO Task (`io_task.rs`)
 
-- [ ] Implement `InboxItem::priority(&self) -> Priority` (Done when: returns priority per spec table)
-- [ ] Implement priority for Request → High (Done when: test verifies)
-- [ ] Implement priority for DM Message → High (Done when: test verifies)
-- [ ] Implement priority for Channel Message → Normal (Done when: test verifies)
-- [ ] Implement priority for SubagentResult → High (Done when: test verifies)
-- [ ] Implement priority for Response → Normal (Done when: test verifies)
+- [ ] Implement `handle_connection(stream, keypair, trusted, inbox_sender)` async (Done when: handles one connection)
+- [ ] Implement read envelope in IO task (Done when: reads with framing)
+- [ ] Implement signature verification in IO task (Done when: invalid sig drops message)
+- [ ] Implement trust check in IO task (Done when: untrusted sender drops message)
+- [ ] Implement ack sending in IO task (Done when: sends Ack for Message/Request, not for Ack/Response)
+- [ ] Implement enqueue to inbox in IO task (Done when: pushes InboxItem::External)
 
-### Tasks - Mute Logic
+### Tasks - Ack Rules
 
-- [ ] Implement `Inbox::mute_channel(channel_id)` (Done when: channel messages get Low priority)
-- [ ] Implement `Inbox::unmute_channel(channel_id)` (Done when: channel messages restore Normal priority)
+- [ ] Implement "never ack an Ack" rule (Done when: Ack messages don't trigger Ack response)
+- [ ] Implement "don't ack a Response" rule (Done when: Response messages don't trigger Ack)
 
-### Tasks - Integration Tests
+### Tasks - Tests
 
-- [ ] Write test: inbox push and drain (Done when: test_inbox_push_drain passes)
-- [ ] Write test: wake items detection (Done when: test_inbox_wake_items passes)
-- [ ] Write test: muted channel doesn't wake (Done when: test_inbox_muted_no_wake passes)
-- [ ] Write test: priority assignment per spec (Done when: test_inbox_priority_assignment passes)
+- [ ] Write test: inbox send and recv (Done when: test_inbox_send_recv passes)
+- [ ] Write test: inbox try_drain (Done when: test_inbox_drain passes)
+- [ ] Write test: IO task sends ack for Message (Done when: test_io_task_acks_message passes)
+- [ ] Write test: IO task sends ack for Request (Done when: test_io_task_acks_request passes)
+- [ ] Write test: IO task does NOT ack an Ack (Done when: test_io_task_no_ack_for_ack passes)
+- [ ] Write test: IO task does NOT ack a Response (Done when: test_io_task_no_ack_for_response passes)
+- [ ] Write test: IO task rejects invalid signature (Done when: test_io_task_rejects_invalid_sig passes)
+- [ ] Write test: IO task rejects untrusted sender (Done when: test_io_task_rejects_untrusted passes)
 
-### Phase 4 Gate Verification Commands
+### Phase 4 Gate Verification
 
 ```bash
 cargo test -p meerkat-comms
@@ -346,52 +272,39 @@ cargo test -p meerkat-comms
 
 ### Phase 4 Gate Review
 
-Spawn reviewers IN PARALLEL:
-- **RCT Guardian**: Verify InboxItem round-trips
-- **Spec Auditor**: Verify wake rules match spec table exactly
-- **Integration Sheriff**: Verify mute/unmute affects wake behavior
+- **Integration Sheriff**: Verify IO task → validate → ack → inbox flow
+- **Spec Auditor**: Verify ack rules match spec table
 
 ---
 
-## Phase 5: Message Router
+## Phase 5: Router (Send API)
 
-**Goal:** PeerRouter for message dispatch with role/permission checks.
+**Goal:** High-level send API with ack timeout.
 
-**Dependencies:** Phase 3 (transport), Phase 4 (inbox)
+**Dependencies:** Phase 4
 
-### Tasks - Router Module (`router.rs`)
+### Tasks - Router (`router.rs`)
 
-- [ ] Create `router.rs` module (Done when: module compiles)
-- [ ] Implement `PeerRouter` struct (Done when: compiles with peer map, roster, inbox)
-- [ ] Implement `PeerRouter::add_peer(pubkey, transport)` (Done when: stores peer connection)
-- [ ] Implement `PeerRouter::remove_peer(pubkey)` (Done when: removes peer connection)
-- [ ] Implement `PeerRouter::send(envelope)` (Done when: routes to correct peer(s))
+- [ ] Implement `Router` struct (Done when: holds keypair, trusted_peers, config)
+- [ ] Implement `Router::send(peer: &str, kind: MessageKind) -> Result<(), SendError>` (Done when: sends and waits for ack)
+- [ ] Implement connect to peer by name lookup (Done when: resolves name to address)
+- [ ] Implement ack timeout (Done when: returns error after configured timeout)
+- [ ] Implement `SendError` enum with PeerNotFound, PeerOffline, Io variants (Done when: compiles)
 
-### Tasks - Message Reception
+### Tasks - Send Helpers
 
-- [ ] Implement `PeerRouter::on_receive(envelope)` (Done when: validates and delivers to inbox)
-- [ ] Implement signature verification on receive (Done when: invalid sigs rejected)
-- [ ] Implement TTL check on receive (Done when: expired messages rejected)
-- [ ] Implement roster membership check on receive (Done when: non-members rejected)
-- [ ] Implement role permission check on receive (Done when: unauthorized actions rejected)
-- [ ] Implement hop limit check for Requests (Done when: hop > 3 rejected)
+- [ ] Implement `Router::send_message(peer: &str, body: String)` (Done when: wraps send with Message kind)
+- [ ] Implement `Router::send_request(peer: &str, intent: String, params: JsonValue)` (Done when: wraps send with Request kind)
+- [ ] Implement `Router::send_response(peer: &str, in_reply_to: Uuid, status: Status, result: JsonValue)` (Done when: wraps send with Response kind)
 
-### Tasks - Channel Routing
+### Tasks - Tests
 
-- [ ] Implement `PeerRouter::channel_members(channel_id) -> Vec<PubKey>` (Done when: returns members from ChannelPolicy)
-- [ ] Implement fan-out for channel messages (Done when: sends to all channel members)
+- [ ] Write test: send message and receive ack (Done when: test_send_receives_ack passes)
+- [ ] Write test: send to unknown peer returns PeerNotFound (Done when: test_send_unknown_peer passes)
+- [ ] Write test: timeout returns PeerOffline (Done when: test_send_timeout passes)
+- [ ] Write test: send_response does not wait for ack (Done when: test_send_response_no_ack_wait passes)
 
-### Tasks - Integration Tests
-
-- [ ] Write test: send message to peer (Done when: test_router_send_to_peer passes)
-- [ ] Write test: send message to channel (Done when: test_router_send_to_channel passes)
-- [ ] Write test: receive validates signature (Done when: test_router_rejects_invalid_sig passes)
-- [ ] Write test: receive checks TTL (Done when: test_router_rejects_expired passes)
-- [ ] Write test: receive checks roster membership (Done when: test_router_rejects_non_member passes)
-- [ ] Write test: receive checks role for Request (Done when: test_router_rejects_member_request passes)
-- [ ] Write test: receive checks hop limit (Done when: test_router_rejects_hop_exceeded passes)
-
-### Phase 5 Gate Verification Commands
+### Phase 5 Gate Verification
 
 ```bash
 cargo test -p meerkat-comms
@@ -399,185 +312,90 @@ cargo test -p meerkat-comms
 
 ### Phase 5 Gate Review
 
-Spawn reviewers IN PARALLEL:
-- **RCT Guardian**: Verify message flow preserves envelope integrity
-- **Spec Auditor**: Verify all receive validation steps match spec "On Receipt" section
-- **Integration Sheriff**: Verify router → inbox delivery works end-to-end
+- **Integration Sheriff**: Verify full send → ack → timeout flow
+- **Spec Auditor**: Verify send behavior matches spec
 
 ---
 
-## Phase 6: History Sync
+## Phase 6: MCP Tools
 
-**Goal:** HistoryRequest/Response flow with sequence tracking and dedup.
+**Goal:** Expose comms tools via MCP.
 
-**Dependencies:** Phase 5 (router can send/receive)
-
-### Tasks - Sequence Tracking
-
-- [ ] Implement `SequenceTracker` struct (Done when: tracks (pubkey, epoch) → last_seq)
-- [ ] Implement `SequenceTracker::update(pubkey, epoch, seq)` (Done when: updates tracking)
-- [ ] Implement `SequenceTracker::has_gap(pubkey, epoch, seq) -> bool` (Done when: detects gaps)
-- [ ] Implement epoch reset detection (Done when: new epoch resets seq tracking)
-
-### Tasks - History Storage
-
-- [ ] Implement `ChannelHistory` struct (Done when: stores messages with retention limits)
-- [ ] Implement `ChannelHistory::add(envelope)` (Done when: stores envelope)
-- [ ] Implement `ChannelHistory::query(since_ts, since_seq_by_sender, max_messages, max_bytes)` (Done when: returns matching messages)
-- [ ] Implement retention pruning (Done when: old messages removed per policy)
-
-### Tasks - History Protocol
-
-- [ ] Implement `handle_history_request(request) -> HistoryResponse` (Done when: queries and responds)
-- [ ] Implement `request_history(channel_id, peers)` (Done when: sends HistoryRequest to peers)
-- [ ] Implement dedup on history receive (Done when: duplicate message IDs ignored)
-
-### Tasks - Integration Tests
-
-- [ ] Write test: sequence tracking detects gaps (Done when: test_sequence_gap_detection passes)
-- [ ] Write test: epoch reset clears tracking (Done when: test_epoch_reset passes)
-- [ ] Write test: history query respects limits (Done when: test_history_query_limits passes)
-- [ ] Write test: history sync dedup (Done when: test_history_dedup passes)
-- [ ] Write test: retention pruning (Done when: test_retention_pruning passes)
-
-### Phase 6 Gate Verification Commands
-
-```bash
-cargo test -p meerkat-comms
-```
-
-### Phase 6 Gate Review
-
-Spawn reviewers IN PARALLEL:
-- **RCT Guardian**: Verify HistoryRequest/Response round-trips
-- **Spec Auditor**: Verify sync algorithm matches spec
-- **Integration Sheriff**: Verify full sync flow with multiple peers
-
----
-
-## Phase 7: MCP Tools
-
-**Goal:** MCP server exposing comms tools for agent use.
-
-**Dependencies:** Phase 5 (router), Phase 4 (inbox)
+**Dependencies:** Phase 5
 
 ### Tasks - Crate Setup
 
 - [ ] Create `meerkat-comms-mcp/Cargo.toml` (Done when: `cargo check -p meerkat-comms-mcp` succeeds)
-- [ ] Create `meerkat-comms-mcp/src/lib.rs` (Done when: module compiles)
+- [ ] Create `meerkat-comms-mcp/src/lib.rs` (Done when: compiles)
 
-### Tasks - Tool Implementations (`tools.rs`)
+### Tasks - Tools (`tools.rs`)
 
-- [ ] Implement `send_message(target, body)` tool (Done when: sends Message via router)
-- [ ] Implement `send_request(target, intent, params)` tool (Done when: sends Request via router)
-- [ ] Implement `send_response(request_id, status, result)` tool (Done when: sends Response via router)
-- [ ] Implement `set_presence(state)` tool (Done when: broadcasts Presence)
-- [ ] Implement `subscribe(channel)` tool (Done when: adds channel subscription)
-- [ ] Implement `unsubscribe(channel)` tool (Done when: removes channel subscription)
-- [ ] Implement `mute(channel)` tool (Done when: mutes channel in inbox)
-- [ ] Implement `unmute(channel)` tool (Done when: unmutes channel in inbox)
+- [ ] Implement `send_message(peer, body)` tool (Done when: calls Router::send_message)
+- [ ] Implement `send_request(peer, intent, params)` tool (Done when: calls Router::send_request)
+- [ ] Implement `send_response(request_id, status, result)` tool (Done when: calls Router::send_response)
+- [ ] Implement `list_peers()` tool (Done when: returns trusted peers list with names and addresses)
 
-### Tasks - MCP Server
+### Tasks - MCP Integration
 
-- [ ] Implement MCP tool registration (Done when: tools discoverable via MCP)
-- [ ] Implement tool parameter validation (Done when: invalid params rejected)
+- [ ] Register tools with MCP server (Done when: tools appear in tool list)
 
-### Tasks - Integration Tests
+### Tasks - Tests
 
 - [ ] Write test: send_message via MCP (Done when: test_mcp_send_message passes)
-- [ ] Write test: send_request via MCP (Done when: test_mcp_send_request passes)
-- [ ] Write test: subscribe/unsubscribe via MCP (Done when: test_mcp_subscription passes)
+- [ ] Write test: list_peers via MCP (Done when: test_mcp_list_peers passes)
 
-### Phase 7 Gate Verification Commands
+### Phase 6 Gate Verification
 
 ```bash
 cargo test -p meerkat-comms-mcp
 ```
 
-### Phase 7 Gate Review
+### Phase 6 Gate Review
 
-Spawn reviewers IN PARALLEL:
-- **Spec Auditor**: Verify all tools from spec are implemented
-- **Integration Sheriff**: Verify MCP → router → inbox flow
+- **Spec Auditor**: Verify all tools from spec implemented
 
 ---
 
-## Final Phase: E2E Scenarios and Integration
+## Final Phase: E2E Scenarios
 
-**Goal:** Full system working with E2E scenarios from spec.
+**Goal:** Full system working end-to-end.
 
-**Dependencies:** All prior phases complete
+**Dependencies:** All prior phases
 
-### Tasks - E2E Scenario Tests
+### Tasks - E2E Tests
 
-- [ ] Implement S1: Bug report between agents (Done when: test_e2e_bug_report passes per spec example)
-- [ ] Implement S2: Channel broadcast (Done when: test_e2e_channel_broadcast passes per spec example)
-- [ ] Implement S3: Inbox flow with subagent (Done when: test_e2e_inbox_subagent passes per spec example)
-- [ ] Implement S4: Roster update propagation (Done when: test_e2e_roster_update passes)
-- [ ] Implement S5: History sync after reconnect (Done when: test_e2e_history_sync passes)
-
-### Tasks - meerkat-core Integration
-
-- [ ] Integrate Inbox with agent loop (Done when: agent receives inbox items)
-- [ ] Integrate SubagentResult delivery (Done when: subagent completion → parent inbox)
-- [ ] Implement presence auto-update (Done when: presence reflects loop state)
-
-### Tasks - CLI Commands
-
-- [ ] Implement `rkat comms status` (Done when: shows presence and peer count)
-- [ ] Implement `rkat comms peers` (Done when: lists connected peers)
-- [ ] Implement `rkat comms send` (Done when: sends message from CLI)
+- [ ] Implement E2E: Two peers exchange messages over UDS (Done when: test_e2e_uds_message passes)
+- [ ] Implement E2E: Two peers exchange messages over TCP (Done when: test_e2e_tcp_message passes)
+- [ ] Implement E2E: Request → Ack → Response flow (Done when: test_e2e_request_response passes)
+- [ ] Implement E2E: Untrusted peer rejected (Done when: test_e2e_untrusted_rejected passes)
+- [ ] Implement E2E: Concurrent messages from multiple peers (Done when: test_e2e_concurrent_messages passes)
 
 ### Tasks - Final Verification
 
-- [ ] Run full test suite (Done when: all tests pass)
-- [ ] Verify no `todo!()` or `unimplemented!()` in completed code (Done when: grep returns empty)
-- [ ] Verify all spec sections have corresponding tests (Done when: coverage audit passes)
+- [ ] Run full test suite (Done when: `cargo test --workspace` passes)
+- [ ] Verify no `todo!()` or `unimplemented!()` (Done when: grep returns empty)
 
-### Final Phase Gate Verification Commands
+### Final Phase Gate Verification
 
 ```bash
 cargo test -p meerkat-comms
 cargo test -p meerkat-comms-mcp
-cargo test --workspace
 ```
 
 ### Final Phase Gate Review
 
-Spawn reviewers IN PARALLEL:
-- **RCT Guardian**: Final representation verification (scope: all types)
-- **Integration Sheriff**: Verify all choke points covered (scope: all phases)
-- **Spec Auditor**: Verify 100% spec coverage (scope: full DESIGN-COMMS.md)
-- **Methodology Integrity Gate**: Check for process-over-product, accumulated stubs, deferrals
+- **RCT Guardian**: All types round-trip correctly
+- **Integration Sheriff**: All flows work end-to-end, concurrent messages handled
+- **Spec Auditor**: 100% spec coverage
 
 ---
 
 ## Success Criteria
 
 1. [ ] All existing meerkat tests still pass
-2. [ ] Phase 0 RCT tests green (all round-trips pass)
-3. [ ] All E2E scenario tests pass
-4. [ ] All integration tests pass
-5. [ ] No `todo!()`, `unimplemented!()`, or `NotImplementedError` in completed code
-6. [ ] 100% spec coverage verified
-7. [ ] Single-machine UDS communication works end-to-end
-
----
-
-## Appendix: Reviewer Agent Prompts
-
-See `.claude/skills/rct-methodology/references/reviewer_prompts.md` for complete prompts.
-
-**Phase-to-Spec Mapping for Spec Auditor:**
-
-| Phase | Spec Sections |
-|-------|---------------|
-| Phase 0 | Core Concepts (all types) |
-| Phase 1 | Identity, Messages (signing) |
-| Phase 2 | Roster, Roles |
-| Phase 3 | Network Topology, Handshake Flow, Transport |
-| Phase 4 | Agent Integration (Inbox, Wake Rules) |
-| Phase 5 | Message Flow (On Receipt, Routing) |
-| Phase 6 | History Sync |
-| Phase 7 | Comms Tools (via MCP) |
-| Final | Example Scenarios, all sections |
+2. [ ] Phase 0 RCT tests green
+3. [ ] All E2E tests pass
+4. [ ] No stubs in completed code
+5. [ ] Two Meerkats can exchange messages over UDS
+6. [ ] Two Meerkats can exchange messages over TCP
+7. [ ] Concurrent messages from multiple peers handled correctly

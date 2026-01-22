@@ -2845,26 +2845,26 @@ use meerkat::{Agent, Config};
 use serde::{Deserialize, Serialize};
 
 /// MCP server that exposes Meerkat as a tool
-pub struct RaikMcpServer {
+pub struct MeerkatMcpServer {
     config: Config,
 }
 
-impl RaikMcpServer {
+impl MeerkatMcpServer {
     pub fn new(config: Config) -> Self {
         Self { config }
     }
 
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         let server = Server::new("meerkat", "0.1.0")
-            .with_tool(RaikRunTool { config: self.config.clone() })
-            .with_tool(RaikResumeTool { config: self.config.clone() });
+            .with_tool(MeerkatRunTool { config: self.config.clone() })
+            .with_tool(MeerkatResumeTool { config: self.config.clone() });
 
         server.run_stdio().await
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct RaikRunInput {
+struct MeerkatRunInput {
     /// The prompt to execute
     prompt: String,
     /// Optional system prompt override
@@ -2875,12 +2875,12 @@ struct RaikRunInput {
     max_tokens: Option<u64>,
 }
 
-struct RaikRunTool {
+struct MeerkatRunTool {
     config: Config,
 }
 
 #[async_trait]
-impl Tool for RaikRunTool {
+impl Tool for MeerkatRunTool {
     fn name(&self) -> &str {
         "meerkat_run"
     }
@@ -2890,11 +2890,11 @@ impl Tool for RaikRunTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        schemars::schema_for!(RaikRunInput).into()
+        schemars::schema_for!(MeerkatRunInput).into()
     }
 
     async fn call(&self, input: serde_json::Value) -> ToolResult {
-        let input: RaikRunInput = serde_json::from_value(input)
+        let input: MeerkatRunInput = serde_json::from_value(input)
             .map_err(|e| format!("Invalid input: {e}"))?;
 
         let mut config = self.config.clone();

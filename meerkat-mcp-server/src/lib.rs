@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 /// Input schema for meerkat_run tool
 #[derive(Debug, Deserialize)]
-pub struct RaikRunInput {
+pub struct MeerkatRunInput {
     pub prompt: String,
     #[serde(default)]
     pub system_prompt: Option<String>,
@@ -34,7 +34,7 @@ fn default_max_tokens() -> u32 {
 
 /// Input schema for meerkat_resume tool
 #[derive(Debug, Deserialize)]
-pub struct RaikResumeInput {
+pub struct MeerkatResumeInput {
     pub session_id: String,
     pub prompt: String,
 }
@@ -93,12 +93,12 @@ pub fn tools_list() -> Vec<Value> {
 pub async fn handle_tools_call(tool_name: &str, arguments: &Value) -> Result<Value, String> {
     match tool_name {
         "meerkat_run" => {
-            let input: RaikRunInput = serde_json::from_value(arguments.clone())
+            let input: MeerkatRunInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| format!("Invalid arguments: {}", e))?;
             handle_meerkat_run(input).await
         }
         "meerkat_resume" => {
-            let input: RaikResumeInput = serde_json::from_value(arguments.clone())
+            let input: MeerkatResumeInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| format!("Invalid arguments: {}", e))?;
             handle_meerkat_resume(input).await
         }
@@ -106,7 +106,7 @@ pub async fn handle_tools_call(tool_name: &str, arguments: &Value) -> Result<Val
     }
 }
 
-async fn handle_meerkat_run(input: RaikRunInput) -> Result<Value, String> {
+async fn handle_meerkat_run(input: MeerkatRunInput) -> Result<Value, String> {
     // Get API key from environment
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
@@ -160,7 +160,7 @@ async fn handle_meerkat_run(input: RaikRunInput) -> Result<Value, String> {
     }))
 }
 
-async fn handle_meerkat_resume(input: RaikResumeInput) -> Result<Value, String> {
+async fn handle_meerkat_resume(input: MeerkatResumeInput) -> Result<Value, String> {
     // Get API key from environment
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
@@ -371,7 +371,7 @@ mod tests {
             "model": "claude-sonnet-4"
         });
 
-        let input: RaikRunInput = serde_json::from_value(input_json).unwrap();
+        let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.prompt, "Hello");
         assert_eq!(input.model, "claude-sonnet-4");
         assert_eq!(input.max_tokens, 4096); // default
@@ -384,7 +384,7 @@ mod tests {
             "prompt": "Continue"
         });
 
-        let input: RaikResumeInput = serde_json::from_value(input_json).unwrap();
+        let input: MeerkatResumeInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.session_id, "01234567-89ab-cdef-0123-456789abcdef");
         assert_eq!(input.prompt, "Continue");
     }

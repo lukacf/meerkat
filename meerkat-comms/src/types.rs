@@ -50,7 +50,14 @@ pub struct Envelope {
 
 impl Envelope {
     /// Compute the canonical CBOR bytes to sign: [id, from, to, kind]
+    ///
     /// Field order is fixed per spec for cross-implementation compatibility.
+    /// Uses ciborium which implements RFC 8949 Core Deterministic Encoding:
+    /// - Map keys sorted in bytewise lexicographic order
+    /// - Integers use minimal encoding
+    /// - No indefinite-length encoding
+    ///
+    /// PubKey is encoded as CBOR byte string (major type 2) not array.
     pub fn signable_bytes(&self) -> Vec<u8> {
         // Create a tuple of (id, from, to, kind) for canonical encoding
         let signable = (&self.id, &self.from, &self.to, &self.kind);

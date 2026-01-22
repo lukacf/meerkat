@@ -282,8 +282,13 @@ Comms exposed via MCP:
 |------|---------|
 | `send_message(peer, body)` | Send message to peer |
 | `send_request(peer, intent, params)` | Send request to peer |
-| `send_response(request_id, status, result)` | Reply to a request |
+| `send_response(peer, request_id, status, result)` | Reply to a request |
 | `list_peers()` | List trusted peers (no online status) |
+
+Note: `send_response` includes an explicit `peer` parameter (unlike a pure request-reply pattern) because:
+1. Being explicit about the recipient is simpler and more debuggable
+2. It doesn't require the system to track pending request origins
+3. The agent extracting `from` from the original request envelope is trivial
 
 Note: `list_peers()` returns the trusted list, not live status. Use `send_message` to probe liveness.
 

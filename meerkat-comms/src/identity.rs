@@ -24,9 +24,36 @@ pub enum IdentityError {
 }
 
 /// Ed25519 public key (32 bytes).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+///
+/// Serialized as a CBOR byte string (not array) for interoperability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PubKey(pub [u8; 32]);
+
+// Custom serde implementation for PubKey to serialize as byte string (CBOR major type 2)
+// instead of array (CBOR major type 4) for cross-implementation compatibility.
+impl Serialize for PubKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serde_bytes::serialize(&self.0[..], serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PubKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = serde_bytes::deserialize(deserializer)?;
+        if bytes.len() != 32 {
+            return Err(serde::de::Error::invalid_length(bytes.len(), &"32 bytes"));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(PubKey(arr))
+    }
+}
 
 /// Ed25519 signature (64 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,10 +173,21 @@ impl Keypair {
     }
 
     /// Save the keypair to a directory.
-    /// Writes `identity.key` (secret) and `identity.pub` (public).
+    /// Writes `identity.key` (secret, mode 0600) and `identity.pub` (public).
     pub fn save(&self, dir: &Path) -> Result<(), IdentityError> {
         fs::create_dir_all(dir)?;
-        fs::write(dir.join("identity.key"), self.signing_key.to_bytes())?;
+
+        let key_path = dir.join("identity.key");
+        fs::write(&key_path, self.signing_key.to_bytes())?;
+
+        // Set restrictive permissions on private key (Unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            fs::set_permissions(&key_path, perms)?;
+        }
+
         fs::write(
             dir.join("identity.pub"),
             self.signing_key.verifying_key().to_bytes(),

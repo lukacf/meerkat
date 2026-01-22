@@ -2,9 +2,17 @@
 //! Inter-agent communication for Meerkat instances.
 
 pub mod identity;
+pub mod inbox;
+pub mod io_task;
+pub mod router;
+pub mod transport;
 pub mod trust;
 pub mod types;
 
 pub use identity::{IdentityError, Keypair, PubKey, Signature};
-pub use trust::{TrustedPeer, TrustedPeers};
+pub use inbox::{Inbox, InboxError, InboxSender};
+pub use io_task::{handle_connection, IoTaskError};
+pub use router::{CommsConfig, Router, SendError};
+pub use transport::{PeerAddr, TransportError};
+pub use trust::{TrustError, TrustedPeer, TrustedPeers};
 pub use types::{Envelope, InboxItem, MessageKind, Status};

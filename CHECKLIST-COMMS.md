@@ -201,6 +201,7 @@ Spawn reviewers IN PARALLEL:
 ---
 
 ## Phase 2: Trust Management
+PHASE_2_APPROVED
 
 **Goal:** Load, save, and query trusted peers list.
 
@@ -208,17 +209,17 @@ Spawn reviewers IN PARALLEL:
 
 ### Tasks - Trust Operations (`trust.rs`)
 
-- [ ] Implement `TrustedPeers::load(path: &Path) -> Result<Self>` (Done when: `test_trusted_peers_load` passes with sample JSON)
-- [ ] Implement `TrustedPeers::save(&self, path: &Path) -> Result<()>` (Done when: `test_trusted_peers_save` passes)
-- [ ] Implement `TrustedPeers::is_trusted(&self, pubkey: &PubKey) -> bool` for trusted peer (Done when: `test_is_trusted_found` passes)
-- [ ] Implement `TrustedPeers::is_trusted(&self, pubkey: &PubKey) -> bool` for unknown peer (Done when: `test_is_trusted_not_found` passes)
-- [ ] Implement `TrustedPeers::get_peer(&self, pubkey: &PubKey) -> Option<&TrustedPeer>` (Done when: `test_get_peer` passes)
-- [ ] Implement `TrustedPeers::get_by_name(&self, name: &str) -> Option<&TrustedPeer>` (Done when: `test_get_by_name` passes)
+- [x] Implement `TrustedPeers::load(path: &Path) -> Result<Self>` (Done when: `test_trusted_peers_load` passes with sample JSON)
+- [x] Implement `TrustedPeers::save(&self, path: &Path) -> Result<()>` (Done when: `test_trusted_peers_save` passes)
+- [x] Implement `TrustedPeers::is_trusted(&self, pubkey: &PubKey) -> bool` for trusted peer (Done when: `test_is_trusted_found` passes)
+- [x] Implement `TrustedPeers::is_trusted(&self, pubkey: &PubKey) -> bool` for unknown peer (Done when: `test_is_trusted_not_found` passes)
+- [x] Implement `TrustedPeers::get_peer(&self, pubkey: &PubKey) -> Option<&TrustedPeer>` (Done when: `test_get_peer` passes)
+- [x] Implement `TrustedPeers::get_by_name(&self, name: &str) -> Option<&TrustedPeer>` (Done when: `test_get_by_name` passes)
 
 ### Tasks - JSON Format Tests
 
-- [ ] Write test: JSON format matches spec example (Done when: `test_json_format_matches_spec` passes verifying structure matches DESIGN-COMMS.md)
-- [ ] Write test: load/save round-trip preserves data (Done when: `test_trusted_peers_persistence_roundtrip` passes)
+- [x] Write test: JSON format matches spec example (Done when: `test_json_format_matches_spec` passes verifying structure matches DESIGN-COMMS.md)
+- [x] Write test: load/save round-trip preserves data (Done when: `test_trusted_peers_persistence_roundtrip` passes)
 
 ### Phase 2 Gate Verification Commands
 
@@ -234,6 +235,7 @@ Spawn reviewers IN PARALLEL:
 ---
 
 ## Phase 3: Transport Layer
+PHASE_3_APPROVED
 
 **Goal:** UDS and TCP transports with length-prefix framing can send/receive envelopes.
 
@@ -243,37 +245,37 @@ Spawn reviewers IN PARALLEL:
 
 ### Tasks - Framing (`transport/mod.rs`)
 
-- [ ] Create `meerkat-comms/src/transport/mod.rs` (Done when: file exists)
-- [ ] Add `mod transport;` to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
-- [ ] Define `TransportError` enum with `Io` variant (Done when: `test_transport_error_io` passes)
-- [ ] Define `TransportError` enum with `Timeout` variant (Done when: `test_transport_error_timeout` passes)
-- [ ] Define `TransportError` enum with `MessageTooLarge` variant (Done when: `test_transport_error_too_large` passes)
-- [ ] Define `TransportError` enum with `InvalidFrame` variant (Done when: `test_transport_error_invalid_frame` passes)
-- [ ] Implement `write_envelope<W: Write>(writer: &mut W, envelope: &Envelope)` with 4-byte length prefix (Done when: `test_write_envelope_format` passes verifying first 4 bytes are big-endian length)
-- [ ] Implement `read_envelope<R: Read>(reader: &mut R) -> Result<Envelope>` (Done when: `test_read_envelope` passes)
-- [ ] Implement max payload check (1 MB) in `read_envelope` (Done when: `test_reject_oversized_payload` passes)
+- [x] Create `meerkat-comms/src/transport/mod.rs` (Done when: file exists)
+- [x] Add `mod transport;` to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
+- [x] Define `TransportError` enum with `Io` variant (Done when: `test_transport_error_io` passes)
+- [x] Define `TransportError` enum with `Timeout` variant (Done when: `test_transport_error_timeout` passes)
+- [x] Define `TransportError` enum with `MessageTooLarge` variant (Done when: `test_transport_error_too_large` passes)
+- [x] Define `TransportError` enum with `InvalidFrame` variant (Done when: `test_transport_error_invalid_frame` passes)
+- [x] Implement `write_envelope<W: Write>(writer: &mut W, envelope: &Envelope)` with 4-byte length prefix (Done when: `test_write_envelope_format` passes verifying first 4 bytes are big-endian length)
+- [x] Implement `read_envelope<R: Read>(reader: &mut R) -> Result<Envelope>` (Done when: `test_read_envelope` passes)
+- [x] Implement max payload check (1 MB) in `read_envelope` (Done when: `test_reject_oversized_payload` passes)
 
 ### Tasks - Address Parsing (`transport/mod.rs`)
 
-- [ ] Define `PeerAddr` enum with `Uds(PathBuf)` variant (Done when: `test_peer_addr_uds_variant` passes)
-- [ ] Define `PeerAddr` enum with `Tcp(SocketAddr)` variant (Done when: `test_peer_addr_tcp_variant` passes)
-- [ ] Implement `PeerAddr::parse(s: &str)` for "uds://..." (Done when: `test_parse_uds_addr` passes)
-- [ ] Implement `PeerAddr::parse(s: &str)` for "tcp://..." (Done when: `test_parse_tcp_addr` passes)
-- [ ] Write test: invalid address format rejected (Done when: `test_parse_invalid_addr` passes)
+- [x] Define `PeerAddr` enum with `Uds(PathBuf)` variant (Done when: `test_peer_addr_uds_variant` passes)
+- [x] Define `PeerAddr` enum with `Tcp(SocketAddr)` variant (Done when: `test_peer_addr_tcp_variant` passes)
+- [x] Implement `PeerAddr::parse(s: &str)` for "uds://..." (Done when: `test_parse_uds_addr` passes)
+- [x] Implement `PeerAddr::parse(s: &str)` for "tcp://..." (Done when: `test_parse_tcp_addr` passes)
+- [x] Write test: invalid address format rejected (Done when: `test_parse_invalid_addr` passes)
 
 ### Tasks - UDS Transport (`transport/uds.rs`)
 
-- [ ] Create `meerkat-comms/src/transport/uds.rs` (Done when: file exists)
-- [ ] Implement async UDS listener bind (Done when: `test_uds_bind` passes)
-- [ ] Implement async UDS connect (Done when: `test_uds_connect` passes)
-- [ ] Implement send/recv envelope over UDS (Done when: `test_uds_envelope_roundtrip` passes)
+- [x] Create `meerkat-comms/src/transport/uds.rs` (Done when: file exists)
+- [x] Implement async UDS listener bind (Done when: `test_uds_bind` passes)
+- [x] Implement async UDS connect (Done when: `test_uds_connect` passes)
+- [x] Implement send/recv envelope over UDS (Done when: `test_uds_envelope_roundtrip` passes)
 
 ### Tasks - TCP Transport (`transport/tcp.rs`)
 
-- [ ] Create `meerkat-comms/src/transport/tcp.rs` (Done when: file exists)
-- [ ] Implement async TCP listener bind (Done when: `test_tcp_bind` passes)
-- [ ] Implement async TCP connect (Done when: `test_tcp_connect` passes)
-- [ ] Implement send/recv envelope over TCP (Done when: `test_tcp_envelope_roundtrip` passes)
+- [x] Create `meerkat-comms/src/transport/tcp.rs` (Done when: file exists)
+- [x] Implement async TCP listener bind (Done when: `test_tcp_bind` passes)
+- [x] Implement async TCP connect (Done when: `test_tcp_connect` passes)
+- [x] Implement send/recv envelope over TCP (Done when: `test_tcp_envelope_roundtrip` passes)
 
 ### Phase 3 Gate Verification Commands
 
@@ -291,6 +293,7 @@ Spawn reviewers IN PARALLEL:
 ---
 
 ## Phase 4: IO Task and Inbox
+PHASE_4_APPROVED
 
 **Goal:** Thread-safe inbox and IO task that validates messages and sends acks.
 
@@ -298,37 +301,37 @@ Spawn reviewers IN PARALLEL:
 
 ### Tasks - Inbox (`inbox.rs`)
 
-- [ ] Create `meerkat-comms/src/inbox.rs` (Done when: file exists)
-- [ ] Add `mod inbox;` to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
-- [ ] Define `Inbox` struct wrapping `mpsc::UnboundedReceiver<InboxItem>` (Done when: `test_inbox_struct` passes)
-- [ ] Define `InboxSender` struct wrapping `mpsc::UnboundedSender<InboxItem>` (Done when: `test_inbox_sender_struct` passes)
-- [ ] Implement `Inbox::new() -> (Inbox, InboxSender)` (Done when: `test_inbox_new` passes)
-- [ ] Implement `InboxSender::send(item: InboxItem)` (Done when: `test_inbox_sender_send` passes)
-- [ ] Implement `Inbox::recv() -> Option<InboxItem>` async (Done when: `test_inbox_recv` passes)
-- [ ] Implement `Inbox::try_drain() -> Vec<InboxItem>` (Done when: `test_inbox_try_drain` passes draining multiple items)
+- [x] Create `meerkat-comms/src/inbox.rs` (Done when: file exists)
+- [x] Add `mod inbox;` to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
+- [x] Define `Inbox` struct wrapping `mpsc::UnboundedReceiver<InboxItem>` (Done when: `test_inbox_struct` passes)
+- [x] Define `InboxSender` struct wrapping `mpsc::UnboundedSender<InboxItem>` (Done when: `test_inbox_sender_struct` passes)
+- [x] Implement `Inbox::new() -> (Inbox, InboxSender)` (Done when: `test_inbox_new` passes)
+- [x] Implement `InboxSender::send(item: InboxItem)` (Done when: `test_inbox_sender_send` passes)
+- [x] Implement `Inbox::recv() -> Option<InboxItem>` async (Done when: `test_inbox_recv` passes)
+- [x] Implement `Inbox::try_drain() -> Vec<InboxItem>` (Done when: `test_inbox_try_drain` passes draining multiple items)
 
 ### Tasks - IO Task (`io_task.rs`)
 
-- [ ] Create `meerkat-comms/src/io_task.rs` (Done when: file exists)
-- [ ] Add `mod io_task;` to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
-- [ ] Implement `handle_connection(stream, keypair, trusted, inbox_sender)` async fn signature (Done when: `test_handle_connection_compiles` passes)
-- [ ] Implement envelope reading with framing in IO task (Done when: `test_io_task_reads_envelope` passes)
-- [ ] Implement signature verification in IO task (Done when: `test_io_task_verifies_signature` passes)
-- [ ] Implement trust check in IO task (Done when: `test_io_task_checks_trust` passes)
-- [ ] Implement ack creation and sending in IO task (Done when: `test_io_task_sends_ack` passes)
-- [ ] Implement inbox enqueue in IO task (Done when: `test_io_task_enqueues_to_inbox` passes)
+- [x] Create `meerkat-comms/src/io_task.rs` (Done when: file exists)
+- [x] Add `mod io_task;` to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
+- [x] Implement `handle_connection(stream, keypair, trusted, inbox_sender)` async fn signature (Done when: `test_handle_connection_compiles` passes)
+- [x] Implement envelope reading with framing in IO task (Done when: `test_io_task_reads_envelope` passes)
+- [x] Implement signature verification in IO task (Done when: `test_io_task_verifies_signature` passes)
+- [x] Implement trust check in IO task (Done when: `test_io_task_checks_trust` passes)
+- [x] Implement ack creation and sending in IO task (Done when: `test_io_task_sends_ack` passes)
+- [x] Implement inbox enqueue in IO task (Done when: `test_io_task_enqueues_to_inbox` passes)
 
 ### Tasks - Ack Rules
 
-- [ ] Implement: send Ack for `MessageKind::Message` (Done when: `test_ack_for_message` passes)
-- [ ] Implement: send Ack for `MessageKind::Request` (Done when: `test_ack_for_request` passes)
-- [ ] Implement: do NOT send Ack for `MessageKind::Ack` (Done when: `test_no_ack_for_ack` passes)
-- [ ] Implement: do NOT send Ack for `MessageKind::Response` (Done when: `test_no_ack_for_response` passes)
+- [x] Implement: send Ack for `MessageKind::Message` (Done when: `test_ack_for_message` passes)
+- [x] Implement: send Ack for `MessageKind::Request` (Done when: `test_ack_for_request` passes)
+- [x] Implement: do NOT send Ack for `MessageKind::Ack` (Done when: `test_no_ack_for_ack` passes)
+- [x] Implement: do NOT send Ack for `MessageKind::Response` (Done when: `test_no_ack_for_response` passes)
 
 ### Tasks - Rejection Behavior
 
-- [ ] Implement: drop message silently on invalid signature (Done when: `test_drop_invalid_signature` passes verifying no ack sent, no inbox item)
-- [ ] Implement: drop message silently on untrusted sender (Done when: `test_drop_untrusted_sender` passes verifying no ack sent, no inbox item)
+- [x] Implement: drop message silently on invalid signature (Done when: `test_drop_invalid_signature` passes verifying no ack sent, no inbox item)
+- [x] Implement: drop message silently on untrusted sender (Done when: `test_drop_untrusted_sender` passes verifying no ack sent, no inbox item)
 
 ### Phase 4 Gate Verification Commands
 
@@ -345,6 +348,7 @@ Spawn reviewers IN PARALLEL:
 ---
 
 ## Phase 5: Router (Send API)
+PHASE_5_APPROVED
 
 **Goal:** High-level send API with ack timeout handling.
 
@@ -352,32 +356,32 @@ Spawn reviewers IN PARALLEL:
 
 ### Tasks - Router (`router.rs`)
 
-- [ ] Create `meerkat-comms/src/router.rs` (Done when: file exists)
-- [ ] Add `mod router;` to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
-- [ ] Define `Router` struct holding keypair, trusted_peers, config (Done when: `test_router_struct` passes)
-- [ ] Define `SendError::PeerNotFound` variant (Done when: `test_send_error_peer_not_found` passes)
-- [ ] Define `SendError::PeerOffline` variant (Done when: `test_send_error_peer_offline` passes)
-- [ ] Define `SendError::Io` variant (Done when: `test_send_error_io` passes)
-- [ ] Define `CommsConfig` struct with `ack_timeout_secs`, `max_message_bytes` (Done when: `test_comms_config` passes)
+- [x] Create `meerkat-comms/src/router.rs` (Done when: file exists)
+- [x] Add `mod router;` to lib.rs (Done when: `cargo check -p meerkat-comms` exits 0)
+- [x] Define `Router` struct holding keypair, trusted_peers, config (Done when: `test_router_struct` passes)
+- [x] Define `SendError::PeerNotFound` variant (Done when: `test_send_error_peer_not_found` passes)
+- [x] Define `SendError::PeerOffline` variant (Done when: `test_send_error_peer_offline` passes)
+- [x] Define `SendError::Io` variant (Done when: `test_send_error_io` passes)
+- [x] Define `CommsConfig` struct with `ack_timeout_secs`, `max_message_bytes` (Done when: `test_comms_config` passes)
 
 ### Tasks - Send Implementation
 
-- [ ] Implement `Router::send(peer_name: &str, kind: MessageKind) -> Result<(), SendError>` (Done when: `test_router_send` passes)
-- [ ] Implement peer name lookup via `TrustedPeers::get_by_name` (Done when: `test_router_resolves_peer_name` passes)
-- [ ] Implement connection to peer address (Done when: `test_router_connects_to_peer` passes)
-- [ ] Implement envelope creation and signing (Done when: `test_router_signs_envelope` passes)
-- [ ] Implement ack wait with timeout (Done when: `test_router_waits_for_ack` passes)
-- [ ] Implement timeout returns `SendError::PeerOffline` (Done when: `test_router_timeout_returns_offline` passes)
+- [x] Implement `Router::send(peer_name: &str, kind: MessageKind) -> Result<(), SendError>` (Done when: `test_router_send` passes)
+- [x] Implement peer name lookup via `TrustedPeers::get_by_name` (Done when: `test_router_resolves_peer_name` passes)
+- [x] Implement connection to peer address (Done when: `test_router_connects_to_peer` passes)
+- [x] Implement envelope creation and signing (Done when: `test_router_signs_envelope` passes)
+- [x] Implement ack wait with timeout (Done when: `test_router_waits_for_ack` passes)
+- [x] Implement timeout returns `SendError::PeerOffline` (Done when: `test_router_timeout_returns_offline` passes)
 
 ### Tasks - Send Helpers
 
-- [ ] Implement `Router::send_message(peer: &str, body: String)` (Done when: `test_send_message` passes)
-- [ ] Implement `Router::send_request(peer: &str, intent: String, params: JsonValue)` (Done when: `test_send_request` passes)
-- [ ] Implement `Router::send_response(peer: &str, in_reply_to: Uuid, status: Status, result: JsonValue)` (Done when: `test_send_response` passes)
+- [x] Implement `Router::send_message(peer: &str, body: String)` (Done when: `test_send_message` passes)
+- [x] Implement `Router::send_request(peer: &str, intent: String, params: JsonValue)` (Done when: `test_send_request` passes)
+- [x] Implement `Router::send_response(peer: &str, in_reply_to: Uuid, status: Status, result: JsonValue)` (Done when: `test_send_response` passes)
 
 ### Tasks - Response Special Case
 
-- [ ] Implement: `send_response` does NOT wait for ack (Done when: `test_send_response_no_ack_wait` passes verifying immediate return)
+- [x] Implement: `send_response` does NOT wait for ack (Done when: `test_send_response_no_ack_wait` passes verifying immediate return)
 
 ### Phase 5 Gate Verification Commands
 
@@ -394,6 +398,7 @@ Spawn reviewers IN PARALLEL:
 ---
 
 ## Phase 6: MCP Tools
+PHASE_6_APPROVED
 
 **Goal:** Expose comms functionality as MCP tools.
 
@@ -401,20 +406,20 @@ Spawn reviewers IN PARALLEL:
 
 ### Tasks - Crate Setup
 
-- [ ] Create `meerkat-comms-mcp/Cargo.toml` (Done when: `cargo check -p meerkat-comms-mcp` exits 0)
-- [ ] Create `meerkat-comms-mcp/src/lib.rs` (Done when: file exists)
-- [ ] Create `meerkat-comms-mcp/src/tools.rs` (Done when: file exists)
+- [x] Create `meerkat-comms-mcp/Cargo.toml` (Done when: `cargo check -p meerkat-comms-mcp` exits 0)
+- [x] Create `meerkat-comms-mcp/src/lib.rs` (Done when: file exists)
+- [x] Create `meerkat-comms-mcp/src/tools.rs` (Done when: file exists)
 
 ### Tasks - Tool Implementations (`tools.rs`)
 
-- [ ] Implement `send_message` tool calling `Router::send_message` (Done when: `test_tool_send_message` passes)
-- [ ] Implement `send_request` tool calling `Router::send_request` (Done when: `test_tool_send_request` passes)
-- [ ] Implement `send_response` tool calling `Router::send_response` (Done when: `test_tool_send_response` passes)
-- [ ] Implement `list_peers` tool returning trusted peers (Done when: `test_tool_list_peers` passes)
+- [x] Implement `send_message` tool calling `Router::send_message` (Done when: `test_tool_send_message` passes)
+- [x] Implement `send_request` tool calling `Router::send_request` (Done when: `test_tool_send_request` passes)
+- [x] Implement `send_response` tool calling `Router::send_response` (Done when: `test_tool_send_response` passes)
+- [x] Implement `list_peers` tool returning trusted peers (Done when: `test_tool_list_peers` passes)
 
 ### Tasks - MCP Registration
 
-- [ ] Register all tools with MCP server (Done when: `test_mcp_tool_discovery` passes listing all 4 tools)
+- [x] Register all tools with MCP server (Done when: `test_mcp_tool_discovery` passes listing all 4 tools)
 
 ### Phase 6 Gate Verification Commands
 
@@ -430,6 +435,7 @@ Spawn reviewers IN PARALLEL:
 ---
 
 ## Final Phase: E2E Scenarios
+FINAL_PHASE_APPROVED
 
 **Goal:** Full system working end-to-end with realistic scenarios.
 
@@ -437,21 +443,21 @@ Spawn reviewers IN PARALLEL:
 
 ### Tasks - E2E Test Infrastructure
 
-- [ ] Create E2E test harness spawning two Meerkat instances (Done when: `test_e2e_harness` passes)
-- [ ] Implement helper to set up mutual trust between two instances (Done when: `test_e2e_mutual_trust_setup` passes)
+- [x] Create E2E test harness spawning two Meerkat instances (Done when: `test_e2e_harness` passes)
+- [x] Implement helper to set up mutual trust between two instances (Done when: `test_e2e_mutual_trust_setup` passes)
 
 ### Tasks - E2E Scenarios
 
-- [ ] E2E: Two peers exchange Message over UDS (Done when: `test_e2e_uds_message_exchange` passes)
-- [ ] E2E: Two peers exchange Message over TCP (Done when: `test_e2e_tcp_message_exchange` passes)
-- [ ] E2E: Full Request → Ack → Response flow (Done when: `test_e2e_request_response_flow` passes)
-- [ ] E2E: Untrusted peer connection rejected (Done when: `test_e2e_untrusted_rejected` passes)
-- [ ] E2E: Concurrent messages from 3 peers handled correctly (Done when: `test_e2e_concurrent_multi_peer` passes)
+- [x] E2E: Two peers exchange Message over UDS (Done when: `test_e2e_uds_message_exchange` passes)
+- [x] E2E: Two peers exchange Message over TCP (Done when: `test_e2e_tcp_message_exchange` passes)
+- [x] E2E: Full Request → Ack → Response flow (Done when: `test_e2e_request_response_flow` passes)
+- [x] E2E: Untrusted peer connection rejected (Done when: `test_e2e_untrusted_rejected` passes)
+- [x] E2E: Concurrent messages from 3 peers handled correctly (Done when: `test_e2e_concurrent_multi_peer` passes)
 
 ### Tasks - Final Verification
 
-- [ ] Run full test suite (Done when: `cargo test --workspace` exits 0)
-- [ ] All reviewers approve (Done when: RCT Guardian, Integration Sheriff, Spec Auditor, and Methodology Integrity all return APPROVE)
+- [x] Run full test suite (Done when: `cargo test --workspace` exits 0)
+- [x] All reviewers approve (Done when: RCT Guardian, Integration Sheriff, Spec Auditor, and Methodology Integrity all return APPROVE)
 
 ### Final Phase Gate Verification Commands
 
@@ -459,6 +465,7 @@ Spawn reviewers IN PARALLEL:
 cargo test -p meerkat-comms
 cargo test -p meerkat-comms-mcp
 cargo test --workspace
+cargo clippy -p meerkat-comms -p meerkat-comms-mcp -- -D warnings
 ```
 
 ### Final Phase Gate Review
@@ -473,14 +480,15 @@ Spawn reviewers IN PARALLEL:
 
 ## Success Criteria
 
-1. [ ] All existing meerkat workspace tests still pass
-2. [ ] Phase 0 RCT tests green (all round-trips pass)
-3. [ ] All E2E scenario tests pass
-4. [ ] No `todo!()`, `unimplemented!()`, or stub code in `meerkat-comms*/src/`
-5. [ ] Two Meerkats can exchange messages over UDS
-6. [ ] Two Meerkats can exchange messages over TCP
-7. [ ] Concurrent messages from multiple peers handled correctly
-8. [ ] 100% spec coverage verified by Spec Auditor
+1. [x] All existing meerkat workspace tests still pass
+2. [x] Phase 0 RCT tests green (all round-trips pass)
+3. [x] All E2E scenario tests pass
+4. [x] No `todo!()`, `unimplemented!()`, or stub code in `meerkat-comms*/src/`
+5. [x] Two Meerkats can exchange messages over UDS
+6. [x] Two Meerkats can exchange messages over TCP
+7. [x] Concurrent messages from multiple peers handled correctly
+8. [x] 100% spec coverage verified by Spec Auditor
+9. [x] `cargo clippy -p meerkat-comms -p meerkat-comms-mcp -- -D warnings` passes with no warnings
 
 ---
 

@@ -1331,6 +1331,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-comms-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ciborium",
+ "meerkat-comms",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "meerkat-core"
 version = "0.1.0"
 dependencies = [

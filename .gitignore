@@ -13,6 +13,7 @@
 # Local config
 .env
 .rkat/
+.raik/
 .mcp-the-force/
 
 # Cargo lock is committed for binaries

@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "raik-core",
+    "raik-client",
+    "raik-store",
+    "raik-tools",
+    "raik-mcp-client",
+    "raik-mcp-server",
+    "raik-cli",
+    "raik-rest",
+    "raik",
+    "test-fixtures/mcp-test-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["RAIK Contributors"]
+repository = "https://github.com/raik-rs/raik"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+async-stream = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+toml_edit = "0.22"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Utilities
+uuid = { version = "1.11", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+humantime = "2.1"
+humantime-serde = "1.1"
+
+# JSON Schema validation
+jsonschema = "0.26"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+dirs = "5.0"
+
+# Web framework
+axum = { version = "0.8", features = ["json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# MCP
+rmcp = "0.13"
+
+# Testing
+tempfile = "3.14"
+
+# Internal crates
+raik-core = { path = "raik-core" }
+raik-client = { path = "raik-client" }
+raik-store = { path = "raik-store" }
+raik-tools = { path = "raik-tools" }
+raik-mcp-client = { path = "raik-mcp-client" }
+raik-mcp-server = { path = "raik-mcp-server" }
+raik-cli = { path = "raik-cli" }
+raik-rest = { path = "raik-rest" }
+raik = { path = "raik" }

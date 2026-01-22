@@ -1,0 +1,19 @@
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Local config
+.env
+.raik/
+.mcp-the-force/
+
+# Cargo lock is committed for binaries
+# Cargo.lock

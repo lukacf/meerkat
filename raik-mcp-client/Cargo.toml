@@ -1,0 +1,26 @@
+[package]
+name = "raik-mcp-client"
+description = "MCP client for RAIK (connect to tool servers)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+raik-core = { workspace = true }
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+http = "1"
+sse-stream = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

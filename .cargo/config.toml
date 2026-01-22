@@ -1,0 +1,13 @@
+# RAIK cargo configuration
+
+[env]
+# Run provider tests serially to avoid rate limits
+RUST_TEST_THREADS = "1"
+
+[alias]
+# Run all RCT tests
+rct = "test --workspace --lib"
+# Run integration tests
+int = "test --package raik --test integration"
+# Run E2E tests (ignored by default)
+e2e = "test --package raik --test e2e -- --ignored"

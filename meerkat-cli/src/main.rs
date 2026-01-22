@@ -3,10 +3,10 @@
 mod adapters;
 mod mcp;
 
-use adapters::{CliToolDispatcher, EmptyToolDispatcher, LlmClientAdapter, McpRouterAdapter, SessionStoreAdapter};
+use adapters::{CliToolDispatcher, DynLlmClientAdapter, EmptyToolDispatcher, McpRouterAdapter, SessionStoreAdapter};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use meerkat_client::AnthropicClient;
+use meerkat_client::{AnthropicClient, GeminiClient, OpenAiClient};
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::SystemPromptConfig;
 use meerkat_core::agent::AgentBuilder;
@@ -41,6 +41,10 @@ enum Commands {
         /// Model to use (default: claude-sonnet-4-20250514)
         #[arg(long, default_value = "claude-sonnet-4-20250514")]
         model: String,
+
+        /// LLM provider (anthropic, openai, gemini). Inferred from model name if not specified.
+        #[arg(long, short = 'p', value_enum)]
+        provider: Option<Provider>,
 
         /// Maximum tokens per turn
         #[arg(long, default_value = "4096")]
@@ -215,6 +219,7 @@ async fn main() -> ExitCode {
         Commands::Run {
             prompt,
             model,
+            provider,
             max_tokens,
             max_total_tokens,
             max_duration,
@@ -222,6 +227,11 @@ async fn main() -> ExitCode {
             output,
             stream: _,
         } => {
+            // Resolve provider: explicit flag > infer from model > default
+            let resolved_provider = provider
+                .or_else(|| Provider::infer_from_model(&model))
+                .unwrap_or_default();
+
             // Parse duration string if provided
             let duration = max_duration.map(|s| parse_duration(&s)).transpose();
             match duration {
@@ -231,7 +241,7 @@ async fn main() -> ExitCode {
                         max_duration: dur,
                         max_tool_calls,
                     };
-                    run_agent(&prompt, &model, max_tokens, limits, &output).await
+                    run_agent(&prompt, &model, resolved_provider, max_tokens, limits, &output).await
                 }
                 Err(e) => Err(e),
             }
@@ -351,21 +361,31 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
 async fn run_agent(
     prompt: &str,
     model: &str,
+    provider: Provider,
     max_tokens: u32,
     limits: BudgetLimits,
     output: &str,
 ) -> anyhow::Result<()> {
     // Get API key from environment
-    let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+    let env_var = provider.api_key_env_var();
+    let api_key = std::env::var(env_var).map_err(|_| {
         anyhow::anyhow!(
-            "ANTHROPIC_API_KEY environment variable not set.\n\
-             Please set it with: export ANTHROPIC_API_KEY=your-api-key"
+            "{} environment variable not set.\n\
+             Please set it with: export {}=your-api-key",
+            env_var,
+            env_var
         )
     })?;
 
-    // Create the LLM client
-    let llm_client = Arc::new(AnthropicClient::new(api_key));
-    let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.to_string()));
+    // Create the LLM client based on provider
+    let llm_client: Arc<dyn meerkat_client::LlmClient> = match provider {
+        Provider::Anthropic => Arc::new(AnthropicClient::new(api_key)),
+        Provider::Openai => Arc::new(OpenAiClient::new(api_key)),
+        Provider::Gemini => Arc::new(GeminiClient::new(api_key)),
+    };
+    let llm_adapter = Arc::new(DynLlmClientAdapter::new(llm_client, model.to_string()));
+
+    tracing::info!("Using provider: {:?}, model: {}", provider, model);
 
     // Load MCP config and create tool dispatcher
     let tools: Arc<CliToolDispatcher> = match create_mcp_tools().await {
@@ -456,9 +476,10 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     tracing::info!("Resuming session {} with {} messages", session_id, session.messages().len());
 
     // Create the LLM client (default model for resume)
+    // TODO: Store provider in session metadata to restore correct provider on resume
     let model = "claude-sonnet-4-20250514";
-    let llm_client = Arc::new(AnthropicClient::new(api_key));
-    let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.to_string()));
+    let llm_client: Arc<dyn meerkat_client::LlmClient> = Arc::new(AnthropicClient::new(api_key));
+    let llm_adapter = Arc::new(DynLlmClientAdapter::new(llm_client, model.to_string()));
 
     // Load MCP config and create tool dispatcher
     let tools: Arc<CliToolDispatcher> = match create_mcp_tools().await {
@@ -641,5 +662,106 @@ fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
             });
             mcp::get_server(name, scope, json)
         }
+    }
+}
+
+/// LLM Provider selection
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum Provider {
+    /// Anthropic Claude models
+    #[default]
+    Anthropic,
+    /// OpenAI GPT models
+    Openai,
+    /// Google Gemini models
+    Gemini,
+}
+
+impl Provider {
+    /// Infer provider from model name prefix.
+    /// Returns None if the model name doesn't match any known pattern.
+    pub fn infer_from_model(model: &str) -> Option<Self> {
+        let model_lower = model.to_lowercase();
+
+        // OpenAI patterns: gpt-*, o1-*, o3-*, chatgpt-*
+        if model_lower.starts_with("gpt-")
+            || model_lower.starts_with("o1-")
+            || model_lower.starts_with("o3-")
+            || model_lower.starts_with("chatgpt-")
+        {
+            return Some(Provider::Openai);
+        }
+
+        // Anthropic patterns: claude-*
+        if model_lower.starts_with("claude-") {
+            return Some(Provider::Anthropic);
+        }
+
+        // Gemini patterns: gemini-*
+        if model_lower.starts_with("gemini-") {
+            return Some(Provider::Gemini);
+        }
+
+        None
+    }
+
+    /// Get the environment variable name for the API key
+    pub fn api_key_env_var(&self) -> &'static str {
+        match self {
+            Provider::Anthropic => "ANTHROPIC_API_KEY",
+            Provider::Openai => "OPENAI_API_KEY",
+            Provider::Gemini => "GOOGLE_API_KEY",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_infer_provider_anthropic() {
+        assert_eq!(Provider::infer_from_model("claude-3-opus"), Some(Provider::Anthropic));
+        assert_eq!(Provider::infer_from_model("claude-sonnet-4"), Some(Provider::Anthropic));
+        assert_eq!(Provider::infer_from_model("claude-sonnet-4-20250514"), Some(Provider::Anthropic));
+        assert_eq!(Provider::infer_from_model("claude-opus-4-5"), Some(Provider::Anthropic));
+        assert_eq!(Provider::infer_from_model("Claude-3-Opus"), Some(Provider::Anthropic)); // case insensitive
+    }
+
+    #[test]
+    fn test_infer_provider_openai() {
+        assert_eq!(Provider::infer_from_model("gpt-4"), Some(Provider::Openai));
+        assert_eq!(Provider::infer_from_model("gpt-4o"), Some(Provider::Openai));
+        assert_eq!(Provider::infer_from_model("gpt-4-turbo"), Some(Provider::Openai));
+        assert_eq!(Provider::infer_from_model("gpt-5.2"), Some(Provider::Openai));
+        assert_eq!(Provider::infer_from_model("o1-preview"), Some(Provider::Openai));
+        assert_eq!(Provider::infer_from_model("o1-mini"), Some(Provider::Openai));
+        assert_eq!(Provider::infer_from_model("o3-mini"), Some(Provider::Openai));
+        assert_eq!(Provider::infer_from_model("chatgpt-4o-latest"), Some(Provider::Openai));
+        assert_eq!(Provider::infer_from_model("GPT-4"), Some(Provider::Openai)); // case insensitive
+    }
+
+    #[test]
+    fn test_infer_provider_gemini() {
+        assert_eq!(Provider::infer_from_model("gemini-pro"), Some(Provider::Gemini));
+        assert_eq!(Provider::infer_from_model("gemini-1.5-pro"), Some(Provider::Gemini));
+        assert_eq!(Provider::infer_from_model("gemini-2.0-flash"), Some(Provider::Gemini));
+        assert_eq!(Provider::infer_from_model("gemini-2.0-flash-exp"), Some(Provider::Gemini));
+        assert_eq!(Provider::infer_from_model("Gemini-Pro"), Some(Provider::Gemini)); // case insensitive
+    }
+
+    #[test]
+    fn test_infer_provider_unknown() {
+        assert_eq!(Provider::infer_from_model("llama-3"), None);
+        assert_eq!(Provider::infer_from_model("mistral-7b"), None);
+        assert_eq!(Provider::infer_from_model("custom-model"), None);
+        assert_eq!(Provider::infer_from_model(""), None);
+    }
+
+    #[test]
+    fn test_api_key_env_var() {
+        assert_eq!(Provider::Anthropic.api_key_env_var(), "ANTHROPIC_API_KEY");
+        assert_eq!(Provider::Openai.api_key_env_var(), "OPENAI_API_KEY");
+        assert_eq!(Provider::Gemini.api_key_env_var(), "GOOGLE_API_KEY");
     }
 }

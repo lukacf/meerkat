@@ -24,8 +24,107 @@ impl<C: LlmClient> LlmClientAdapter<C> {
     }
 }
 
+/// Dynamic dispatch version of LlmClientAdapter for runtime provider selection
+pub struct DynLlmClientAdapter {
+    client: Arc<dyn LlmClient>,
+    model: String,
+}
+
+impl DynLlmClientAdapter {
+    pub fn new(client: Arc<dyn LlmClient>, model: String) -> Self {
+        Self { client, model }
+    }
+}
+
 #[async_trait]
 impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
+    async fn stream_response(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        max_tokens: u32,
+    ) -> Result<LlmStreamResult, AgentError> {
+        // Build request
+        let request = LlmRequest {
+            model: self.model.clone(),
+            messages: messages.to_vec(),
+            tools: tools.to_vec(),
+            max_tokens,
+            temperature: None,
+            stop_sequences: None,
+        };
+
+        // Get stream
+        let mut stream = self.client.stream(&request);
+
+        // Accumulate response
+        let mut content = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut tool_call_buffers: HashMap<String, ToolCallBuffer> = HashMap::new();
+        let mut stop_reason = StopReason::EndTurn;
+        let mut usage = Usage::default();
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(event) => match event {
+                    LlmEvent::TextDelta { delta } => {
+                        content.push_str(&delta);
+                    }
+                    LlmEvent::ToolCallDelta {
+                        id,
+                        name,
+                        args_delta,
+                    } => {
+                        let buffer = tool_call_buffers
+                            .entry(id.clone())
+                            .or_insert_with(|| ToolCallBuffer::new(id));
+
+                        if let Some(n) = name {
+                            buffer.name = Some(n);
+                        }
+                        buffer.args_json.push_str(&args_delta);
+                    }
+                    LlmEvent::ToolCallComplete { id, name, args } => {
+                        tool_calls.push(ToolCall { id, name, args });
+                    }
+                    LlmEvent::UsageUpdate { usage: u } => {
+                        usage = u;
+                    }
+                    LlmEvent::Done { stop_reason: sr } => {
+                        stop_reason = sr;
+                    }
+                },
+                Err(e) => {
+                    return Err(AgentError::LlmError(e.to_string()));
+                }
+            }
+        }
+
+        // Complete any buffered tool calls that weren't explicitly completed
+        for (_, buffer) in tool_call_buffers {
+            if let Some(tc) = buffer.try_complete() {
+                // Only add if not already in tool_calls
+                if !tool_calls.iter().any(|t| t.id == tc.id) {
+                    tool_calls.push(tc);
+                }
+            }
+        }
+
+        Ok(LlmStreamResult {
+            content,
+            tool_calls,
+            stop_reason,
+            usage,
+        })
+    }
+
+    fn provider(&self) -> &'static str {
+        self.client.provider()
+    }
+}
+
+#[async_trait]
+impl AgentLlmClient for DynLlmClientAdapter {
     async fn stream_response(
         &self,
         messages: &[Message],

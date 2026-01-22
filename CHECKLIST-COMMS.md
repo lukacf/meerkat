@@ -60,17 +60,16 @@ When completing a phase:
 
 1. [ ] All phase checklist items marked complete
 2. [ ] Run phase gate verification commands
-3. [ ] Verify no stubs: `grep -r "todo!()\|unimplemented!()" meerkat-comms*/src/` returns empty
-4. [ ] Spawn reviewer agents IN PARALLEL (single message, multiple Task calls)
-5. [ ] Collect all verdicts
-6. [ ] If any BLOCK verdicts:
+3. [ ] Spawn reviewer agents IN PARALLEL (single message, multiple Task calls)
+4. [ ] Collect all verdicts
+5. [ ] If any BLOCK verdicts:
    - Address blocking issues
    - Re-run verification commands
    - Re-run *all* reviewers
-7. [ ] Record phase completion with reviewer verdicts
-8. [ ] Proceed to next phase
+6. [ ] Record phase completion with reviewer verdicts
+7. [ ] Proceed to next phase
 
-**Critical:** Reviewers must run verification commands themselves. Do NOT feed them test results.
+**Critical:** Reviewers are independent agents with access to tools (Grep, Read, Bash). They discover state themselves. Do NOT feed them test results or grep outputs.
 
 ---
 
@@ -132,8 +131,9 @@ When completing a phase:
 
 ```bash
 cargo test -p meerkat-comms
-grep -r "todo!()\|unimplemented!()" meerkat-comms/src/ && echo "FAIL: stubs found" || echo "PASS: no stubs"
 ```
+
+Note: Stub detection is performed by reviewer agents independently.
 
 ### Phase 0 Gate Review
 
@@ -188,7 +188,6 @@ Spawn reviewers IN PARALLEL:
 
 ```bash
 cargo test -p meerkat-comms
-grep -r "todo!()\|unimplemented!()" meerkat-comms/src/ && echo "FAIL: stubs found" || echo "PASS: no stubs"
 ```
 
 ### Phase 1 Gate Review
@@ -223,7 +222,6 @@ Spawn reviewers IN PARALLEL:
 
 ```bash
 cargo test -p meerkat-comms
-grep -r "todo!()\|unimplemented!()" meerkat-comms/src/ && echo "FAIL: stubs found" || echo "PASS: no stubs"
 ```
 
 ### Phase 2 Gate Review
@@ -279,7 +277,6 @@ Spawn reviewers IN PARALLEL:
 
 ```bash
 cargo test -p meerkat-comms
-grep -r "todo!()\|unimplemented!()" meerkat-comms/src/ && echo "FAIL: stubs found" || echo "PASS: no stubs"
 ```
 
 ### Phase 3 Gate Review
@@ -335,7 +332,6 @@ Spawn reviewers IN PARALLEL:
 
 ```bash
 cargo test -p meerkat-comms
-grep -r "todo!()\|unimplemented!()" meerkat-comms/src/ && echo "FAIL: stubs found" || echo "PASS: no stubs"
 ```
 
 ### Phase 4 Gate Review
@@ -385,7 +381,6 @@ Spawn reviewers IN PARALLEL:
 
 ```bash
 cargo test -p meerkat-comms
-grep -r "todo!()\|unimplemented!()" meerkat-comms/src/ && echo "FAIL: stubs found" || echo "PASS: no stubs"
 ```
 
 ### Phase 5 Gate Review
@@ -423,7 +418,6 @@ Spawn reviewers IN PARALLEL:
 
 ```bash
 cargo test -p meerkat-comms-mcp
-grep -r "todo!()\|unimplemented!()" meerkat-comms-mcp/src/ && echo "FAIL: stubs found" || echo "PASS: no stubs"
 ```
 
 ### Phase 6 Gate Review
@@ -455,8 +449,7 @@ Spawn reviewers IN PARALLEL:
 ### Tasks - Final Verification
 
 - [ ] Run full test suite (Done when: `cargo test --workspace` exits 0)
-- [ ] Verify no stubs in source (Done when: `grep -r "todo!()\|unimplemented!()" meerkat-comms*/src/` returns empty)
-- [ ] Verify all spec sections covered (Done when: Spec Auditor reviewer returns APPROVE verdict)
+- [ ] All reviewers approve (Done when: RCT Guardian, Integration Sheriff, Spec Auditor, and Methodology Integrity all return APPROVE)
 
 ### Final Phase Gate Verification Commands
 
@@ -464,7 +457,6 @@ Spawn reviewers IN PARALLEL:
 cargo test -p meerkat-comms
 cargo test -p meerkat-comms-mcp
 cargo test --workspace
-grep -r "todo!()\|unimplemented!()" meerkat-comms*/src/ && echo "FAIL: stubs found" || echo "PASS: no stubs"
 ```
 
 ### Final Phase Gate Review
@@ -514,7 +506,7 @@ You are the RCT Guardian reviewing Phase {PHASE} of the meerkat-comms implementa
 
 BE BRUTALLY HONEST. Your job is to find problems, not rubber-stamp work.
 
-IMPORTANT: Run verification commands yourself. Do NOT rely on any state descriptions in this prompt.
+You have access to tools: Grep, Read, Bash. Use them to discover state independently.
 
 Your scope is LIMITED to representation boundaries:
 - Serialization/encoding strategy (CBOR, JSON)
@@ -526,20 +518,14 @@ Your scope is LIMITED to representation boundaries:
 
 {PHASE_SCOPE}
 
-## Verification Commands
+## Required Verification Steps
 
-Run these yourself:
-```bash
-cargo test -p meerkat-comms
-```
+Perform these checks yourself using your tools:
 
-## Anti-Pattern Detection (REQUIRED)
-
-Before approving, run this stub detection check:
-```bash
-grep -r "todo!()\|unimplemented!()" meerkat-comms*/src/
-```
-If stubs are found in code that the checklist marks as complete, you MUST block with evidence_type: STUB_MASKING.
+1. **Run tests**: Use Bash to run `cargo test -p meerkat-comms`
+2. **Stub detection**: Use Grep to search for `todo!` and `unimplemented!` in meerkat-comms*/src/
+3. **Read test files**: Use Read to examine any failing tests
+4. **Check round-trip tests**: Verify they exist and pass for types in scope
 
 ## Blocking Rules
 
@@ -548,7 +534,7 @@ You MUST block if:
 - Enum encodes as ordinal instead of string (evidence_type: SPEC_VIOLATION)
 - signable_bytes produces non-deterministic output (evidence_type: TEST_FAILING)
 - A representation boundary changed without test coverage (evidence_type: TEST_MISSING)
-- Stubs found in completed code (evidence_type: STUB_MASKING)
+- Stubs (todo!, unimplemented!) found in code marked complete (evidence_type: STUB_MASKING)
 
 You MUST NOT block for:
 - Issues outside representation scope
@@ -562,7 +548,7 @@ blocking:
   - id: RCT-001
     claim: "<specific claim>"
     evidence_type: TEST_FAILING | TEST_MISSING | SPEC_VIOLATION | STUB_MASKING
-    evidence: "<test name or code location>"
+    evidence: "<test name or code location you found>"
     fix: "<actionable fix>"
 non_blocking:
   - id: NB-001
@@ -576,7 +562,7 @@ You are the Integration Sheriff reviewing Phase {PHASE} of the meerkat-comms imp
 
 BE BRUTALLY HONEST. Your job is to find wiring problems before they reach production.
 
-IMPORTANT: Run verification commands yourself. Discover the state independently.
+You have access to tools: Grep, Read, Bash. Use them to discover state independently.
 
 Your scope is LIMITED to cross-component wiring:
 - Data flows correctly between components
@@ -594,25 +580,16 @@ Your scope is LIMITED to cross-component wiring:
 - Phases 4-5: Integration tests may be RED but must be executable.
 - Final Phase: ALL tests must be GREEN.
 
-## Verification Commands
+## Required Verification Steps
 
-```bash
-cargo test -p meerkat-comms
-```
+Perform these checks yourself using your tools:
 
-## Anti-Pattern Detection (REQUIRED)
-
-### XFAIL/Skip Abuse Detection
-```bash
-grep -r "#\[ignore\]" meerkat-comms*/src/ meerkat-comms*/tests/
-```
-XFAIL/ignore is ONLY acceptable if it references an external bug. Block if on feature tests.
-
-### Stub Detection
-```bash
-grep -r "todo!()\|unimplemented!()" meerkat-comms*/src/
-```
-If stubs exist in completed integration points, block with STUB_MASKING.
+1. **Run tests**: Use Bash to run `cargo test -p meerkat-comms`
+2. **XFAIL/ignore detection**: Use Grep to search for `#[ignore]` in meerkat-comms*/src/ and tests/
+   - ONLY acceptable if comment references external bug number
+   - Block if on feature tests without bug reference
+3. **Stub detection**: Use Grep to search for `todo!` and `unimplemented!` in meerkat-comms*/src/
+4. **Read integration tests**: Use Read to verify choke points have coverage
 
 ## Blocking Rules
 
@@ -620,8 +597,8 @@ You MUST block if:
 - A test fails with wrong error type (evidence_type: TEST_FAILING)
 - A choke point has no integration test (evidence_type: TEST_MISSING)
 - Data doesn't flow correctly between components (evidence_type: WIRING_VIOLATION)
-- XFAIL/ignore markers on feature tests (evidence_type: XFAIL_ABUSE)
-- Stubs in completed integration code (evidence_type: STUB_MASKING)
+- #[ignore] markers on feature tests without external bug reference (evidence_type: XFAIL_ABUSE)
+- Stubs (todo!, unimplemented!) in completed integration code (evidence_type: STUB_MASKING)
 
 ## Output Format
 
@@ -631,7 +608,7 @@ blocking:
   - id: INT-001
     claim: "<specific claim>"
     evidence_type: TEST_FAILING | TEST_MISSING | WIRING_VIOLATION | XFAIL_ABUSE | STUB_MASKING
-    evidence: "<test name and error type>"
+    evidence: "<test name and error type you found>"
     fix: "<actionable fix>"
 non_blocking:
   - id: NB-001
@@ -645,7 +622,7 @@ You are the Spec Auditor reviewing Phase {PHASE} of the meerkat-comms implementa
 
 BE BRUTALLY HONEST. Your job is to ensure implementation matches DESIGN-COMMS.md.
 
-IMPORTANT: Run verification commands yourself. Discover the state independently.
+You have access to tools: Grep, Read, Bash. Use them to discover state independently.
 
 Your scope is LIMITED to requirements compliance:
 - All spec fields present in types
@@ -656,23 +633,19 @@ Your scope is LIMITED to requirements compliance:
 
 {PHASE_SPEC_SECTIONS}
 
-## Verification
+## Required Verification Steps
 
-Read DESIGN-COMMS.md sections listed above. Cross-reference with implementation.
+Perform these checks yourself using your tools:
 
-## Anti-Pattern Detection (REQUIRED)
-
-### Infinite Deferral Detection
-```bash
-grep -ri "v0.2\|v2\|future work\|out of scope\|deferred\|later version\|TODO.*later" meerkat-comms*/src/ DESIGN-COMMS.md CHECKLIST-COMMS.md
-```
-Cross-reference against spec requirements. If a spec-required feature is deferred, block.
-
-### Checklist Honesty Check
-Compare checklist [x] marks against actual implementation:
-- Read CHECKLIST-COMMS.md for tasks marked complete
-- Verify the "Done when" condition is actually satisfied
-- If a task is marked complete but condition is not met, block with CHECKLIST_DISHONESTY
+1. **Read the spec**: Use Read to examine DESIGN-COMMS.md sections listed above
+2. **Read the implementation**: Use Read to examine the actual source files
+3. **Cross-reference**: Verify every spec requirement has corresponding implementation
+4. **Deferral detection**: Use Grep to search for `v0.2`, `future work`, `out of scope`, `deferred`, `later version`, `TODO.*later` in source files
+   - Cross-reference against spec requirements
+   - If spec-required feature appears in deferral language, block
+5. **Checklist honesty**: Use Read on CHECKLIST-COMMS.md, find tasks marked [x]
+   - For each, verify the "Done when" condition is actually satisfied
+   - Run the test or check the file exists as specified
 
 ## Blocking Rules
 
@@ -681,7 +654,7 @@ You MUST block if:
 - Behavior contradicts spec (evidence_type: SPEC_VIOLATION)
 - A spec requirement has no corresponding test (evidence_type: TEST_MISSING)
 - A spec-required feature is deferred (evidence_type: INFINITE_DEFERRAL)
-- Checklist task marked complete but not actually done (evidence_type: CHECKLIST_DISHONESTY)
+- Checklist task marked [x] but "Done when" condition not met (evidence_type: CHECKLIST_DISHONESTY)
 
 ## Output Format
 
@@ -691,7 +664,7 @@ blocking:
   - id: SPEC-001
     claim: "<specific claim>"
     evidence_type: SPEC_VIOLATION | TEST_MISSING | INFINITE_DEFERRAL | CHECKLIST_DISHONESTY
-    evidence: "<spec section + actual implementation>"
+    evidence: "<spec section + what you found in implementation>"
     fix: "<actionable fix>"
 non_blocking:
   - id: NB-001
@@ -705,29 +678,30 @@ You are the Methodology Integrity reviewer for the FINAL PHASE of meerkat-comms.
 
 Your job is to detect methodology abuse patterns.
 
-## Checks
+You have access to tools: Grep, Read, Bash. Use them to discover state independently.
+
+## Required Verification Steps
+
+Perform ALL these checks yourself using your tools:
 
 ### 1. Stub Detection
-```bash
-grep -r "todo!()\|unimplemented!()" meerkat-comms*/src/
-```
+Use Grep to search for `todo!` and `unimplemented!` in meerkat-comms*/src/
 Block if any found in completed code (evidence_type: STUB_REMAINING).
 
 ### 2. XFAIL/Skip Detection
-```bash
-grep -r "#\[ignore\]" meerkat-comms*/src/ meerkat-comms*/tests/
-```
+Use Grep to search for `#[ignore]` in meerkat-comms*/src/ and meerkat-comms*/tests/
 Block if on feature tests without external bug reference (evidence_type: XFAIL_ACCUMULATION).
 Note: `#[should_panic]` is valid for edge case tests and should NOT be flagged.
 
 ### 3. Deferred Requirements
-```bash
-grep -ri "v0.2\|deferred\|future work\|out of scope" meerkat-comms*/src/ DESIGN-COMMS.md
-```
-Cross-reference against original spec requirements. Block if spec-required features deferred (evidence_type: DEFERRED_REQUIREMENTS).
+Use Grep to search for `v0.2`, `deferred`, `future work`, `out of scope` in source files
+Use Read to examine DESIGN-COMMS.md for original requirements
+Cross-reference: if spec-required features appear deferred, block (evidence_type: DEFERRED_REQUIREMENTS).
 
 ### 4. Process vs Product Ratio
-Count implementation vs methodology file changes. If methodology artifacts dominate, flag (evidence_type: PROCESS_DISPLACEMENT).
+Use Bash to run `git log --oneline --name-only` and examine recent commits
+Count implementation file changes (.rs) vs methodology file changes (.md)
+If methodology artifacts dominate recent commits, flag (evidence_type: PROCESS_DISPLACEMENT).
 
 ## Output Format
 
@@ -737,7 +711,7 @@ blocking:
   - id: META-001
     claim: "<specific claim>"
     evidence_type: STUB_REMAINING | XFAIL_ACCUMULATION | DEFERRED_REQUIREMENTS | PROCESS_DISPLACEMENT
-    evidence: "<file location or grep output>"
+    evidence: "<file location and content you found>"
     fix: "<actionable fix>"
 non_blocking:
   - id: NB-001

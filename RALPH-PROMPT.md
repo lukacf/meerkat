@@ -52,6 +52,7 @@ Based on the phase, spawn the appropriate reviewers as parallel Task agents:
   - Add approval marker after the phase header: "<!-- Phase N: APPROVED -->"
   - Stop this iteration
 - If ANY reviewer returns BLOCK:
+  - Uncheck [x] → [ ] the task(s) related to the blocking issue
   - Address the blocking issues they identified
   - Do NOT add approval marker
   - Do NOT proceed to next phase
@@ -94,7 +95,7 @@ ONE PHASE PER ITERATION:
 2. If unchecked tasks exist: complete them, mark [x], run tests
 3. Spawn phase reviewers IN PARALLEL (from Appendix prompts)
 4. If ALL APPROVE: add "<!-- Phase N: APPROVED -->" marker, stop iteration
-5. If ANY BLOCK: fix issues, do NOT add marker, next iteration retries
+5. If ANY BLOCK: uncheck failing task(s), fix issues, do NOT add marker, next iteration retries
 
 CRITICAL: Checkboxes [x] ≠ phase complete. Only approval marker = complete.
 

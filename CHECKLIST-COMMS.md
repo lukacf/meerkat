@@ -74,7 +74,7 @@ When completing a phase:
 ---
 
 ## Phase 0: Representation Contracts (RCT Gate 0 - MUST BE GREEN)
-**[PHASE 0 APPROVED]**
+PHASE_0_APPROVED
 
 **Goal:** All types compile, serialize, and round-trip through CBOR/JSON. No behavior yet - only data shapes.
 
@@ -145,7 +145,7 @@ Spawn reviewers IN PARALLEL:
 ---
 
 ## Phase 1: Cryptographic Identity
-**[PHASE 1 APPROVED]**
+PHASE_1_APPROVED
 
 **Goal:** Key generation, signing, verification, and PeerId conversion work correctly.
 

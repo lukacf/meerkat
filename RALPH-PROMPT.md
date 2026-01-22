@@ -21,7 +21,7 @@ Complete ONE PHASE per iteration. Do not proceed to the next phase until all rev
 
 1. Read CHECKLIST-COMMS.md
 2. Find the current phase using this logic:
-   - Look for approval markers: "**[PHASE N APPROVED]**"
+   - Look for approval markers: "PHASE_N_APPROVED"
    - The current phase is the FIRST phase WITHOUT an approval marker
    - If a phase has all [x] but NO approval marker, it needs review (not the next phase!)
 3. If all phases including Final Phase have approval markers, output <promise>COMPLETE</promise>
@@ -49,7 +49,7 @@ Based on the phase, spawn the appropriate reviewers as parallel Task agents:
 
 ### Step 4: Evaluate Verdicts
 - If ALL reviewers return APPROVE:
-  - Add approval marker after the phase header: "**[PHASE N APPROVED]**"
+  - Add approval marker after the phase header: "PHASE_N_APPROVED"
   - Stop this iteration
 - If ANY reviewer returns BLOCK:
   - Uncheck [x] → [ ] the task(s) related to the blocking issue
@@ -61,7 +61,7 @@ Based on the phase, spawn the appropriate reviewers as parallel Task agents:
 ## Critical Rules
 
 1. ONE PHASE PER ITERATION - Never start a new phase in the same iteration
-2. APPROVAL MARKER = DONE - A phase is only complete when it has "**[PHASE N APPROVED]**"
+2. APPROVAL MARKER = DONE - A phase is only complete when it has "PHASE_N_APPROVED"
 3. CHECKBOXES ≠ APPROVAL - All [x] without approval marker means review still needed
 4. REVIEWERS MUST APPROVE - 100% approval required before adding marker
 5. NO SKIPPING REVIEWS - Every phase must have its reviewers run
@@ -91,10 +91,10 @@ Do NOT output <promise>COMPLETE</promise> if stuck - let the iteration limit han
 Implement meerkat-comms per CHECKLIST-COMMS.md.
 
 ONE PHASE PER ITERATION:
-1. Read checklist, find first phase WITHOUT "**[PHASE N APPROVED]**" marker
+1. Read checklist, find first phase WITHOUT "PHASE_N_APPROVED" marker
 2. If unchecked tasks exist: complete them, mark [x], run tests
 3. Spawn phase reviewers IN PARALLEL (from Appendix prompts)
-4. If ALL APPROVE: add "**[PHASE N APPROVED]**" marker, stop iteration
+4. If ALL APPROVE: add "PHASE_N_APPROVED" marker, stop iteration
 5. If ANY BLOCK: uncheck failing task(s), fix issues, do NOT add marker, next iteration retries
 
 CRITICAL: Checkboxes [x] ≠ phase complete. Only approval marker = complete.
@@ -112,7 +112,7 @@ Never skip reviews. Never proceed without approval marker.
 
 - **Iteration limit**: 50 should be enough for 8 phases with some retries
 - **Cost estimate**: ~$20-50 depending on how many review cycles needed
-- **Monitor**: Check CHECKLIST-COMMS.md for `**[PHASE N APPROVED]**` markers
+- **Monitor**: Check CHECKLIST-COMMS.md for `PHASE_N_APPROVED` markers
 - **Cancel**: Use `/ralph-loop:cancel-ralph` if it goes off track
 
 ## Approval Marker Format
@@ -121,7 +121,7 @@ After Phase N reviewers approve, add this line immediately after the phase heade
 
 ```markdown
 ## Phase N: [Name]
-**[PHASE N APPROVED]**
+PHASE_N_APPROVED
 ```
 
 This marker is the source of truth for phase completion, not the checkboxes.

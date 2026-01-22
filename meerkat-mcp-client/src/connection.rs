@@ -1,9 +1,14 @@
 //! MCP connection management
 
+use crate::transport::sse::{SseClientConfig, SseClientTransport};
+use crate::transport::{
+    headers_from_map, sse::ReqwestSseClient, streamable_http::ReqwestStreamableHttpClient,
+};
 use crate::{McpError, McpServerConfig};
-use crate::transport::{headers_from_map, sse::ReqwestSseClient, streamable_http::ReqwestStreamableHttpClient};
-use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
 use meerkat_core::ToolDef;
+use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
+use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{
     model::{CallToolRequestParam, RawContent},
     service::{RoleClient, RunningService, ServiceExt},
@@ -11,9 +16,6 @@ use rmcp::{
 };
 use serde_json::Value;
 use tokio::process::Command;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::StreamableHttpClientTransport;
-use crate::transport::sse::{SseClientConfig, SseClientTransport};
 
 /// Connection to an MCP server
 pub struct McpConnection {
@@ -33,21 +35,20 @@ impl McpConnection {
                     cmd.env(key, value);
                 }
 
-                let transport = TokioChildProcess::new(cmd).map_err(|e| McpError::ConnectionFailed {
-                    reason: format!("Failed to spawn process: {}", e),
-                })?;
+                let transport =
+                    TokioChildProcess::new(cmd).map_err(|e| McpError::ConnectionFailed {
+                        reason: format!("Failed to spawn process: {}", e),
+                    })?;
 
-                ()
-                    .serve(transport)
+                ().serve(transport)
                     .await
                     .map_err(|e| McpError::ConnectionFailed {
                         reason: format!("Failed to establish MCP connection: {}", e),
                     })?
             }
             McpTransportConfig::Http(http) => {
-                let headers = headers_from_map(&http.headers).map_err(|e| McpError::ConnectionFailed {
-                    reason: e,
-                })?;
+                let headers = headers_from_map(&http.headers)
+                    .map_err(|e| McpError::ConnectionFailed { reason: e })?;
                 match http.transport.unwrap_or_default() {
                     McpHttpTransport::StreamableHttp => {
                         let client = ReqwestStreamableHttpClient::new(headers);
@@ -55,8 +56,7 @@ impl McpConnection {
                             client,
                             StreamableHttpClientTransportConfig::with_uri(http.url.clone()),
                         );
-                        ()
-                            .serve(transport)
+                        ().serve(transport)
                             .await
                             .map_err(|e| McpError::ConnectionFailed {
                                 reason: format!("Failed to establish MCP connection: {}", e),
@@ -75,8 +75,7 @@ impl McpConnection {
                         .map_err(|e| McpError::ConnectionFailed {
                             reason: format!("Failed to establish SSE connection: {}", e),
                         })?;
-                        ()
-                            .serve(transport)
+                        ().serve(transport)
                             .await
                             .map_err(|e| McpError::ConnectionFailed {
                                 reason: format!("Failed to establish MCP connection: {}", e),
@@ -99,13 +98,13 @@ impl McpConnection {
 
     /// List available tools
     pub async fn list_tools(&self) -> Result<Vec<ToolDef>, McpError> {
-        let response = self
-            .service
-            .list_tools(None)
-            .await
-            .map_err(|e| McpError::ProtocolError {
-                message: format!("Failed to list tools: {}", e),
-            })?;
+        let response =
+            self.service
+                .list_tools(None)
+                .await
+                .map_err(|e| McpError::ProtocolError {
+                    message: format!("Failed to list tools: {}", e),
+                })?;
 
         // Convert MCP tools to our ToolDef format
         let tools = response
@@ -287,8 +286,14 @@ pub mod tests {
         assert!(add_tool.is_some(), "Should have add tool");
         let add_schema = &add_tool.unwrap().input_schema;
         let props = add_schema.get("properties").unwrap();
-        assert!(props.get("a").is_some(), "Add tool should have 'a' property");
-        assert!(props.get("b").is_some(), "Add tool should have 'b' property");
+        assert!(
+            props.get("a").is_some(),
+            "Add tool should have 'a' property"
+        );
+        assert!(
+            props.get("b").is_some(),
+            "Add tool should have 'b' property"
+        );
 
         conn.close().await.expect("Failed to close connection");
     }

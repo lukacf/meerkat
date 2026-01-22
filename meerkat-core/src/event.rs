@@ -35,19 +35,13 @@ pub enum AgentEvent {
 
     // === LLM Interaction ===
     /// New turn started (calling LLM)
-    TurnStarted {
-        turn_number: u32,
-    },
+    TurnStarted { turn_number: u32 },
 
     /// Streaming text from the model
-    TextDelta {
-        delta: String,
-    },
+    TextDelta { delta: String },
 
     /// Text generation complete for this turn
-    TextComplete {
-        content: String,
-    },
+    TextComplete { content: String },
 
     /// Model requested a tool call
     ToolCallRequested {
@@ -71,10 +65,7 @@ pub enum AgentEvent {
 
     // === Tool Execution ===
     /// Starting tool execution
-    ToolExecutionStarted {
-        id: String,
-        name: String,
-    },
+    ToolExecutionStarted { id: String, name: String },
 
     /// Tool execution completed
     ToolExecutionCompleted {
@@ -192,7 +183,11 @@ mod tests {
             let json = serde_json::to_value(&event).unwrap();
 
             // All events should have a "type" field
-            assert!(json.get("type").is_some(), "Event missing type field: {:?}", event);
+            assert!(
+                json.get("type").is_some(),
+                "Event missing type field: {:?}",
+                event
+            );
 
             // Should roundtrip
             let roundtrip: AgentEvent = serde_json::from_value(json.clone()).unwrap();
@@ -203,14 +198,8 @@ mod tests {
 
     #[test]
     fn test_budget_type_serialization() {
-        assert_eq!(
-            serde_json::to_value(BudgetType::Tokens).unwrap(),
-            "tokens"
-        );
-        assert_eq!(
-            serde_json::to_value(BudgetType::Time).unwrap(),
-            "time"
-        );
+        assert_eq!(serde_json::to_value(BudgetType::Tokens).unwrap(), "tokens");
+        assert_eq!(serde_json::to_value(BudgetType::Time).unwrap(), "time");
         assert_eq!(
             serde_json::to_value(BudgetType::ToolCalls).unwrap(),
             "tool_calls"

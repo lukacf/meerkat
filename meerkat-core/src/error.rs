@@ -107,11 +107,13 @@ mod tests {
     #[test]
     fn test_graceful_errors() {
         assert!(AgentError::TokenBudgetExceeded { used: 0, limit: 0 }.is_graceful());
-        assert!(AgentError::TimeBudgetExceeded {
-            elapsed_secs: 0,
-            limit_secs: 0
-        }
-        .is_graceful());
+        assert!(
+            AgentError::TimeBudgetExceeded {
+                elapsed_secs: 0,
+                limit_secs: 0
+            }
+            .is_graceful()
+        );
         assert!(AgentError::MaxTurnsReached { turns: 10 }.is_graceful());
 
         assert!(!AgentError::Cancelled.is_graceful());

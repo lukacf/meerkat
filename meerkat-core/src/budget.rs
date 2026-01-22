@@ -8,8 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Resource limits for an agent run
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BudgetLimits {
     /// Maximum tokens to consume
     pub max_tokens: Option<u64>,
@@ -18,7 +17,6 @@ pub struct BudgetLimits {
     /// Maximum tool calls
     pub max_tool_calls: Option<usize>,
 }
-
 
 impl BudgetLimits {
     /// Create unlimited budget
@@ -170,12 +168,9 @@ impl Budget {
 
     /// Get call usage (count, limit) if limit is set
     pub fn call_usage(&self) -> Option<(usize, usize)> {
-        self.limits.max_tool_calls.map(|limit| {
-            (
-                self.tool_calls_made.load(Ordering::Relaxed) as usize,
-                limit,
-            )
-        })
+        self.limits
+            .max_tool_calls
+            .map(|limit| (self.tool_calls_made.load(Ordering::Relaxed) as usize, limit))
     }
 
     /// Get remaining tokens (None if unlimited)
@@ -241,11 +236,9 @@ impl BudgetPool {
             max_tokens: request
                 .max_tokens
                 .map(|r| r.min(available_tokens.unwrap_or(u64::MAX))),
-            max_duration: request.max_duration.map(|r| {
-                available_duration
-                    .map(|a| r.min(a))
-                    .unwrap_or(r)
-            }),
+            max_duration: request
+                .max_duration
+                .map(|r| available_duration.map(|a| r.min(a)).unwrap_or(r)),
             max_tool_calls: request.max_tool_calls,
         };
 
@@ -334,7 +327,10 @@ mod tests {
 
         budget.record_tokens(50);
         let result = budget.check();
-        assert!(matches!(result, Err(AgentError::TokenBudgetExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(AgentError::TokenBudgetExceeded { .. })
+        ));
     }
 
     #[test]

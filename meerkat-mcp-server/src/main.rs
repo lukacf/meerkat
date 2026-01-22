@@ -5,7 +5,7 @@
 //! - meerkat_resume: Resume an existing session
 
 use meerkat_mcp_server::{handle_tools_call, tools_list};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 
 fn main() {

@@ -88,7 +88,10 @@ impl SystemPromptConfig {
 
     /// Compose the final system prompt
     pub fn compose(&self) -> String {
-        let base = self.system_prompt.as_deref().unwrap_or(DEFAULT_SYSTEM_PROMPT);
+        let base = self
+            .system_prompt
+            .as_deref()
+            .unwrap_or(DEFAULT_SYSTEM_PROMPT);
 
         if !self.load_agents_md {
             return base.to_string();
@@ -116,13 +119,17 @@ impl SystemPromptConfig {
     }
 
     fn load_global_agents_md(&self) -> Option<String> {
-        let path = self.global_agents_md_path.clone()
+        let path = self
+            .global_agents_md_path
+            .clone()
             .or_else(default_global_agents_md_path)?;
         load_agents_md_file(&path)
     }
 
     fn load_project_agents_md(&self) -> Option<String> {
-        let path = self.project_agents_md_path.clone()
+        let path = self
+            .project_agents_md_path
+            .clone()
             .or_else(find_project_agents_md)?;
         load_agents_md_file(&path)
     }
@@ -177,9 +184,7 @@ fn load_agents_md_file(path: &Path) -> Option<String> {
     // Enforce size limit
     if content.len() > AGENTS_MD_MAX_BYTES {
         // Truncate to limit
-        let truncated: String = content.chars()
-            .take(AGENTS_MD_MAX_BYTES)
-            .collect();
+        let truncated: String = content.chars().take(AGENTS_MD_MAX_BYTES).collect();
         return Some(truncated);
     }
 
@@ -227,8 +232,7 @@ mod tests {
         let agents_path = temp.path().join("AGENTS.md");
         fs::write(&agents_path, "# Build Instructions\nRun `make build`").unwrap();
 
-        let config = SystemPromptConfig::new()
-            .with_project_agents_md(&agents_path);
+        let config = SystemPromptConfig::new().with_project_agents_md(&agents_path);
 
         let prompt = config.compose();
         assert!(prompt.contains(DEFAULT_SYSTEM_PROMPT));
@@ -243,8 +247,7 @@ mod tests {
         let global_path = temp.path().join("global-agents.md");
         fs::write(&global_path, "# Global rules\nAlways be nice").unwrap();
 
-        let config = SystemPromptConfig::new()
-            .with_global_agents_md(&global_path);
+        let config = SystemPromptConfig::new().with_global_agents_md(&global_path);
 
         let prompt = config.compose();
         assert!(prompt.contains("# Project Instructions (from global AGENTS.md)"));
@@ -279,8 +282,7 @@ mod tests {
         let agents_path = temp.path().join("AGENTS.md");
         fs::write(&agents_path, "   \n\n  ").unwrap(); // whitespace only
 
-        let config = SystemPromptConfig::new()
-            .with_project_agents_md(&agents_path);
+        let config = SystemPromptConfig::new().with_project_agents_md(&agents_path);
 
         let prompt = config.compose();
         assert!(!prompt.contains("Project Instructions"));
@@ -295,8 +297,7 @@ mod tests {
         let large_content = "x".repeat(AGENTS_MD_MAX_BYTES + 1000);
         fs::write(&agents_path, &large_content).unwrap();
 
-        let config = SystemPromptConfig::new()
-            .with_project_agents_md(&agents_path);
+        let config = SystemPromptConfig::new().with_project_agents_md(&agents_path);
 
         let prompt = config.compose();
 

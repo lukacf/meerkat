@@ -1,0 +1,86 @@
+# Pre-commit configuration for Meerkat
+# Install: pip install pre-commit
+# Setup: pre-commit install && pre-commit install --hook-type pre-push
+
+default_stages: [pre-commit]
+
+repos:
+  # Rust formatting check
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+  # Clippy linting (fast mode for commits)
+  - repo: local
+    hooks:
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+  # Fast unit tests on commit
+  - repo: local
+    hooks:
+      - id: cargo-test
+        name: cargo test (unit)
+        entry: make test
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+  # Secret detection
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+
+  # Full test suite on push only
+  - repo: local
+    hooks:
+      - id: cargo-test-all
+        name: cargo test (full suite)
+        entry: make test-all
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+  # Documentation build on push
+  - repo: local
+    hooks:
+      - id: cargo-doc
+        name: cargo doc
+        entry: make doc
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+  # Security audit on push
+  - repo: local
+    hooks:
+      - id: cargo-audit
+        name: cargo deny (security audit)
+        entry: make audit
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

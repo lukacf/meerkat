@@ -1,14 +1,14 @@
 use futures::StreamExt;
-use futures::{stream::BoxStream, Future};
+use futures::{Future, stream::BoxStream};
 use http::Uri;
 use reqwest::header::{ACCEPT, HeaderMap};
 use sse_stream::{Error as SseError, Sse, SseStream};
 use std::sync::Arc;
 
 use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
-use rmcp::transport::common::http_header::{EVENT_STREAM_MIME_TYPE, HEADER_LAST_EVENT_ID};
-use rmcp::transport::Transport;
 use rmcp::service::RoleClient;
+use rmcp::transport::Transport;
+use rmcp::transport::common::http_header::{EVENT_STREAM_MIME_TYPE, HEADER_LAST_EVENT_ID};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SseTransportError<E: std::error::Error + Send + Sync + 'static> {
@@ -43,7 +43,10 @@ pub trait SseClient: Clone + Send + Sync + 'static {
         uri: Uri,
         last_event_id: Option<String>,
         auth_token: Option<String>,
-    ) -> impl Future<Output = Result<BoxStream<'static, Result<Sse, SseError>>, SseTransportError<Self::Error>>> + Send + '_;
+    ) -> impl Future<
+        Output = Result<BoxStream<'static, Result<Sse, SseError>>, SseTransportError<Self::Error>>,
+    > + Send
+    + '_;
 }
 
 #[derive(Debug, Clone)]

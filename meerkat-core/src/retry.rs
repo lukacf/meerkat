@@ -73,8 +73,8 @@ impl RetryPolicy {
             return Duration::ZERO;
         }
 
-        let base_delay = self.initial_delay.as_secs_f64()
-            * self.multiplier.powi((attempt - 1) as i32);
+        let base_delay =
+            self.initial_delay.as_secs_f64() * self.multiplier.powi((attempt - 1) as i32);
 
         // Apply jitter (±10%)
         let jitter = 1.0 + (rand_jitter() * 0.2 - 0.1);

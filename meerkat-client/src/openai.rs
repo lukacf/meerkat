@@ -513,7 +513,10 @@ pub mod tests {
 
         let err = event.unwrap_err();
         assert!(
-            matches!(err, LlmError::AuthenticationFailed { .. } | LlmError::InvalidApiKey),
+            matches!(
+                err,
+                LlmError::AuthenticationFailed { .. } | LlmError::InvalidApiKey
+            ),
             "Expected auth error, got: {:?}",
             err
         );

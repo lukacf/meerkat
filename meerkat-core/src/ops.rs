@@ -152,10 +152,7 @@ pub struct OperationResult {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OpEvent {
     /// Operation started executing
-    Started {
-        id: OperationId,
-        kind: WorkKind,
-    },
+    Started { id: OperationId, kind: WorkKind },
 
     /// Progress update (for streaming operations)
     Progress {
@@ -171,21 +168,13 @@ pub enum OpEvent {
     },
 
     /// Operation failed
-    Failed {
-        id: OperationId,
-        error: String,
-    },
+    Failed { id: OperationId, error: String },
 
     /// Operation was cancelled
-    Cancelled {
-        id: OperationId,
-    },
+    Cancelled { id: OperationId },
 
     /// Steering message was applied
-    SteeringApplied {
-        id: OperationId,
-        steering_id: Uuid,
-    },
+    SteeringApplied { id: OperationId, steering_id: Uuid },
 }
 
 /// Concurrency limits for operations
@@ -213,7 +202,7 @@ impl Default for ConcurrencyLimits {
 }
 
 /// Specification for spawning a new sub-agent
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SpawnSpec {
     /// The prompt/task for the sub-agent
     pub prompt: String,
@@ -227,19 +216,6 @@ pub struct SpawnSpec {
     pub allow_spawn: bool,
     /// System prompt override (None = inherit from parent)
     pub system_prompt: Option<String>,
-}
-
-impl Default for SpawnSpec {
-    fn default() -> Self {
-        Self {
-            prompt: String::new(),
-            context: ContextStrategy::default(),
-            tool_access: ToolAccessPolicy::default(),
-            budget: BudgetLimits::default(),
-            allow_spawn: false,
-            system_prompt: None,
-        }
-    }
 }
 
 /// A branch in a fork operation
@@ -390,7 +366,8 @@ mod tests {
         let json = serde_json::to_value(&inherit).unwrap();
         assert_eq!(json["type"], "inherit");
 
-        let allow = ToolAccessPolicy::AllowList(vec!["read_file".to_string(), "write_file".to_string()]);
+        let allow =
+            ToolAccessPolicy::AllowList(vec!["read_file".to_string(), "write_file".to_string()]);
         let json = serde_json::to_value(&allow).unwrap();
         assert_eq!(json["type"], "allow_list");
         // Adjacently-tagged: {"type": "allow_list", "value": [...]}

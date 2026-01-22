@@ -11,7 +11,7 @@
 //! - `RKAT_HOST`: Host to bind to (default: 127.0.0.1)
 //! - `RKAT_PORT`: Port to bind to (default: 8080)
 
-use meerkat_rest::{router, AppState};
+use meerkat_rest::{AppState, router};
 use std::net::SocketAddr;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

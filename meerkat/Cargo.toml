@@ -39,3 +39,6 @@ all-providers = ["anthropic", "openai", "gemini"]
 # Storage backends
 jsonl-store = ["meerkat-store/jsonl"]
 memory-store = ["meerkat-store/memory"]
+
+[lints]
+workspace = true

@@ -126,7 +126,8 @@ impl Session {
         if let Some(Message::System(_)) = self.messages.first() {
             self.messages[0] = Message::System(SystemMessage { content: prompt });
         } else {
-            self.messages.insert(0, Message::System(SystemMessage { content: prompt }));
+            self.messages
+                .insert(0, Message::System(SystemMessage { content: prompt }));
         }
         self.updated_at = SystemTime::now();
     }

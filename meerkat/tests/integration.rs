@@ -69,7 +69,10 @@ mod llm_normalization {
             }
         }
 
-        assert!(got_text_delta, "Should have received at least one TextDelta");
+        assert!(
+            got_text_delta,
+            "Should have received at least one TextDelta"
+        );
         assert!(got_done, "Should have received Done event");
     }
 
@@ -106,7 +109,10 @@ mod llm_normalization {
             }
         }
 
-        assert!(got_text_delta, "Should have received at least one TextDelta");
+        assert!(
+            got_text_delta,
+            "Should have received at least one TextDelta"
+        );
         assert!(got_done, "Should have received Done event");
     }
 
@@ -143,7 +149,10 @@ mod llm_normalization {
             }
         }
 
-        assert!(got_text_delta, "Should have received at least one TextDelta");
+        assert!(
+            got_text_delta,
+            "Should have received at least one TextDelta"
+        );
         assert!(got_done, "Should have received Done event");
     }
 
@@ -161,17 +170,26 @@ mod llm_normalization {
         let auth_error = LlmError::AuthenticationFailed {
             message: "Invalid API key".to_string(),
         };
-        assert!(!auth_error.is_retryable(), "Auth errors should not be retryable");
+        assert!(
+            !auth_error.is_retryable(),
+            "Auth errors should not be retryable"
+        );
 
         // Server overload should be retryable
         let overload = LlmError::ServerOverloaded;
-        assert!(overload.is_retryable(), "Server overload should be retryable");
+        assert!(
+            overload.is_retryable(),
+            "Server overload should be retryable"
+        );
 
         // Invalid request should not be retryable
         let invalid = LlmError::InvalidRequest {
             message: "Bad request".to_string(),
         };
-        assert!(!invalid.is_retryable(), "Invalid request should not be retryable");
+        assert!(
+            !invalid.is_retryable(),
+            "Invalid request should not be retryable"
+        );
     }
 }
 
@@ -200,7 +218,10 @@ mod tool_dispatch {
         registry.register(valid_tool);
 
         // Verify tool is registered using contains()
-        assert!(registry.contains("test_tool"), "Should find registered tool");
+        assert!(
+            registry.contains("test_tool"),
+            "Should find registered tool"
+        );
     }
 
     #[test]
@@ -267,7 +288,10 @@ mod session_persistence {
         store.save(&session).await.expect("Save should succeed");
 
         // Verify file exists and is complete
-        let loaded = store.load(&session_id).await.expect("Load should succeed")
+        let loaded = store
+            .load(&session_id)
+            .await
+            .expect("Load should succeed")
             .expect("Session should exist");
         assert_eq!(loaded.messages().len(), 3);
 
@@ -304,7 +328,10 @@ mod session_persistence {
         let store2 = JsonlStore::new(temp_dir.path().to_path_buf());
 
         // Should be able to resume session
-        let resumed = store2.load(&session_id).await.expect("Resume should succeed")
+        let resumed = store2
+            .load(&session_id)
+            .await
+            .expect("Resume should succeed")
             .expect("Session should exist");
         assert_eq!(resumed.messages().len(), 2);
         assert_eq!(*resumed.id(), session_id);
@@ -346,7 +373,10 @@ mod session_persistence {
 
         // Round-trip through store
         store.save(&session).await.expect("Save failed");
-        let loaded = store.load(&original_id).await.expect("Load failed")
+        let loaded = store
+            .load(&original_id)
+            .await
+            .expect("Load failed")
             .expect("Session should exist");
 
         // Verify integrity
@@ -384,7 +414,10 @@ mod config_loading {
 
         let retry_config: RetryConfig = toml::from_str(toml_str).expect("Should parse TOML");
         assert_eq!(retry_config.max_retries, 5);
-        assert_eq!(retry_config.initial_delay, std::time::Duration::from_secs(1));
+        assert_eq!(
+            retry_config.initial_delay,
+            std::time::Duration::from_secs(1)
+        );
         assert_eq!(retry_config.max_delay, std::time::Duration::from_secs(60));
 
         // Verify BudgetLimits can be deserialized
@@ -408,10 +441,15 @@ mod retry_policy {
         let policy = RetryPolicy::default();
 
         // Should have positive retry count
-        assert!(policy.max_retries > 0, "Default policy should allow retries");
+        assert!(
+            policy.max_retries > 0,
+            "Default policy should allow retries"
+        );
 
         // Rate limit error should be retryable (check via LlmError)
-        let rate_limit = LlmError::RateLimited { retry_after_ms: None };
+        let rate_limit = LlmError::RateLimited {
+            retry_after_ms: None,
+        };
         assert!(rate_limit.is_retryable(), "Rate limit should trigger retry");
 
         // Policy should allow retries up to max
@@ -435,7 +473,10 @@ mod retry_policy {
         let invalid = LlmError::InvalidRequest {
             message: "Bad params".to_string(),
         };
-        assert!(!invalid.is_retryable(), "Invalid requests should never retry");
+        assert!(
+            !invalid.is_retryable(),
+            "Invalid requests should never retry"
+        );
     }
 
     #[test]
@@ -444,7 +485,11 @@ mod retry_policy {
 
         // First attempt has no delay
         let delay_0 = policy.delay_for_attempt(0);
-        assert_eq!(delay_0, Duration::ZERO, "First attempt should have no delay");
+        assert_eq!(
+            delay_0,
+            Duration::ZERO,
+            "First attempt should have no delay"
+        );
 
         // Subsequent delays should increase
         let delay_1 = policy.delay_for_attempt(1);
@@ -480,7 +525,10 @@ mod budget_enforcement {
 
         // Record usage within limit
         budget.record_tokens(500);
-        assert!(budget.check().is_ok(), "Budget check should pass within limit");
+        assert!(
+            budget.check().is_ok(),
+            "Budget check should pass within limit"
+        );
 
         // Should track usage
         assert_eq!(budget.token_usage(), Some((500, 1000)));
@@ -489,7 +537,10 @@ mod budget_enforcement {
         budget.record_tokens(600);
 
         // Should fail check when over limit
-        assert!(budget.check().is_err(), "Budget check should fail over limit");
+        assert!(
+            budget.check().is_err(),
+            "Budget check should fail over limit"
+        );
         assert!(budget.is_exhausted(), "Budget should be exhausted");
     }
 
@@ -524,13 +575,19 @@ mod budget_enforcement {
         // Should allow any amount of tokens
         budget.record_tokens(1_000_000);
         budget.record_tokens(1_000_000);
-        assert!(budget.check().is_ok(), "Unlimited budget should always pass");
+        assert!(
+            budget.check().is_ok(),
+            "Unlimited budget should always pass"
+        );
 
         // Should allow any number of tool calls
         for _ in 0..100 {
             budget.record_tool_call();
         }
-        assert!(budget.check().is_ok(), "Unlimited budget should always pass");
+        assert!(
+            budget.check().is_ok(),
+            "Unlimited budget should always pass"
+        );
     }
 }
 
@@ -630,7 +687,8 @@ mod sub_agent_access {
 
     #[test]
     fn test_allow_list_structure() {
-        let policy = ToolAccessPolicy::AllowList(vec!["safe_tool".to_string(), "another_safe".to_string()]);
+        let policy =
+            ToolAccessPolicy::AllowList(vec!["safe_tool".to_string(), "another_safe".to_string()]);
 
         // Should serialize correctly
         let json = serde_json::to_value(&policy).expect("Should serialize");
@@ -807,7 +865,9 @@ mod mcp_protocol {
     async fn test_mcp_tool_call_roundtrip() {
         // Test with real MCP test server if available
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-        let workspace_root = std::path::Path::new(&manifest_dir).parent().unwrap_or(std::path::Path::new("."));
+        let workspace_root = std::path::Path::new(&manifest_dir)
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
         let server_path = workspace_root.join("target/debug/mcp-test-server");
 
         if !server_path.exists() {
@@ -854,11 +914,15 @@ mod mcp_protocol {
     async fn test_meerkat_mcp_server_tools_list() {
         // Test with meerkat-mcp-server if available
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-        let workspace_root = std::path::Path::new(&manifest_dir).parent().unwrap_or(std::path::Path::new("."));
+        let workspace_root = std::path::Path::new(&manifest_dir)
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
         let server_path = workspace_root.join("target/debug/meerkat-mcp-server");
 
         if !server_path.exists() {
-            eprintln!("Skipping: meerkat-mcp-server not built (run cargo build -p meerkat-mcp-server)");
+            eprintln!(
+                "Skipping: meerkat-mcp-server not built (run cargo build -p meerkat-mcp-server)"
+            );
             return;
         }
 

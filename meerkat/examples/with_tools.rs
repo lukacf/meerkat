@@ -11,10 +11,10 @@
 use async_trait::async_trait;
 use meerkat::prelude::*;
 use meerkat::{
-    AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    LlmStreamResult, Session, ToolDef,
+    AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult, Session,
+    ToolDef,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 // Custom tool dispatcher that handles our tools
@@ -180,7 +180,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("ANTHROPIC_API_KEY environment variable must be set");
 
     // Create components
-    let llm = Arc::new(AnthropicLlmAdapter::new(api_key, "claude-sonnet-4".to_string()));
+    let llm = Arc::new(AnthropicLlmAdapter::new(
+        api_key,
+        "claude-sonnet-4".to_string(),
+    ));
     let tools = Arc::new(MathToolDispatcher);
     let store = Arc::new(MemoryStore::new());
 

@@ -20,7 +20,6 @@ pub struct Config {
     pub tools: ToolsConfig,
 }
 
-
 impl Config {
     /// Load configuration from all sources with proper layering
     /// Order: defaults → user config → project config → env vars → CLI (CLI applied separately)
@@ -76,11 +75,11 @@ impl Config {
 
     /// Merge configuration from a TOML file
     pub fn merge_file(&mut self, path: &PathBuf) -> Result<(), ConfigError> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::IoError(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
 
-        let file_config: Config = toml::from_str(&content)
-            .map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        let file_config: Config =
+            toml::from_str(&content).map_err(|e| ConfigError::ParseError(e.to_string()))?;
 
         // Merge (file values override defaults)
         self.merge(file_config);
@@ -168,8 +167,8 @@ impl Config {
             ProviderConfig::Gemini { api_key } => {
                 if api_key.is_none() {
                     // Try GEMINI_API_KEY first, then GOOGLE_API_KEY
-                    if let Ok(key) = std::env::var("GEMINI_API_KEY")
-                        .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+                    if let Ok(key) =
+                        std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
                     {
                         *api_key = Some(key);
                     }
@@ -446,7 +445,9 @@ mod optional_duration_serde {
             }
             Some(serde_json::Value::Number(n)) => {
                 // Support milliseconds as number for backward compat
-                let millis = n.as_u64().ok_or_else(|| D::Error::custom("invalid number"))?;
+                let millis = n
+                    .as_u64()
+                    .ok_or_else(|| D::Error::custom("invalid number"))?;
                 Ok(Some(Duration::from_millis(millis)))
             }
             _ => Err(D::Error::custom("expected string or number for duration")),
@@ -523,7 +524,9 @@ mod tests {
         // 4. Test CLI override (highest precedence)
         let mut config = Config::default();
         // SAFETY: Test runs single-threaded
-        unsafe { std::env::set_var("RKAT_MODEL", "env-model"); }
+        unsafe {
+            std::env::set_var("RKAT_MODEL", "env-model");
+        }
         config.apply_env_overrides().unwrap();
         config.apply_cli_overrides(CliOverrides {
             model: Some("cli-model".to_string()),
@@ -534,16 +537,22 @@ mod tests {
         assert_eq!(config.agent.model, "cli-model");
         assert_eq!(config.budget.max_tokens, Some(50000));
         // SAFETY: Test cleanup
-        unsafe { std::env::remove_var("RKAT_MODEL"); }
+        unsafe {
+            std::env::remove_var("RKAT_MODEL");
+        }
 
         // 5. Test full layering: defaults → env → file → CLI
         let mut config = Config::default();
         // Apply env
         // SAFETY: Test runs single-threaded
-        unsafe { std::env::set_var("RKAT_MAX_DURATION", "600"); }
+        unsafe {
+            std::env::set_var("RKAT_MAX_DURATION", "600");
+        }
         config.apply_env_overrides().unwrap();
         // SAFETY: Test cleanup
-        unsafe { std::env::remove_var("RKAT_MAX_DURATION"); }
+        unsafe {
+            std::env::remove_var("RKAT_MAX_DURATION");
+        }
         // Apply file (merge)
         let file_config = Config {
             budget: BudgetConfig {

@@ -1,5 +1,5 @@
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use http::header::WWW_AUTHENTICATE;
 use reqwest::header::{ACCEPT, HeaderMap};
 use sse_stream::{Sse, SseStream};
@@ -44,7 +44,8 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         session_id: Arc<str>,
         last_event_id: Option<String>,
         auth_token: Option<String>,
-    ) -> Result<BoxStream<'static, Result<Sse, sse_stream::Error>>, StreamableHttpError<Self::Error>> {
+    ) -> Result<BoxStream<'static, Result<Sse, sse_stream::Error>>, StreamableHttpError<Self::Error>>
+    {
         let mut request_builder = self
             .client
             .get(uri.as_ref())
@@ -170,10 +171,8 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
                 Ok(StreamableHttpPostResponse::Sse(event_stream, session_id))
             }
             Some(ct) if ct.as_bytes().starts_with(JSON_MIME_TYPE.as_bytes()) => {
-                let message: ServerJsonRpcMessage = response
-                    .json()
-                    .await
-                    .map_err(StreamableHttpError::Client)?;
+                let message: ServerJsonRpcMessage =
+                    response.json().await.map_err(StreamableHttpError::Client)?;
                 Ok(StreamableHttpPostResponse::Json(message, session_id))
             }
             _ => Err(StreamableHttpError::UnexpectedContentType(

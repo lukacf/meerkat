@@ -1,12 +1,10 @@
-pub(crate) mod streamable_http;
 pub(crate) mod sse;
+pub(crate) mod streamable_http;
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::collections::HashMap;
 
-pub(crate) fn headers_from_map(
-    headers: &HashMap<String, String>,
-) -> Result<HeaderMap, String> {
+pub(crate) fn headers_from_map(headers: &HashMap<String, String>) -> Result<HeaderMap, String> {
     let mut header_map = HeaderMap::new();
     for (key, value) in headers {
         let name = HeaderName::from_bytes(key.as_bytes())

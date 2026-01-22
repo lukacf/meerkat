@@ -24,3 +24,6 @@ humantime-serde = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints]
+workspace = true

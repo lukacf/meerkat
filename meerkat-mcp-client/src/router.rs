@@ -27,7 +27,8 @@ impl McpRouter {
         // Discover tools from this server
         let tools = conn.list_tools().await?;
         for tool in &tools {
-            self.tool_to_server.insert(tool.name.clone(), config.name.clone());
+            self.tool_to_server
+                .insert(tool.name.clone(), config.name.clone());
         }
 
         self.servers.insert(config.name.clone(), conn);
@@ -46,10 +47,14 @@ impl McpRouter {
 
     /// Call a tool by name
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<String, McpError> {
-        let server_name = self.tool_to_server.get(name)
+        let server_name = self
+            .tool_to_server
+            .get(name)
             .ok_or_else(|| McpError::ToolNotFound(name.to_string()))?;
 
-        let conn = self.servers.get(server_name)
+        let conn = self
+            .servers
+            .get(server_name)
             .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
 
         conn.call_tool(name, args).await
@@ -116,7 +121,10 @@ mod tests {
             HashMap::new(),
         );
 
-        router.add_server(config).await.expect("Failed to add server");
+        router
+            .add_server(config)
+            .await
+            .expect("Failed to add server");
 
         // Verify tools were discovered
         let tools = router.list_tools().await.expect("Failed to list tools");
@@ -152,8 +160,14 @@ mod tests {
             HashMap::new(),
         );
 
-        router.add_server(config1).await.expect("Failed to add server1");
-        router.add_server(config2).await.expect("Failed to add server2");
+        router
+            .add_server(config1)
+            .await
+            .expect("Failed to add server1");
+        router
+            .add_server(config2)
+            .await
+            .expect("Failed to add server2");
 
         // Shutdown all - should close both connections gracefully
         router.shutdown().await;

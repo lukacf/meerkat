@@ -276,7 +276,11 @@ fn get_test_server_path() -> Option<std::path::PathBuf> {
 }
 
 /// Create a store adapter using JsonlStore with a temp directory
-async fn create_temp_store() -> (Arc<JsonlStore>, Arc<SessionStoreAdapter<JsonlStore>>, TempDir) {
+async fn create_temp_store() -> (
+    Arc<JsonlStore>,
+    Arc<SessionStoreAdapter<JsonlStore>>,
+    TempDir,
+) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let store = JsonlStore::new(temp_dir.path().to_path_buf());
     store.init().await.expect("Failed to init store");
@@ -304,16 +308,13 @@ mod simple_chat {
 
         // Create components
         let llm_client = Arc::new(AnthropicClient::new(api_key));
-        let llm_adapter = Arc::new(LlmClientAdapter::new(
-            llm_client,
-            anthropic_model(),
-        ));
+        let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
 
         // Build agent
         let mut agent = AgentBuilder::new()
-            .model(&anthropic_model())
+            .model(anthropic_model())
             .max_tokens_per_turn(256)
             .system_prompt("You are a helpful assistant. Respond briefly.")
             .build(llm_adapter, tools, store_adapter);
@@ -332,8 +333,14 @@ mod simple_chat {
             result.text
         );
         assert_eq!(result.turns, 1, "Should complete in 1 turn");
-        assert!(result.usage.input_tokens > 0, "Should have used input tokens");
-        assert!(result.usage.output_tokens > 0, "Should have used output tokens");
+        assert!(
+            result.usage.input_tokens > 0,
+            "Should have used input tokens"
+        );
+        assert!(
+            result.usage.output_tokens > 0,
+            "Should have used output tokens"
+        );
 
         // Verify session state
         assert_eq!(
@@ -358,7 +365,7 @@ mod simple_chat {
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
 
         let mut agent = AgentBuilder::new()
-            .model(&openai_model())
+            .model(openai_model())
             .max_tokens_per_turn(256)
             .system_prompt("You are a helpful assistant. Respond briefly.")
             .build(llm_adapter, tools, store_adapter);
@@ -386,15 +393,12 @@ mod simple_chat {
         };
 
         let llm_client = Arc::new(GeminiClient::new(api_key));
-        let llm_adapter = Arc::new(LlmClientAdapter::new(
-            llm_client,
-            gemini_model(),
-        ));
+        let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, gemini_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
 
         let mut agent = AgentBuilder::new()
-            .model(&gemini_model())
+            .model(gemini_model())
             .max_tokens_per_turn(256)
             .system_prompt("You are a helpful assistant. Respond briefly.")
             .build(llm_adapter, tools, store_adapter);
@@ -432,8 +436,16 @@ mod tool_invocation {
     }
 
     impl DispatcherWrapper {
-        pub fn new(tools: Vec<ToolDef>, router: Arc<McpRouter>, timeout: std::time::Duration) -> Self {
-            Self { tools, router, timeout }
+        pub fn new(
+            tools: Vec<ToolDef>,
+            router: Arc<McpRouter>,
+            timeout: std::time::Duration,
+        ) -> Self {
+            Self {
+                tools,
+                router,
+                timeout,
+            }
         }
     }
 
@@ -495,15 +507,12 @@ mod tool_invocation {
 
         // Create agent with tool support
         let llm_client = Arc::new(AnthropicClient::new(api_key));
-        let llm_adapter = Arc::new(LlmClientAdapter::new(
-            llm_client,
-            anthropic_model(),
-        ));
+        let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
 
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
 
         let mut agent = AgentBuilder::new()
-            .model(&anthropic_model())
+            .model(anthropic_model())
             .max_tokens_per_turn(512)
             .system_prompt(
                 "You have access to an 'echo' tool. When asked to echo something, use it.",
@@ -547,15 +556,12 @@ mod multi_turn {
         };
 
         let llm_client = Arc::new(AnthropicClient::new(api_key));
-        let llm_adapter = Arc::new(LlmClientAdapter::new(
-            llm_client,
-            anthropic_model(),
-        ));
+        let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
 
         let mut agent = AgentBuilder::new()
-            .model(&anthropic_model())
+            .model(anthropic_model())
             .max_tokens_per_turn(256)
             .system_prompt("You are a helpful assistant. Keep your responses brief.")
             .build(llm_adapter, tools, store_adapter);
@@ -642,15 +648,12 @@ mod session_resume {
         // Phase 1: Create agent, establish context, save
         let session_id = {
             let llm_client = Arc::new(AnthropicClient::new(api_key.clone()));
-            let llm_adapter = Arc::new(LlmClientAdapter::new(
-                llm_client,
-                anthropic_model(),
-            ));
+            let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
             let tools = Arc::new(EmptyToolDispatcher);
             let store_adapter = Arc::new(SessionStoreAdapter::new(store.clone()));
 
             let mut agent = AgentBuilder::new()
-                .model(&anthropic_model())
+                .model(anthropic_model())
                 .max_tokens_per_turn(256)
                 .system_prompt("You are a helpful assistant. Keep your responses brief.")
                 .build(llm_adapter, tools, store_adapter);
@@ -676,16 +679,13 @@ mod session_resume {
                 .expect("Session should exist");
 
             let llm_client = Arc::new(AnthropicClient::new(api_key));
-            let llm_adapter = Arc::new(LlmClientAdapter::new(
-                llm_client,
-                anthropic_model(),
-            ));
+            let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
             let tools = Arc::new(EmptyToolDispatcher);
             let store_adapter = Arc::new(SessionStoreAdapter::new(store.clone()));
 
             // Resume with saved session
             let mut agent = AgentBuilder::new()
-                .model(&anthropic_model())
+                .model(anthropic_model())
                 .max_tokens_per_turn(256)
                 .resume_session(saved_session)
                 .build(llm_adapter, tools, store_adapter);
@@ -697,7 +697,9 @@ mod session_resume {
                 .expect("Turn should succeed");
 
             assert!(
-                result.text.contains("ALPHA") || result.text.contains("BRAVO") || result.text.contains("7"),
+                result.text.contains("ALPHA")
+                    || result.text.contains("BRAVO")
+                    || result.text.contains("7"),
                 "Should remember the secret code: {}",
                 result.text
             );
@@ -723,16 +725,13 @@ mod budget_exhaustion {
         };
 
         let llm_client = Arc::new(AnthropicClient::new(api_key));
-        let llm_adapter = Arc::new(LlmClientAdapter::new(
-            llm_client,
-            anthropic_model(),
-        ));
+        let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
 
         // Create agent with very low token budget
         let mut agent = AgentBuilder::new()
-            .model(&anthropic_model())
+            .model(anthropic_model())
             .max_tokens_per_turn(100)
             .system_prompt("You are a helpful assistant.")
             .budget(BudgetLimits {
@@ -787,10 +786,7 @@ mod budget_exhaustion {
         };
 
         let llm_client = Arc::new(AnthropicClient::new(api_key));
-        let llm_adapter = Arc::new(LlmClientAdapter::new(
-            llm_client,
-            anthropic_model(),
-        ));
+        let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
 
         // Create mock tools
         let tools = Arc::new(
@@ -803,7 +799,7 @@ mod budget_exhaustion {
 
         // Create agent with tool call limit
         let mut agent = AgentBuilder::new()
-            .model(&anthropic_model())
+            .model(anthropic_model())
             .max_tokens_per_turn(512)
             .system_prompt("You have tools available. Use them when asked.")
             .budget(BudgetLimits {
@@ -874,8 +870,10 @@ mod parallel_tools {
         // and LLM behavior. This test verifies that multiple tool results can be
         // handled correctly when the LLM requests multiple tools.
 
-        eprintln!("Parallel tool execution test: tools available: {:?}",
-            tools.iter().map(|t| &t.name).collect::<Vec<_>>());
+        eprintln!(
+            "Parallel tool execution test: tools available: {:?}",
+            tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
 
         let router = Arc::new(router);
         let dispatcher = Arc::new(tool_invocation::DispatcherWrapper::new(
@@ -885,15 +883,12 @@ mod parallel_tools {
         ));
 
         let llm_client = Arc::new(AnthropicClient::new(api_key));
-        let llm_adapter = Arc::new(LlmClientAdapter::new(
-            llm_client,
-            anthropic_model(),
-        ));
+        let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
 
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
 
         let mut agent = AgentBuilder::new()
-            .model(&anthropic_model())
+            .model(anthropic_model())
             .max_tokens_per_turn(512)
             .system_prompt("You have access to an 'add' tool that adds two numbers.")
             .build(llm_adapter, dispatcher, store_adapter);
@@ -924,9 +919,7 @@ mod parallel_tools {
 /// Tests fork, spawn, context strategies, tool access policies, and depth limits
 mod sub_agent_fork {
     use super::*;
-    use meerkat::{
-        ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, SpawnSpec, SubAgentManager,
-    };
+    use meerkat::{ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, SpawnSpec, SubAgentManager};
 
     #[tokio::test]
     #[ignore = "Requires ANTHROPIC_API_KEY"]
@@ -938,15 +931,12 @@ mod sub_agent_fork {
 
         // Create a parent agent
         let llm_client = Arc::new(AnthropicClient::new(api_key));
-        let client = Arc::new(LlmClientAdapter::new(
-            llm_client,
-            anthropic_model(),
-        ));
+        let client = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store, _temp_dir) = create_temp_store().await;
 
         let mut agent = AgentBuilder::new()
-            .model(&anthropic_model())
+            .model(anthropic_model())
             .system_prompt("You are a helpful assistant.")
             .max_tokens_per_turn(1024)
             .concurrency_limits(ConcurrencyLimits {
@@ -992,15 +982,12 @@ mod sub_agent_fork {
         };
 
         let llm_client = Arc::new(AnthropicClient::new(api_key));
-        let client = Arc::new(LlmClientAdapter::new(
-            llm_client,
-            anthropic_model(),
-        ));
+        let client = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store, _temp_dir) = create_temp_store().await;
 
         let agent = AgentBuilder::new()
-            .model(&anthropic_model())
+            .model(anthropic_model())
             .system_prompt("You are a helpful assistant.")
             .max_tokens_per_turn(1024)
             .build(client, tools, store);
@@ -1105,16 +1092,13 @@ mod sub_agent_fork {
         };
 
         let llm_client = Arc::new(AnthropicClient::new(api_key));
-        let client = Arc::new(LlmClientAdapter::new(
-            llm_client,
-            anthropic_model(),
-        ));
+        let client = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store, _temp_dir) = create_temp_store().await;
 
         // Create agent with max_depth=0 - no children allowed
         let agent = AgentBuilder::new()
-            .model(&anthropic_model())
+            .model(anthropic_model())
             .concurrency_limits(ConcurrencyLimits {
                 max_depth: 0,
                 max_concurrent_ops: 10,

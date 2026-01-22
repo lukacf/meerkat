@@ -28,3 +28,6 @@ default = ["anthropic", "openai", "gemini"]
 anthropic = []
 openai = []
 gemini = []
+
+[lints]
+workspace = true

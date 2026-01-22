@@ -40,28 +40,28 @@ impl LoopState {
 
         match (self, next) {
             // From CallingLlm
-            (CallingLlm, WaitingForOps) => true,      // ops pending after tool dispatch
-            (CallingLlm, DrainingEvents) => true,     // tool_use stop reason
-            (CallingLlm, Completed) => true,          // end_turn and no ops
-            (CallingLlm, ErrorRecovery) => true,      // LLM error
-            (CallingLlm, Cancelling) => true,         // cancel signal
+            (CallingLlm, WaitingForOps) => true, // ops pending after tool dispatch
+            (CallingLlm, DrainingEvents) => true, // tool_use stop reason
+            (CallingLlm, Completed) => true,     // end_turn and no ops
+            (CallingLlm, ErrorRecovery) => true, // LLM error
+            (CallingLlm, Cancelling) => true,    // cancel signal
 
             // From WaitingForOps
-            (WaitingForOps, DrainingEvents) => true,  // when ops complete
-            (WaitingForOps, Cancelling) => true,      // cancel signal
+            (WaitingForOps, DrainingEvents) => true, // when ops complete
+            (WaitingForOps, Cancelling) => true,     // cancel signal
 
             // From DrainingEvents
-            (DrainingEvents, CallingLlm) => true,     // more work needed
-            (DrainingEvents, Completed) => true,      // done
-            (DrainingEvents, Cancelling) => true,     // cancel signal
+            (DrainingEvents, CallingLlm) => true, // more work needed
+            (DrainingEvents, Completed) => true,  // done
+            (DrainingEvents, Cancelling) => true, // cancel signal
 
             // From Cancelling
-            (Cancelling, Completed) => true,          // after drain
+            (Cancelling, Completed) => true, // after drain
 
             // From ErrorRecovery
-            (ErrorRecovery, CallingLlm) => true,      // after recovery
-            (ErrorRecovery, Completed) => true,       // if unrecoverable
-            (ErrorRecovery, Cancelling) => true,      // cancel during recovery
+            (ErrorRecovery, CallingLlm) => true, // after recovery
+            (ErrorRecovery, Completed) => true,  // if unrecoverable
+            (ErrorRecovery, Cancelling) => true, // cancel during recovery
 
             // No other transitions allowed
             _ => false,

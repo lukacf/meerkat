@@ -64,15 +64,11 @@ pub struct McpHttpConfig {
 /// HTTP transport selection for URL-based servers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum McpHttpTransport {
+    #[default]
     StreamableHttp,
     Sse,
-}
-
-impl Default for McpHttpTransport {
-    fn default() -> Self {
-        McpHttpTransport::StreamableHttp
-    }
 }
 
 /// MCP server transport configuration
@@ -280,8 +276,7 @@ fn read_mcp_file(path: Option<&Path>) -> Result<McpConfig, McpConfigError> {
     if !path.exists() {
         return Ok(McpConfig::default());
     }
-    let contents =
-        fs::read_to_string(path).map_err(|e| McpConfigError::Io(e.to_string()))?;
+    let contents = fs::read_to_string(path).map_err(|e| McpConfigError::Io(e.to_string()))?;
     let parsed: McpConfig = toml::from_str(&contents).map_err(|e| McpConfigError::Parse {
         path: path.display().to_string(),
         message: e.to_string(),
@@ -420,7 +415,9 @@ pub fn find_project_mcp_in(dir: &Path) -> Option<PathBuf> {
 
 /// Get the project MCP config path for the current directory (creates path even if doesn't exist)
 pub fn project_mcp_path() -> Option<PathBuf> {
-    std::env::current_dir().ok().map(|cwd| cwd.join(".rkat/mcp.toml"))
+    std::env::current_dir()
+        .ok()
+        .map(|cwd| cwd.join(".rkat/mcp.toml"))
 }
 
 /// Get the project MCP config directory for the current directory
@@ -528,25 +525,30 @@ headers = { Authorization = "Bearer token" }
         let user_dir = temp.path().join("user");
         fs::create_dir_all(&user_dir).unwrap();
         let user_file = user_dir.join("mcp.toml");
-        fs::write(&user_file, r#"
+        fs::write(
+            &user_file,
+            r#"
 [[servers]]
 name = "user-server"
 command = "user-cmd"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let project_dir = temp.path().join("project");
         fs::create_dir_all(&project_dir).unwrap();
         let project_file = project_dir.join("mcp.toml");
-        fs::write(&project_file, r#"
+        fs::write(
+            &project_file,
+            r#"
 [[servers]]
 name = "project-server"
 command = "project-cmd"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
-        let config = McpConfig::load_from_paths(
-            Some(&user_file),
-            Some(&project_file),
-        ).unwrap();
+        let config = McpConfig::load_from_paths(Some(&user_file), Some(&project_file)).unwrap();
 
         assert_eq!(config.servers.len(), 2);
         // Project first
@@ -561,11 +563,15 @@ command = "project-cmd"
         // Create parent/.rkat/mcp.toml (should NOT be found)
         let parent_config = temp.path().join(".rkat");
         fs::create_dir_all(&parent_config).unwrap();
-        fs::write(parent_config.join("mcp.toml"), r#"
+        fs::write(
+            parent_config.join("mcp.toml"),
+            r#"
 [[servers]]
 name = "parent-server"
 command = "should-not-load"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         // Create parent/child/ directory (no .rkat here)
         let child_dir = temp.path().join("child");
@@ -573,7 +579,10 @@ command = "should-not-load"
 
         // Looking from child/ should NOT find parent/.rkat/mcp.toml
         let result = find_project_mcp_in(&child_dir);
-        assert!(result.is_none(), "Should not find config in parent directory");
+        assert!(
+            result.is_none(),
+            "Should not find config in parent directory"
+        );
 
         // But looking from parent/ should find it
         let result = find_project_mcp_in(temp.path());
@@ -588,11 +597,15 @@ command = "should-not-load"
         let meerkat_dir = temp.path().join(".rkat");
         fs::create_dir_all(&meerkat_dir).unwrap();
         let config_path = meerkat_dir.join("mcp.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 [[servers]]
 name = "local-server"
 command = "echo"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let result = find_project_mcp_in(temp.path());
         assert_eq!(result, Some(config_path));
@@ -607,7 +620,10 @@ url = "https://mcp.example.com/mcp"
 "#;
         let config: McpConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.servers.len(), 1);
-        assert_eq!(config.servers[0].transport_kind(), McpTransportKind::StreamableHttp);
+        assert_eq!(
+            config.servers[0].transport_kind(),
+            McpTransportKind::StreamableHttp
+        );
     }
 
     #[test]

@@ -5,8 +5,6 @@
 //! ANTHROPIC_API_KEY=your-key cargo run --example simple
 //! ```
 
-use meerkat::prelude::*;
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get API key from environment

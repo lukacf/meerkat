@@ -35,10 +35,15 @@ impl ToolRegistry {
     }
 
     /// Validate arguments against a tool's schema
-    pub fn validate(&self, name: &str, args: &Value) -> Result<(), crate::error::ToolValidationError> {
-        let _tool = self.tools.get(name).ok_or_else(|| {
-            crate::error::ToolValidationError::ToolNotFound(name.to_string())
-        })?;
+    pub fn validate(
+        &self,
+        name: &str,
+        args: &Value,
+    ) -> Result<(), crate::error::ToolValidationError> {
+        let _tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| crate::error::ToolValidationError::ToolNotFound(name.to_string()))?;
 
         // Validate against compiled schema if available
         if let Some(validator) = self.validators.get(name) {

@@ -115,9 +115,8 @@ impl GeminiClient {
         }
 
         if let Some(temp) = request.temperature {
-            body["generationConfig"]["temperature"] = Value::Number(
-                serde_json::Number::from_f64(temp as f64).unwrap()
-            );
+            body["generationConfig"]["temperature"] =
+                Value::Number(serde_json::Number::from_f64(temp as f64).unwrap());
         }
 
         if !request.tools.is_empty() {
@@ -270,11 +269,7 @@ impl LlmClient for GeminiClient {
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
-        let url = format!(
-            "{}/v1beta/models?key={}",
-            self.base_url,
-            self.api_key
-        );
+        let url = format!("{}/v1beta/models?key={}", self.base_url, self.api_key);
 
         let response = self
             .http

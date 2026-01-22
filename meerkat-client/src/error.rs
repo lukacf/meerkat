@@ -73,9 +73,7 @@ impl LlmError {
     /// Get retry-after hint if available
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_ms } => {
-                retry_after_ms.map(Duration::from_millis)
-            }
+            Self::RateLimited { retry_after_ms } => retry_after_ms.map(Duration::from_millis),
             _ => None,
         }
     }
@@ -86,7 +84,9 @@ impl LlmError {
             401 => Self::AuthenticationFailed { message },
             403 => Self::InvalidApiKey,
             404 => Self::ModelNotFound { model: message },
-            429 => Self::RateLimited { retry_after_ms: None },
+            429 => Self::RateLimited {
+                retry_after_ms: None,
+            },
             503 => Self::ServerOverloaded,
             s if s >= 500 => Self::ServerError { status: s, message },
             s if s >= 400 => Self::InvalidRequest { message },
@@ -101,41 +101,58 @@ mod tests {
 
     #[test]
     fn test_retryable_errors() {
-        assert!(LlmError::RateLimited { retry_after_ms: Some(1000) }.is_retryable());
+        assert!(
+            LlmError::RateLimited {
+                retry_after_ms: Some(1000)
+            }
+            .is_retryable()
+        );
         assert!(LlmError::ServerOverloaded.is_retryable());
         assert!(LlmError::NetworkTimeout { duration_ms: 30000 }.is_retryable());
         assert!(LlmError::ConnectionReset.is_retryable());
-        assert!(LlmError::ServerError {
-            status: 500,
-            message: "Internal error".to_string()
-        }
-        .is_retryable());
-        assert!(LlmError::ServerError {
-            status: 502,
-            message: "Bad gateway".to_string()
-        }
-        .is_retryable());
+        assert!(
+            LlmError::ServerError {
+                status: 500,
+                message: "Internal error".to_string()
+            }
+            .is_retryable()
+        );
+        assert!(
+            LlmError::ServerError {
+                status: 502,
+                message: "Bad gateway".to_string()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn test_non_retryable_errors() {
-        assert!(!LlmError::InvalidRequest {
-            message: "Bad request".to_string()
-        }
-        .is_retryable());
-        assert!(!LlmError::AuthenticationFailed {
-            message: "Invalid key".to_string()
-        }
-        .is_retryable());
+        assert!(
+            !LlmError::InvalidRequest {
+                message: "Bad request".to_string()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !LlmError::AuthenticationFailed {
+                message: "Invalid key".to_string()
+            }
+            .is_retryable()
+        );
         assert!(!LlmError::InvalidApiKey.is_retryable());
-        assert!(!LlmError::ContentFiltered {
-            reason: "Policy".to_string()
-        }
-        .is_retryable());
-        assert!(!LlmError::ModelNotFound {
-            model: "gpt-5".to_string()
-        }
-        .is_retryable());
+        assert!(
+            !LlmError::ContentFiltered {
+                reason: "Policy".to_string()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !LlmError::ModelNotFound {
+                model: "gpt-5".to_string()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]

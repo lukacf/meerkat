@@ -7,14 +7,14 @@
 //! - GET /sessions/:id/events - SSE stream for agent events
 
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::{
-        sse::{Event, Sse},
         IntoResponse, Response,
+        sse::{Event, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
@@ -24,7 +24,7 @@ use meerkat::{
     SessionMeta, SessionStore, ToolDef,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -354,9 +354,11 @@ impl IntoResponse for ApiError {
         let (status, code, message) = match self {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg),
-            ApiError::Configuration(msg) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "CONFIGURATION_ERROR", msg)
-            }
+            ApiError::Configuration(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "CONFIGURATION_ERROR",
+                msg,
+            ),
             ApiError::Agent(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "AGENT_ERROR", msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg),
         };

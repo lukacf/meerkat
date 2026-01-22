@@ -2,18 +2,17 @@
 //!
 //! Handles fork/spawn operations, steering queues, and result collection.
 
-use crate::budget::{Budget, BudgetLimits};
+use crate::budget::BudgetLimits;
 use crate::error::AgentError;
 use crate::ops::{
-    ContextStrategy, ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, OperationId, OperationResult,
-    SpawnSpec, SteeringHandle, SteeringMessage, SteeringStatus, SubAgentState, ToolAccessPolicy,
+    ConcurrencyLimits, ContextStrategy, ForkBudgetPolicy, OperationId, OperationResult,
+    SteeringHandle, SteeringMessage, SteeringStatus, SubAgentState, ToolAccessPolicy,
 };
 use crate::session::Session;
 use crate::types::{Message, ToolDef, UserMessage};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use uuid::Uuid;
 
 /// A running sub-agent handle
@@ -89,7 +88,10 @@ impl SubAgentManager {
     /// Check if we can spawn more sub-agents
     pub async fn can_spawn(&self) -> bool {
         let agents = self.agents.read().await;
-        let running = agents.values().filter(|a| a.state == SubAgentState::Running).count();
+        let running = agents
+            .values()
+            .filter(|a| a.state == SubAgentState::Running)
+            .count();
         running < self.limits.max_concurrent_agents && self.current_depth < self.limits.max_depth
     }
 
@@ -135,7 +137,8 @@ impl SubAgentManager {
                 }
 
                 // Add messages from the end until we hit the budget
-                let non_system: Vec<_> = parent_session.messages()
+                let non_system: Vec<_> = parent_session
+                    .messages()
                     .iter()
                     .skip(1) // Skip system message
                     .collect();
@@ -177,20 +180,16 @@ impl SubAgentManager {
     ) -> Vec<ToolDef> {
         match policy {
             ToolAccessPolicy::Inherit => all_tools.to_vec(),
-            ToolAccessPolicy::AllowList(allowed) => {
-                all_tools
-                    .iter()
-                    .filter(|t| allowed.contains(&t.name))
-                    .cloned()
-                    .collect()
-            }
-            ToolAccessPolicy::DenyList(denied) => {
-                all_tools
-                    .iter()
-                    .filter(|t| !denied.contains(&t.name))
-                    .cloned()
-                    .collect()
-            }
+            ToolAccessPolicy::AllowList(allowed) => all_tools
+                .iter()
+                .filter(|t| allowed.contains(&t.name))
+                .cloned()
+                .collect(),
+            ToolAccessPolicy::DenyList(denied) => all_tools
+                .iter()
+                .filter(|t| !denied.contains(&t.name))
+                .cloned()
+                .collect(),
         }
     }
 
@@ -266,11 +265,15 @@ impl SubAgentManager {
     }
 
     /// Send steering message to a running sub-agent
-    pub async fn steer(&self, id: &OperationId, message: String) -> Result<SteeringHandle, AgentError> {
+    pub async fn steer(
+        &self,
+        id: &OperationId,
+        message: String,
+    ) -> Result<SteeringHandle, AgentError> {
         let mut agents = self.agents.write().await;
-        let handle = agents.get_mut(id).ok_or_else(|| AgentError::SubAgentNotFound {
-            id: id.to_string(),
-        })?;
+        let handle = agents
+            .get_mut(id)
+            .ok_or_else(|| AgentError::SubAgentNotFound { id: id.to_string() })?;
 
         if handle.state != SubAgentState::Running {
             return Err(AgentError::SubAgentNotRunning {

@@ -193,11 +193,23 @@ mod tests {
         }
 
         // Test limit
-        let sessions = store.list(SessionFilter { limit: Some(3), ..Default::default() }).await.unwrap();
+        let sessions = store
+            .list(SessionFilter {
+                limit: Some(3),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(sessions.len(), 3);
 
         // Test offset
-        let sessions = store.list(SessionFilter { offset: Some(2), ..Default::default() }).await.unwrap();
+        let sessions = store
+            .list(SessionFilter {
+                offset: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(sessions.len(), 3);
     }
 }

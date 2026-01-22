@@ -25,3 +25,6 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 default = ["jsonl", "memory"]
 jsonl = []
 memory = []
+
+[lints]
+workspace = true

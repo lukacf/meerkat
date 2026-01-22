@@ -23,40 +23,74 @@
 
 // Re-export core types
 pub use meerkat_core::{
-    // Types
-    Message, UserMessage, AssistantMessage, SystemMessage,
-    ToolCall, ToolResult, ToolDef,
-    StopReason, Usage, RunResult,
-    SessionId, ArtifactRef,
-    // Session
-    Session, SessionMeta, SESSION_VERSION,
-    // Events
-    AgentEvent, BudgetType,
-    // Operations
-    WorkKind, ResultShape, OperationId, OperationSpec, OperationPolicy, OpEvent,
-    ContextStrategy, ForkBudgetPolicy, ToolAccessPolicy, ConcurrencyLimits,
-    OperationResult, SpawnSpec, ForkBranch,
-    SteeringMessage, SteeringHandle, SteeringStatus, SubAgentState,
-    // State
-    LoopState,
-    // Config
-    Config, AgentConfig, ProviderConfig, StorageConfig, BudgetConfig, RetryConfig,
-    // Budget
-    Budget, BudgetPool, BudgetLimits,
-    // Retry
-    RetryPolicy,
+    // Agent
+    Agent,
+    AgentBuilder,
+    AgentConfig,
     // Errors
     AgentError,
-    // Agent
-    Agent, AgentBuilder, AgentLlmClient, AgentToolDispatcher, AgentSessionStore, LlmStreamResult,
+    // Events
+    AgentEvent,
+    AgentLlmClient,
+    AgentSessionStore,
+    AgentToolDispatcher,
+    ArtifactRef,
+    AssistantMessage,
+    // Budget
+    Budget,
+    BudgetConfig,
+    BudgetLimits,
+    BudgetPool,
+    BudgetType,
+    ConcurrencyLimits,
+    // Config
+    Config,
+    ContextStrategy,
+    ForkBranch,
+    ForkBudgetPolicy,
+    LlmStreamResult,
+    // State
+    LoopState,
+    // Types
+    Message,
+    OpEvent,
+    OperationId,
+    OperationPolicy,
+    OperationResult,
+    OperationSpec,
+    ProviderConfig,
+    ResultShape,
+    RetryConfig,
+    // Retry
+    RetryPolicy,
+    RunResult,
+    SESSION_VERSION,
+    // Session
+    Session,
+    SessionId,
+    SessionMeta,
+    SpawnSpec,
+    SteeringHandle,
+    SteeringMessage,
+    SteeringStatus,
+    StopReason,
+    StorageConfig,
     // Sub-agents
     SubAgentManager,
+    SubAgentState,
+    SystemMessage,
+    ToolAccessPolicy,
+    ToolCall,
+    ToolDef,
+    ToolResult,
+    Usage,
+    UserMessage,
+    // Operations
+    WorkKind,
 };
 
 // Re-export client types
-pub use meerkat_client::{
-    LlmClient, LlmEvent, LlmError, LlmRequest, LlmResponse,
-};
+pub use meerkat_client::{LlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse};
 
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;
@@ -68,9 +102,7 @@ pub use meerkat_client::OpenAiClient;
 pub use meerkat_client::GeminiClient;
 
 // Re-export store types
-pub use meerkat_store::{
-    SessionStore, SessionFilter, StoreError,
-};
+pub use meerkat_store::{SessionFilter, SessionStore, StoreError};
 
 #[cfg(feature = "jsonl-store")]
 pub use meerkat_store::JsonlStore;
@@ -80,14 +112,11 @@ pub use meerkat_store::MemoryStore;
 
 // Re-export tools
 pub use meerkat_tools::{
-    ToolRegistry, ToolDispatcher,
-    ToolError, ToolValidationError, DispatchError,
+    DispatchError, ToolDispatcher, ToolError, ToolRegistry, ToolValidationError,
 };
 
 // Re-export MCP client
-pub use meerkat_mcp_client::{
-    McpRouter, McpError, McpServerConfig, McpConnection,
-};
+pub use meerkat_mcp_client::{McpConnection, McpError, McpRouter, McpServerConfig};
 
 // SDK module
 mod sdk;
@@ -96,17 +125,10 @@ pub use sdk::*;
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use super::{
-        Message, UserMessage, AssistantMessage, SystemMessage,
-        ToolCall, ToolResult, ToolDef,
-        StopReason, Usage, RunResult,
-        SessionId, Session, SessionMeta,
-        AgentEvent, BudgetType,
-        Config, AgentConfig,
-        Budget, BudgetLimits,
-        RetryPolicy,
-        AgentError,
-        LlmClient, LlmEvent, LlmError, LlmRequest,
-        SessionStore, SessionFilter,
+        AgentConfig, AgentError, AgentEvent, AssistantMessage, Budget, BudgetLimits, BudgetType,
+        Config, LlmClient, LlmError, LlmEvent, LlmRequest, Message, RetryPolicy, RunResult,
+        Session, SessionFilter, SessionId, SessionMeta, SessionStore, StopReason, SystemMessage,
+        ToolCall, ToolDef, ToolResult, Usage, UserMessage,
     };
 
     #[cfg(feature = "anthropic")]

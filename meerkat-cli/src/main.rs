@@ -3,16 +3,19 @@
 mod adapters;
 mod mcp;
 
-use adapters::{CliToolDispatcher, DynLlmClientAdapter, EmptyToolDispatcher, McpRouterAdapter, SessionStoreAdapter};
+use adapters::{
+    CliToolDispatcher, DynLlmClientAdapter, EmptyToolDispatcher, McpRouterAdapter,
+    SessionStoreAdapter,
+};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use meerkat_client::{AnthropicClient, GeminiClient, OpenAiClient};
-use meerkat_core::mcp_config::{McpScope, McpTransportKind};
+use meerkat_core::SessionId;
 use meerkat_core::SystemPromptConfig;
 use meerkat_core::agent::AgentBuilder;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
-use meerkat_core::SessionId;
+use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_store::{JsonlStore, SessionFilter, SessionStore};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -241,25 +244,25 @@ async fn main() -> ExitCode {
                         max_duration: dur,
                         max_tool_calls,
                     };
-                    run_agent(&prompt, &model, resolved_provider, max_tokens, limits, &output).await
+                    run_agent(
+                        &prompt,
+                        &model,
+                        resolved_provider,
+                        max_tokens,
+                        limits,
+                        &output,
+                    )
+                    .await
                 }
                 Err(e) => Err(e),
             }
         }
-        Commands::Resume { session_id, prompt } => {
-            resume_session(&session_id, &prompt).await
-        }
+        Commands::Resume { session_id, prompt } => resume_session(&session_id, &prompt).await,
         Commands::Sessions { command } => match command {
-            SessionCommands::List { limit } => {
-                list_sessions(limit).await
-            }
-            SessionCommands::Show { id } => {
-                show_session(&id).await
-            }
+            SessionCommands::List { limit } => list_sessions(limit).await,
+            SessionCommands::Show { id } => show_session(&id).await,
         },
-        Commands::Mcp { command } => {
-            handle_mcp_command(command)
-        }
+        Commands::Mcp { command } => handle_mcp_command(command),
     };
 
     // Map result to exit code
@@ -282,8 +285,7 @@ async fn main() -> ExitCode {
 
 /// Parse a duration string like "5m", "1h30m", "30s"
 fn parse_duration(s: &str) -> anyhow::Result<Duration> {
-    humantime::parse_duration(s)
-        .map_err(|e| anyhow::anyhow!("Invalid duration '{}': {}", s, e))
+    humantime::parse_duration(s).map_err(|e| anyhow::anyhow!("Invalid duration '{}': {}", s, e))
 }
 
 /// Get the default session store directory
@@ -306,8 +308,8 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
     use meerkat_mcp_client::McpRouter;
 
     // Load MCP config with scope info for security warnings
-    let servers_with_scope = McpConfig::load_with_scopes()
-        .map_err(|e| anyhow::anyhow!("MCP config error: {}", e))?;
+    let servers_with_scope =
+        McpConfig::load_with_scopes().map_err(|e| anyhow::anyhow!("MCP config error: {}", e))?;
 
     if servers_with_scope.is_empty() {
         return Ok(None);
@@ -353,7 +355,10 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
 
     // Create adapter and cache tools
     let adapter = McpRouterAdapter::new(router);
-    adapter.refresh_tools().await.map_err(|e| anyhow::anyhow!("Failed to refresh MCP tools: {}", e))?;
+    adapter
+        .refresh_tools()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to refresh MCP tools: {}", e))?;
 
     Ok(Some(adapter))
 }
@@ -389,7 +394,7 @@ async fn run_agent(
 
     // Load MCP config and create tool dispatcher
     let tools: Arc<CliToolDispatcher> = match create_mcp_tools().await {
-        Ok(Some(adapter)) => Arc::new(CliToolDispatcher::Mcp(adapter)),
+        Ok(Some(adapter)) => Arc::new(CliToolDispatcher::Mcp(Box::new(adapter))),
         Ok(None) => Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher)),
         Err(e) => {
             tracing::warn!("Failed to load MCP tools: {}", e);
@@ -461,9 +466,8 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     })?;
 
     // Parse session ID
-    let session_id = SessionId::parse(session_id).map_err(|e| {
-        anyhow::anyhow!("Invalid session ID '{}': {}", session_id, e)
-    })?;
+    let session_id = SessionId::parse(session_id)
+        .map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", session_id, e))?;
 
     // Load the session from store
     let store = create_session_store();
@@ -473,7 +477,11 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
 
-    tracing::info!("Resuming session {} with {} messages", session_id, session.messages().len());
+    tracing::info!(
+        "Resuming session {} with {} messages",
+        session_id,
+        session.messages().len()
+    );
 
     // Create the LLM client (default model for resume)
     // TODO: Store provider in session metadata to restore correct provider on resume
@@ -483,7 +491,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
 
     // Load MCP config and create tool dispatcher
     let tools: Arc<CliToolDispatcher> = match create_mcp_tools().await {
-        Ok(Some(adapter)) => Arc::new(CliToolDispatcher::Mcp(adapter)),
+        Ok(Some(adapter)) => Arc::new(CliToolDispatcher::Mcp(Box::new(adapter))),
         Ok(None) => Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher)),
         Err(e) => {
             tracing::warn!("Failed to load MCP tools: {}", e);
@@ -517,10 +525,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     println!("{}", result.text);
     eprintln!(
         "\n[Session: {} | Turns: {} | Tokens: {} in / {} out]",
-        result.session_id,
-        result.turns,
-        result.usage.input_tokens,
-        result.usage.output_tokens
+        result.session_id, result.turns, result.usage.input_tokens, result.usage.output_tokens
     );
 
     Ok(())
@@ -544,7 +549,10 @@ async fn list_sessions(limit: usize) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("{:<40} {:<12} {:<20} {:<20}", "ID", "MESSAGES", "CREATED", "UPDATED");
+    println!(
+        "{:<40} {:<12} {:<20} {:<20}",
+        "ID", "MESSAGES", "CREATED", "UPDATED"
+    );
     println!("{}", "-".repeat(92));
 
     for meta in sessions {
@@ -567,9 +575,8 @@ async fn list_sessions(limit: usize) -> anyhow::Result<()> {
 /// Show session details
 async fn show_session(id: &str) -> anyhow::Result<()> {
     // Parse session ID
-    let session_id = SessionId::parse(id).map_err(|e| {
-        anyhow::anyhow!("Invalid session ID '{}': {}", id, e)
-    })?;
+    let session_id =
+        SessionId::parse(id).map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", id, e))?;
 
     let store = create_session_store();
     let session = store
@@ -608,7 +615,10 @@ async fn show_session(id: &str) -> anyhow::Result<()> {
                     println!("  {}", display_text);
                 }
                 if !a.tool_calls.is_empty() {
-                    println!("  Tool calls: {:?}", a.tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>());
+                    println!(
+                        "  Tool calls: {:?}",
+                        a.tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>()
+                    );
                 }
             }
             Message::ToolResults { results } => {
@@ -633,13 +643,29 @@ async fn show_session(id: &str) -> anyhow::Result<()> {
 /// Handle MCP subcommands
 fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
     match command {
-        McpCommands::Add { name, transport, user, url, headers, env, command } => {
+        McpCommands::Add {
+            name,
+            transport,
+            user,
+            url,
+            headers,
+            env,
+            command,
+        } => {
             // user flag means user scope, otherwise default to project
-            mcp::add_server(name, transport.map(|t| match t {
-                CliTransport::Stdio => McpTransportKind::Stdio,
-                CliTransport::Http => McpTransportKind::StreamableHttp,
-                CliTransport::Sse => McpTransportKind::Sse,
-            }), url, headers, command, env, !user)
+            mcp::add_server(
+                name,
+                transport.map(|t| match t {
+                    CliTransport::Stdio => McpTransportKind::Stdio,
+                    CliTransport::Http => McpTransportKind::StreamableHttp,
+                    CliTransport::Sse => McpTransportKind::Sse,
+                }),
+                url,
+                headers,
+                command,
+                env,
+                !user,
+            )
         }
         McpCommands::Remove { name, scope } => {
             let scope = scope.map(|s| match s {
@@ -721,33 +747,81 @@ mod tests {
 
     #[test]
     fn test_infer_provider_anthropic() {
-        assert_eq!(Provider::infer_from_model("claude-3-opus"), Some(Provider::Anthropic));
-        assert_eq!(Provider::infer_from_model("claude-sonnet-4"), Some(Provider::Anthropic));
-        assert_eq!(Provider::infer_from_model("claude-sonnet-4-20250514"), Some(Provider::Anthropic));
-        assert_eq!(Provider::infer_from_model("claude-opus-4-5"), Some(Provider::Anthropic));
-        assert_eq!(Provider::infer_from_model("Claude-3-Opus"), Some(Provider::Anthropic)); // case insensitive
+        assert_eq!(
+            Provider::infer_from_model("claude-3-opus"),
+            Some(Provider::Anthropic)
+        );
+        assert_eq!(
+            Provider::infer_from_model("claude-sonnet-4"),
+            Some(Provider::Anthropic)
+        );
+        assert_eq!(
+            Provider::infer_from_model("claude-sonnet-4-20250514"),
+            Some(Provider::Anthropic)
+        );
+        assert_eq!(
+            Provider::infer_from_model("claude-opus-4-5"),
+            Some(Provider::Anthropic)
+        );
+        assert_eq!(
+            Provider::infer_from_model("Claude-3-Opus"),
+            Some(Provider::Anthropic)
+        ); // case insensitive
     }
 
     #[test]
     fn test_infer_provider_openai() {
         assert_eq!(Provider::infer_from_model("gpt-4"), Some(Provider::Openai));
         assert_eq!(Provider::infer_from_model("gpt-4o"), Some(Provider::Openai));
-        assert_eq!(Provider::infer_from_model("gpt-4-turbo"), Some(Provider::Openai));
-        assert_eq!(Provider::infer_from_model("gpt-5.2"), Some(Provider::Openai));
-        assert_eq!(Provider::infer_from_model("o1-preview"), Some(Provider::Openai));
-        assert_eq!(Provider::infer_from_model("o1-mini"), Some(Provider::Openai));
-        assert_eq!(Provider::infer_from_model("o3-mini"), Some(Provider::Openai));
-        assert_eq!(Provider::infer_from_model("chatgpt-4o-latest"), Some(Provider::Openai));
+        assert_eq!(
+            Provider::infer_from_model("gpt-4-turbo"),
+            Some(Provider::Openai)
+        );
+        assert_eq!(
+            Provider::infer_from_model("gpt-5.2"),
+            Some(Provider::Openai)
+        );
+        assert_eq!(
+            Provider::infer_from_model("o1-preview"),
+            Some(Provider::Openai)
+        );
+        assert_eq!(
+            Provider::infer_from_model("o1-mini"),
+            Some(Provider::Openai)
+        );
+        assert_eq!(
+            Provider::infer_from_model("o3-mini"),
+            Some(Provider::Openai)
+        );
+        assert_eq!(
+            Provider::infer_from_model("chatgpt-4o-latest"),
+            Some(Provider::Openai)
+        );
         assert_eq!(Provider::infer_from_model("GPT-4"), Some(Provider::Openai)); // case insensitive
     }
 
     #[test]
     fn test_infer_provider_gemini() {
-        assert_eq!(Provider::infer_from_model("gemini-pro"), Some(Provider::Gemini));
-        assert_eq!(Provider::infer_from_model("gemini-1.5-pro"), Some(Provider::Gemini));
-        assert_eq!(Provider::infer_from_model("gemini-2.0-flash"), Some(Provider::Gemini));
-        assert_eq!(Provider::infer_from_model("gemini-2.0-flash-exp"), Some(Provider::Gemini));
-        assert_eq!(Provider::infer_from_model("Gemini-Pro"), Some(Provider::Gemini)); // case insensitive
+        assert_eq!(
+            Provider::infer_from_model("gemini-pro"),
+            Some(Provider::Gemini)
+        );
+        assert_eq!(
+            Provider::infer_from_model("gemini-1.5-pro"),
+            Some(Provider::Gemini)
+        );
+        assert_eq!(
+            Provider::infer_from_model("gemini-2.0-flash"),
+            Some(Provider::Gemini)
+        );
+        assert_eq!(
+            Provider::infer_from_model("gemini-2.0-flash-exp"),
+            Some(Provider::Gemini)
+        );
+        assert_eq!(
+            Provider::infer_from_model("Gemini-Pro"),
+            Some(Provider::Gemini)
+        ); // case insensitive
     }
 
     #[test]

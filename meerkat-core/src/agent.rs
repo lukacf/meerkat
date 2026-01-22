@@ -7,14 +7,16 @@ use crate::config::AgentConfig;
 use crate::error::AgentError;
 use crate::event::{AgentEvent, BudgetType};
 use crate::ops::{
-    ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OperationId,
-    OperationResult, SpawnSpec, SteeringHandle, ToolAccessPolicy,
+    ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, OperationId, OperationResult, SpawnSpec,
+    SteeringHandle, ToolAccessPolicy,
 };
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
-use crate::sub_agent::{inject_steering_messages, SubAgentManager};
-use crate::types::{AssistantMessage, Message, RunResult, StopReason, ToolCall, ToolDef, ToolResult, Usage};
+use crate::sub_agent::{SubAgentManager, inject_steering_messages};
+use crate::types::{
+    AssistantMessage, Message, RunResult, StopReason, ToolCall, ToolDef, ToolResult, Usage,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
@@ -61,7 +63,10 @@ pub struct FilteredToolDispatcher<T: AgentToolDispatcher> {
 
 impl<T: AgentToolDispatcher> FilteredToolDispatcher<T> {
     pub fn new(inner: Arc<T>, allowed_tools: Vec<String>) -> Self {
-        Self { inner, allowed_tools }
+        Self {
+            inner,
+            allowed_tools,
+        }
     }
 }
 
@@ -94,6 +99,7 @@ pub trait AgentSessionStore: Send + Sync {
 }
 
 /// Builder for creating an Agent
+#[derive(Default)]
 pub struct AgentBuilder {
     config: AgentConfig,
     system_prompt: Option<String>,
@@ -125,6 +131,7 @@ impl AgentBuilder {
     }
 
     /// Set the nesting depth (internal, used for sub-agents)
+    #[allow(dead_code)]
     pub(crate) fn depth(mut self, depth: u32) -> Self {
         self.depth = depth;
         self
@@ -173,12 +180,7 @@ impl AgentBuilder {
     }
 
     /// Build the agent
-    pub fn build<C, T, S>(
-        self,
-        client: Arc<C>,
-        tools: Arc<T>,
-        store: Arc<S>,
-    ) -> Agent<C, T, S>
+    pub fn build<C, T, S>(self, client: Arc<C>, tools: Arc<T>, store: Arc<S>) -> Agent<C, T, S>
     where
         C: AgentLlmClient,
         T: AgentToolDispatcher,
@@ -211,20 +213,6 @@ impl AgentBuilder {
             depth: self.depth,
             steering_rx,
             steering_tx,
-        }
-    }
-}
-
-impl Default for AgentBuilder {
-    fn default() -> Self {
-        Self {
-            config: AgentConfig::default(),
-            system_prompt: None,
-            budget_limits: None,
-            retry_policy: RetryPolicy::default(),
-            session: None,
-            concurrency_limits: ConcurrencyLimits::default(),
-            depth: 0,
         }
     }
 }
@@ -313,20 +301,22 @@ where
 
         // Validate tool access policy
         let all_tools = self.tools.tools();
-        let allowed_tools = self.sub_agent_manager.apply_tool_access_policy(&all_tools, &spec.tool_access);
+        let allowed_tools = self
+            .sub_agent_manager
+            .apply_tool_access_policy(&all_tools, &spec.tool_access);
 
         if let ToolAccessPolicy::AllowList(ref names) = spec.tool_access {
             for name in names {
                 if !all_tools.iter().any(|t| &t.name == name) {
-                    return Err(AgentError::InvalidToolAccess {
-                        tool: name.clone(),
-                    });
+                    return Err(AgentError::InvalidToolAccess { tool: name.clone() });
                 }
             }
         }
 
         // Apply context strategy to get messages for sub-agent
-        let messages = self.sub_agent_manager.apply_context_strategy(&self.session, &spec.context);
+        let messages = self
+            .sub_agent_manager
+            .apply_context_strategy(&self.session, &spec.context);
 
         // Create sub-agent session with context
         let mut sub_session = Session::new();
@@ -360,8 +350,12 @@ where
         let max_tokens = self.config.max_tokens_per_turn;
 
         // Create filtered tools based on policy
-        let allowed_tool_names: Vec<String> = allowed_tools.iter().map(|t| t.name.clone()).collect();
-        let filtered_tools = Arc::new(FilteredToolDispatcher::new(self.tools.clone(), allowed_tool_names));
+        let allowed_tool_names: Vec<String> =
+            allowed_tools.iter().map(|t| t.name.clone()).collect();
+        let filtered_tools = Arc::new(FilteredToolDispatcher::new(
+            self.tools.clone(),
+            allowed_tool_names,
+        ));
 
         // Spawn the sub-agent in a background task
         tokio::spawn(async move {
@@ -381,16 +375,18 @@ where
             // Report completion
             match result {
                 Ok(run_result) => {
-                    sub_agent_manager.complete(
-                        &op_id_clone,
-                        OperationResult {
-                            id: op_id_clone.clone(),
-                            content: run_result.text,
-                            is_error: false,
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            tokens_used: run_result.usage.total_tokens() as u64,
-                        },
-                    ).await;
+                    sub_agent_manager
+                        .complete(
+                            &op_id_clone,
+                            OperationResult {
+                                id: op_id_clone.clone(),
+                                content: run_result.text,
+                                is_error: false,
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                tokens_used: run_result.usage.total_tokens(),
+                            },
+                        )
+                        .await;
                 }
                 Err(e) => {
                     sub_agent_manager.fail(&op_id_clone, e.to_string()).await;
@@ -446,15 +442,11 @@ where
             let op_id = OperationId::new();
 
             // Validate tool access if specified
-            if let Some(policy) = &branch.tool_access {
-                if let ToolAccessPolicy::AllowList(names) = policy {
-                    let all_tools = self.tools.tools();
-                    for name in names {
-                        if !all_tools.iter().any(|t| &t.name == name) {
-                            return Err(AgentError::InvalidToolAccess {
-                                tool: name.clone(),
-                            });
-                        }
+            if let Some(ToolAccessPolicy::AllowList(names)) = &branch.tool_access {
+                let all_tools = self.tools.tools();
+                for name in names {
+                    if !all_tools.iter().any(|t| &t.name == name) {
+                        return Err(AgentError::InvalidToolAccess { tool: name.clone() });
                     }
                 }
             }
@@ -470,11 +462,17 @@ where
             // Apply tool access policy for this branch
             let all_tools = self.tools.tools();
             let allowed_tools = match &branch.tool_access {
-                Some(policy) => self.sub_agent_manager.apply_tool_access_policy(&all_tools, policy),
+                Some(policy) => self
+                    .sub_agent_manager
+                    .apply_tool_access_policy(&all_tools, policy),
                 None => all_tools, // Inherit all tools
             };
-            let allowed_tool_names: Vec<String> = allowed_tools.iter().map(|t| t.name.clone()).collect();
-            let filtered_tools = Arc::new(FilteredToolDispatcher::new(self.tools.clone(), allowed_tool_names));
+            let allowed_tool_names: Vec<String> =
+                allowed_tools.iter().map(|t| t.name.clone()).collect();
+            let filtered_tools = Arc::new(FilteredToolDispatcher::new(
+                self.tools.clone(),
+                allowed_tool_names,
+            ));
 
             // Clone components for the spawned task
             let client = self.client.clone();
@@ -511,16 +509,18 @@ where
                 // Report completion
                 match result {
                     Ok(run_result) => {
-                        sub_agent_manager.complete(
-                            &op_id_clone,
-                            OperationResult {
-                                id: op_id_clone.clone(),
-                                content: format!("[{}] {}", branch_name, run_result.text),
-                                is_error: false,
-                                duration_ms: start.elapsed().as_millis() as u64,
-                                tokens_used: run_result.usage.total_tokens() as u64,
-                            },
-                        ).await;
+                        sub_agent_manager
+                            .complete(
+                                &op_id_clone,
+                                OperationResult {
+                                    id: op_id_clone.clone(),
+                                    content: format!("[{}] {}", branch_name, run_result.text),
+                                    is_error: false,
+                                    duration_ms: start.elapsed().as_millis() as u64,
+                                    tokens_used: run_result.usage.total_tokens(),
+                                },
+                            )
+                            .await;
                     }
                     Err(e) => {
                         sub_agent_manager.fail(&op_id_clone, e.to_string()).await;
@@ -542,7 +542,11 @@ where
     }
 
     /// Send a steering message to a running sub-agent
-    pub async fn steer(&self, op_id: &OperationId, message: String) -> Result<SteeringHandle, AgentError> {
+    pub async fn steer(
+        &self,
+        op_id: &OperationId,
+        message: String,
+    ) -> Result<SteeringHandle, AgentError> {
         self.sub_agent_manager.steer(op_id, message).await
     }
 
@@ -591,7 +595,11 @@ where
                 tokio::time::sleep(delay).await;
             }
 
-            match self.client.stream_response(messages, tools, max_tokens).await {
+            match self
+                .client
+                .stream_response(messages, tools, max_tokens)
+                .await
+            {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     // Check if we should retry
@@ -645,7 +653,10 @@ where
     }
 
     /// The main agent loop
-    async fn run_loop(&mut self, event_tx: mpsc::Sender<AgentEvent>) -> Result<RunResult, AgentError> {
+    async fn run_loop(
+        &mut self,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, AgentError> {
         let mut turn_count = 0u32;
         let max_turns = self.config.max_turns.unwrap_or(100);
         let mut tool_call_count = 0u32;
@@ -771,7 +782,9 @@ where
                         }
 
                         // Add tool results to session
-                        self.session.push(Message::ToolResults { results: tool_results });
+                        self.session.push(Message::ToolResults {
+                            results: tool_results,
+                        });
 
                         // Go through DrainingEvents to CallingLlm (state machine requires this)
                         self.state.transition(LoopState::DrainingEvents)?;
@@ -1048,7 +1061,10 @@ mod tests {
             .model("test-model")
             .build(client, tools, store);
 
-        let result = agent.run("What's the weather in Tokyo?".to_string()).await.unwrap();
+        let result = agent
+            .run("What's the weather in Tokyo?".to_string())
+            .await
+            .unwrap();
 
         assert_eq!(result.text, "The weather in Tokyo is sunny.");
         assert_eq!(result.turns, 2);

@@ -6,7 +6,7 @@
 //! - slow: Sleeps for N seconds (for timeout testing)
 //! - fail: Always returns an error
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
@@ -16,10 +16,7 @@ fn main() {
     let reader = BufReader::new(stdin.lock());
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
+        let Ok(line) = line else { break };
 
         if line.is_empty() {
             continue;
@@ -33,10 +30,10 @@ fn main() {
                     "id": null,
                     "error": {
                         "code": -32700,
-                        "message": format!("Parse error: {}", e)
+                        "message": format!("Parse error: {e}")
                     }
                 });
-                writeln!(stdout, "{}", error).unwrap();
+                writeln!(stdout, "{error}").unwrap();
                 stdout.flush().unwrap();
                 continue;
             }
@@ -50,15 +47,12 @@ fn main() {
             // Handle known notifications silently
             let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
             match method {
-                "notifications/initialized" => {
-                    // Client is ready, nothing to do
-                }
-                "notifications/cancelled" => {
-                    // Request cancelled, nothing to do
+                "notifications/initialized" | "notifications/cancelled" => {
+                    // Client is ready or request cancelled, nothing to do
                 }
                 _ => {
                     // Unknown notification, ignore
-                    eprintln!("Unknown notification: {}", method);
+                    eprintln!("Unknown notification: {method}");
                 }
             }
             continue;
@@ -66,7 +60,7 @@ fn main() {
 
         // This is a request, send a response
         let response = handle_request(&request);
-        writeln!(stdout, "{}", response).unwrap();
+        writeln!(stdout, "{response}").unwrap();
         stdout.flush().unwrap();
     }
 }
@@ -176,7 +170,8 @@ fn handle_request(request: &Value) -> Value {
 
             let result = match tool_name {
                 "echo" => {
-                    let message = arguments.get("message")
+                    let message = arguments
+                        .get("message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("");
                     json!({
@@ -187,12 +182,8 @@ fn handle_request(request: &Value) -> Value {
                     })
                 }
                 "add" => {
-                    let a = arguments.get("a")
-                        .and_then(|n| n.as_f64())
-                        .unwrap_or(0.0);
-                    let b = arguments.get("b")
-                        .and_then(|n| n.as_f64())
-                        .unwrap_or(0.0);
+                    let a = arguments.get("a").and_then(|n| n.as_f64()).unwrap_or(0.0);
+                    let b = arguments.get("b").and_then(|n| n.as_f64()).unwrap_or(0.0);
                     json!({
                         "content": [{
                             "type": "text",
@@ -201,7 +192,8 @@ fn handle_request(request: &Value) -> Value {
                     })
                 }
                 "slow" => {
-                    let seconds = arguments.get("seconds")
+                    let seconds = arguments
+                        .get("seconds")
                         .and_then(|n| n.as_f64())
                         .unwrap_or(1.0);
                     std::thread::sleep(Duration::from_secs_f64(seconds));
@@ -213,7 +205,8 @@ fn handle_request(request: &Value) -> Value {
                     })
                 }
                 "fail" => {
-                    let message = arguments.get("message")
+                    let message = arguments
+                        .get("message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("Tool failed");
                     json!({
@@ -230,7 +223,7 @@ fn handle_request(request: &Value) -> Value {
                         "id": id,
                         "error": {
                             "code": -32601,
-                            "message": format!("Unknown tool: {}", tool_name)
+                            "message": format!("Unknown tool: {tool_name}")
                         }
                     });
                 }
@@ -248,7 +241,7 @@ fn handle_request(request: &Value) -> Value {
                 "id": id,
                 "error": {
                     "code": -32601,
-                    "message": format!("Method not found: {}", method)
+                    "message": format!("Method not found: {method}")
                 }
             })
         }

@@ -3,8 +3,8 @@
 //! Provides `rkat mcp add|remove|list|get` commands for managing MCP server configuration.
 
 use meerkat_core::mcp_config::{
-    find_project_mcp, project_mcp_path, user_mcp_path,
-    McpConfig, McpScope, McpServerConfig, McpTransportConfig, McpTransportKind,
+    McpConfig, McpScope, McpServerConfig, McpTransportConfig, McpTransportKind, find_project_mcp,
+    project_mcp_path, user_mcp_path,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -79,7 +79,10 @@ pub fn add_server(
     if McpConfig::server_exists(&name, scope)? {
         anyhow::bail!(
             "MCP server '{}' already exists in {} scope. Remove it first with: rkat mcp remove {} --scope {}",
-            name, scope, name, scope
+            name,
+            scope,
+            name,
+            scope
         );
     }
 
@@ -88,11 +91,18 @@ pub fn add_server(
         // Explicit stdio transport
         (Some(McpTransportKind::Stdio), _, false) => {
             let env_map = parse_env_vars(&env)?;
-            McpServerConfig::stdio(name.clone(), command[0].clone(), command[1..].to_vec(), env_map)
+            McpServerConfig::stdio(
+                name.clone(),
+                command[0].clone(),
+                command[1..].to_vec(),
+                env_map,
+            )
         }
         // Explicit stdio but no command
         (Some(McpTransportKind::Stdio), _, true) => {
-            anyhow::bail!("Stdio transport requires a command. Usage: rkat mcp add <name> -t stdio -- <command> [args...]");
+            anyhow::bail!(
+                "Stdio transport requires a command. Usage: rkat mcp add <name> -t stdio -- <command> [args...]"
+            );
         }
         // Explicit HTTP transport
         (Some(McpTransportKind::StreamableHttp), Some(url), _) => {
@@ -106,7 +116,9 @@ pub fn add_server(
         }
         // HTTP/SSE without URL
         (Some(McpTransportKind::StreamableHttp | McpTransportKind::Sse), None, _) => {
-            anyhow::bail!("HTTP/SSE transport requires --url. Usage: rkat mcp add <name> -t http --url <url>");
+            anyhow::bail!(
+                "HTTP/SSE transport requires --url. Usage: rkat mcp add <name> -t http --url <url>"
+            );
         }
         // URL provided, no explicit transport - default to streamable-http
         (None, Some(url), _) => {
@@ -116,7 +128,12 @@ pub fn add_server(
         // Command provided, no explicit transport - default to stdio
         (None, None, false) => {
             let env_map = parse_env_vars(&env)?;
-            McpServerConfig::stdio(name.clone(), command[0].clone(), command[1..].to_vec(), env_map)
+            McpServerConfig::stdio(
+                name.clone(),
+                command[0].clone(),
+                command[1..].to_vec(),
+                env_map,
+            )
         }
         // Nothing provided
         (None, None, true) => {
@@ -130,15 +147,25 @@ pub fn add_server(
 
     // Get the file path for this scope
     let path = match scope {
-        McpScope::User => user_mcp_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?,
-        McpScope::Project => project_mcp_path().ok_or_else(|| anyhow::anyhow!("Could not determine project directory"))?,
+        McpScope::User => {
+            user_mcp_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+        }
+        McpScope::Project => project_mcp_path()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine project directory"))?,
     };
 
     // Add to file using toml_edit to preserve formatting
     add_server_to_file(&path, &server)?;
 
     let (kind, target) = format_server_target(&server);
-    println!("Added {} MCP server '{}' ({}) to {} config: {}", transport_label(kind), name, target, scope, path.display());
+    println!(
+        "Added {} MCP server '{}' ({}) to {} config: {}",
+        transport_label(kind),
+        name,
+        target,
+        scope,
+        path.display()
+    );
     Ok(())
 }
 
@@ -148,7 +175,10 @@ fn parse_env_vars(env: &[String]) -> anyhow::Result<HashMap<String, String>> {
     for e in env {
         let parts: Vec<&str> = e.splitn(2, '=').collect();
         if parts.len() != 2 {
-            anyhow::bail!("Invalid environment variable format: '{}'. Expected KEY=VALUE", e);
+            anyhow::bail!(
+                "Invalid environment variable format: '{}'. Expected KEY=VALUE",
+                e
+            );
         }
         env_map.insert(parts[0].to_string(), parts[1].to_string());
     }
@@ -199,14 +229,23 @@ pub fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Result<()
 
     // Get the file path for this scope
     let path = match target_scope {
-        McpScope::User => user_mcp_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?,
-        McpScope::Project => find_project_mcp().ok_or_else(|| anyhow::anyhow!("No project mcp.toml found"))?,
+        McpScope::User => {
+            user_mcp_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+        }
+        McpScope::Project => {
+            find_project_mcp().ok_or_else(|| anyhow::anyhow!("No project mcp.toml found"))?
+        }
     };
 
     // Remove from file
     remove_server_from_file(&path, &name)?;
 
-    println!("Removed MCP server '{}' from {} config: {}", name, target_scope, path.display());
+    println!(
+        "Removed MCP server '{}' from {} config: {}",
+        name,
+        target_scope,
+        path.display()
+    );
     Ok(())
 }
 
@@ -256,7 +295,7 @@ pub fn list_servers(scope: Option<McpScope>, json_output: bool) -> anyhow::Resul
             return Ok(());
         }
 
-        println!("{:<20} {:<10} {:<16} {}", "NAME", "SCOPE", "TRANSPORT", "TARGET");
+        println!("{:<20} {:<10} {:<16} TARGET", "NAME", "SCOPE", "TRANSPORT");
         println!("{}", "-".repeat(60));
         for s in &servers {
             let (kind, target) = format_server_target(&s.server);
@@ -515,11 +554,15 @@ mod tests {
         let file = temp.path().join("mcp.toml");
 
         // Create initial file with a server
-        fs::write(&file, r#"# My MCP config
+        fs::write(
+            &file,
+            r#"# My MCP config
 [[servers]]
 name = "existing"
 command = "existing-cmd"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let server = create_test_server("new-server", "new-cmd", vec![]);
         add_server_to_file(&file, &server).unwrap();
@@ -566,14 +609,18 @@ command = "existing-cmd"
         let file = temp.path().join("mcp.toml");
 
         // Create file with two servers
-        fs::write(&file, r#"[[servers]]
+        fs::write(
+            &file,
+            r#"[[servers]]
 name = "keep-me"
 command = "keep"
 
 [[servers]]
 name = "remove-me"
 command = "remove"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         remove_server_from_file(&file, "remove-me").unwrap();
 
@@ -587,10 +634,14 @@ command = "remove"
         let temp = TempDir::new().unwrap();
         let file = temp.path().join("mcp.toml");
 
-        fs::write(&file, r#"[[servers]]
+        fs::write(
+            &file,
+            r#"[[servers]]
 name = "only-server"
 command = "cmd"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let result = remove_server_from_file(&file, "nonexistent");
         assert!(result.is_err());
@@ -667,11 +718,8 @@ command = "cmd"
         let temp = TempDir::new().unwrap();
         let file = temp.path().join("mcp.toml");
 
-        let server = McpServerConfig::sse(
-            "sse-server",
-            "https://api.example.com/sse",
-            HashMap::new(),
-        );
+        let server =
+            McpServerConfig::sse("sse-server", "https://api.example.com/sse", HashMap::new());
         add_server_to_file(&file, &server).unwrap();
 
         let contents = fs::read_to_string(&file).unwrap();
@@ -689,7 +737,8 @@ command = "cmd"
         let mut headers = HashMap::new();
         headers.insert("Authorization".to_string(), "Bearer token123".to_string());
         headers.insert("X-Custom".to_string(), "value".to_string());
-        let server = McpServerConfig::streamable_http("auth-server", "https://api.example.com/mcp", headers);
+        let server =
+            McpServerConfig::streamable_http("auth-server", "https://api.example.com/mcp", headers);
         add_server_to_file(&file, &server).unwrap();
 
         let contents = fs::read_to_string(&file).unwrap();
@@ -701,9 +750,15 @@ command = "cmd"
 
     #[test]
     fn test_parse_headers_valid() {
-        let headers = vec!["Content-Type:application/json".to_string(), "Auth: Bearer xyz".to_string()];
+        let headers = vec![
+            "Content-Type:application/json".to_string(),
+            "Auth: Bearer xyz".to_string(),
+        ];
         let result = parse_headers(&headers).unwrap();
-        assert_eq!(result.get("Content-Type"), Some(&"application/json".to_string()));
+        assert_eq!(
+            result.get("Content-Type"),
+            Some(&"application/json".to_string())
+        );
         assert_eq!(result.get("Auth"), Some(&"Bearer xyz".to_string()));
     }
 
@@ -712,7 +767,12 @@ command = "cmd"
         let headers = vec!["InvalidHeader".to_string()];
         let result = parse_headers(&headers);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid header format"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid header format")
+        );
     }
 
     #[test]
@@ -728,12 +788,22 @@ command = "cmd"
         let env = vec!["INVALID".to_string()];
         let result = parse_env_vars(&env);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid environment variable"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid environment variable")
+        );
     }
 
     #[test]
     fn test_format_server_target_stdio() {
-        let server = McpServerConfig::stdio("test", "npx", vec!["-y".to_string(), "@test/server".to_string()], HashMap::new());
+        let server = McpServerConfig::stdio(
+            "test",
+            "npx",
+            vec!["-y".to_string(), "@test/server".to_string()],
+            HashMap::new(),
+        );
         let (kind, target) = format_server_target(&server);
         assert_eq!(kind, McpTransportKind::Stdio);
         assert_eq!(target, "npx -y @test/server");
@@ -741,7 +811,8 @@ command = "cmd"
 
     #[test]
     fn test_format_server_target_http() {
-        let server = McpServerConfig::streamable_http("test", "https://api.example.com", HashMap::new());
+        let server =
+            McpServerConfig::streamable_http("test", "https://api.example.com", HashMap::new());
         let (kind, target) = format_server_target(&server);
         assert_eq!(kind, McpTransportKind::StreamableHttp);
         assert_eq!(target, "https://api.example.com");
@@ -758,7 +829,10 @@ command = "cmd"
     #[test]
     fn test_transport_label() {
         assert_eq!(transport_label(McpTransportKind::Stdio), "stdio");
-        assert_eq!(transport_label(McpTransportKind::StreamableHttp), "streamable-http");
+        assert_eq!(
+            transport_label(McpTransportKind::StreamableHttp),
+            "streamable-http"
+        );
         assert_eq!(transport_label(McpTransportKind::Sse), "sse");
     }
 }

@@ -11,10 +11,10 @@
 use async_trait::async_trait;
 use meerkat::prelude::*;
 use meerkat::{
-    AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    LlmStreamResult, Session, ToolDef,
+    AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult, Session,
+    ToolDef,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 // Tool dispatcher with multiple specialized tools
@@ -46,7 +46,8 @@ impl AgentToolDispatcher for MultiToolDispatcher {
             // Calculator tool
             ToolDef {
                 name: "calculate".to_string(),
-                description: "Perform arithmetic calculations. Supports +, -, *, / operations.".to_string(),
+                description: "Perform arithmetic calculations. Supports +, -, *, / operations."
+                    .to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -111,9 +112,7 @@ impl AgentToolDispatcher for MultiToolDispatcher {
                 Ok(format!("{} = {}", expr, result))
             }
             "save_note" => {
-                let note = args["note"]
-                    .as_str()
-                    .ok_or("Missing 'note' argument")?;
+                let note = args["note"].as_str().ok_or("Missing 'note' argument")?;
 
                 let mut state = self.state.lock().unwrap();
                 state.notes.push(note.to_string());
@@ -125,12 +124,16 @@ impl AgentToolDispatcher for MultiToolDispatcher {
                 if state.notes.is_empty() {
                     Ok("No notes saved yet.".to_string())
                 } else {
-                    Ok(format!("Saved notes:\n{}", state.notes
-                        .iter()
-                        .enumerate()
-                        .map(|(i, n)| format!("{}. {}", i + 1, n))
-                        .collect::<Vec<_>>()
-                        .join("\n")))
+                    Ok(format!(
+                        "Saved notes:\n{}",
+                        state
+                            .notes
+                            .iter()
+                            .enumerate()
+                            .map(|(i, n)| format!("{}. {}", i + 1, n))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ))
                 }
             }
             "get_calculation_history" => {
@@ -282,7 +285,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("ANTHROPIC_API_KEY environment variable must be set");
 
     // Create components - tools maintain state across turns
-    let llm = Arc::new(AnthropicLlmAdapter::new(api_key, "claude-sonnet-4".to_string()));
+    let llm = Arc::new(AnthropicLlmAdapter::new(
+        api_key,
+        "claude-sonnet-4".to_string(),
+    ));
     let tools = Arc::new(MultiToolDispatcher::new());
     let store = Arc::new(MemoryStore::new());
 
@@ -292,7 +298,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .system_prompt(
             "You are a helpful assistant with access to tools for calculations and note-taking. \
              Use tools to help the user with their requests. When asked to perform calculations \
-             or save notes, always use the appropriate tool."
+             or save notes, always use the appropriate tool.",
         )
         .max_tokens_per_turn(2048)
         .build(llm, tools, store);

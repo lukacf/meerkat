@@ -57,13 +57,11 @@ fn test_message_json_schema() {
 
     // Tool results
     let tool_results = Message::ToolResults {
-        results: vec![
-            ToolResult {
-                tool_use_id: "tool_123".to_string(),
-                content: "Result content".to_string(),
-                is_error: false,
-            },
-        ],
+        results: vec![ToolResult {
+            tool_use_id: "tool_123".to_string(),
+            content: "Result content".to_string(),
+            is_error: false,
+        }],
     };
     let json = serde_json::to_value(&tool_results).unwrap();
     assert_eq!(json["role"], "tool_results");
@@ -259,13 +257,11 @@ fn test_session_checkpoint_complex() {
             // With tool calls
             messages.push(Message::Assistant(AssistantMessage {
                 content: format!("Let me help with request {}", i),
-                tool_calls: vec![
-                    ToolCall {
-                        id: format!("tc_{}", i),
-                        name: "test_tool".to_string(),
-                        args: json!({"index": i}),
-                    },
-                ],
+                tool_calls: vec![ToolCall {
+                    id: format!("tc_{}", i),
+                    name: "test_tool".to_string(),
+                    args: json!({"index": i}),
+                }],
                 stop_reason: StopReason::ToolUse,
                 usage: Usage {
                     input_tokens: 100 + i as u64,
@@ -276,13 +272,11 @@ fn test_session_checkpoint_complex() {
             }));
 
             messages.push(Message::ToolResults {
-                results: vec![
-                    ToolResult {
-                        tool_use_id: format!("tc_{}", i),
-                        content: format!("Tool result for {}", i),
-                        is_error: false,
-                    },
-                ],
+                results: vec![ToolResult {
+                    tool_use_id: format!("tc_{}", i),
+                    content: format!("Tool result for {}", i),
+                    is_error: false,
+                }],
             });
 
             messages.push(Message::Assistant(AssistantMessage {

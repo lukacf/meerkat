@@ -4,11 +4,10 @@
 //! as MCP tools: meerkat_run and meerkat_resume.
 
 use meerkat::{
-    AgentBuilder, AgentError, AnthropicClient, JsonlStore, LlmClient,
-    Session, SessionStore,
+    AgentBuilder, AgentError, AnthropicClient, JsonlStore, LlmClient, Session, SessionStore,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -122,7 +121,10 @@ async fn handle_meerkat_run(input: MeerkatRunInput) -> Result<Value, String> {
         });
 
     let store = JsonlStore::new(store_path);
-    store.init().await.map_err(|e| format!("Store init failed: {}", e))?;
+    store
+        .init()
+        .await
+        .map_err(|e| format!("Store init failed: {}", e))?;
 
     // Create LLM client
     let llm_client = Arc::new(AnthropicClient::new(api_key));
@@ -176,7 +178,10 @@ async fn handle_meerkat_resume(input: MeerkatResumeInput) -> Result<Value, Strin
         });
 
     let store = JsonlStore::new(store_path);
-    store.init().await.map_err(|e| format!("Store init failed: {}", e))?;
+    store
+        .init()
+        .await
+        .map_err(|e| format!("Store init failed: {}", e))?;
 
     // Load existing session
     let session_id = meerkat::SessionId::parse(&input.session_id)
@@ -224,7 +229,9 @@ async fn handle_meerkat_resume(input: MeerkatResumeInput) -> Result<Value, Strin
 // Adapter types needed for the MCP server
 
 use async_trait::async_trait;
-use meerkat::{AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult, Message, ToolDef};
+use meerkat::{
+    AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult, Message, ToolDef,
+};
 
 /// LLM client adapter
 pub struct LlmClientAdapter<C: LlmClient> {

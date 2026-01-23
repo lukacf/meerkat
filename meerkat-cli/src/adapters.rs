@@ -6,6 +6,7 @@ use meerkat_client::{LlmClient, LlmEvent, LlmRequest};
 use meerkat_core::{
     AgentError, Message, Session, SessionId, StopReason, ToolCall, ToolDef, Usage,
     agent::{AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult},
+    error::ToolError,
     event::AgentEvent,
 };
 use meerkat_store::SessionStore;
@@ -228,8 +229,8 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Vec::new()
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
-        Err(format!("Unknown tool: {}", name))
+    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+        Err(ToolError::not_found(name))
     }
 }
 
@@ -287,14 +288,20 @@ impl AgentToolDispatcher for McpRouterAdapter {
         }
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
         let guard = self.router.read().await;
         match &*guard {
-            Some(router) => router
-                .call_tool(name, args)
-                .await
-                .map_err(|e| e.to_string()),
-            None => Err("MCP router has been shut down".to_string()),
+            Some(router) => {
+                let result = router
+                    .call_tool(name, args)
+                    .await
+                    .map_err(|e| ToolError::execution_failed(e.to_string()))?;
+                // Parse the result string as JSON, or wrap in a string value
+                #[allow(clippy::unnecessary_lazy_evaluations)]
+                let value = serde_json::from_str(&result).unwrap_or_else(|_| Value::String(result));
+                Ok(value)
+            }
+            None => Err(ToolError::execution_failed("MCP router has been shut down")),
         }
     }
 }
@@ -324,7 +331,7 @@ impl AgentToolDispatcher for CliToolDispatcher {
         }
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
         match self {
             CliToolDispatcher::Empty(d) => d.dispatch(name, args).await,
             CliToolDispatcher::Mcp(d) => d.dispatch(name, args).await,

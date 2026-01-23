@@ -5,6 +5,7 @@
 
 use meerkat::{
     AgentBuilder, AgentError, AnthropicClient, JsonlStore, LlmClient, Session, SessionStore,
+    ToolError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -506,12 +507,12 @@ impl AgentToolDispatcher for MpcToolDispatcher {
         self.tool_defs.clone()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
         // Check if this is a callback tool
         if self.callback_tools.contains(name) {
             // Return a special error that signals the agent loop should pause
             // The error contains serialized info about the pending tool call
-            Err(format!(
+            Err(ToolError::other(format!(
                 "{}{}",
                 CALLBACK_TOOL_PREFIX,
                 serde_json::to_string(&json!({
@@ -519,9 +520,9 @@ impl AgentToolDispatcher for MpcToolDispatcher {
                     "args": args
                 }))
                 .unwrap_or_default()
-            ))
+            )))
         } else {
-            Err(format!("Tool '{}' has no registered handler", name))
+            Err(ToolError::not_found(name))
         }
     }
 }
@@ -687,7 +688,7 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().to_string();
         assert!(err.starts_with(CALLBACK_TOOL_PREFIX));
         assert!(err.contains("get_weather"));
         assert!(err.contains("Tokyo"));

@@ -2,6 +2,90 @@
 
 use crate::types::SessionId;
 
+/// Error returned by tool dispatch operations.
+///
+/// This type represents errors that occur during tool execution, distinguishing
+/// between tool-level failures (which should be reported back to the LLM) and
+/// system-level failures (which may need different handling).
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ToolError {
+    /// The requested tool was not found
+    #[error("Tool not found: {name}")]
+    NotFound { name: String },
+
+    /// The tool arguments failed validation
+    #[error("Invalid arguments for tool '{name}': {reason}")]
+    InvalidArguments { name: String, reason: String },
+
+    /// The tool execution failed
+    #[error("Tool execution failed: {message}")]
+    ExecutionFailed { message: String },
+
+    /// The tool execution timed out
+    #[error("Tool '{name}' timed out after {timeout_ms}ms")]
+    Timeout { name: String, timeout_ms: u64 },
+
+    /// Tool access was denied by policy
+    #[error("Tool '{name}' is not allowed by policy")]
+    AccessDenied { name: String },
+
+    /// A generic tool error with a message
+    #[error("{0}")]
+    Other(String),
+}
+
+impl ToolError {
+    /// Create a new "not found" error
+    pub fn not_found(name: impl Into<String>) -> Self {
+        Self::NotFound { name: name.into() }
+    }
+
+    /// Create a new "invalid arguments" error
+    pub fn invalid_arguments(name: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::InvalidArguments {
+            name: name.into(),
+            reason: reason.into(),
+        }
+    }
+
+    /// Create a new "execution failed" error
+    pub fn execution_failed(message: impl Into<String>) -> Self {
+        Self::ExecutionFailed {
+            message: message.into(),
+        }
+    }
+
+    /// Create a new "timeout" error
+    pub fn timeout(name: impl Into<String>, timeout_ms: u64) -> Self {
+        Self::Timeout {
+            name: name.into(),
+            timeout_ms,
+        }
+    }
+
+    /// Create a new "access denied" error
+    pub fn access_denied(name: impl Into<String>) -> Self {
+        Self::AccessDenied { name: name.into() }
+    }
+
+    /// Create a generic error from any string-like type
+    pub fn other(message: impl Into<String>) -> Self {
+        Self::Other(message.into())
+    }
+}
+
+impl From<String> for ToolError {
+    fn from(s: String) -> Self {
+        Self::Other(s)
+    }
+}
+
+impl From<&str> for ToolError {
+    fn from(s: &str) -> Self {
+        Self::Other(s.to_string())
+    }
+}
+
 /// Errors that can occur during agent execution
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {

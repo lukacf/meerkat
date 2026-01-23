@@ -3,6 +3,7 @@
 use crate::error::DispatchError;
 use crate::registry::ToolRegistry;
 use async_trait::async_trait;
+use meerkat_core::error::ToolError;
 use meerkat_core::{AgentToolDispatcher, ToolCall, ToolDef, ToolResult};
 use meerkat_mcp_client::McpRouter;
 use serde_json::Value;
@@ -98,25 +99,24 @@ impl AgentToolDispatcher for ToolDispatcher {
         self.tool_defs()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
         // Validate arguments against schema
         self.registry
             .validate(name, args)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ToolError::invalid_arguments(name.to_string(), e.to_string()))?;
 
         // Dispatch via MCP router with timeout
         let result = tokio::time::timeout(self.default_timeout, self.router.call_tool(name, args))
             .await
             .map_err(|_| {
-                format!(
-                    "Tool '{}' timed out after {}ms",
-                    name,
-                    self.default_timeout.as_millis()
-                )
+                ToolError::timeout(name.to_string(), self.default_timeout.as_millis() as u64)
             })?
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ToolError::execution_failed(e.to_string()))?;
 
-        Ok(result)
+        // Parse the result string as JSON, or wrap in a string value
+        #[allow(clippy::unnecessary_lazy_evaluations)]
+        let value = serde_json::from_str(&result).unwrap_or_else(|_| Value::String(result));
+        Ok(value)
     }
 }
 
@@ -182,7 +182,8 @@ mod tests {
         let result =
             AgentToolDispatcher::dispatch(&dispatcher, "test_tool", &serde_json::json!({})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("count"));
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("count"));
     }
 
     #[tokio::test]
@@ -194,6 +195,7 @@ mod tests {
             AgentToolDispatcher::dispatch(&dispatcher, "unknown_tool", &serde_json::json!({}))
                 .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not found"));
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not found"));
     }
 }

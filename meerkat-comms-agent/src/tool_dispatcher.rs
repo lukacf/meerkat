@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use meerkat_comms::{Router, TrustedPeers};
 use meerkat_comms_mcp::tools::{ToolContext, handle_tools_call, tools_list};
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::error::ToolError;
 use meerkat_core::types::ToolDef;
 use serde_json::Value;
 
@@ -66,8 +67,8 @@ impl AgentToolDispatcher for NoOpDispatcher {
         vec![]
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
-        Err(format!("Unknown tool: {}", name))
+    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+        Err(ToolError::not_found(name))
     }
 }
 
@@ -103,16 +104,18 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
         }
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
         // Check if this is a comms tool
         if COMMS_TOOL_NAMES.contains(&name) {
-            let result = handle_tools_call(&self.tool_context, name, args).await?;
-            Ok(serde_json::to_string(&result).unwrap_or_default())
+            let result = handle_tools_call(&self.tool_context, name, args)
+                .await
+                .map_err(ToolError::execution_failed)?;
+            Ok(result)
         } else if let Some(inner) = &self.inner {
             // Delegate to inner dispatcher
             inner.dispatch(name, args).await
         } else {
-            Err(format!("Unknown tool: {}", name))
+            Err(ToolError::not_found(name))
         }
     }
 }
@@ -183,7 +186,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = serde_json::to_string(&result.unwrap()).unwrap();
         assert!(output.contains("peers"));
         assert!(output.contains("test-peer"));
     }
@@ -198,7 +201,7 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unknown tool"));
+        assert!(matches!(result.unwrap_err(), ToolError::NotFound { .. }));
     }
 
     // Mock inner dispatcher for testing delegation
@@ -224,11 +227,11 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
+        async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
             if name == "inner_tool" {
-                Ok("inner tool result".to_string())
+                Ok(Value::String("inner tool result".to_string()))
             } else {
-                Err(format!("Unknown tool: {}", name))
+                Err(ToolError::not_found(name))
             }
         }
     }
@@ -266,7 +269,10 @@ mod tests {
             .dispatch("inner_tool", &serde_json::json!({}))
             .await;
         assert!(inner_result.is_ok());
-        assert_eq!(inner_result.unwrap(), "inner tool result");
+        assert_eq!(
+            inner_result.unwrap(),
+            Value::String("inner tool result".to_string())
+        );
 
         // Unknown tool should fail
         let unknown_result = dispatcher

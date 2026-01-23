@@ -187,7 +187,11 @@ impl AgentToolDispatcher for LoggingToolDispatcher {
         self.inner.tools()
     }
 
-    async fn dispatch(&self, name: &str, args: &serde_json::Value) -> Result<String, String> {
+    async fn dispatch(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, ToolError> {
         let call_num = TOOL_CALL_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
 
         println!("\n┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓");

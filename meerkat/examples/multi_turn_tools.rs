@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use meerkat::prelude::*;
 use meerkat::{
     AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult, Session,
-    ToolDef,
+    ToolDef, ToolError,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -95,36 +95,38 @@ impl AgentToolDispatcher for MultiToolDispatcher {
         ]
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
         match name {
             "calculate" => {
-                let expr = args["expression"]
-                    .as_str()
-                    .ok_or("Missing 'expression' argument")?;
+                let expr = args["expression"].as_str().ok_or_else(|| {
+                    ToolError::invalid_arguments(name, "Missing 'expression' argument")
+                })?;
 
                 // Simple expression parser (for demo purposes)
-                let result = parse_and_calculate(expr)?;
+                let result = parse_and_calculate(expr).map_err(ToolError::execution_failed)?;
 
                 // Store in history
                 let mut state = self.state.lock().unwrap();
                 state.calculations.push(result);
 
-                Ok(format!("{} = {}", expr, result))
+                Ok(json!(format!("{} = {}", expr, result)))
             }
             "save_note" => {
-                let note = args["note"].as_str().ok_or("Missing 'note' argument")?;
+                let note = args["note"]
+                    .as_str()
+                    .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'note' argument"))?;
 
                 let mut state = self.state.lock().unwrap();
                 state.notes.push(note.to_string());
 
-                Ok(format!("Note saved: '{}'", note))
+                Ok(json!(format!("Note saved: '{}'", note)))
             }
             "get_notes" => {
                 let state = self.state.lock().unwrap();
                 if state.notes.is_empty() {
-                    Ok("No notes saved yet.".to_string())
+                    Ok(json!("No notes saved yet."))
                 } else {
-                    Ok(format!(
+                    Ok(json!(format!(
                         "Saved notes:\n{}",
                         state
                             .notes
@@ -133,18 +135,21 @@ impl AgentToolDispatcher for MultiToolDispatcher {
                             .map(|(i, n)| format!("{}. {}", i + 1, n))
                             .collect::<Vec<_>>()
                             .join("\n")
-                    ))
+                    )))
                 }
             }
             "get_calculation_history" => {
                 let state = self.state.lock().unwrap();
                 if state.calculations.is_empty() {
-                    Ok("No calculations performed yet.".to_string())
+                    Ok(json!("No calculations performed yet."))
                 } else {
-                    Ok(format!("Calculation results: {:?}", state.calculations))
+                    Ok(json!(format!(
+                        "Calculation results: {:?}",
+                        state.calculations
+                    )))
                 }
             }
-            _ => Err(format!("Unknown tool: {}", name)),
+            _ => Err(ToolError::not_found(name)),
         }
     }
 }

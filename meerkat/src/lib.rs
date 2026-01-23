@@ -82,6 +82,7 @@ pub use meerkat_core::{
     ToolAccessPolicy,
     ToolCall,
     ToolDef,
+    ToolError,
     ToolResult,
     Usage,
     UserMessage,
@@ -111,8 +112,13 @@ pub use meerkat_store::JsonlStore;
 pub use meerkat_store::MemoryStore;
 
 // Re-export tools
+pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidationError};
+
+// Re-export builtin tools infrastructure
 pub use meerkat_tools::{
-    DispatchError, ToolDispatcher, ToolError, ToolRegistry, ToolValidationError,
+    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
+    CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore,
+    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir, find_project_root,
 };
 
 // Re-export MCP client

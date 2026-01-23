@@ -237,22 +237,22 @@ mod tool_dispatch {
 
     #[test]
     fn test_tool_error_captured() {
-        // ToolError::Execution takes a String
-        let error = ToolError::Execution("Something went wrong with test_tool".to_string());
+        // ToolError::ExecutionFailed via helper
+        let error = ToolError::execution_failed("Something went wrong with test_tool");
 
         // Error should contain the message
         let error_str = format!("{:?}", error);
         assert!(error_str.contains("Something went wrong"));
         assert!(error_str.contains("test_tool"));
 
-        // Test other variants
-        let not_found = ToolError::NotFound("missing_tool".to_string());
+        // Test other variants via helpers
+        let not_found = ToolError::not_found("missing_tool");
         assert!(format!("{:?}", not_found).contains("missing_tool"));
 
-        let timeout = ToolError::Timeout("slow_tool timed out".to_string());
+        let timeout = ToolError::timeout("slow_tool", 5000);
         assert!(format!("{:?}", timeout).contains("slow_tool"));
 
-        let validation = ToolError::Validation("invalid params".to_string());
+        let validation = ToolError::invalid_arguments("test_tool", "invalid params");
         assert!(format!("{:?}", validation).contains("invalid params"));
     }
 }

@@ -65,7 +65,10 @@ pub trait AgentToolDispatcher: Send + Sync {
     fn tools(&self) -> Vec<ToolDef>;
 
     /// Execute a tool call
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String>;
+    ///
+    /// Returns the tool result as a JSON Value on success, or a ToolError on failure.
+    /// The Value will be stringified when creating ToolResult.content for the LLM.
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, crate::error::ToolError>;
 }
 
 /// A tool dispatcher that filters tools based on a policy
@@ -94,9 +97,9 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for FilteredToolDispa
             .collect()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, crate::error::ToolError> {
         if !self.allowed_tools.contains(name) {
-            return Err(format!("Tool '{}' is not allowed by policy", name));
+            return Err(crate::error::ToolError::access_denied(name));
         }
         self.inner.dispatch(name, args).await
     }
@@ -922,8 +925,15 @@ where
                         let mut tool_results = Vec::with_capacity(num_tool_calls);
                         for (id, name, dispatch_result, duration_ms) in dispatch_results {
                             let (content, is_error) = match dispatch_result {
-                                Ok(c) => (c, false),
-                                Err(e) => (e, true),
+                                Ok(v) => {
+                                    // Stringify the Value for the LLM
+                                    let s = match &v {
+                                        Value::String(s) => s.clone(),
+                                        _ => serde_json::to_string(&v).unwrap_or_default(),
+                                    };
+                                    (s, false)
+                                }
+                                Err(e) => (e.to_string(), true),
                             };
 
                             // Emit execution complete
@@ -1135,8 +1145,15 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-            Ok(format!("Result from {} with args: {}", name, args))
+        async fn dispatch(
+            &self,
+            name: &str,
+            args: &Value,
+        ) -> Result<Value, crate::error::ToolError> {
+            Ok(Value::String(format!(
+                "Result from {} with args: {}",
+                name, args
+            )))
         }
     }
 
@@ -1804,7 +1821,7 @@ mod tests {
             .dispatch("blocked_tool", &serde_json::json!({}))
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not allowed"));
+        assert!(result.unwrap_err().to_string().contains("not allowed"));
     }
 
     /// Test that tool_results Vec is pre-allocated
@@ -1901,7 +1918,11 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
+        async fn dispatch(
+            &self,
+            name: &str,
+            _args: &Value,
+        ) -> Result<Value, crate::error::ToolError> {
             let start = std::time::Instant::now();
             tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
             let end = std::time::Instant::now();
@@ -1911,7 +1932,7 @@ mod tests {
                 .unwrap()
                 .push((name.to_string(), start, end));
 
-            Ok(format!("Result from {}", name))
+            Ok(Value::String(format!("Result from {}", name)))
         }
     }
 
@@ -2045,7 +2066,11 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
+        async fn dispatch(
+            &self,
+            name: &str,
+            _args: &Value,
+        ) -> Result<Value, crate::error::ToolError> {
             // Record that dispatch started
             self.dispatch_order.lock().unwrap().push(name.to_string());
 
@@ -2053,9 +2078,12 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
 
             if self.failing_tools.contains(name) {
-                Err(format!("Tool {} failed intentionally", name))
+                Err(crate::error::ToolError::execution_failed(format!(
+                    "Tool {} failed intentionally",
+                    name
+                )))
             } else {
-                Ok(format!("Success from {}", name))
+                Ok(Value::String(format!("Success from {}", name)))
             }
         }
     }

@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust-1.85+-orange?logo=rust" alt="Rust 1.85+">
+  <img src="https://img.shields.io/badge/Rust-1.89+-orange?logo=rust" alt="Rust 1.89+">
   <img src="https://img.shields.io/badge/License-MIT%2FApache--2.0-blue" alt="License">
   <img src="https://img.shields.io/badge/MCP-Native-green" alt="MCP Native">
   <img src="https://img.shields.io/badge/Multi--Agent-Ed25519-purple" alt="Multi-Agent">
@@ -458,9 +458,57 @@ cargo int    # Integration tests
 cargo e2e    # E2E tests
 ```
 
+### CI/CD Pipeline
+
+The project uses a Makefile-driven CI/CD pipeline with pre-commit hooks for local development.
+
+**Setup (one-time):**
+```bash
+# Install pre-commit hooks
+make install-hooks
+
+# Or manually:
+pip install pre-commit
+pre-commit install
+pre-commit install --hook-type pre-push
+```
+
+**Makefile targets:**
+```bash
+make fmt        # Format code with rustfmt
+make fmt-check  # Check formatting (CI mode)
+make lint       # Run clippy with strict warnings
+make test       # Run unit tests
+make test-all   # Run all tests including integration
+make audit      # Security audit with cargo-deny
+make ci         # Full CI pipeline (fmt + lint + test + audit)
+```
+
+**Pre-commit hooks (~14s on full codebase):**
+
+| Hook | Stage | Description |
+|------|-------|-------------|
+| `cargo fmt` | commit | Code formatting |
+| `cargo clippy` | commit | Lint checks |
+| `cargo test` (unit) | commit | Fast unit tests |
+| `cargo test` (all) | push | Full test suite |
+| `cargo deny` | push | Security/license audit |
+| `gitleaks` | commit | Secret detection |
+
+The hooks run automatically:
+- **On commit:** Fast checks (~14s) - formatting, linting, unit tests
+- **On push:** Full checks - all tests + security audit
+
+**Rust version:** Pinned to `1.89.0` via `rust-toolchain.toml` for consistent builds.
+
 ## Contributing
 
 Contributions are welcome! Please submit PRs to the `main` branch.
+
+Before submitting:
+1. Run `make ci` to verify all checks pass
+2. Add tests for new functionality
+3. Update documentation if needed
 
 ## License
 

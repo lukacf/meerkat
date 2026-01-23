@@ -26,18 +26,25 @@ impl ToolDispatcher {
         }
     }
 
-    /// Discover tools from MCP servers
-    pub async fn discover_tools(&mut self) -> Result<(), DispatchError> {
-        let tools = self.router.list_tools().await?;
-        for tool in tools {
-            self.registry.register(tool);
+    /// Discover tools from MCP servers (caches tools from router)
+    ///
+    /// This method registers tools from the router's cache. Tools are cached
+    /// in the router when servers are added, so this is now synchronous.
+    pub fn discover_tools(&mut self) {
+        for tool in self.router.list_tools() {
+            self.registry.register(tool.clone());
         }
-        Ok(())
     }
 
-    /// Get tool definitions for LLM requests
-    pub fn tool_defs(&self) -> Vec<ToolDef> {
+    /// Get tool definitions for LLM requests.
+    /// Returns Arc references to avoid cloning ToolDef on each call.
+    pub fn tool_defs_arc(&self) -> Vec<Arc<ToolDef>> {
         self.registry.tool_defs()
+    }
+
+    /// Get tool definitions for LLM requests (cloned for trait compatibility).
+    pub fn tool_defs(&self) -> Vec<ToolDef> {
+        self.registry.tool_defs().into_iter().map(|arc| (*arc).clone()).collect()
     }
 
     /// Dispatch a single tool call

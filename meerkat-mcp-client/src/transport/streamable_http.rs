@@ -13,18 +13,33 @@ use rmcp::transport::streamable_http_client::{
     AuthRequiredError, StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
 };
 
+/// Shared HTTP client for Streamable HTTP connections.
+///
+/// Reuses a single `reqwest::Client` for connection pooling and better performance.
+/// A default client is created via `new()`, or pass an existing client via `with_client()`.
 #[derive(Clone, Debug)]
 pub(crate) struct ReqwestStreamableHttpClient {
     client: reqwest::Client,
     headers: HeaderMap,
 }
 
+/// Lazy-initialized shared reqwest client for Streamable HTTP transports
+static DEFAULT_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(reqwest::Client::new);
+
 impl ReqwestStreamableHttpClient {
+    /// Create a new HTTP client using the shared default reqwest::Client
     pub(crate) fn new(headers: HeaderMap) -> Self {
         Self {
-            client: reqwest::Client::default(),
+            client: DEFAULT_HTTP_CLIENT.clone(),
             headers,
         }
+    }
+
+    /// Create an HTTP client with a custom reqwest::Client
+    #[allow(dead_code)]
+    pub(crate) fn with_client(client: reqwest::Client, headers: HeaderMap) -> Self {
+        Self { client, headers }
     }
 
     fn apply_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

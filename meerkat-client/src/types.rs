@@ -143,6 +143,10 @@ pub struct LlmResponse {
 }
 
 /// Buffer for accumulating tool call arguments during streaming
+///
+/// Uses pre-allocated capacity to minimize allocations during streaming.
+/// The default capacity of 256 bytes handles most small tool arguments
+/// without reallocation.
 #[derive(Debug, Clone, Default)]
 pub struct ToolCallBuffer {
     pub id: String,
@@ -150,14 +154,32 @@ pub struct ToolCallBuffer {
     pub args_json: String,
 }
 
+/// Default capacity for tool call args buffer (256 bytes handles most small args)
+const TOOL_CALL_ARGS_CAPACITY: usize = 256;
+
 impl ToolCallBuffer {
-    /// Create a new buffer for a tool call
+    /// Create a new buffer for a tool call with pre-allocated capacity
     pub fn new(id: String) -> Self {
         Self {
             id,
             name: None,
-            args_json: String::new(),
+            args_json: String::with_capacity(TOOL_CALL_ARGS_CAPACITY),
         }
+    }
+
+    /// Create a new buffer with custom capacity for large arguments
+    pub fn with_capacity(id: String, capacity: usize) -> Self {
+        Self {
+            id,
+            name: None,
+            args_json: String::with_capacity(capacity),
+        }
+    }
+
+    /// Append to the args buffer
+    #[inline]
+    pub fn push_args(&mut self, delta: &str) {
+        self.args_json.push_str(delta);
     }
 
     /// Try to complete the tool call (parse JSON args)
@@ -374,5 +396,54 @@ mod tests {
             .with_provider_params(serde_json::json!({}));
 
         assert_eq!(request.provider_params, Some(serde_json::json!({})));
+    }
+
+    #[test]
+    fn test_tool_call_buffer_preallocated_capacity() {
+        let buffer = ToolCallBuffer::new("tc_1".to_string());
+        // Should have pre-allocated capacity to reduce allocations
+        assert!(
+            buffer.args_json.capacity() >= super::TOOL_CALL_ARGS_CAPACITY,
+            "Buffer should have pre-allocated capacity of at least {} bytes, got {}",
+            super::TOOL_CALL_ARGS_CAPACITY,
+            buffer.args_json.capacity()
+        );
+    }
+
+    #[test]
+    fn test_tool_call_buffer_with_capacity() {
+        let buffer = ToolCallBuffer::with_capacity("tc_1".to_string(), 1024);
+        assert!(
+            buffer.args_json.capacity() >= 1024,
+            "Buffer should have at least 1024 bytes capacity"
+        );
+    }
+
+    #[test]
+    fn test_tool_call_buffer_push_args() {
+        let mut buffer = ToolCallBuffer::new("tc_1".to_string());
+        buffer.name = Some("test_tool".to_string());
+        buffer.push_args(r#"{"key""#);
+        buffer.push_args(r#": "value"}"#);
+
+        let completed = buffer.try_complete().unwrap();
+        assert_eq!(completed.args["key"], "value");
+    }
+
+    #[test]
+    fn test_tool_call_buffer_no_reallocation_small_args() {
+        let mut buffer = ToolCallBuffer::new("tc_1".to_string());
+        let initial_capacity = buffer.args_json.capacity();
+
+        // Small JSON args that fit within default capacity
+        let small_json = r#"{"path": "/tmp/test.txt"}"#;
+        buffer.push_args(small_json);
+
+        // Should not have reallocated
+        assert_eq!(
+            buffer.args_json.capacity(),
+            initial_capacity,
+            "Buffer should not reallocate for small args"
+        );
     }
 }

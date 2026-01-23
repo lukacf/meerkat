@@ -195,23 +195,32 @@ impl LlmClient for OpenAiClient {
                 Err(LlmError::from_http_status(status_code, text))
             };
             let mut stream = stream_result?;
-            let mut buffer = String::new();
+            // Pre-allocate buffer with typical SSE event size to reduce allocations
+            let mut buffer = String::with_capacity(512);
             let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                // from_utf8_lossy returns Cow which avoids allocation for valid UTF-8
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                // Process complete lines
+                // Process complete lines without allocating new strings
                 while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].trim().to_string();
-                    buffer = buffer[newline_pos + 1..].to_string();
+                    // Get the line as a slice and trim, avoiding allocation
+                    let line = buffer[..newline_pos].trim();
 
-                    if line.is_empty() || line.starts_with(':') {
-                        continue;
-                    }
+                    // Skip empty lines and SSE comments
+                    let should_process = !line.is_empty() && !line.starts_with(':');
+                    let parsed_chunk = if should_process {
+                        Self::parse_sse_line(line)
+                    } else {
+                        None
+                    };
 
-                    if let Some(chunk) = Self::parse_sse_line(&line) {
+                    // Drain the processed line from buffer (avoids creating new String)
+                    buffer.drain(..=newline_pos);
+
+                    if let Some(chunk) = parsed_chunk {
                         // Handle usage info (comes in final chunk)
                         if let Some(usage) = chunk.usage {
                             yield LlmEvent::UsageUpdate {
@@ -360,7 +369,7 @@ struct UsageInfo {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use meerkat_core::{ToolDef, UserMessage};
+    use meerkat_core::{AssistantMessage, StopReason as CoreStopReason, ToolCall, ToolDef, Usage as CoreUsage, UserMessage};
 
     fn skip_if_no_key() -> Option<OpenAiClient> {
         OpenAiClient::from_env().ok()
@@ -672,5 +681,99 @@ pub mod tests {
             "Expected auth error, got: {:?}",
             err
         );
+    }
+
+    // Unit tests for SSE buffer handling and tool args serialization
+
+    /// Test that tool args are serialized directly without round-trip through serde_json::Value::to_string
+    /// The expected format is: `"arguments": "{\"city\":\"Tokyo\"}"`
+    /// NOT nested JSON like: `"arguments": "\"{\\\"city\\\":\\\"Tokyo\\\"}\""` (double-serialized)
+    #[test]
+    fn test_tool_args_serialization_no_double_encoding() {
+        let client = OpenAiClient::new("test-key".to_string());
+
+        let tool_args = serde_json::json!({"city": "Tokyo", "units": "celsius"});
+        let request = LlmRequest::new(
+            "gpt-4o-mini",
+            vec![
+                Message::User(UserMessage {
+                    content: "What's the weather?".to_string(),
+                }),
+                Message::Assistant(AssistantMessage {
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "call_123".to_string(),
+                        name: "get_weather".to_string(),
+                        args: tool_args.clone(),
+                    }],
+                    stop_reason: CoreStopReason::ToolUse,
+                    usage: CoreUsage::default(),
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+
+        // Find the assistant message with tool_calls
+        let messages = body["messages"].as_array().expect("messages should be array");
+        let assistant_msg = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("should have assistant message");
+
+        let tool_calls = assistant_msg["tool_calls"]
+            .as_array()
+            .expect("should have tool_calls");
+        let arguments = tool_calls[0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments should be string");
+
+        // Parse the arguments string back to verify it's valid JSON (not double-encoded)
+        let parsed: serde_json::Value =
+            serde_json::from_str(arguments).expect("arguments should be valid JSON");
+
+        // Verify it matches the original - not double-serialized
+        assert_eq!(parsed["city"], "Tokyo");
+        assert_eq!(parsed["units"], "celsius");
+
+        // Also verify the string doesn't contain escaped quotes at the start (double-encoding sign)
+        assert!(
+            !arguments.starts_with(r#""{\"#),
+            "arguments should not be double-encoded: {}",
+            arguments
+        );
+    }
+
+    /// Test SSE buffer uses efficient drain pattern (compile-time verification via code review)
+    /// This test verifies the SSE parsing logic works correctly - the efficiency is ensured
+    /// by using drain() instead of creating new String allocations
+    #[test]
+    fn test_parse_sse_line_valid_data() {
+        let line = r#"data: {"id":"123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}"#;
+        let chunk = OpenAiClient::parse_sse_line(line);
+        assert!(chunk.is_some());
+        let chunk = chunk.unwrap();
+        assert_eq!(chunk.choices.len(), 1);
+        assert_eq!(chunk.choices[0].delta.content, Some("Hi".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sse_line_done_marker() {
+        let line = "data: [DONE]";
+        let chunk = OpenAiClient::parse_sse_line(line);
+        assert!(chunk.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_line_non_data_line() {
+        // Event lines should be ignored
+        let line = "event: message";
+        let chunk = OpenAiClient::parse_sse_line(line);
+        assert!(chunk.is_none());
+
+        // Comments should be ignored
+        let line = ": keep-alive";
+        let chunk = OpenAiClient::parse_sse_line(line);
+        assert!(chunk.is_none());
     }
 }

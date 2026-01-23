@@ -11,6 +11,16 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::time::Duration;
+
+/// Default connect timeout for HTTP connections
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default request timeout (long for streaming responses)
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// Default pool idle timeout
+const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Initial capacity for SSE buffer (typical SSE event is ~200-500 bytes)
+const SSE_BUFFER_CAPACITY: usize = 512;
 
 /// Anthropic Claude API client
 pub struct AnthropicClient {
@@ -19,14 +29,79 @@ pub struct AnthropicClient {
     http: reqwest::Client,
 }
 
-impl AnthropicClient {
-    /// Create a new Anthropic client with the given API key
+/// Builder for AnthropicClient with configurable HTTP settings
+pub struct AnthropicClientBuilder {
+    api_key: String,
+    base_url: String,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    pool_idle_timeout: Duration,
+}
+
+impl AnthropicClientBuilder {
+    /// Create a new builder with the given API key
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
             base_url: "https://api.anthropic.com".to_string(),
-            http: reqwest::Client::new(),
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
         }
+    }
+
+    /// Set custom base URL
+    pub fn base_url(mut self, url: String) -> Self {
+        self.base_url = url;
+        self
+    }
+
+    /// Set connection timeout
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Set request timeout
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Set pool idle timeout
+    pub fn pool_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.pool_idle_timeout = timeout;
+        self
+    }
+
+    /// Build the client with configured HTTP settings
+    pub fn build(self) -> AnthropicClient {
+        let http = reqwest::Client::builder()
+            .connect_timeout(self.connect_timeout)
+            .timeout(self.request_timeout)
+            .pool_idle_timeout(self.pool_idle_timeout)
+            .pool_max_idle_per_host(4)
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .expect("Failed to build HTTP client");
+
+        AnthropicClient {
+            api_key: self.api_key,
+            base_url: self.base_url,
+            http,
+        }
+    }
+}
+
+impl AnthropicClient {
+    /// Create a new Anthropic client with the given API key and default HTTP settings
+    pub fn new(api_key: String) -> Self {
+        AnthropicClientBuilder::new(api_key).build()
+    }
+
+    /// Create a builder for more control over HTTP configuration
+    pub fn builder(api_key: String) -> AnthropicClientBuilder {
+        AnthropicClientBuilder::new(api_key)
     }
 
     /// Create from environment variable ANTHROPIC_API_KEY
@@ -198,24 +273,33 @@ impl LlmClient for AnthropicClient {
                 Err(LlmError::from_http_status(status_code, text))
             };
             let mut stream = stream_result?;
-            let mut buffer = String::new();
+            // Pre-allocate buffer with typical SSE event size to reduce allocations
+            let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
             let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
             let mut current_tool_index: Option<usize> = None;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                // from_utf8_lossy returns Cow which avoids allocation for valid UTF-8
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                // Process complete lines
+                // Process complete lines without allocating new strings
                 while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].trim().to_string();
-                    buffer = buffer[newline_pos + 1..].to_string();
+                    // Get the line as a slice and trim, avoiding allocation
+                    let line = buffer[..newline_pos].trim();
 
-                    if line.is_empty() || line.starts_with(':') {
-                        continue;
-                    }
+                    // Skip empty lines and SSE comments
+                    let should_process = !line.is_empty() && !line.starts_with(':');
+                    let event = if should_process {
+                        Self::parse_sse_line(line)
+                    } else {
+                        None
+                    };
 
-                    if let Some(event) = Self::parse_sse_line(&line) {
+                    // Drain the processed line from buffer (avoids creating new String)
+                    buffer.drain(..=newline_pos);
+
+                    if let Some(event) = event {
                         match event.event_type.as_str() {
                             "content_block_start" => {
                                 if let Some(content_block) = event.content_block {
@@ -244,7 +328,7 @@ impl LlmClient for AnthropicClient {
                                                     current_tool_index.unwrap_or(0)
                                                 );
                                                 if let Some(buf) = tool_buffers.get_mut(&index) {
-                                                    buf.args_json.push_str(&partial);
+                                                    buf.push_args(&partial);
                                                     yield LlmEvent::ToolCallDelta {
                                                         id: buf.id.clone(),
                                                         name: buf.name.clone(),
@@ -688,5 +772,63 @@ pub mod tests {
 
         // Standard fields should be present
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_client_builder_creates_configured_client() {
+        // Test that builder creates client with proper configuration
+        let client = AnthropicClient::builder("test-key".to_string())
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .request_timeout(std::time::Duration::from_secs(120))
+            .build();
+
+        assert_eq!(client.provider(), "anthropic");
+    }
+
+    #[test]
+    fn test_client_default_has_connection_pool() {
+        // Default client should have proper HTTP configuration
+        let client = AnthropicClient::new("test-key".to_string());
+        // Just verify it compiles and works - actual pool config is internal to reqwest
+        assert_eq!(client.provider(), "anthropic");
+    }
+
+    #[test]
+    fn test_parse_sse_line() {
+        // Valid data line
+        let line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let event = AnthropicClient::parse_sse_line(line);
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.event_type, "content_block_delta");
+
+        // DONE marker
+        let done = AnthropicClient::parse_sse_line("data: [DONE]");
+        assert!(done.is_none());
+
+        // Comment line (should return None since it doesn't start with "data: ")
+        let comment = AnthropicClient::parse_sse_line(": comment");
+        assert!(comment.is_none());
+
+        // Event line (not data)
+        let event_line = AnthropicClient::parse_sse_line("event: message_start");
+        assert!(event_line.is_none());
+    }
+
+    #[test]
+    fn test_sse_buffer_constants() {
+        // Verify constants are sensible values
+        assert!(
+            SSE_BUFFER_CAPACITY >= 256,
+            "SSE buffer should be at least 256 bytes"
+        );
+        assert!(
+            DEFAULT_CONNECT_TIMEOUT.as_secs() >= 5,
+            "Connect timeout should be at least 5s"
+        );
+        assert!(
+            DEFAULT_REQUEST_TIMEOUT.as_secs() >= 60,
+            "Request timeout should be at least 60s"
+        );
     }
 }

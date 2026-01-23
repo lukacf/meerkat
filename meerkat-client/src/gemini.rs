@@ -197,26 +197,33 @@ impl LlmClient for GeminiClient {
                 Err(LlmError::from_http_status(status_code, text))
             };
             let mut stream = stream_result?;
-            let mut buffer = String::new();
+            // Pre-allocate buffer with typical SSE event size to reduce allocations
+            let mut buffer = String::with_capacity(512);
             let mut tool_index = 0usize;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                // from_utf8_lossy returns Cow which avoids allocation for valid UTF-8
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                // Process complete lines
+                // Process complete lines without allocating new strings
                 while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].trim().to_string();
-                    buffer = buffer[newline_pos + 1..].to_string();
+                    // Get the line as a slice and trim, avoiding allocation
+                    let line = buffer[..newline_pos].trim();
 
-                    if line.is_empty() {
-                        continue;
-                    }
+                    // Skip empty lines
+                    let parsed_response = if !line.is_empty() {
+                        // Handle SSE format - strip prefix if present
+                        let data = line.strip_prefix("data: ").unwrap_or(line);
+                        Self::parse_stream_line(data)
+                    } else {
+                        None
+                    };
 
-                    // Handle SSE format
-                    let data = line.strip_prefix("data: ").unwrap_or(&line);
+                    // Drain the processed line from buffer (avoids creating new String)
+                    buffer.drain(..=newline_pos);
 
-                    if let Some(response) = Self::parse_stream_line(data) {
+                    if let Some(response) = parsed_response {
                         // Handle error
                         if let Some(error) = response.error {
                             Err(LlmError::InvalidRequest {
@@ -670,5 +677,63 @@ pub mod tests {
             "Expected auth/invalid error, got: {:?}",
             err
         );
+    }
+
+    // Unit tests for SSE buffer handling
+
+    /// Test SSE parsing with valid response data
+    #[test]
+    fn test_parse_stream_line_valid_response() {
+        let line = r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#;
+        let response = GeminiClient::parse_stream_line(line);
+        assert!(response.is_some());
+        let response = response.unwrap();
+        assert!(response.candidates.is_some());
+        let candidates = response.candidates.unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].finish_reason, Some("STOP".to_string()));
+    }
+
+    /// Test SSE parsing with usage metadata
+    #[test]
+    fn test_parse_stream_line_with_usage() {
+        let line = r#"{"candidates":[],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#;
+        let response = GeminiClient::parse_stream_line(line);
+        assert!(response.is_some());
+        let response = response.unwrap();
+        assert!(response.usage_metadata.is_some());
+        let usage = response.usage_metadata.unwrap();
+        assert_eq!(usage.prompt_token_count, Some(10));
+        assert_eq!(usage.candidates_token_count, Some(5));
+    }
+
+    /// Test SSE parsing with function call
+    #[test]
+    fn test_parse_stream_line_function_call() {
+        let line = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Tokyo"}}}]}}]}"#;
+        let response = GeminiClient::parse_stream_line(line);
+        assert!(response.is_some());
+        let response = response.unwrap();
+        let candidates = response.candidates.unwrap();
+        let parts = candidates[0].content.as_ref().unwrap().parts.as_ref().unwrap();
+        let fc = parts[0].function_call.as_ref().unwrap();
+        assert_eq!(fc.name, "get_weather");
+        assert_eq!(fc.args.as_ref().unwrap()["city"], "Tokyo");
+    }
+
+    /// Test SSE parsing with invalid JSON returns None
+    #[test]
+    fn test_parse_stream_line_invalid_json() {
+        let line = "not valid json";
+        let response = GeminiClient::parse_stream_line(line);
+        assert!(response.is_none());
+    }
+
+    /// Test SSE parsing with empty line returns None
+    #[test]
+    fn test_parse_stream_line_empty() {
+        let line = "";
+        let response = GeminiClient::parse_stream_line(line);
+        assert!(response.is_none());
     }
 }

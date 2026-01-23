@@ -112,7 +112,9 @@ impl McpConnection {
             .into_iter()
             .map(|t| {
                 // Convert Arc<Map<String, Value>> to Value::Object
-                let schema = Value::Object((*t.input_schema).clone());
+                // Use Arc::unwrap_or_clone to avoid clone if we have the only reference
+                let inner_map = std::sync::Arc::unwrap_or_clone(t.input_schema);
+                let schema = Value::Object(inner_map);
                 ToolDef {
                     name: t.name.to_string(),
                     description: t.description.unwrap_or_default().to_string(),
@@ -149,7 +151,7 @@ impl McpConnection {
             });
         }
 
-        // Extract text content from result
+        // Extract text content from result using fold to avoid intermediate Vec allocation
         let text = result
             .content
             .into_iter()
@@ -160,8 +162,13 @@ impl McpConnection {
                     None
                 }
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .fold(String::new(), |mut acc, text| {
+                if !acc.is_empty() {
+                    acc.push('\n');
+                }
+                acc.push_str(&text);
+                acc
+            });
 
         Ok(text)
     }
@@ -181,8 +188,60 @@ impl McpConnection {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use rmcp::model::Content;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    /// Helper function that extracts text from Content items using the optimized approach
+    /// This mirrors the logic in call_tool() but as a standalone testable function
+    fn extract_text_content(contents: Vec<Content>) -> String {
+        contents
+            .into_iter()
+            .filter_map(|c| {
+                if let RawContent::Text(text_content) = c.raw {
+                    Some(text_content.text)
+                } else {
+                    None
+                }
+            })
+            .fold(String::new(), |mut acc, text| {
+                if !acc.is_empty() {
+                    acc.push('\n');
+                }
+                acc.push_str(&text);
+                acc
+            })
+    }
+
+    /// Test that text content extraction works correctly with multiple items
+    #[test]
+    fn test_extract_text_content_multiple_items() {
+        let contents = vec![
+            Content::text("Line 1"),
+            Content::text("Line 2"),
+            Content::text("Line 3"),
+        ];
+
+        let result = extract_text_content(contents);
+        assert_eq!(result, "Line 1\nLine 2\nLine 3");
+    }
+
+    /// Test that text content extraction works with single item (no separator)
+    #[test]
+    fn test_extract_text_content_single_item() {
+        let contents = vec![Content::text("Only line")];
+
+        let result = extract_text_content(contents);
+        assert_eq!(result, "Only line");
+    }
+
+    /// Test that text content extraction returns empty string for empty input
+    #[test]
+    fn test_extract_text_content_empty() {
+        let contents: Vec<Content> = vec![];
+        let result = extract_text_content(contents);
+        assert_eq!(result, "");
+    }
 
     /// Get path to the test server binary
     fn test_server_path() -> PathBuf {

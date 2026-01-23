@@ -856,8 +856,8 @@ mod mcp_protocol {
         let router = McpRouter::new();
 
         // Router should be created successfully
-        // list_tools returns empty when no servers are connected
-        let tools = router.list_tools().await.expect("Should list tools");
+        // list_tools returns empty slice when no servers are connected
+        let tools = router.list_tools();
         assert!(tools.is_empty(), "No tools without servers");
     }
 

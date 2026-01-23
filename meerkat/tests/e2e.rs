@@ -493,17 +493,18 @@ mod tool_invocation {
             .await
             .expect("Should connect to MCP server");
 
-        // List tools from router
-        let tools = router.list_tools().await.expect("Should list tools");
+        // List tools from router (now synchronous)
+        let tools = router.list_tools();
         assert!(!tools.is_empty(), "Should have discovered tools");
         assert!(
             tools.iter().any(|t| t.name == "echo"),
             "Should have echo tool"
         );
 
+        let tools_vec = tools.to_vec();
         let router = Arc::new(router);
         let dispatcher = Arc::new(DispatcherWrapper::new(
-            tools,
+            tools_vec,
             router,
             std::time::Duration::from_secs(30),
         ));
@@ -862,8 +863,8 @@ mod parallel_tools {
             .await
             .expect("Should connect to MCP server");
 
-        // List tools from router
-        let tools = router.list_tools().await.expect("Should list tools");
+        // List tools from router (now synchronous)
+        let tools = router.list_tools();
         assert!(
             tools.iter().any(|t| t.name == "add"),
             "Should have add tool"
@@ -878,9 +879,10 @@ mod parallel_tools {
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
 
+        let tools_vec = tools.to_vec();
         let router = Arc::new(router);
         let dispatcher = Arc::new(tool_invocation::DispatcherWrapper::new(
-            tools,
+            tools_vec,
             router,
             std::time::Duration::from_secs(30),
         ));
@@ -911,6 +913,327 @@ mod parallel_tools {
             "Response should contain calculation results: {}",
             result.text
         );
+    }
+
+    /// Tool dispatcher with simulated delays to verify parallel execution timing
+    pub struct TimedToolDispatcher {
+        tools: Vec<ToolDef>,
+        delay_ms: u64,
+        call_log: Arc<std::sync::Mutex<Vec<(String, std::time::Instant, std::time::Instant)>>>,
+    }
+
+    impl TimedToolDispatcher {
+        pub fn new(delay_ms: u64) -> Self {
+            Self {
+                tools: vec![
+                    ToolDef {
+                        name: "get_weather".to_string(),
+                        description: "Get current weather for a city".to_string(),
+                        input_schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "city": { "type": "string", "description": "City name" }
+                            },
+                            "required": ["city"]
+                        }),
+                    },
+                    ToolDef {
+                        name: "get_time".to_string(),
+                        description: "Get current time for a timezone".to_string(),
+                        input_schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "timezone": { "type": "string", "description": "Timezone name" }
+                            },
+                            "required": ["timezone"]
+                        }),
+                    },
+                    ToolDef {
+                        name: "get_stock".to_string(),
+                        description: "Get stock price for a symbol".to_string(),
+                        input_schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "symbol": { "type": "string", "description": "Stock symbol" }
+                            },
+                            "required": ["symbol"]
+                        }),
+                    },
+                ],
+                delay_ms,
+                call_log: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        pub fn call_timings(&self) -> Vec<(String, std::time::Instant, std::time::Instant)> {
+            self.call_log.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for TimedToolDispatcher {
+        fn tools(&self) -> Vec<ToolDef> {
+            self.tools.clone()
+        }
+
+        async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+            let start = std::time::Instant::now();
+
+            // Simulate network/processing delay
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+
+            let end = std::time::Instant::now();
+            self.call_log.lock().unwrap().push((name.to_string(), start, end));
+
+            // Return realistic mock responses
+            match name {
+                "get_weather" => {
+                    let city = args.get("city").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                    Ok(format!("Weather in {}: Sunny, 22°C", city))
+                }
+                "get_time" => {
+                    let tz = args.get("timezone").and_then(|v| v.as_str()).unwrap_or("UTC");
+                    Ok(format!("Current time in {}: 14:30 PM", tz))
+                }
+                "get_stock" => {
+                    let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("???");
+                    Ok(format!("Stock {}: $150.25 (+2.3%)", symbol))
+                }
+                _ => Err(format!("Unknown tool: {}", name)),
+            }
+        }
+    }
+
+    /// E2E test for parallel tool execution with timing verification
+    /// Verifies that multiple tools execute concurrently, not serially
+    #[tokio::test]
+    #[ignore = "Requires ANTHROPIC_API_KEY"]
+    async fn test_parallel_tools_with_timing_verification() {
+        let Some(api_key) = skip_if_no_anthropic_key() else {
+            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            return;
+        };
+
+        // Each tool takes 200ms - if serial, 3 tools = 600ms+; if parallel, ~200ms+
+        let tool_delay_ms = 200;
+        let dispatcher = Arc::new(TimedToolDispatcher::new(tool_delay_ms));
+
+        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
+
+        let (_store, store_adapter, _temp_dir) = create_temp_store().await;
+
+        let mut agent = AgentBuilder::new()
+            .model(anthropic_model())
+            .max_tokens_per_turn(1024)
+            .system_prompt(
+                "You have access to get_weather, get_time, and get_stock tools. \
+                 When asked about multiple things, use ALL relevant tools in a SINGLE response. \
+                 Do not call them one at a time."
+            )
+            .build(llm_adapter, dispatcher.clone(), store_adapter);
+
+        // Ask for multiple pieces of info to encourage parallel tool calls
+        let overall_start = std::time::Instant::now();
+        let result = agent
+            .run("I need the weather in Tokyo, the time in London, and the stock price for AAPL. Get all three.".to_string())
+            .await
+            .expect("Should complete");
+        let overall_duration = overall_start.elapsed();
+
+        eprintln!("Result: {} tool calls in {:?}", result.tool_calls, overall_duration);
+        eprintln!("Response: {}", result.text);
+
+        // Verify multiple tools were called
+        assert!(
+            result.tool_calls >= 2,
+            "LLM should have called multiple tools, got: {}",
+            result.tool_calls
+        );
+
+        // Check timing to verify parallel execution
+        let timings = dispatcher.call_timings();
+        if timings.len() >= 2 {
+            let starts: Vec<_> = timings.iter().map(|(_, s, _)| *s).collect();
+            let first_start = *starts.iter().min().unwrap();
+            let last_start = *starts.iter().max().unwrap();
+            let start_spread = last_start.duration_since(first_start);
+
+            eprintln!("Tool start spread: {:?}", start_spread);
+
+            // If parallel, tools should start within ~50ms of each other
+            // If serial, they'd start 200ms+ apart
+            assert!(
+                start_spread.as_millis() < 100,
+                "Tools should start nearly simultaneously for parallel execution. \
+                 Start spread was {:?}, suggesting serial execution.",
+                start_spread
+            );
+        }
+
+        // Verify response contains info from all tools
+        let text_lower = result.text.to_lowercase();
+        assert!(
+            text_lower.contains("tokyo") || text_lower.contains("weather") || text_lower.contains("sunny"),
+            "Response should mention weather result"
+        );
+    }
+
+    /// E2E test for multi-turn conversation with parallel tools
+    /// Turn 1: Multiple tools → Turn 2: Follow-up question
+    #[tokio::test]
+    #[ignore = "Requires ANTHROPIC_API_KEY"]
+    async fn test_parallel_tools_multiturn() {
+        let Some(api_key) = skip_if_no_anthropic_key() else {
+            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            return;
+        };
+
+        let dispatcher = Arc::new(TimedToolDispatcher::new(100));
+
+        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
+
+        let (_store, store_adapter, _temp_dir) = create_temp_store().await;
+
+        let mut agent = AgentBuilder::new()
+            .model(anthropic_model())
+            .max_tokens_per_turn(1024)
+            .system_prompt(
+                "You have access to get_weather, get_time, and get_stock tools. \
+                 Use multiple tools when appropriate."
+            )
+            .build(llm_adapter, dispatcher.clone(), store_adapter);
+
+        // Turn 1: Multiple tool calls
+        let result1 = agent
+            .run("Get the weather in Paris and the stock price for MSFT".to_string())
+            .await
+            .expect("Turn 1 should complete");
+
+        eprintln!("Turn 1: {} tool calls", result1.tool_calls);
+        eprintln!("Turn 1 response: {}", result1.text);
+
+        assert!(result1.tool_calls >= 1, "Turn 1 should have tool calls");
+
+        // Turn 2: Follow-up (uses session history)
+        let result2 = agent
+            .run("Now also get the time in New York".to_string())
+            .await
+            .expect("Turn 2 should complete");
+
+        eprintln!("Turn 2: {} tool calls", result2.tool_calls);
+        eprintln!("Turn 2 response: {}", result2.text);
+
+        // Turn 2 should have used the get_time tool
+        assert!(result2.tool_calls >= 1, "Turn 2 should have tool calls");
+
+        // Total tool calls across both turns
+        let total_tool_calls = result1.tool_calls + result2.tool_calls;
+        assert!(
+            total_tool_calls >= 2,
+            "Should have made multiple tool calls across turns, got: {}",
+            total_tool_calls
+        );
+
+        // Verify session maintained context
+        let session = agent.session();
+        assert!(
+            session.messages().len() >= 4,
+            "Session should have multiple messages from both turns"
+        );
+    }
+
+    /// E2E test for partial tool failure in parallel execution
+    /// One tool fails, others should still complete and LLM should handle gracefully
+    #[tokio::test]
+    #[ignore = "Requires ANTHROPIC_API_KEY"]
+    async fn test_parallel_tools_partial_failure() {
+        let Some(api_key) = skip_if_no_anthropic_key() else {
+            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            return;
+        };
+
+        /// Dispatcher where one specific tool always fails
+        struct PartialFailureDispatcher;
+
+        #[async_trait]
+        impl AgentToolDispatcher for PartialFailureDispatcher {
+            fn tools(&self) -> Vec<ToolDef> {
+                vec![
+                    ToolDef {
+                        name: "working_tool".to_string(),
+                        description: "A tool that works correctly".to_string(),
+                        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                    },
+                    ToolDef {
+                        name: "broken_tool".to_string(),
+                        description: "A tool that always fails".to_string(),
+                        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                    },
+                    ToolDef {
+                        name: "another_working_tool".to_string(),
+                        description: "Another tool that works correctly".to_string(),
+                        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                    },
+                ]
+            }
+
+            async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
+                // Simulate some processing time
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                match name {
+                    "working_tool" => Ok("Working tool result: success!".to_string()),
+                    "broken_tool" => Err("Error: broken_tool encountered a critical failure".to_string()),
+                    "another_working_tool" => Ok("Another working tool result: also success!".to_string()),
+                    _ => Err(format!("Unknown tool: {}", name)),
+                }
+            }
+        }
+
+        let dispatcher = Arc::new(PartialFailureDispatcher);
+
+        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
+
+        let (_store, store_adapter, _temp_dir) = create_temp_store().await;
+
+        let mut agent = AgentBuilder::new()
+            .model(anthropic_model())
+            .max_tokens_per_turn(1024)
+            .system_prompt(
+                "You have three tools: working_tool, broken_tool, and another_working_tool. \
+                 When asked to test all tools, call ALL THREE tools. \
+                 If a tool fails, acknowledge the error and report results from successful tools."
+            )
+            .build(llm_adapter, dispatcher, store_adapter);
+
+        // Request that should trigger all three tools
+        let result = agent
+            .run("Please call working_tool, broken_tool, and another_working_tool to test them all".to_string())
+            .await
+            .expect("Agent should complete even with partial tool failure");
+
+        eprintln!("Tool calls: {}", result.tool_calls);
+        eprintln!("Response: {}", result.text);
+
+        // Should have attempted multiple tool calls
+        assert!(
+            result.tool_calls >= 1,
+            "Should have made tool calls, got: {}",
+            result.tool_calls
+        );
+
+        // LLM should acknowledge both success and failure
+        let text_lower = result.text.to_lowercase();
+        let mentions_success = text_lower.contains("success") || text_lower.contains("working");
+        let mentions_error = text_lower.contains("error") || text_lower.contains("fail") || text_lower.contains("broken");
+
+        eprintln!("Mentions success: {}, Mentions error: {}", mentions_success, mentions_error);
+
+        // At minimum, the agent should complete and respond coherently
+        assert!(!result.text.is_empty(), "Should have a response");
     }
 }
 

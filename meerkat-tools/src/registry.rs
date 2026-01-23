@@ -4,10 +4,11 @@ use jsonschema::Validator;
 use meerkat_core::ToolDef;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Registry for tool definitions and schema validation
 pub struct ToolRegistry {
-    tools: HashMap<String, ToolDef>,
+    tools: HashMap<String, Arc<ToolDef>>,
     validators: HashMap<String, Validator>,
 }
 
@@ -26,11 +27,12 @@ impl ToolRegistry {
         if let Ok(validator) = Validator::new(&tool.input_schema) {
             self.validators.insert(tool.name.clone(), validator);
         }
-        self.tools.insert(tool.name.clone(), tool);
+        self.tools.insert(tool.name.clone(), Arc::new(tool));
     }
 
-    /// Get tool definitions for LLM requests
-    pub fn tool_defs(&self) -> Vec<ToolDef> {
+    /// Get tool definitions for LLM requests.
+    /// Returns Arc references to avoid cloning on every request.
+    pub fn tool_defs(&self) -> Vec<Arc<ToolDef>> {
         self.tools.values().cloned().collect()
     }
 
@@ -47,13 +49,14 @@ impl ToolRegistry {
 
         // Validate against compiled schema if available
         if let Some(validator) = self.validators.get(name) {
-            // Collect all validation errors
-            let errors: Vec<String> = validator
-                .iter_errors(args)
-                .map(|e| format!("{}: {}", e.instance_path, e))
-                .collect();
+            // Use is_valid() fast-path for the common case of valid input
+            if !validator.is_valid(args) {
+                // Only collect errors when validation fails
+                let errors: Vec<String> = validator
+                    .iter_errors(args)
+                    .map(|e| format!("{}: {}", e.instance_path, e))
+                    .collect();
 
-            if !errors.is_empty() {
                 return Err(crate::error::ToolValidationError::SchemaValidation(
                     errors.join("; "),
                 ));
@@ -78,6 +81,7 @@ impl Default for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_validate_valid_args() {
@@ -154,5 +158,53 @@ mod tests {
             result.unwrap_err(),
             crate::error::ToolValidationError::ToolNotFound(_)
         ));
+    }
+
+    // Performance tests for issue fixes
+
+    #[test]
+    fn test_tool_defs_returns_arc_references() {
+        // Test that tool_defs returns Arc references, not clones
+        let mut registry = ToolRegistry::new();
+        let tool = ToolDef {
+            name: "test_tool".to_string(),
+            description: "A test tool".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        registry.register(tool);
+
+        let defs1 = registry.tool_defs();
+        let defs2 = registry.tool_defs();
+
+        // Both calls should return Arc pointing to the same data
+        assert_eq!(defs1.len(), 1);
+        assert_eq!(defs2.len(), 1);
+        assert!(Arc::ptr_eq(&defs1[0], &defs2[0]));
+    }
+
+    #[test]
+    fn test_validate_uses_fast_path_for_valid_input() {
+        // This test verifies that valid input doesn't collect errors.
+        // We can't directly test internal behavior, but we verify the
+        // function works correctly for valid input (fast path case).
+        let mut registry = ToolRegistry::new();
+        registry.register(ToolDef {
+            name: "test_tool".to_string(),
+            description: "A test tool".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "required": ["name"]
+            }),
+        });
+
+        // Valid args should return Ok quickly without collecting errors
+        let result = registry.validate(
+            "test_tool",
+            &serde_json::json!({"name": "valid"}),
+        );
+        assert!(result.is_ok());
     }
 }

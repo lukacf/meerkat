@@ -169,18 +169,33 @@ fn message_endpoint(base: http::Uri, endpoint: String) -> Result<http::Uri, http
     http::Uri::from_parts(base_parts).map_err(|_| endpoint_clone.parse::<http::Uri>().unwrap_err())
 }
 
+/// Shared HTTP client for SSE connections.
+///
+/// Reuses a single `reqwest::Client` for connection pooling and better performance.
+/// A default client is created via `new()`, or pass an existing client via `with_client()`.
 #[derive(Clone, Debug)]
 pub(crate) struct ReqwestSseClient {
     client: reqwest::Client,
     headers: HeaderMap,
 }
 
+/// Lazy-initialized shared reqwest client for SSE transports
+static DEFAULT_SSE_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(reqwest::Client::new);
+
 impl ReqwestSseClient {
+    /// Create a new SSE client using the shared default reqwest::Client
     pub(crate) fn new(headers: HeaderMap) -> Self {
         Self {
-            client: reqwest::Client::default(),
+            client: DEFAULT_SSE_CLIENT.clone(),
             headers,
         }
+    }
+
+    /// Create an SSE client with a custom reqwest::Client
+    #[allow(dead_code)]
+    pub(crate) fn with_client(client: reqwest::Client, headers: HeaderMap) -> Self {
+        Self { client, headers }
     }
 
     fn apply_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

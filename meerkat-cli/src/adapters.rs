@@ -251,10 +251,12 @@ impl McpRouterAdapter {
     }
 
     /// Refresh the cached tool list from the router
+    ///
+    /// Note: list_tools() is now synchronous since tools are cached in the router.
     pub async fn refresh_tools(&self) -> Result<(), String> {
         let router = self.router.read().await;
         if let Some(router) = router.as_ref() {
-            let tools = router.list_tools().await.map_err(|e| e.to_string())?;
+            let tools = router.list_tools().to_vec();
             let mut cached = self.cached_tools.write().await;
             *cached = tools;
         }

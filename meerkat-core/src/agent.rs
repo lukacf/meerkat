@@ -3,6 +3,8 @@
 //! The Agent struct ties together all components and runs the agent loop.
 
 use crate::budget::{Budget, BudgetLimits};
+use crate::comms_config::CoreCommsConfig;
+use crate::comms_runtime::CommsRuntime;
 use crate::config::AgentConfig;
 use crate::error::AgentError;
 use crate::event::{AgentEvent, BudgetType};
@@ -16,6 +18,7 @@ use crate::state::LoopState;
 use crate::sub_agent::{SubAgentManager, inject_steering_messages};
 use crate::types::{
     AssistantMessage, Message, RunResult, StopReason, ToolCall, ToolDef, ToolResult, Usage,
+    UserMessage,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -31,6 +34,7 @@ pub trait AgentLlmClient: Send + Sync {
         messages: &[Message],
         tools: &[ToolDef],
         max_tokens: u32,
+        temperature: Option<f32>,
     ) -> Result<LlmStreamResult, AgentError>;
 
     /// Get the provider name
@@ -108,6 +112,10 @@ pub struct AgentBuilder {
     session: Option<Session>,
     concurrency_limits: ConcurrencyLimits,
     depth: u32,
+    /// Comms configuration (optional, enables inter-agent communication)
+    comms_config: Option<CoreCommsConfig>,
+    /// Base directory for resolving comms paths (defaults to current dir)
+    comms_base_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentBuilder {
@@ -121,6 +129,8 @@ impl AgentBuilder {
             session: None,
             concurrency_limits: ConcurrencyLimits::default(),
             depth: 0,
+            comms_config: None,
+            comms_base_dir: None,
         }
     }
 
@@ -179,6 +189,28 @@ impl AgentBuilder {
         self
     }
 
+    /// Enable inter-agent communication with the given config.
+    ///
+    /// When comms is enabled, the agent will:
+    /// - Start listeners for incoming messages (UDS and/or TCP)
+    /// - Provide comms tools (send_message, send_request, send_response, list_peers)
+    /// - Drain inbox at turn boundaries and inject messages into the session
+    ///
+    /// Note: Subagents cannot have comms enabled (security restriction).
+    pub fn comms(mut self, config: CoreCommsConfig) -> Self {
+        self.comms_config = Some(config);
+        self
+    }
+
+    /// Set the base directory for resolving comms paths.
+    ///
+    /// Relative paths in comms config will be resolved relative to this directory.
+    /// Defaults to current working directory if not set.
+    pub fn comms_base_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.comms_base_dir = Some(dir);
+        self
+    }
+
     /// Build the agent
     pub fn build<C, T, S>(self, client: Arc<C>, tools: Arc<T>, store: Arc<S>) -> Agent<C, T, S>
     where
@@ -200,6 +232,43 @@ impl AgentBuilder {
         // Create steering channel for receiving steering messages from parent
         let (steering_tx, steering_rx) = mpsc::channel(16);
 
+        // Create comms runtime if enabled AND this is not a subagent.
+        // Subagents cannot have comms for security reasons (no network exposure).
+        let comms_runtime = if self.depth == 0 {
+            self.comms_config
+                .filter(|c| c.enabled)
+                .and_then(|config| {
+                    let base_dir = self.comms_base_dir.unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    });
+                    let resolved = config.resolve_paths(&base_dir);
+                    match CommsRuntime::new(resolved) {
+                        Ok(mut runtime) => {
+                            tracing::info!(
+                                "Comms enabled for agent '{}' (peer ID: {})",
+                                config.name,
+                                runtime.public_key().to_peer_id()
+                            );
+                            // Start listeners automatically when comms is enabled
+                            // This is done in a blocking context since build() is sync
+                            // Listeners run in background tasks and don't block
+                            if let Err(e) = futures::executor::block_on(runtime.start_listeners()) {
+                                tracing::warn!("Failed to start comms listeners: {}", e);
+                            }
+                            Some(runtime)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to create comms runtime: {}", e);
+                            None
+                        }
+                    }
+                })
+        } else {
+            // Subagents cannot have comms - this is a security restriction to prevent
+            // subagents from having network exposure.
+            None
+        };
+
         Agent {
             config: self.config,
             client,
@@ -213,6 +282,7 @@ impl AgentBuilder {
             depth: self.depth,
             steering_rx,
             steering_tx,
+            comms_runtime,
         }
     }
 }
@@ -236,6 +306,9 @@ where
     depth: u32,
     steering_rx: mpsc::Receiver<crate::ops::SteeringMessage>,
     steering_tx: mpsc::Sender<crate::ops::SteeringMessage>,
+    /// Optional comms runtime for inter-agent communication.
+    /// None if comms is disabled or if this is a subagent (subagents cannot have comms).
+    comms_runtime: Option<CommsRuntime>,
 }
 
 impl<C, T, S> Agent<C, T, S>
@@ -252,6 +325,11 @@ where
     /// Get the current session
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// Get mutable access to the session (for setting metadata)
+    pub fn session_mut(&mut self) -> &mut Session {
+        &mut self.session
     }
 
     /// Get the current budget
@@ -272,6 +350,20 @@ where
     /// Get the current nesting depth
     pub fn depth(&self) -> u32 {
         self.depth
+    }
+
+    /// Get the comms runtime, if enabled.
+    ///
+    /// Returns `None` if comms is disabled or if this is a subagent.
+    pub fn comms(&self) -> Option<&CommsRuntime> {
+        self.comms_runtime.as_ref()
+    }
+
+    /// Get mutable access to the comms runtime, if enabled.
+    ///
+    /// Returns `None` if comms is disabled or if this is a subagent.
+    pub fn comms_mut(&mut self) -> Option<&mut CommsRuntime> {
+        self.comms_runtime.as_mut()
     }
 
     /// Get the steering sender (for parent to use when spawning this agent)
@@ -579,6 +671,33 @@ where
         }
     }
 
+    /// Drain comms inbox and inject messages into session.
+    ///
+    /// This is called at turn boundaries to process incoming inter-agent messages.
+    /// It is non-blocking - if the inbox is empty, it returns immediately.
+    fn drain_comms_inbox(&mut self) {
+        if let Some(ref mut comms) = self.comms_runtime {
+            let messages = comms.drain_messages();
+            if !messages.is_empty() {
+                // Format all messages into a single user message for the LLM
+                let text: Vec<String> = messages
+                    .iter()
+                    .map(|m| m.to_user_message_text())
+                    .collect();
+                let combined = text.join("\n\n");
+
+                tracing::debug!(
+                    "Injecting {} comms messages into session",
+                    messages.len()
+                );
+
+                self.session.push(Message::User(UserMessage {
+                    content: combined,
+                }));
+            }
+        }
+    }
+
     /// Call LLM with retry logic
     async fn call_llm_with_retry(
         &self,
@@ -597,7 +716,7 @@ where
 
             match self
                 .client
-                .stream_response(messages, tools, max_tokens)
+                .stream_response(messages, tools, max_tokens, self.config.temperature)
                 .await
             {
                 Ok(result) => return Ok(result),
@@ -789,10 +908,13 @@ where
                         // Go through DrainingEvents to CallingLlm (state machine requires this)
                         self.state.transition(LoopState::DrainingEvents)?;
 
-                        // === TURN BOUNDARY: Apply steering and collect sub-agent results ===
+                        // === TURN BOUNDARY: Apply steering, drain comms, collect sub-agent results ===
 
                         // Apply any pending steering messages from parent
                         self.apply_pending_steering().await;
+
+                        // Drain comms inbox and inject messages into session (non-blocking)
+                        self.drain_comms_inbox();
 
                         // Collect completed sub-agent results and inject into session
                         let sub_agent_results = self.collect_sub_agent_results().await;
@@ -926,6 +1048,7 @@ mod tests {
             _messages: &[Message],
             _tools: &[ToolDef],
             _max_tokens: u32,
+            _temperature: Option<f32>,
         ) -> Result<LlmStreamResult, AgentError> {
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
@@ -1094,5 +1217,317 @@ mod tests {
 
         assert!(!agent.session().messages().is_empty()); // Should have system prompt
         assert_eq!(agent.state(), &LoopState::CallingLlm);
+    }
+
+    // =========================================================================
+    // Phase 10: Agent Integration Tests (comms wiring)
+    // =========================================================================
+
+    #[test]
+    fn test_agent_builder_has_comms_config() {
+        // Verify AgentBuilder has comms_config field
+        let builder = AgentBuilder::new();
+        // The field exists (compiles) and is None by default
+        // We test this by using the comms() method
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        let agent = builder.build(client, tools, store);
+        // Without comms config, comms runtime should be None
+        assert!(agent.comms().is_none());
+    }
+
+    #[test]
+    fn test_agent_builder_comms_method() {
+        use crate::comms_config::CoreCommsConfig;
+
+        let config = CoreCommsConfig::with_name("test-agent");
+        let builder = AgentBuilder::new().comms(config.clone());
+
+        // Verify builder accepted the config (implicitly - build will use it)
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        // Note: This test doesn't verify comms_runtime creation because that
+        // requires filesystem access. See test_agent_builder_creates_comms_runtime.
+        let _agent = builder.build(client, tools, store);
+    }
+
+    #[test]
+    fn test_agent_has_comms_runtime() {
+        // Verify Agent has comms_runtime field (accessible via comms())
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        let agent = AgentBuilder::new().build(client, tools, store);
+
+        // comms() and comms_mut() methods should exist and return None when disabled
+        assert!(agent.comms().is_none());
+    }
+
+    #[test]
+    fn test_agent_builder_creates_comms_runtime() {
+        use crate::comms_config::CoreCommsConfig;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let mut config = CoreCommsConfig::with_name("test-agent");
+        config.identity_dir = tmp.path().join("identity").into();
+        config.trusted_peers_path = tmp.path().join("trusted.json").into();
+        // No listeners to avoid port binding issues in tests
+        config.listen_uds = None;
+        config.listen_tcp = None;
+
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        let agent = AgentBuilder::new()
+            .comms(config)
+            .comms_base_dir(tmp.path().to_path_buf())
+            .build(client, tools, store);
+
+        // Comms runtime should be created
+        assert!(agent.comms().is_some());
+
+        // Public key should be valid
+        let pubkey = agent.comms().unwrap().public_key();
+        assert_eq!(pubkey.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn test_agent_comms_accessor() {
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        let agent = AgentBuilder::new().build(client, tools, store);
+
+        // comms() should return Option<&CommsRuntime>
+        let comms_ref: Option<&crate::comms_runtime::CommsRuntime> = agent.comms();
+        assert!(comms_ref.is_none());
+    }
+
+    #[test]
+    fn test_agent_comms_mut_accessor() {
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        let mut agent = AgentBuilder::new().build(client, tools, store);
+
+        // comms_mut() should return Option<&mut CommsRuntime>
+        let comms_mut: Option<&mut crate::comms_runtime::CommsRuntime> = agent.comms_mut();
+        assert!(comms_mut.is_none());
+    }
+
+    #[test]
+    fn test_subagent_has_no_comms() {
+        use crate::comms_config::CoreCommsConfig;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let mut config = CoreCommsConfig::with_name("test-agent");
+        config.identity_dir = tmp.path().join("identity").into();
+        config.trusted_peers_path = tmp.path().join("trusted.json").into();
+
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        // Build agent with depth > 0 (simulating subagent)
+        let agent = AgentBuilder::new()
+            .comms(config)
+            .comms_base_dir(tmp.path().to_path_buf())
+            .depth(1) // Subagent depth
+            .build(client, tools, store);
+
+        // Subagents cannot have comms - security restriction
+        assert!(agent.comms().is_none());
+        assert_eq!(agent.depth(), 1);
+    }
+
+    #[test]
+    fn test_agent_no_comms_tools_when_disabled() {
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![
+            ToolDef {
+                name: "my_tool".to_string(),
+                description: "A test tool".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+        ]));
+        let store = Arc::new(MockSessionStore);
+
+        let agent = AgentBuilder::new().build(client, tools, store);
+
+        // Without comms, agent should have no comms runtime
+        assert!(agent.comms().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_agent_empty_inbox_nonblocking() {
+        use crate::comms_config::CoreCommsConfig;
+        use tempfile::TempDir;
+        use std::time::{Duration, Instant};
+
+        let tmp = TempDir::new().unwrap();
+        let mut config = CoreCommsConfig::with_name("test-agent");
+        config.identity_dir = tmp.path().join("identity").into();
+        config.trusted_peers_path = tmp.path().join("trusted.json").into();
+        config.listen_uds = None;
+        config.listen_tcp = None;
+
+        let client = Arc::new(MockLlmClient::new(vec![LlmStreamResult {
+            content: "Done".to_string(),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        let mut agent = AgentBuilder::new()
+            .comms(config)
+            .comms_base_dir(tmp.path().to_path_buf())
+            .build(client, tools, store);
+
+        // Verify comms is enabled
+        assert!(agent.comms().is_some());
+
+        // Run agent - should complete quickly even with empty inbox
+        let start = Instant::now();
+        let result = agent.run("Test".to_string()).await.unwrap();
+        let elapsed = start.elapsed();
+
+        // Should complete in reasonable time (not blocked on inbox)
+        assert!(elapsed < Duration::from_secs(5), "Agent run took too long: {:?}", elapsed);
+        assert_eq!(result.text, "Done");
+    }
+
+    #[tokio::test]
+    async fn test_agent_starts_comms_listeners() {
+        // Test that listeners are started automatically when comms is enabled.
+        // We verify this by checking that the runtime was created (listeners start
+        // during CommsRuntime::start_listeners() which is called in build()).
+        use crate::comms_config::CoreCommsConfig;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let mut config = CoreCommsConfig::with_name("test-agent");
+        config.identity_dir = tmp.path().join("identity").into();
+        config.trusted_peers_path = tmp.path().join("trusted.json").into();
+        // Enable UDS listener
+        config.listen_uds = Some(tmp.path().join("test.sock").into());
+        config.listen_tcp = None;
+
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        let agent = AgentBuilder::new()
+            .comms(config.clone())
+            .comms_base_dir(tmp.path().to_path_buf())
+            .build(client, tools, store);
+
+        // Comms runtime should exist
+        assert!(agent.comms().is_some());
+
+        // Give the listener a moment to create the socket
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Socket file should have been created by the listener
+        // (This verifies start_listeners was called)
+        assert!(
+            config.listen_uds.as_ref().unwrap().exists(),
+            "UDS socket file should exist after listener starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_drains_inbox_at_turn_boundary() {
+        // This test verifies that drain_comms_inbox is called at turn boundaries.
+        // Since we can't easily inject messages into the inbox, we verify:
+        // 1. The method exists and is called (via code inspection)
+        // 2. Empty inbox doesn't affect agent behavior
+        // Full inbox draining is tested in e2e tests with real connections.
+        use crate::comms_config::CoreCommsConfig;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let mut config = CoreCommsConfig::with_name("test-agent");
+        config.identity_dir = tmp.path().join("identity").into();
+        config.trusted_peers_path = tmp.path().join("trusted.json").into();
+        config.listen_uds = None;
+        config.listen_tcp = None;
+
+        let client = Arc::new(MockLlmClient::new(vec![
+            // First: tool call response
+            LlmStreamResult {
+                content: "Calling tool".to_string(),
+                tool_calls: vec![ToolCall {
+                    id: "tc_1".to_string(),
+                    name: "test_tool".to_string(),
+                    args: serde_json::json!({}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+            // Second: final response (after turn boundary where inbox would be drained)
+            LlmStreamResult {
+                content: "Done after turn boundary".to_string(),
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![ToolDef {
+            name: "test_tool".to_string(),
+            description: "Test".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }]));
+        let store = Arc::new(MockSessionStore);
+
+        let mut agent = AgentBuilder::new()
+            .comms(config)
+            .comms_base_dir(tmp.path().to_path_buf())
+            .build(client, tools, store);
+
+        assert!(agent.comms().is_some());
+
+        // Run agent - it should complete even with comms enabled and empty inbox
+        let result = agent.run("Test".to_string()).await.unwrap();
+
+        // Should reach final response (turn boundary was crossed successfully)
+        assert_eq!(result.text, "Done after turn boundary");
+        assert_eq!(result.turns, 2);
+    }
+
+    #[test]
+    fn test_agent_formats_inbox_for_llm() {
+        // Test that CommsMessage::to_user_message_text produces proper format.
+        // This is already tested in comms_runtime::tests::test_comms_message_formatting
+        // but we add a quick sanity check here for the integration context.
+        use crate::comms_runtime::{CommsContent, CommsMessage};
+        use meerkat_comms::PubKey;
+
+        let msg = CommsMessage {
+            id: uuid::Uuid::new_v4(),
+            from_peer: "alice".to_string(),
+            from_pubkey: PubKey::new([1u8; 32]),
+            content: CommsContent::Message {
+                body: "Hello from Alice".to_string(),
+            },
+        };
+
+        let text = msg.to_user_message_text();
+
+        // Should be formatted for LLM injection
+        assert!(text.contains("[Comms]"), "Should have [Comms] prefix");
+        assert!(text.contains("alice"), "Should include peer name");
+        assert!(text.contains("Hello from Alice"), "Should include message body");
     }
 }

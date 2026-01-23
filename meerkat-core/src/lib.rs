@@ -5,6 +5,8 @@
 
 pub mod agent;
 pub mod budget;
+pub mod comms_config;
+pub mod comms_runtime;
 pub mod config;
 pub mod error;
 pub mod event;
@@ -22,6 +24,8 @@ pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
+pub use comms_config::{CoreCommsConfig, ResolvedCommsConfig};
+pub use comms_runtime::{CommsContent, CommsMessage, CommsRuntime, CommsRuntimeError, CommsStatus};
 pub use config::{AgentConfig, BudgetConfig, Config, ProviderConfig, RetryConfig, StorageConfig};
 pub use error::AgentError;
 pub use event::{AgentEvent, BudgetType};

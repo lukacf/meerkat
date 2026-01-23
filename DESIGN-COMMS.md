@@ -89,10 +89,17 @@ Field order is fixed: `id`, `from`, `to`, `kind`. This ensures cross-implementat
 
 **Critical: Never ack an Ack.** This prevents infinite ack storms.
 
+**Key distinction: Ack = envelope received and validated, NOT message processed by LLM.**
+
+The IO task sends the ack immediately upon validation. The agent's LLM processing happens later, asynchronously. This means:
+- Sender gets fast acknowledgment that the message was delivered
+- Sender does NOT wait for recipient to process/respond
+- Recipient may still be thinking when sender receives the ack
+
 Flow:
 1. Sender sends `Message` or `Request`
-2. Receiver validates, then sends `Ack` immediately
-3. Sender receives `Ack` - peer confirmed alive
+2. Receiver's IO task validates, then sends `Ack` immediately (before any LLM processing)
+3. Sender receives `Ack` - message confirmed delivered
 4. If `Response`, receiver sends it later (no ack expected for Response)
 5. `Ack` messages are never acknowledged
 
@@ -236,6 +243,47 @@ loop {
 }
 ```
 
+## Async Model
+
+### Ack vs Processing: The Key Distinction
+
+Understanding when things happen is critical to the comms model:
+
+| Event | When it happens | Who does it |
+|-------|-----------------|-------------|
+| **Ack sent** | Immediately on receive | IO task (per-connection) |
+| **Message processing** | Later, at turn boundary | Agent loop |
+
+This design ensures:
+1. **Fast acks**: Sender knows message was delivered within milliseconds
+2. **No blocking**: Sender can continue work immediately after ack
+3. **Decoupled processing**: Recipient's LLM can take any amount of time
+
+### Timing Example
+
+```
+Time 0ms:   Sender sends Message to Receiver
+Time 5ms:   Receiver's IO task validates, sends Ack
+Time 10ms:  Sender receives Ack, continues working
+Time 10ms:  Receiver's inbox has the message queued
+Time 500ms: Receiver's agent loop drains inbox (at turn boundary)
+Time 5000ms: Receiver's LLM finishes processing, may send Response
+```
+
+The sender is NOT blocked waiting for the 5000ms LLM processing.
+
+### Non-Blocking Sender Guarantee
+
+After sending a message, the sender can:
+- Send additional messages immediately
+- Continue its own LLM processing
+- Exit (if its task is complete)
+
+The ack confirms delivery, not processing. This is intentional:
+- Processing time is unpredictable (depends on LLM, task complexity)
+- Blocking the sender would create cascading delays
+- The Response message exists for when processing results matter
+
 ## Message Flow
 
 ### On Send
@@ -297,12 +345,47 @@ Note: `list_peers()` returns the trusted list, not live status. Use `send_messag
 ### Config File
 
 ```toml
-# meerkat.toml
+# .rkat/config.toml (project) or ~/.config/rkat/config.toml (user)
 [comms]
+enabled = true
+name = "my-agent"
 listen_uds = "/tmp/meerkat-{name}.sock"
 listen_tcp = "0.0.0.0:4200"  # optional, for remote
+identity_dir = ".rkat/identity"
+trusted_peers_path = ".rkat/trusted_peers.json"
 ack_timeout_secs = 30
 max_message_bytes = 1048576  # 1 MB
+```
+
+### CLI Configuration
+
+The `rkat` CLI loads comms config with the following precedence (highest to lowest):
+1. CLI flags (`--comms-name`, `--comms-listen-tcp`, `--no-comms`)
+2. Project config (`.rkat/config.toml` in current directory)
+3. User config (`~/.config/rkat/config.toml`)
+4. Defaults
+
+**CLI flags:**
+```bash
+# Enable comms with a specific name
+rkat run "prompt" --comms-name alice
+
+# Specify listen address
+rkat run "prompt" --comms-name alice --comms-listen-tcp 0.0.0.0:4200
+
+# Disable comms entirely
+rkat run "prompt" --no-comms
+```
+
+**Example project config:**
+```toml
+# .rkat/config.toml
+[comms]
+enabled = true
+name = "project-agent"
+listen_tcp = "127.0.0.1:4200"
+identity_dir = ".rkat/identity"
+trusted_peers_path = ".rkat/trusted_peers.json"
 ```
 
 ### Environment Variables
@@ -311,6 +394,45 @@ max_message_bytes = 1048576  # 1 MB
 MEERKAT_COMMS_ACK_TIMEOUT=30
 MEERKAT_COMMS_LISTEN_TCP=0.0.0.0:4200
 ```
+
+## Interface Parity
+
+All Meerkat interfaces (CLI, MCP, REST, SDK) use identical core components:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        User Interfaces                           │
+├────────────┬────────────┬────────────┬────────────┬──────────────┤
+│  rkat CLI  │  MCP Tools │  REST API  │  Rust SDK  │   (future)   │
+├────────────┴────────────┴────────────┴────────────┴──────────────┤
+│                                                                  │
+│                        meerkat-core                              │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ AgentBuilder → Agent → CommsRuntime → (tools, inbox, router)│ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│                       meerkat-comms                              │
+│  ┌───────────┬───────────┬───────────┬───────────┬────────────┐  │
+│  │  Router   │   Inbox   │  Keypair  │  Trusted  │ IO Tasks   │  │
+│  │           │           │           │  Peers    │            │  │
+│  └───────────┴───────────┴───────────┴───────────┴────────────┘  │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+This means:
+- **Same crypto**: All interfaces use identical Ed25519 signing
+- **Same transport**: All use the same UDS/TCP implementation
+- **Same protocol**: All speak the same CBOR-encoded envelope format
+- **Same behavior**: Ack semantics, timeouts, trust checking are consistent
+
+A message sent from `rkat` CLI will be received identically whether the peer is:
+- Another `rkat` CLI instance
+- An MCP server exposing Meerkat tools
+- A REST API client
+- A direct Rust SDK integration
 
 ## Crate Layout
 
@@ -333,6 +455,21 @@ meerkat-comms-mcp/
   src/
     lib.rs
     tools.rs        # send_message, send_request, send_response, list_peers
+
+meerkat-comms-agent/
+  src/
+    lib.rs
+    types.rs        # CommsMessage, CommsContent
+    manager.rs      # CommsManager (keypair, peers, inbox, router)
+    listener.rs     # spawn_tcp_listener, spawn_uds_listener
+    tool_dispatcher.rs  # CommsToolDispatcher implementing AgentToolDispatcher
+    comms_agent.rs  # CommsAgent wrapper for inbox injection
+
+meerkat-core/
+  src/
+    comms_config.rs    # CoreCommsConfig, ResolvedCommsConfig
+    comms_runtime.rs   # CommsRuntime lifecycle management
+    agent.rs           # AgentBuilder with .comms() method
 ```
 
 ## What's NOT in v1

@@ -40,13 +40,14 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         messages: &[Message],
         tools: &[ToolDef],
         max_tokens: u32,
+        temperature: Option<f32>,
     ) -> Result<LlmStreamResult, AgentError> {
         let request = LlmRequest {
             model: self.model.clone(),
             messages: messages.to_vec(),
             tools: tools.to_vec(),
             max_tokens,
-            temperature: None,
+            temperature,
             stop_sequences: None,
         };
 
@@ -1168,6 +1169,7 @@ mod sanity {
                 _messages: &[Message],
                 _tools: &[ToolDef],
                 _max_tokens: u32,
+                _temperature: Option<f32>,
             ) -> Result<LlmStreamResult, AgentError> {
                 Ok(LlmStreamResult {
                     content: "test".to_string(),

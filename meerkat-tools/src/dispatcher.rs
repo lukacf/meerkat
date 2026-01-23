@@ -2,8 +2,10 @@
 
 use crate::error::DispatchError;
 use crate::registry::ToolRegistry;
-use meerkat_core::{ToolCall, ToolDef, ToolResult};
+use async_trait::async_trait;
+use meerkat_core::{AgentToolDispatcher, ToolCall, ToolDef, ToolResult};
 use meerkat_mcp_client::McpRouter;
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,5 +78,111 @@ impl ToolDispatcher {
     pub async fn dispatch_parallel(&self, calls: &[ToolCall]) -> Vec<ToolResult> {
         let futures = calls.iter().map(|call| self.dispatch_one(call));
         futures::future::join_all(futures).await
+    }
+}
+
+#[async_trait]
+impl AgentToolDispatcher for ToolDispatcher {
+    fn tools(&self) -> Vec<ToolDef> {
+        self.tool_defs()
+    }
+
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+        // Validate arguments against schema
+        self.registry
+            .validate(name, args)
+            .map_err(|e| e.to_string())?;
+
+        // Dispatch via MCP router with timeout
+        let result = tokio::time::timeout(self.default_timeout, self.router.call_tool(name, args))
+            .await
+            .map_err(|_| {
+                format!(
+                    "Tool '{}' timed out after {}ms",
+                    name,
+                    self.default_timeout.as_millis()
+                )
+            })?
+            .map_err(|e| e.to_string())?;
+
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat_core::AgentToolDispatcher;
+
+    fn create_test_dispatcher() -> ToolDispatcher {
+        let router = Arc::new(McpRouter::new());
+        ToolDispatcher::new(router, Duration::from_secs(30))
+    }
+
+    #[test]
+    fn test_tools_returns_empty_vec_for_new_dispatcher() {
+        let dispatcher = create_test_dispatcher();
+        // Use the AgentToolDispatcher trait method
+        let tools: Vec<ToolDef> = AgentToolDispatcher::tools(&dispatcher);
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_tools_returns_registered_tools() {
+        let router = Arc::new(McpRouter::new());
+        let mut dispatcher = ToolDispatcher::new(router, Duration::from_secs(30));
+
+        // Register a tool directly via the registry
+        dispatcher.registry.register(ToolDef {
+            name: "test_tool".to_string(),
+            description: "A test tool".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"}
+                }
+            }),
+        });
+
+        // Use the AgentToolDispatcher trait method
+        let tools = AgentToolDispatcher::tools(&dispatcher);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "test_tool");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_validates_args() {
+        let router = Arc::new(McpRouter::new());
+        let mut dispatcher = ToolDispatcher::new(router, Duration::from_secs(30));
+
+        dispatcher.registry.register(ToolDef {
+            name: "test_tool".to_string(),
+            description: "A test tool".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer"}
+                },
+                "required": ["count"]
+            }),
+        });
+
+        // Invalid args (missing required field) should fail validation
+        let result =
+            AgentToolDispatcher::dispatch(&dispatcher, "test_tool", &serde_json::json!({})).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("count"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_unknown_tool() {
+        let dispatcher = create_test_dispatcher();
+
+        // Unknown tool should fail
+        let result =
+            AgentToolDispatcher::dispatch(&dispatcher, "unknown_tool", &serde_json::json!({}))
+                .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
     }
 }

@@ -1259,6 +1259,8 @@ dependencies = [
  "async-trait",
  "futures",
  "meerkat-client",
+ "meerkat-comms",
+ "meerkat-comms-agent",
  "meerkat-core",
  "meerkat-mcp-client",
  "meerkat-store",
@@ -1282,6 +1284,7 @@ dependencies = [
  "humantime",
  "meerkat",
  "meerkat-client",
+ "meerkat-comms",
  "meerkat-core",
  "meerkat-mcp-client",
  "meerkat-store",
@@ -1331,6 +1334,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-comms-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ciborium",
+ "meerkat-comms",
+ "meerkat-comms-mcp",
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "meerkat-comms-mcp"
 version = "0.1.0"
 dependencies = [
@@ -1353,6 +1374,7 @@ dependencies = [
  "chrono",
  "futures",
  "humantime-serde",
+ "meerkat-comms",
  "serde",
  "serde_json",
  "tempfile",

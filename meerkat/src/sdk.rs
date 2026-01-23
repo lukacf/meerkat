@@ -176,13 +176,14 @@ impl<C: LlmClient + 'static> AgentLlmClient for QuickLlmAdapter<C> {
         messages: &[Message],
         tools: &[ToolDef],
         max_tokens: u32,
+        temperature: Option<f32>,
     ) -> Result<LlmStreamResult, AgentError> {
         let request = LlmRequest {
             model: self.model.clone(),
             messages: messages.to_vec(),
             tools: tools.to_vec(),
             max_tokens,
-            temperature: None,
+            temperature,
             stop_sequences: None,
         };
 

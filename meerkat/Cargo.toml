@@ -26,6 +26,8 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
+meerkat-comms = { workspace = true }
+meerkat-comms-agent = { workspace = true }
 
 [features]
 default = ["anthropic", "jsonl-store"]

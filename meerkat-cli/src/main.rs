@@ -1,6 +1,7 @@
 //! meerkat-cli - Headless CLI for Meerkat
 
 mod adapters;
+pub mod config;
 mod mcp;
 
 use adapters::{
@@ -69,9 +70,22 @@ enum Commands {
         #[arg(long, default_value = "text")]
         output: String,
 
-        /// Stream events as they arrive (not yet implemented)
+        /// Stream LLM response tokens to stdout as they arrive
         #[arg(long)]
         stream: bool,
+
+        // === Comms flags ===
+        /// Agent name for inter-agent communication. Enables comms if set.
+        #[arg(long = "comms-name")]
+        comms_name: Option<String>,
+
+        /// TCP address to listen on for inter-agent communication (e.g., "0.0.0.0:4200")
+        #[arg(long = "comms-listen-tcp")]
+        comms_listen_tcp: Option<String>,
+
+        /// Disable inter-agent communication entirely
+        #[arg(long = "no-comms")]
+        no_comms: bool,
     },
 
     /// Resume a previous session
@@ -108,6 +122,12 @@ enum SessionCommands {
     Show {
         /// Session ID
         id: String,
+    },
+
+    /// Delete a session
+    Delete {
+        /// Session ID to delete
+        session_id: String,
     },
 }
 
@@ -228,7 +248,10 @@ async fn main() -> ExitCode {
             max_duration,
             max_tool_calls,
             output,
-            stream: _,
+            stream,
+            comms_name,
+            comms_listen_tcp,
+            no_comms,
         } => {
             // Resolve provider: explicit flag > infer from model > default
             let resolved_provider = provider
@@ -237,6 +260,14 @@ async fn main() -> ExitCode {
 
             // Parse duration string if provided
             let duration = max_duration.map(|s| parse_duration(&s)).transpose();
+
+            // Build comms overrides from CLI flags
+            let comms_overrides = config::CommsOverrides {
+                name: comms_name,
+                listen_tcp: comms_listen_tcp.and_then(|s| s.parse().ok()),
+                disabled: no_comms,
+            };
+
             match duration {
                 Ok(dur) => {
                     let limits = BudgetLimits {
@@ -251,6 +282,8 @@ async fn main() -> ExitCode {
                         max_tokens,
                         limits,
                         &output,
+                        stream,
+                        comms_overrides,
                     )
                     .await
                 }
@@ -261,6 +294,7 @@ async fn main() -> ExitCode {
         Commands::Sessions { command } => match command {
             SessionCommands::List { limit } => list_sessions(limit).await,
             SessionCommands::Show { id } => show_session(&id).await,
+            SessionCommands::Delete { session_id } => delete_session(&session_id).await,
         },
         Commands::Mcp { command } => handle_mcp_command(command),
     };
@@ -363,6 +397,7 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
     Ok(Some(adapter))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_agent(
     prompt: &str,
     model: &str,
@@ -370,7 +405,13 @@ async fn run_agent(
     max_tokens: u32,
     limits: BudgetLimits,
     output: &str,
+    stream: bool,
+    comms_overrides: config::CommsOverrides,
 ) -> anyhow::Result<()> {
+    use meerkat_core::event::AgentEvent;
+    use std::io::Write;
+    use tokio::sync::mpsc;
+
     // Get API key from environment
     let env_var = provider.api_key_env_var();
     let api_key = std::env::var(env_var).map_err(|_| {
@@ -388,7 +429,18 @@ async fn run_agent(
         Provider::Openai => Arc::new(OpenAiClient::new(api_key)),
         Provider::Gemini => Arc::new(GeminiClient::new(api_key)),
     };
-    let llm_adapter = Arc::new(DynLlmClientAdapter::new(llm_client, model.to_string()));
+
+    // Create LLM adapter - with event channel if streaming is enabled
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+    let llm_adapter = if stream {
+        Arc::new(DynLlmClientAdapter::with_event_channel(
+            llm_client,
+            model.to_string(),
+            event_tx,
+        ))
+    } else {
+        Arc::new(DynLlmClientAdapter::new(llm_client, model.to_string()))
+    };
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
 
@@ -409,19 +461,74 @@ async fn run_agent(
     // Compose system prompt (with AGENTS.md if present)
     let system_prompt = SystemPromptConfig::new().compose();
 
+    // Load comms configuration
+    let (comms_config, comms_base_dir) = config::load_comms_config(&comms_overrides);
+
     // Build the agent with budget limits (clone tools Arc so we can shutdown later)
     let tools_for_shutdown = tools.clone();
-    let mut agent = AgentBuilder::new()
+    let mut builder = AgentBuilder::new()
         .model(model)
         .max_tokens_per_turn(max_tokens)
         .system_prompt(system_prompt)
-        .budget(limits)
-        .build(llm_adapter, tools, store_adapter);
+        .budget(limits);
+
+    // Add comms configuration if present
+    if let Some(ref comms) = comms_config {
+        builder = builder.comms(comms.clone()).comms_base_dir(comms_base_dir.clone());
+    }
+
+    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+
+    // Store provider and model in session metadata for resume
+    agent.session_mut().set_metadata("provider", serde_json::json!(provider.as_str()));
+    agent.session_mut().set_metadata("model", serde_json::json!(model));
+
+    // Display comms status if enabled
+    if let Some(comms_runtime) = agent.comms() {
+        let peer_id = comms_runtime.public_key().to_peer_id();
+        eprintln!("Peer ID: {}", peer_id);
+
+        // Display listening addresses
+        if let Some(ref comms) = comms_config {
+            if comms.listen_uds.is_some() {
+                let resolved_path = comms.resolve_paths(&comms_base_dir).listen_uds;
+                if let Some(path) = resolved_path {
+                    eprintln!("Comms: listening on uds://{}", path.display());
+                }
+            }
+            if let Some(ref tcp_addr) = comms.listen_tcp {
+                eprintln!("Comms: listening on tcp://{}", tcp_addr);
+            }
+        }
+    }
 
     // Run the agent
     tracing::info!("Running agent with model: {}", model);
 
+    // Spawn streaming output task if enabled
+    let stream_task = if stream {
+        Some(tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                if let AgentEvent::TextDelta { delta } = event {
+                    print!("{}", delta);
+                    let _ = std::io::stdout().flush();
+                }
+            }
+        }))
+    } else {
+        // Drop the receiver to avoid blocking the sender
+        drop(event_rx);
+        None
+    };
+
     let result = agent.run(prompt.to_string()).await?;
+
+    // Wait for streaming task to complete (it will end when sender is dropped)
+    if let Some(task) = stream_task {
+        let _ = task.await;
+        // Add newline after streaming output
+        println!();
+    }
 
     // Shutdown MCP connections gracefully
     tools_for_shutdown.shutdown().await;
@@ -442,7 +549,10 @@ async fn run_agent(
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => {
-            println!("{}", result.text);
+            // If we already streamed the output, don't print it again
+            if !stream {
+                println!("{}", result.text);
+            }
             eprintln!(
                 "\n[Session: {} | Turns: {} | Tokens: {} in / {} out]",
                 result.session_id,
@@ -457,14 +567,6 @@ async fn run_agent(
 }
 
 async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
-    // Get API key from environment
-    let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-        anyhow::anyhow!(
-            "ANTHROPIC_API_KEY environment variable not set.\n\
-             Please set it with: export ANTHROPIC_API_KEY=your-api-key"
-        )
-    })?;
-
     // Parse session ID
     let session_id = SessionId::parse(session_id)
         .map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", session_id, e))?;
@@ -477,17 +579,47 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
 
+    // Restore provider and model from session metadata, with defaults
+    let provider = session
+        .metadata()
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .and_then(Provider::parse)
+        .unwrap_or_default();
+
+    let model = session
+        .metadata()
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+
     tracing::info!(
-        "Resuming session {} with {} messages",
+        "Resuming session {} with {} messages (provider: {:?}, model: {})",
         session_id,
-        session.messages().len()
+        session.messages().len(),
+        provider,
+        model
     );
 
-    // Create the LLM client (default model for resume)
-    // TODO: Store provider in session metadata to restore correct provider on resume
-    let model = "claude-sonnet-4-20250514";
-    let llm_client: Arc<dyn meerkat_client::LlmClient> = Arc::new(AnthropicClient::new(api_key));
-    let llm_adapter = Arc::new(DynLlmClientAdapter::new(llm_client, model.to_string()));
+    // Get API key from environment based on restored provider
+    let env_var = provider.api_key_env_var();
+    let api_key = std::env::var(env_var).map_err(|_| {
+        anyhow::anyhow!(
+            "{} environment variable not set.\n\
+             Please set it with: export {}=your-api-key",
+            env_var,
+            env_var
+        )
+    })?;
+
+    // Create the LLM client based on restored provider
+    let llm_client: Arc<dyn meerkat_client::LlmClient> = match provider {
+        Provider::Anthropic => Arc::new(AnthropicClient::new(api_key)),
+        Provider::Openai => Arc::new(OpenAiClient::new(api_key)),
+        Provider::Gemini => Arc::new(GeminiClient::new(api_key)),
+    };
+    let llm_adapter = Arc::new(DynLlmClientAdapter::new(llm_client, model.clone()));
 
     // Load MCP config and create tool dispatcher
     let tools: Arc<CliToolDispatcher> = match create_mcp_tools().await {
@@ -508,7 +640,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     // Build the agent with the existing session and unlimited budget for resume
     let tools_for_shutdown = tools.clone();
     let mut agent = AgentBuilder::new()
-        .model(model)
+        .model(&model)
         .max_tokens_per_turn(4096)
         .system_prompt(system_prompt)
         .budget(BudgetLimits::unlimited())
@@ -640,6 +772,33 @@ async fn show_session(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Delete a session
+async fn delete_session(id: &str) -> anyhow::Result<()> {
+    // Parse session ID
+    let session_id =
+        SessionId::parse(id).map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", id, e))?;
+
+    let store = create_session_store();
+
+    // Check if session exists first
+    if !store
+        .exists(&session_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check session: {}", e))?
+    {
+        return Err(anyhow::anyhow!("Session not found: {}", session_id));
+    }
+
+    // Delete the session
+    store
+        .delete(&session_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to delete session: {}", e))?;
+
+    println!("Deleted session: {}", session_id);
+    Ok(())
+}
+
 /// Handle MCP subcommands
 fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
     match command {
@@ -737,6 +896,25 @@ impl Provider {
             Provider::Anthropic => "ANTHROPIC_API_KEY",
             Provider::Openai => "OPENAI_API_KEY",
             Provider::Gemini => "GOOGLE_API_KEY",
+        }
+    }
+
+    /// Convert to string for storage in session metadata
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Provider::Anthropic => "anthropic",
+            Provider::Openai => "openai",
+            Provider::Gemini => "gemini",
+        }
+    }
+
+    /// Parse from string (for restoring from session metadata)
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "anthropic" => Some(Provider::Anthropic),
+            "openai" => Some(Provider::Openai),
+            "gemini" => Some(Provider::Gemini),
+            _ => None,
         }
     }
 }

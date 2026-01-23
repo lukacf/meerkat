@@ -6,21 +6,43 @@ use meerkat_client::{LlmClient, LlmEvent, LlmRequest};
 use meerkat_core::{
     AgentError, Message, Session, SessionId, StopReason, ToolCall, ToolDef, Usage,
     agent::{AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult},
+    event::AgentEvent,
 };
 use meerkat_store::SessionStore;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Dynamic dispatch adapter for runtime LLM provider selection
 pub struct DynLlmClientAdapter {
     client: Arc<dyn LlmClient>,
     model: String,
+    /// Optional channel to emit streaming events (text deltas)
+    event_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
 impl DynLlmClientAdapter {
     pub fn new(client: Arc<dyn LlmClient>, model: String) -> Self {
-        Self { client, model }
+        Self {
+            client,
+            model,
+            event_tx: None,
+        }
+    }
+
+    /// Create an adapter with streaming event support.
+    /// Text deltas will be sent to the provided channel as they arrive.
+    pub fn with_event_channel(
+        client: Arc<dyn LlmClient>,
+        model: String,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Self {
+        Self {
+            client,
+            model,
+            event_tx: Some(event_tx),
+        }
     }
 }
 
@@ -31,6 +53,7 @@ impl AgentLlmClient for DynLlmClientAdapter {
         messages: &[Message],
         tools: &[ToolDef],
         max_tokens: u32,
+        temperature: Option<f32>,
     ) -> Result<LlmStreamResult, AgentError> {
         // Build request
         let request = LlmRequest {
@@ -38,7 +61,7 @@ impl AgentLlmClient for DynLlmClientAdapter {
             messages: messages.to_vec(),
             tools: tools.to_vec(),
             max_tokens,
-            temperature: None,
+            temperature,
             stop_sequences: None,
         };
 
@@ -57,6 +80,14 @@ impl AgentLlmClient for DynLlmClientAdapter {
                 Ok(event) => match event {
                     LlmEvent::TextDelta { delta } => {
                         content.push_str(&delta);
+                        // Emit streaming event if channel is configured
+                        if let Some(ref tx) = self.event_tx {
+                            let _ = tx
+                                .send(AgentEvent::TextDelta {
+                                    delta: delta.clone(),
+                                })
+                                .await;
+                        }
                     }
                     LlmEvent::ToolCallDelta {
                         id,

@@ -6,10 +6,28 @@
 use meerkat::{
     AgentBuilder, AgentError, AnthropicClient, JsonlStore, LlmClient, Session, SessionStore,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Tool definition provided by the MCP client
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolDef {
+    /// Tool name
+    pub name: String,
+    /// Tool description
+    pub description: String,
+    /// JSON Schema for tool input
+    pub input_schema: Value,
+    /// Handler type: "callback" means the tool result will be provided via meerkat_resume
+    #[serde(default = "default_handler_type")]
+    pub handler: String,
+}
+
+fn default_handler_type() -> String {
+    "callback".to_string()
+}
 
 /// Input schema for meerkat_run tool
 #[derive(Debug, Deserialize)]
@@ -21,6 +39,9 @@ pub struct MeerkatRunInput {
     pub model: String,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    /// Tool definitions for the agent to use
+    #[serde(default)]
+    pub tools: Vec<McpToolDef>,
 }
 
 fn default_model() -> String {
@@ -36,14 +57,74 @@ fn default_max_tokens() -> u32 {
 pub struct MeerkatResumeInput {
     pub session_id: String,
     pub prompt: String,
+    /// Tool definitions for the agent to use (should match the original run)
+    #[serde(default)]
+    pub tools: Vec<McpToolDef>,
+    /// Tool results to provide for pending tool calls
+    #[serde(default)]
+    pub tool_results: Vec<ToolResultInput>,
+}
+
+/// Tool result provided by the MCP client
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolResultInput {
+    /// ID of the tool call this is a result for
+    pub tool_use_id: String,
+    /// Result content (or error message)
+    pub content: String,
+    /// Whether this is an error result
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 /// Returns the list of tools exposed by this MCP server
 pub fn tools_list() -> Vec<Value> {
+    let tool_def_schema = json!({
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Tool name"
+            },
+            "description": {
+                "type": "string",
+                "description": "Tool description"
+            },
+            "input_schema": {
+                "type": "object",
+                "description": "JSON Schema for tool input"
+            },
+            "handler": {
+                "type": "string",
+                "description": "Handler type: 'callback' means results provided via meerkat_resume (default)"
+            }
+        },
+        "required": ["name", "description", "input_schema"]
+    });
+
+    let tool_result_schema = json!({
+        "type": "object",
+        "properties": {
+            "tool_use_id": {
+                "type": "string",
+                "description": "ID of the tool call this is a result for"
+            },
+            "content": {
+                "type": "string",
+                "description": "Result content or error message"
+            },
+            "is_error": {
+                "type": "boolean",
+                "description": "Whether this is an error result"
+            }
+        },
+        "required": ["tool_use_id", "content"]
+    });
+
     vec![
         json!({
             "name": "meerkat_run",
-            "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response.",
+            "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -62,6 +143,11 @@ pub fn tools_list() -> Vec<Value> {
                     "max_tokens": {
                         "type": "integer",
                         "description": "Maximum tokens per turn (default: 4096)"
+                    },
+                    "tools": {
+                        "type": "array",
+                        "description": "Tool definitions for the agent to use. Tools with handler='callback' will pause execution and return pending_tool_calls.",
+                        "items": tool_def_schema.clone()
                     }
                 },
                 "required": ["prompt"]
@@ -69,7 +155,7 @@ pub fn tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "meerkat_resume",
-            "description": "Resume an existing Meerkat session with a new prompt.",
+            "description": "Resume an existing Meerkat session. Use this to continue a conversation or provide tool results for pending tool calls.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -79,7 +165,17 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "prompt": {
                         "type": "string",
-                        "description": "The prompt to continue the conversation"
+                        "description": "The prompt to continue the conversation (can be empty if only providing tool results)"
+                    },
+                    "tools": {
+                        "type": "array",
+                        "description": "Tool definitions (should match the original run)",
+                        "items": tool_def_schema
+                    },
+                    "tool_results": {
+                        "type": "array",
+                        "description": "Results for pending tool calls from a previous response",
+                        "items": tool_result_schema
                     }
                 },
                 "required": ["session_id", "prompt"]
@@ -130,8 +226,8 @@ async fn handle_meerkat_run(input: MeerkatRunInput) -> Result<Value, String> {
     let llm_client = Arc::new(AnthropicClient::new(api_key));
     let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, input.model.clone()));
 
-    // Create empty tool dispatcher
-    let tools = Arc::new(EmptyToolDispatcher);
+    // Create tool dispatcher based on provided tools
+    let tools = Arc::new(MpcToolDispatcher::new(&input.tools));
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
 
     // Build agent
@@ -146,20 +242,38 @@ async fn handle_meerkat_run(input: MeerkatRunInput) -> Result<Value, String> {
     let mut agent = builder.build(llm_adapter, tools, store_adapter);
 
     // Run agent
-    let result = agent
-        .run(input.prompt)
-        .await
-        .map_err(|e| format!("Agent error: {}", e))?;
+    let result = agent.run(input.prompt).await;
 
-    Ok(json!({
-        "content": [{
-            "type": "text",
-            "text": result.text
-        }],
-        "session_id": result.session_id.to_string(),
-        "turns": result.turns,
-        "tool_calls": result.tool_calls
-    }))
+    match result {
+        Ok(result) => Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": result.text
+            }],
+            "session_id": result.session_id.to_string(),
+            "turns": result.turns,
+            "tool_calls": result.tool_calls
+        })),
+        Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
+            // Extract pending tool call info from the error
+            let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
+            let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
+
+            // Get session ID from agent state
+            let session_id = agent.session().id();
+
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Agent is waiting for tool results"
+                }],
+                "session_id": session_id.to_string(),
+                "status": "pending_tool_call",
+                "pending_tool_calls": [pending]
+            }))
+        }
+        Err(e) => Err(format!("Agent error: {}", e)),
+    }
 }
 
 async fn handle_meerkat_resume(input: MeerkatResumeInput) -> Result<Value, String> {
@@ -187,19 +301,34 @@ async fn handle_meerkat_resume(input: MeerkatResumeInput) -> Result<Value, Strin
     let session_id = meerkat::SessionId::parse(&input.session_id)
         .map_err(|e| format!("Invalid session ID: {}", e))?;
 
-    let session = store
+    let mut session = store
         .load(&session_id)
         .await
         .map_err(|e| format!("Failed to load session: {}", e))?
         .ok_or_else(|| format!("Session not found: {}", input.session_id))?;
+
+    // If tool results are provided, inject them into the session
+    if !input.tool_results.is_empty() {
+        use meerkat::ToolResult;
+        let results: Vec<ToolResult> = input
+            .tool_results
+            .iter()
+            .map(|r| ToolResult {
+                tool_use_id: r.tool_use_id.clone(),
+                content: r.content.clone(),
+                is_error: r.is_error,
+            })
+            .collect();
+        session.push(Message::ToolResults { results });
+    }
 
     // Create LLM client
     let llm_client = Arc::new(AnthropicClient::new(api_key));
     let model = "claude-opus-4-5".to_string();
     let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.clone()));
 
-    // Create empty tool dispatcher
-    let tools = Arc::new(EmptyToolDispatcher);
+    // Create tool dispatcher based on provided tools
+    let tools = Arc::new(MpcToolDispatcher::new(&input.tools));
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
 
     // Build agent with resumed session
@@ -209,21 +338,46 @@ async fn handle_meerkat_resume(input: MeerkatResumeInput) -> Result<Value, Strin
         .resume_session(session)
         .build(llm_adapter, tools, store_adapter);
 
-    // Run agent
-    let result = agent
-        .run(input.prompt)
-        .await
-        .map_err(|e| format!("Agent error: {}", e))?;
+    // Run agent - use empty prompt if only providing tool results
+    let prompt = if input.prompt.is_empty() && !input.tool_results.is_empty() {
+        // When resuming with tool results, the agent continues from where it left off
+        String::new()
+    } else {
+        input.prompt
+    };
 
-    Ok(json!({
-        "content": [{
-            "type": "text",
-            "text": result.text
-        }],
-        "session_id": result.session_id.to_string(),
-        "turns": result.turns,
-        "tool_calls": result.tool_calls
-    }))
+    let result = agent.run(prompt).await;
+
+    match result {
+        Ok(result) => Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": result.text
+            }],
+            "session_id": result.session_id.to_string(),
+            "turns": result.turns,
+            "tool_calls": result.tool_calls
+        })),
+        Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
+            // Extract pending tool call info from the error
+            let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
+            let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
+
+            // Get session ID from agent state
+            let session_id = agent.session().id();
+
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Agent is waiting for tool results"
+                }],
+                "session_id": session_id.to_string(),
+                "status": "pending_tool_call",
+                "pending_tool_calls": [pending]
+            }))
+        }
+        Err(e) => Err(format!("Agent error: {}", e)),
+    }
 }
 
 // Adapter types needed for the MCP server
@@ -252,6 +406,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         messages: &[Message],
         tools: &[ToolDef],
         max_tokens: u32,
+        temperature: Option<f32>,
     ) -> Result<LlmStreamResult, AgentError> {
         use futures_util::StreamExt;
         use meerkat::{LlmEvent, LlmRequest, StopReason, ToolCall, Usage};
@@ -261,7 +416,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
             messages: messages.to_vec(),
             tools: tools.to_vec(),
             max_tokens,
-            temperature: None,
+            temperature,
             stop_sequences: None,
         };
 
@@ -308,17 +463,64 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
     }
 }
 
-/// Empty tool dispatcher
-pub struct EmptyToolDispatcher;
+/// Special error prefix to signal that a callback tool was invoked
+pub const CALLBACK_TOOL_PREFIX: &str = "CALLBACK_TOOL_PENDING:";
+
+/// MCP tool dispatcher - exposes tools to the LLM and handles callback tools
+/// by returning a special error that signals the MCP client needs to handle the tool call
+pub struct MpcToolDispatcher {
+    tool_defs: Vec<ToolDef>,
+    callback_tools: std::collections::HashSet<String>,
+}
+
+impl MpcToolDispatcher {
+    /// Create a new tool dispatcher from MCP tool definitions
+    pub fn new(mcp_tools: &[McpToolDef]) -> Self {
+        let tool_defs = mcp_tools
+            .iter()
+            .map(|t| ToolDef {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.input_schema.clone(),
+            })
+            .collect();
+
+        let callback_tools = mcp_tools
+            .iter()
+            .filter(|t| t.handler == "callback")
+            .map(|t| t.name.clone())
+            .collect();
+
+        Self {
+            tool_defs,
+            callback_tools,
+        }
+    }
+}
 
 #[async_trait]
-impl AgentToolDispatcher for EmptyToolDispatcher {
+impl AgentToolDispatcher for MpcToolDispatcher {
     fn tools(&self) -> Vec<ToolDef> {
-        Vec::new()
+        self.tool_defs.clone()
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
-        Err(format!("Unknown tool: {}", name))
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+        // Check if this is a callback tool
+        if self.callback_tools.contains(name) {
+            // Return a special error that signals the agent loop should pause
+            // The error contains serialized info about the pending tool call
+            Err(format!(
+                "{}{}",
+                CALLBACK_TOOL_PREFIX,
+                serde_json::to_string(&json!({
+                    "tool_name": name,
+                    "args": args
+                }))
+                .unwrap_or_default()
+            ))
+        } else {
+            Err(format!("Tool '{}' has no registered handler", name))
+        }
     }
 }
 
@@ -394,5 +596,124 @@ mod tests {
         let input: MeerkatResumeInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.session_id, "01234567-89ab-cdef-0123-456789abcdef");
         assert_eq!(input.prompt, "Continue");
+    }
+
+    #[test]
+    fn test_meerkat_run_input_with_tools() {
+        let input_json = json!({
+            "prompt": "Hello",
+            "tools": [
+                {
+                    "name": "get_weather",
+                    "description": "Get weather for a city",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"}
+                        },
+                        "required": ["city"]
+                    }
+                }
+            ]
+        });
+
+        let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
+        assert_eq!(input.prompt, "Hello");
+        assert_eq!(input.tools.len(), 1);
+        assert_eq!(input.tools[0].name, "get_weather");
+        assert_eq!(input.tools[0].handler, "callback"); // default
+    }
+
+    #[test]
+    fn test_meerkat_resume_input_with_tool_results() {
+        let input_json = json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "prompt": "",
+            "tool_results": [
+                {
+                    "tool_use_id": "tc_123",
+                    "content": "Sunny, 72°F"
+                }
+            ]
+        });
+
+        let input: MeerkatResumeInput = serde_json::from_value(input_json).unwrap();
+        assert_eq!(input.session_id, "01234567-89ab-cdef-0123-456789abcdef");
+        assert_eq!(input.tool_results.len(), 1);
+        assert_eq!(input.tool_results[0].tool_use_id, "tc_123");
+        assert_eq!(input.tool_results[0].content, "Sunny, 72°F");
+        assert!(!input.tool_results[0].is_error);
+    }
+
+    #[test]
+    fn test_mpc_tool_dispatcher_creates_tool_defs() {
+        let mcp_tools = vec![
+            McpToolDef {
+                name: "get_weather".to_string(),
+                description: "Get weather".to_string(),
+                input_schema: json!({"type": "object"}),
+                handler: "callback".to_string(),
+            },
+            McpToolDef {
+                name: "search".to_string(),
+                description: "Search".to_string(),
+                input_schema: json!({"type": "object"}),
+                handler: "callback".to_string(),
+            },
+        ];
+
+        let dispatcher = MpcToolDispatcher::new(&mcp_tools);
+        let tool_defs = dispatcher.tools();
+
+        assert_eq!(tool_defs.len(), 2);
+        assert_eq!(tool_defs[0].name, "get_weather");
+        assert_eq!(tool_defs[1].name, "search");
+    }
+
+    #[tokio::test]
+    async fn test_mpc_tool_dispatcher_returns_callback_error() {
+        let mcp_tools = vec![McpToolDef {
+            name: "get_weather".to_string(),
+            description: "Get weather".to_string(),
+            input_schema: json!({"type": "object"}),
+            handler: "callback".to_string(),
+        }];
+
+        let dispatcher = MpcToolDispatcher::new(&mcp_tools);
+        let result = dispatcher
+            .dispatch("get_weather", &json!({"city": "Tokyo"}))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.starts_with(CALLBACK_TOOL_PREFIX));
+        assert!(err.contains("get_weather"));
+        assert!(err.contains("Tokyo"));
+    }
+
+    #[test]
+    fn test_tools_list_has_tools_parameter() {
+        let tools = tools_list();
+        let run_tool = &tools[0];
+
+        // Verify tools parameter exists in the schema
+        assert!(run_tool["inputSchema"]["properties"]["tools"].is_object());
+        assert_eq!(
+            run_tool["inputSchema"]["properties"]["tools"]["type"],
+            "array"
+        );
+    }
+
+    #[test]
+    fn test_tools_list_has_tool_results_parameter() {
+        let tools = tools_list();
+        let resume_tool = &tools[1];
+
+        // Verify tool_results parameter exists in the schema
+        assert!(resume_tool["inputSchema"]["properties"]["tool_results"].is_object());
+        assert_eq!(
+            resume_tool["inputSchema"]["properties"]["tool_results"]["type"],
+            "array"
+        );
     }
 }

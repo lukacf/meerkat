@@ -684,7 +684,10 @@ pub mod tests {
         let body = client.build_request_body(&request);
 
         // Should have thinking object with type "enabled" and budget_tokens
-        assert!(body.get("thinking").is_some(), "thinking field should be present");
+        assert!(
+            body.get("thinking").is_some(),
+            "thinking field should be present"
+        );
         let thinking = &body["thinking"];
         assert_eq!(thinking["type"], "enabled");
         assert_eq!(thinking["budget_tokens"], 10000);
@@ -817,17 +820,18 @@ pub mod tests {
 
     #[test]
     fn test_sse_buffer_constants() {
-        // Verify constants are sensible values
+        // Verify constants are sensible values at runtime
+        // Using const_assert would be better, but runtime checks are clearer for readers
+        let buffer_cap = SSE_BUFFER_CAPACITY;
+        assert!(buffer_cap >= 256, "SSE buffer should be at least 256 bytes");
+        let connect_timeout = DEFAULT_CONNECT_TIMEOUT.as_secs();
         assert!(
-            SSE_BUFFER_CAPACITY >= 256,
-            "SSE buffer should be at least 256 bytes"
-        );
-        assert!(
-            DEFAULT_CONNECT_TIMEOUT.as_secs() >= 5,
+            connect_timeout >= 5,
             "Connect timeout should be at least 5s"
         );
+        let request_timeout = DEFAULT_REQUEST_TIMEOUT.as_secs();
         assert!(
-            DEFAULT_REQUEST_TIMEOUT.as_secs() >= 60,
+            request_timeout >= 60,
             "Request timeout should be at least 60s"
         );
     }

@@ -9,6 +9,6 @@
 pub mod tools;
 
 pub use tools::{
-    handle_tools_call, tools_list, ListPeersInput, SendMessageInput, SendRequestInput,
-    SendResponseInput,
+    ListPeersInput, SendMessageInput, SendRequestInput, SendResponseInput, handle_tools_call,
+    tools_list,
 };

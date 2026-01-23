@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_comms::{Router, TrustedPeers};
-use meerkat_comms_mcp::tools::{handle_tools_call, tools_list, ToolContext};
-use meerkat_core::types::ToolDef;
+use meerkat_comms_mcp::tools::{ToolContext, handle_tools_call, tools_list};
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::types::ToolDef;
 use serde_json::Value;
 
 /// Tool dispatcher that provides comms tools.
@@ -72,7 +72,12 @@ impl AgentToolDispatcher for NoOpDispatcher {
 }
 
 /// Names of comms tools.
-const COMMS_TOOL_NAMES: &[&str] = &["send_message", "send_request", "send_response", "list_peers"];
+const COMMS_TOOL_NAMES: &[&str] = &[
+    "send_message",
+    "send_request",
+    "send_response",
+    "list_peers",
+];
 
 #[async_trait]
 impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatcher<T> {
@@ -132,7 +137,11 @@ mod tests {
             }],
         };
         let trusted_peers = Arc::new(trusted_peers.clone());
-        let router = Arc::new(Router::new(keypair, trusted_peers.as_ref().clone(), CommsConfig::default()));
+        let router = Arc::new(Router::new(
+            keypair,
+            trusted_peers.as_ref().clone(),
+            CommsConfig::default(),
+        ));
         (router, trusted_peers)
     }
 

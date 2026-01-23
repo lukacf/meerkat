@@ -44,7 +44,11 @@ impl ToolDispatcher {
 
     /// Get tool definitions for LLM requests (cloned for trait compatibility).
     pub fn tool_defs(&self) -> Vec<ToolDef> {
-        self.registry.tool_defs().into_iter().map(|arc| (*arc).clone()).collect()
+        self.registry
+            .tool_defs()
+            .into_iter()
+            .map(|arc| (*arc).clone())
+            .collect()
     }
 
     /// Dispatch a single tool call

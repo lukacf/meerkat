@@ -58,8 +58,7 @@ impl<'de> Deserialize<'de> for TrustedPeer {
             addr: String,
         }
         let helper = TrustedPeerHelper::deserialize(deserializer)?;
-        let pubkey =
-            PubKey::from_peer_id(&helper.pubkey).map_err(serde::de::Error::custom)?;
+        let pubkey = PubKey::from_peer_id(&helper.pubkey).map_err(serde::de::Error::custom)?;
         Ok(TrustedPeer {
             name: helper.name,
             pubkey,

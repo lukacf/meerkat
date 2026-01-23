@@ -90,8 +90,12 @@ impl CommsManager {
         // We need to save/load to get the secret bytes since there's no direct accessor
         let temp_dir = std::env::temp_dir().join(format!("meerkat-comms-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
-        config.keypair.save(&temp_dir).expect("Failed to save keypair");
-        let secret_bytes = std::fs::read(temp_dir.join("identity.key")).expect("Failed to read key");
+        config
+            .keypair
+            .save(&temp_dir)
+            .expect("Failed to save keypair");
+        let secret_bytes =
+            std::fs::read(temp_dir.join("identity.key")).expect("Failed to read key");
         let _ = std::fs::remove_dir_all(&temp_dir);
 
         let mut keypair_secret = [0u8; 32];

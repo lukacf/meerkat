@@ -268,34 +268,32 @@ impl AgentBuilder {
         // Create comms runtime if enabled AND this is not a subagent.
         // Subagents cannot have comms for security reasons (no network exposure).
         let comms_runtime = if self.depth == 0 {
-            self.comms_config
-                .filter(|c| c.enabled)
-                .and_then(|config| {
-                    let base_dir = self.comms_base_dir.unwrap_or_else(|| {
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    });
-                    let resolved = config.resolve_paths(&base_dir);
-                    match CommsRuntime::new(resolved) {
-                        Ok(mut runtime) => {
-                            tracing::info!(
-                                "Comms enabled for agent '{}' (peer ID: {})",
-                                config.name,
-                                runtime.public_key().to_peer_id()
-                            );
-                            // Start listeners automatically when comms is enabled
-                            // This is done in a blocking context since build() is sync
-                            // Listeners run in background tasks and don't block
-                            if let Err(e) = futures::executor::block_on(runtime.start_listeners()) {
-                                tracing::warn!("Failed to start comms listeners: {}", e);
-                            }
-                            Some(runtime)
+            self.comms_config.filter(|c| c.enabled).and_then(|config| {
+                let base_dir = self.comms_base_dir.unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                });
+                let resolved = config.resolve_paths(&base_dir);
+                match CommsRuntime::new(resolved) {
+                    Ok(mut runtime) => {
+                        tracing::info!(
+                            "Comms enabled for agent '{}' (peer ID: {})",
+                            config.name,
+                            runtime.public_key().to_peer_id()
+                        );
+                        // Start listeners automatically when comms is enabled
+                        // This is done in a blocking context since build() is sync
+                        // Listeners run in background tasks and don't block
+                        if let Err(e) = futures::executor::block_on(runtime.start_listeners()) {
+                            tracing::warn!("Failed to start comms listeners: {}", e);
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to create comms runtime: {}", e);
-                            None
-                        }
+                        Some(runtime)
                     }
-                })
+                    Err(e) => {
+                        tracing::warn!("Failed to create comms runtime: {}", e);
+                        None
+                    }
+                }
+            })
         } else {
             // Subagents cannot have comms - this is a security restriction to prevent
             // subagents from having network exposure.
@@ -712,10 +710,7 @@ where
         if let Some(ref mut comms) = self.comms_runtime {
             let messages = comms.drain_messages();
             if !messages.is_empty() {
-                tracing::debug!(
-                    "Injecting {} comms messages into session",
-                    messages.len()
-                );
+                tracing::debug!("Injecting {} comms messages into session", messages.len());
 
                 // Format all messages into a single user message for the LLM
                 // Pre-calculate capacity to avoid reallocations
@@ -729,9 +724,8 @@ where
                     first = false;
                 }
 
-                self.session.push(Message::User(UserMessage {
-                    content: combined,
-                }));
+                self.session
+                    .push(Message::User(UserMessage { content: combined }));
             }
         }
     }
@@ -1331,8 +1325,8 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let mut config = CoreCommsConfig::with_name("test-agent");
-        config.identity_dir = tmp.path().join("identity").into();
-        config.trusted_peers_path = tmp.path().join("trusted.json").into();
+        config.identity_dir = tmp.path().join("identity");
+        config.trusted_peers_path = tmp.path().join("trusted.json");
         // No listeners to avoid port binding issues in tests
         config.listen_uds = None;
         config.listen_tcp = None;
@@ -1387,8 +1381,8 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let mut config = CoreCommsConfig::with_name("test-agent");
-        config.identity_dir = tmp.path().join("identity").into();
-        config.trusted_peers_path = tmp.path().join("trusted.json").into();
+        config.identity_dir = tmp.path().join("identity");
+        config.trusted_peers_path = tmp.path().join("trusted.json");
 
         let client = Arc::new(MockLlmClient::new(vec![]));
         let tools = Arc::new(MockToolDispatcher::new(vec![]));
@@ -1409,13 +1403,11 @@ mod tests {
     #[test]
     fn test_agent_no_comms_tools_when_disabled() {
         let client = Arc::new(MockLlmClient::new(vec![]));
-        let tools = Arc::new(MockToolDispatcher::new(vec![
-            ToolDef {
-                name: "my_tool".to_string(),
-                description: "A test tool".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
-            },
-        ]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![ToolDef {
+            name: "my_tool".to_string(),
+            description: "A test tool".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }]));
         let store = Arc::new(MockSessionStore);
 
         let agent = AgentBuilder::new().build(client, tools, store);
@@ -1427,13 +1419,13 @@ mod tests {
     #[tokio::test]
     async fn test_agent_empty_inbox_nonblocking() {
         use crate::comms_config::CoreCommsConfig;
-        use tempfile::TempDir;
         use std::time::{Duration, Instant};
+        use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
         let mut config = CoreCommsConfig::with_name("test-agent");
-        config.identity_dir = tmp.path().join("identity").into();
-        config.trusted_peers_path = tmp.path().join("trusted.json").into();
+        config.identity_dir = tmp.path().join("identity");
+        config.trusted_peers_path = tmp.path().join("trusted.json");
         config.listen_uds = None;
         config.listen_tcp = None;
 
@@ -1460,7 +1452,11 @@ mod tests {
         let elapsed = start.elapsed();
 
         // Should complete in reasonable time (not blocked on inbox)
-        assert!(elapsed < Duration::from_secs(5), "Agent run took too long: {:?}", elapsed);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "Agent run took too long: {:?}",
+            elapsed
+        );
         assert_eq!(result.text, "Done");
     }
 
@@ -1474,10 +1470,10 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let mut config = CoreCommsConfig::with_name("test-agent");
-        config.identity_dir = tmp.path().join("identity").into();
-        config.trusted_peers_path = tmp.path().join("trusted.json").into();
+        config.identity_dir = tmp.path().join("identity");
+        config.trusted_peers_path = tmp.path().join("trusted.json");
         // Enable UDS listener
-        config.listen_uds = Some(tmp.path().join("test.sock").into());
+        config.listen_uds = Some(tmp.path().join("test.sock"));
         config.listen_tcp = None;
 
         let client = Arc::new(MockLlmClient::new(vec![]));
@@ -1515,8 +1511,8 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let mut config = CoreCommsConfig::with_name("test-agent");
-        config.identity_dir = tmp.path().join("identity").into();
-        config.trusted_peers_path = tmp.path().join("trusted.json").into();
+        config.identity_dir = tmp.path().join("identity");
+        config.trusted_peers_path = tmp.path().join("trusted.json");
         config.listen_uds = None;
         config.listen_tcp = None;
 
@@ -1584,7 +1580,10 @@ mod tests {
         // Should be formatted for LLM injection
         assert!(text.contains("[Comms]"), "Should have [Comms] prefix");
         assert!(text.contains("alice"), "Should include peer name");
-        assert!(text.contains("Hello from Alice"), "Should include message body");
+        assert!(
+            text.contains("Hello from Alice"),
+            "Should include message body"
+        );
     }
 
     // =========================================================================
@@ -1733,7 +1732,10 @@ mod tests {
 
         // Verify provider_params was None
         let captured = client.captured_params();
-        assert!(captured.is_none(), "provider_params should be None when not set");
+        assert!(
+            captured.is_none(),
+            "provider_params should be None when not set"
+        );
     }
 
     // =========================================================================
@@ -1792,11 +1794,15 @@ mod tests {
         let filtered = FilteredToolDispatcher::new(inner, allowed);
 
         // Allowed tool should work
-        let result = filtered.dispatch("allowed_tool", &serde_json::json!({})).await;
+        let result = filtered
+            .dispatch("allowed_tool", &serde_json::json!({}))
+            .await;
         assert!(result.is_ok());
 
         // Blocked tool should fail
-        let result = filtered.dispatch("blocked_tool", &serde_json::json!({})).await;
+        let result = filtered
+            .dispatch("blocked_tool", &serde_json::json!({}))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not allowed"));
     }
@@ -1900,7 +1906,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
             let end = std::time::Instant::now();
 
-            self.timings.lock().unwrap().push((name.to_string(), start, end));
+            self.timings
+                .lock()
+                .unwrap()
+                .push((name.to_string(), start, end));
 
             Ok(format!("Result from {}", name))
         }
@@ -2116,14 +2125,28 @@ mod tests {
 
         // Check session has tool results in correct order
         let messages = agent.session().messages();
-        let tool_results_msg = messages.iter().find(|m| matches!(m, Message::ToolResults { .. }));
-        assert!(tool_results_msg.is_some(), "Should have tool results message");
+        let tool_results_msg = messages
+            .iter()
+            .find(|m| matches!(m, Message::ToolResults { .. }));
+        assert!(
+            tool_results_msg.is_some(),
+            "Should have tool results message"
+        );
 
         if let Message::ToolResults { results } = tool_results_msg.unwrap() {
             assert_eq!(results.len(), 3);
-            assert_eq!(results[0].tool_use_id, "tc_1", "First result should be tc_1");
-            assert_eq!(results[1].tool_use_id, "tc_2", "Second result should be tc_2");
-            assert_eq!(results[2].tool_use_id, "tc_3", "Third result should be tc_3");
+            assert_eq!(
+                results[0].tool_use_id, "tc_1",
+                "First result should be tc_1"
+            );
+            assert_eq!(
+                results[1].tool_use_id, "tc_2",
+                "Second result should be tc_2"
+            );
+            assert_eq!(
+                results[2].tool_use_id, "tc_3",
+                "Third result should be tc_3"
+            );
         }
     }
 
@@ -2190,15 +2213,24 @@ mod tests {
 
         // Should complete successfully even with partial failure
         let result = agent.run("Test".to_string()).await;
-        assert!(result.is_ok(), "Agent should complete even with partial tool failure");
+        assert!(
+            result.is_ok(),
+            "Agent should complete even with partial tool failure"
+        );
 
         // Check that all tools were called
         let dispatch_order = tools.dispatch_order();
-        assert_eq!(dispatch_order.len(), 3, "All 3 tools should have been dispatched");
+        assert_eq!(
+            dispatch_order.len(),
+            3,
+            "All 3 tools should have been dispatched"
+        );
 
         // Check session has correct results with error flags
         let messages = agent.session().messages();
-        let tool_results_msg = messages.iter().find(|m| matches!(m, Message::ToolResults { .. }));
+        let tool_results_msg = messages
+            .iter()
+            .find(|m| matches!(m, Message::ToolResults { .. }));
 
         if let Some(Message::ToolResults { results }) = tool_results_msg {
             assert_eq!(results.len(), 3);
@@ -2270,11 +2302,16 @@ mod tests {
 
         // Should complete - failures go back to LLM as error results
         let result = agent.run("Test".to_string()).await;
-        assert!(result.is_ok(), "Agent should complete even when all tools fail");
+        assert!(
+            result.is_ok(),
+            "Agent should complete even when all tools fail"
+        );
 
         // Check both errors were captured
         let messages = agent.session().messages();
-        let tool_results_msg = messages.iter().find(|m| matches!(m, Message::ToolResults { .. }));
+        let tool_results_msg = messages
+            .iter()
+            .find(|m| matches!(m, Message::ToolResults { .. }));
 
         if let Some(Message::ToolResults { results }) = tool_results_msg {
             assert_eq!(results.len(), 2);

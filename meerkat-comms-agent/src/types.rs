@@ -126,32 +126,28 @@ impl CommsMessage {
     pub fn to_user_message_text(&self) -> String {
         match &self.content {
             CommsContent::Message { body } => {
-                format!(
-                    "[COMMS MESSAGE from {}]\n{}",
-                    self.from_peer, body
-                )
+                format!("[COMMS MESSAGE from {}]\n{}", self.from_peer, body)
             }
             CommsContent::Request {
                 request_id,
                 intent,
                 params,
             } => {
-                let params_str = if params.is_null() || params == &JsonValue::Object(Default::default()) {
-                    String::new()
-                } else {
-                    format!("\nParams: {}", serde_json::to_string_pretty(params).unwrap_or_default())
-                };
+                let params_str =
+                    if params.is_null() || params == &JsonValue::Object(Default::default()) {
+                        String::new()
+                    } else {
+                        format!(
+                            "\nParams: {}",
+                            serde_json::to_string_pretty(params).unwrap_or_default()
+                        )
+                    };
                 format!(
                     "[COMMS REQUEST from {} (id: {})]\n\
                      Intent: {}{}\n\
                      \n\
                      To respond, use send_response with peer=\"{}\", request_id=\"{}\"",
-                    self.from_peer,
-                    request_id,
-                    intent,
-                    params_str,
-                    self.from_peer,
-                    request_id
+                    self.from_peer, request_id, intent, params_str, self.from_peer, request_id
                 )
             }
             CommsContent::Response {
@@ -164,11 +160,15 @@ impl CommsMessage {
                     CommsStatus::Completed => "completed",
                     CommsStatus::Failed => "failed",
                 };
-                let result_str = if result.is_null() || result == &JsonValue::Object(Default::default()) {
-                    String::new()
-                } else {
-                    format!("\nResult: {}", serde_json::to_string_pretty(result).unwrap_or_default())
-                };
+                let result_str =
+                    if result.is_null() || result == &JsonValue::Object(Default::default()) {
+                        String::new()
+                    } else {
+                        format!(
+                            "\nResult: {}",
+                            serde_json::to_string_pretty(result).unwrap_or_default()
+                        )
+                    };
                 format!(
                     "[COMMS RESPONSE from {} (to request: {})]\n\
                      Status: {}{}",
@@ -182,8 +182,16 @@ impl CommsMessage {
 /// Create a CommsMessage from an Envelope directly (for testing).
 #[cfg(test)]
 impl CommsMessage {
-    pub fn from_envelope(envelope: &meerkat_comms::Envelope, trusted_peers: &TrustedPeers) -> Option<Self> {
-        Self::from_inbox_item(&InboxItem::External { envelope: envelope.clone() }, trusted_peers)
+    pub fn from_envelope(
+        envelope: &meerkat_comms::Envelope,
+        trusted_peers: &TrustedPeers,
+    ) -> Option<Self> {
+        Self::from_inbox_item(
+            &InboxItem::External {
+                envelope: envelope.clone(),
+            },
+            trusted_peers,
+        )
     }
 }
 
@@ -361,7 +369,10 @@ mod tests {
         let item = InboxItem::External { envelope };
         let msg = CommsMessage::from_inbox_item(&item, &trusted);
 
-        assert!(msg.is_none(), "Acks should not be converted to CommsMessage");
+        assert!(
+            msg.is_none(),
+            "Acks should not be converted to CommsMessage"
+        );
     }
 
     #[test]

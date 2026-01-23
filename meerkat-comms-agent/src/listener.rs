@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use meerkat_comms::{handle_connection, InboxSender, Keypair, TrustedPeers};
+use meerkat_comms::{InboxSender, Keypair, TrustedPeers, handle_connection};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -412,6 +412,9 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         // Now it should be finished
-        assert!(handle.is_finished(), "Listener should be finished after abort");
+        assert!(
+            handle.is_finished(),
+            "Listener should be finished after abort"
+        );
     }
 }

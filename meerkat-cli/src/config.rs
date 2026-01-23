@@ -279,7 +279,8 @@ ack_timeout_secs = 60
         )
         .unwrap();
 
-        let config: CliConfig = toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let config: CliConfig =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
 
         assert!(config.comms.is_some());
         let comms = config.comms.unwrap();
@@ -304,10 +305,10 @@ ack_timeout_secs = 60
         };
 
         let project_section = CommsConfigSection {
-            enabled: None, // Inherit from user
+            enabled: None,                           // Inherit from user
             name: Some("project-agent".to_string()), // Override
             listen_uds: None,
-            listen_tcp: None, // Inherit from user
+            listen_tcp: None,                                    // Inherit from user
             identity_dir: Some(PathBuf::from(".rkat/identity")), // Add new
             trusted_peers_path: None,
             ack_timeout_secs: None, // Inherit from user
@@ -361,8 +362,10 @@ ack_timeout_secs = 60
             disabled: true, // --no-comms flag
         };
 
-        let mut config = CoreCommsConfig::default();
-        config.enabled = true;
+        let config = CoreCommsConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let result = overrides.apply(config);
 
         assert!(!result.enabled); // Disabled by flag

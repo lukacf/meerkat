@@ -369,7 +369,10 @@ struct UsageInfo {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use meerkat_core::{AssistantMessage, StopReason as CoreStopReason, ToolCall, ToolDef, Usage as CoreUsage, UserMessage};
+    use meerkat_core::{
+        AssistantMessage, StopReason as CoreStopReason, ToolCall, ToolDef, Usage as CoreUsage,
+        UserMessage,
+    };
 
     fn skip_if_no_key() -> Option<OpenAiClient> {
         OpenAiClient::from_env().ok()
@@ -715,7 +718,9 @@ pub mod tests {
         let body = client.build_request_body(&request);
 
         // Find the assistant message with tool_calls
-        let messages = body["messages"].as_array().expect("messages should be array");
+        let messages = body["messages"]
+            .as_array()
+            .expect("messages should be array");
         let assistant_msg = messages
             .iter()
             .find(|m| m["role"] == "assistant")

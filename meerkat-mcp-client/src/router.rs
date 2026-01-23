@@ -173,7 +173,11 @@ mod tests {
 
         // Second call - should return same cached tools
         let tools2 = router.list_tools();
-        assert_eq!(tools1.len(), tools2.len(), "Should return same cached tools");
+        assert_eq!(
+            tools1.len(),
+            tools2.len(),
+            "Should return same cached tools"
+        );
 
         // Verify tool names match
         let names1: Vec<_> = tools1.iter().map(|t| &t.name).collect();
@@ -206,8 +210,14 @@ mod tests {
             HashMap::new(),
         );
 
-        router.add_server(config1).await.expect("Failed to add server1");
-        router.add_server(config2).await.expect("Failed to add server2");
+        router
+            .add_server(config1)
+            .await
+            .expect("Failed to add server1");
+        router
+            .add_server(config2)
+            .await
+            .expect("Failed to add server2");
 
         // list_tools should work efficiently with pre-allocation
         let tools = router.list_tools();

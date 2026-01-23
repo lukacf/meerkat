@@ -983,16 +983,25 @@ mod parallel_tools {
             tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
 
             let end = std::time::Instant::now();
-            self.call_log.lock().unwrap().push((name.to_string(), start, end));
+            self.call_log
+                .lock()
+                .unwrap()
+                .push((name.to_string(), start, end));
 
             // Return realistic mock responses
             match name {
                 "get_weather" => {
-                    let city = args.get("city").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                    let city = args
+                        .get("city")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown");
                     Ok(format!("Weather in {}: Sunny, 22°C", city))
                 }
                 "get_time" => {
-                    let tz = args.get("timezone").and_then(|v| v.as_str()).unwrap_or("UTC");
+                    let tz = args
+                        .get("timezone")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("UTC");
                     Ok(format!("Current time in {}: 14:30 PM", tz))
                 }
                 "get_stock" => {
@@ -1029,7 +1038,7 @@ mod parallel_tools {
             .system_prompt(
                 "You have access to get_weather, get_time, and get_stock tools. \
                  When asked about multiple things, use ALL relevant tools in a SINGLE response. \
-                 Do not call them one at a time."
+                 Do not call them one at a time.",
             )
             .build(llm_adapter, dispatcher.clone(), store_adapter);
 
@@ -1041,7 +1050,10 @@ mod parallel_tools {
             .expect("Should complete");
         let overall_duration = overall_start.elapsed();
 
-        eprintln!("Result: {} tool calls in {:?}", result.tool_calls, overall_duration);
+        eprintln!(
+            "Result: {} tool calls in {:?}",
+            result.tool_calls, overall_duration
+        );
         eprintln!("Response: {}", result.text);
 
         // Verify multiple tools were called
@@ -1074,7 +1086,9 @@ mod parallel_tools {
         // Verify response contains info from all tools
         let text_lower = result.text.to_lowercase();
         assert!(
-            text_lower.contains("tokyo") || text_lower.contains("weather") || text_lower.contains("sunny"),
+            text_lower.contains("tokyo")
+                || text_lower.contains("weather")
+                || text_lower.contains("sunny"),
             "Response should mention weather result"
         );
     }
@@ -1101,7 +1115,7 @@ mod parallel_tools {
             .max_tokens_per_turn(1024)
             .system_prompt(
                 "You have access to get_weather, get_time, and get_stock tools. \
-                 Use multiple tools when appropriate."
+                 Use multiple tools when appropriate.",
             )
             .build(llm_adapter, dispatcher.clone(), store_adapter);
 
@@ -1185,8 +1199,12 @@ mod parallel_tools {
 
                 match name {
                     "working_tool" => Ok("Working tool result: success!".to_string()),
-                    "broken_tool" => Err("Error: broken_tool encountered a critical failure".to_string()),
-                    "another_working_tool" => Ok("Another working tool result: also success!".to_string()),
+                    "broken_tool" => {
+                        Err("Error: broken_tool encountered a critical failure".to_string())
+                    }
+                    "another_working_tool" => {
+                        Ok("Another working tool result: also success!".to_string())
+                    }
                     _ => Err(format!("Unknown tool: {}", name)),
                 }
             }
@@ -1205,13 +1223,16 @@ mod parallel_tools {
             .system_prompt(
                 "You have three tools: working_tool, broken_tool, and another_working_tool. \
                  When asked to test all tools, call ALL THREE tools. \
-                 If a tool fails, acknowledge the error and report results from successful tools."
+                 If a tool fails, acknowledge the error and report results from successful tools.",
             )
             .build(llm_adapter, dispatcher, store_adapter);
 
         // Request that should trigger all three tools
         let result = agent
-            .run("Please call working_tool, broken_tool, and another_working_tool to test them all".to_string())
+            .run(
+                "Please call working_tool, broken_tool, and another_working_tool to test them all"
+                    .to_string(),
+            )
             .await
             .expect("Agent should complete even with partial tool failure");
 
@@ -1228,9 +1249,14 @@ mod parallel_tools {
         // LLM should acknowledge both success and failure
         let text_lower = result.text.to_lowercase();
         let mentions_success = text_lower.contains("success") || text_lower.contains("working");
-        let mentions_error = text_lower.contains("error") || text_lower.contains("fail") || text_lower.contains("broken");
+        let mentions_error = text_lower.contains("error")
+            || text_lower.contains("fail")
+            || text_lower.contains("broken");
 
-        eprintln!("Mentions success: {}, Mentions error: {}", mentions_success, mentions_error);
+        eprintln!(
+            "Mentions success: {}, Mentions error: {}",
+            mentions_success, mentions_error
+        );
 
         // At minimum, the agent should complete and respond coherently
         assert!(!result.text.is_empty(), "Should have a response");

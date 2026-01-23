@@ -1,7 +1,7 @@
 //! MCP tool implementations for Meerkat comms.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -295,10 +295,7 @@ mod tests {
         let tools = tools_list();
         assert_eq!(tools.len(), 4, "Expected 4 tools");
 
-        let tool_names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
 
         assert!(tool_names.contains(&"send_message"));
         assert!(tool_names.contains(&"send_request"));

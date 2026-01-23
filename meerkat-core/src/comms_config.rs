@@ -154,12 +154,12 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.name, "test");
         assert_eq!(config.listen_uds, Some(PathBuf::from("/tmp/test.sock")));
-        assert_eq!(
-            config.listen_tcp,
-            Some("127.0.0.1:4200".parse().unwrap())
-        );
+        assert_eq!(config.listen_tcp, Some("127.0.0.1:4200".parse().unwrap()));
         assert_eq!(config.identity_dir, PathBuf::from("/tmp/identity"));
-        assert_eq!(config.trusted_peers_path, PathBuf::from("/tmp/trusted.json"));
+        assert_eq!(
+            config.trusted_peers_path,
+            PathBuf::from("/tmp/trusted.json")
+        );
         assert_eq!(config.ack_timeout_secs, 10);
         assert_eq!(config.max_message_bytes, 2_000_000);
     }
@@ -218,11 +218,13 @@ mod tests {
 
     #[test]
     fn test_core_comms_config_path_interpolation() {
-        let mut config = CoreCommsConfig::default();
-        config.name = "alice".to_string();
-        config.identity_dir = PathBuf::from(".rkat/{name}/identity");
-        config.trusted_peers_path = PathBuf::from(".rkat/{name}/trusted.json");
-        config.listen_uds = Some(PathBuf::from("/tmp/meerkat-{name}.sock"));
+        let config = CoreCommsConfig {
+            name: "alice".to_string(),
+            identity_dir: PathBuf::from(".rkat/{name}/identity"),
+            trusted_peers_path: PathBuf::from(".rkat/{name}/trusted.json"),
+            listen_uds: Some(PathBuf::from("/tmp/meerkat-{name}.sock")),
+            ..Default::default()
+        };
 
         let resolved = config.resolve_paths(Path::new("/home/user/project"));
 

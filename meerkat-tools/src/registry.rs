@@ -201,10 +201,7 @@ mod tests {
         });
 
         // Valid args should return Ok quickly without collecting errors
-        let result = registry.validate(
-            "test_tool",
-            &serde_json::json!({"name": "valid"}),
-        );
+        let result = registry.validate("test_tool", &serde_json::json!({"name": "valid"}));
         assert!(result.is_ok());
     }
 }

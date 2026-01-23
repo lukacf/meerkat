@@ -113,9 +113,7 @@ mod tests {
         let envelope = make_test_envelope();
         let envelope_id = envelope.id;
 
-        sender
-            .send(InboxItem::External { envelope })
-            .unwrap();
+        sender.send(InboxItem::External { envelope }).unwrap();
 
         let received = inbox.recv().await;
         assert!(received.is_some());

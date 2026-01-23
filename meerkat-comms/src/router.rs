@@ -96,8 +96,8 @@ impl Router {
             .ok_or_else(|| SendError::PeerNotFound(peer_name.to_string()))?;
 
         // Parse peer address
-        let addr = PeerAddr::parse(&peer.addr)
-            .map_err(|e| SendError::InvalidAddress(e.to_string()))?;
+        let addr =
+            PeerAddr::parse(&peer.addr).map_err(|e| SendError::InvalidAddress(e.to_string()))?;
 
         // Determine if we should wait for ack
         let wait_for_ack = should_wait_for_ack(&kind);
@@ -142,7 +142,8 @@ impl Router {
         intent: String,
         params: serde_json::Value,
     ) -> Result<(), SendError> {
-        self.send(peer, MessageKind::Request { intent, params }).await
+        self.send(peer, MessageKind::Request { intent, params })
+            .await
     }
 
     /// Send response - does NOT wait for ack.
@@ -191,7 +192,9 @@ impl Router {
                 Ok(Ok(ack)) => {
                     // Verify ack signature
                     if !ack.verify() {
-                        return Err(SendError::InvalidAck("signature verification failed".into()));
+                        return Err(SendError::InvalidAck(
+                            "signature verification failed".into(),
+                        ));
                     }
 
                     // Verify ack is from the expected peer
@@ -216,9 +219,7 @@ impl Router {
                             )));
                         }
                         _ => {
-                            return Err(SendError::InvalidAck(
-                                "received non-ack response".into(),
-                            ));
+                            return Err(SendError::InvalidAck("received non-ack response".into()));
                         }
                     }
                 }
@@ -245,7 +246,10 @@ impl Router {
 /// - Response: No (no ack expected)
 /// - Ack: No (never ack an ack)
 fn should_wait_for_ack(kind: &MessageKind) -> bool {
-    matches!(kind, MessageKind::Message { .. } | MessageKind::Request { .. })
+    matches!(
+        kind,
+        MessageKind::Message { .. } | MessageKind::Request { .. }
+    )
 }
 
 /// Read an envelope from an async stream with length-prefix framing.
@@ -268,8 +272,8 @@ async fn read_envelope_async<R: AsyncReadExt + Unpin>(
     let mut payload = vec![0u8; len as usize];
     reader.read_exact(&mut payload).await?;
 
-    let envelope: Envelope = ciborium::from_reader(&payload[..])
-        .map_err(|e| SendError::Cbor(e.to_string()))?;
+    let envelope: Envelope =
+        ciborium::from_reader(&payload[..]).map_err(|e| SendError::Cbor(e.to_string()))?;
 
     Ok(envelope)
 }
@@ -281,8 +285,7 @@ async fn write_envelope_async<W: AsyncWriteExt + Unpin>(
     max_size: u32,
 ) -> Result<(), SendError> {
     let mut payload = Vec::new();
-    ciborium::into_writer(envelope, &mut payload)
-        .map_err(|e| SendError::Cbor(e.to_string()))?;
+    ciborium::into_writer(envelope, &mut payload).map_err(|e| SendError::Cbor(e.to_string()))?;
 
     let len = payload.len() as u32;
     // Use configured max (clamped to hard limit)
@@ -390,7 +393,9 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
 
             // Read the envelope
-            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
 
             // Send ack
             let mut ack = Envelope {
@@ -403,13 +408,13 @@ mod tests {
                 sig: Signature::new([0u8; 64]),
             };
             ack.sign(&peer_keypair);
-            write_envelope_async(&mut stream, &ack, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            write_envelope_async(&mut stream, &ack, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
         });
 
         // Send message
-        let result = router
-            .send_message("test-peer", "hello".to_string())
-            .await;
+        let result = router.send_message("test-peer", "hello".to_string()).await;
 
         assert!(result.is_ok());
         server_handle.await.unwrap();
@@ -455,9 +460,7 @@ mod tests {
         let router = Router::new(our_keypair, trusted_peers, CommsConfig::default());
 
         // No server listening - should fail with IO error
-        let result = router
-            .send_message("test-peer", "hello".to_string())
-            .await;
+        let result = router.send_message("test-peer", "hello".to_string()).await;
 
         assert!(matches!(result, Err(SendError::Io(_))));
     }
@@ -485,7 +488,9 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
 
             // Read the envelope and verify signature
-            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
             assert!(envelope.verify(), "Envelope should have valid signature");
             assert_eq!(envelope.from, our_pubkey, "Envelope should be from our key");
 
@@ -500,7 +505,9 @@ mod tests {
                 sig: Signature::new([0u8; 64]),
             };
             ack.sign(&peer_keypair);
-            write_envelope_async(&mut stream, &ack, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            write_envelope_async(&mut stream, &ack, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
         });
 
         let result = router.send_message("test-peer", "hello".to_string()).await;
@@ -534,7 +541,9 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
         let server_handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
 
             // Send ack
             let mut ack = Envelope {
@@ -547,7 +556,9 @@ mod tests {
                 sig: Signature::new([0u8; 64]),
             };
             ack.sign(&peer_keypair);
-            write_envelope_async(&mut stream, &ack, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            write_envelope_async(&mut stream, &ack, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
         });
 
         let result = router.send_message("test-peer", "hello".to_string()).await;
@@ -580,7 +591,9 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
         let server_handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let _envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            let _envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
             // Do NOT send ack - just sleep
             tokio::time::sleep(Duration::from_secs(5)).await;
         });
@@ -612,7 +625,9 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
         let server_handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
 
             // Verify it's a Message
             match envelope.kind {
@@ -633,10 +648,14 @@ mod tests {
                 sig: Signature::new([0u8; 64]),
             };
             ack.sign(&peer_keypair);
-            write_envelope_async(&mut stream, &ack, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            write_envelope_async(&mut stream, &ack, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
         });
 
-        let result = router.send_message("test-peer", "test body".to_string()).await;
+        let result = router
+            .send_message("test-peer", "test body".to_string())
+            .await;
         assert!(result.is_ok());
         server_handle.await.unwrap();
     }
@@ -661,7 +680,9 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
         let server_handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
 
             // Verify it's a Request
             match envelope.kind {
@@ -683,11 +704,17 @@ mod tests {
                 sig: Signature::new([0u8; 64]),
             };
             ack.sign(&peer_keypair);
-            write_envelope_async(&mut stream, &ack, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            write_envelope_async(&mut stream, &ack, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
         });
 
         let result = router
-            .send_request("test-peer", "review-pr".to_string(), serde_json::json!({"pr": 42}))
+            .send_request(
+                "test-peer",
+                "review-pr".to_string(),
+                serde_json::json!({"pr": 42}),
+            )
             .await;
         assert!(result.is_ok());
         server_handle.await.unwrap();
@@ -713,11 +740,17 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
         let server_handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            let envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
 
             // Verify it's a Response
             match envelope.kind {
-                MessageKind::Response { in_reply_to, status, result } => {
+                MessageKind::Response {
+                    in_reply_to,
+                    status,
+                    result,
+                } => {
                     assert_eq!(in_reply_to, request_id);
                     assert!(matches!(status, Status::Completed));
                     assert_eq!(result["approved"], true);
@@ -764,7 +797,9 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
         let server_handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let _envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES).await.unwrap();
+            let _envelope = read_envelope_async(&mut stream, DEFAULT_MAX_MESSAGE_BYTES)
+                .await
+                .unwrap();
             // No ack sent - if router waited, it would timeout
             tokio::time::sleep(Duration::from_secs(3)).await;
         });

@@ -97,8 +97,8 @@ impl SessionStore for JsonlStore {
 
         // Create metadata for the sidecar file
         let meta = SessionMeta::from(session);
-        let meta_json = serde_json::to_string(&meta)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let meta_json =
+            serde_json::to_string(&meta).map_err(|e| StoreError::Serialization(e.to_string()))?;
 
         // Write session atomically (write to temp, then rename)
         let temp_path = path.with_extension("jsonl.tmp");
@@ -239,7 +239,10 @@ mod tests {
         // Previously used sync path.exists() which would block
         let id = SessionId::new();
         let result = store.delete(&id).await;
-        assert!(result.is_ok(), "Delete of non-existent session should succeed");
+        assert!(
+            result.is_ok(),
+            "Delete of non-existent session should succeed"
+        );
     }
 
     #[tokio::test]

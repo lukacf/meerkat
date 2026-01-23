@@ -77,7 +77,10 @@ where
 /// - Response: No
 /// - Ack: Never (would cause infinite loop)
 fn should_ack(kind: &MessageKind) -> bool {
-    matches!(kind, MessageKind::Message { .. } | MessageKind::Request { .. })
+    matches!(
+        kind,
+        MessageKind::Message { .. } | MessageKind::Request { .. }
+    )
 }
 
 /// Create an Ack envelope in reply to the given envelope.
@@ -112,8 +115,8 @@ async fn read_envelope_async<R: AsyncReadExt + Unpin>(
     let mut payload = vec![0u8; len as usize];
     reader.read_exact(&mut payload).await?;
 
-    let envelope: Envelope = ciborium::from_reader(&payload[..])
-        .map_err(|e| IoTaskError::Cbor(e.to_string()))?;
+    let envelope: Envelope =
+        ciborium::from_reader(&payload[..]).map_err(|e| IoTaskError::Cbor(e.to_string()))?;
 
     Ok(envelope)
 }
@@ -124,8 +127,7 @@ async fn write_envelope_async<W: AsyncWriteExt + Unpin>(
     envelope: &Envelope,
 ) -> Result<(), IoTaskError> {
     let mut payload = Vec::new();
-    ciborium::into_writer(envelope, &mut payload)
-        .map_err(|e| IoTaskError::Cbor(e.to_string()))?;
+    ciborium::into_writer(envelope, &mut payload).map_err(|e| IoTaskError::Cbor(e.to_string()))?;
 
     let len = payload.len() as u32;
     if len > MAX_PAYLOAD_SIZE {
@@ -537,7 +539,10 @@ mod tests {
 
         // Should NOT receive an ack - connection closes without data
         let result = read_envelope_async(&mut client_read).await;
-        assert!(result.is_err(), "Should not receive ack for Response message");
+        assert!(
+            result.is_err(),
+            "Should not receive ack for Response message"
+        );
     }
 
     #[tokio::test]

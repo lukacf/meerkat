@@ -248,7 +248,9 @@ mod tests {
     use super::*;
     use crate::manager::CommsManagerConfig;
     use crate::types::{CommsContent, CommsStatus};
-    use meerkat_comms::{Envelope, InboxItem, MessageKind, PubKey, Signature, TrustedPeer, TrustedPeers};
+    use meerkat_comms::{
+        Envelope, InboxItem, MessageKind, PubKey, Signature, TrustedPeer, TrustedPeers,
+    };
     use meerkat_core::agent::LlmStreamResult;
     use meerkat_core::types::{StopReason, ToolDef, Usage};
     use std::sync::Mutex;

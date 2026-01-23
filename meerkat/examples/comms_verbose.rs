@@ -5,11 +5,11 @@ use futures::StreamExt;
 use meerkat::*;
 use meerkat_comms::{Keypair, TrustedPeer, TrustedPeers};
 use meerkat_comms_agent::{
-    spawn_tcp_listener, CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher,
+    CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 static API_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static TOOL_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -61,10 +61,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
         let call_num = API_CALL_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
 
         println!("\n╔══════════════════════════════════════════════════════════════╗");
-        println!(
-            "║  ANTHROPIC API CALL #{} - {}",
-            call_num, self.agent_name
-        );
+        println!("║  ANTHROPIC API CALL #{} - {}", call_num, self.agent_name);
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!("║ Model: {}", self.model);
         println!(
@@ -122,10 +119,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
                         buffer.args_json.push_str(&args_delta);
                     }
                     LlmEvent::ToolCallComplete { id, name, args } => {
-                        println!(
-                            "\n┌─── LLM REQUESTED TOOL: {} ───┐",
-                            name
-                        );
+                        println!("\n┌─── LLM REQUESTED TOOL: {} ───┐", name);
                         println!(
                             "│ Args: {}",
                             serde_json::to_string(&args).unwrap_or_default()
@@ -150,10 +144,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
         for (_, buffer) in tool_call_buffers {
             if let Some(tc) = buffer.try_complete() {
                 if !tool_calls.iter().any(|t| t.id == tc.id) {
-                    println!(
-                        "\n┌─── LLM REQUESTED TOOL: {} ───┐",
-                        tc.name
-                    );
+                    println!("\n┌─── LLM REQUESTED TOOL: {} ───┐", tc.name);
                     println!(
                         "│ Args: {}",
                         serde_json::to_string(&tc.args).unwrap_or_default()
@@ -334,18 +325,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create logging tool dispatchers (separate for each agent)
     let tools_a = Arc::new(LoggingToolDispatcher {
-        inner: CommsToolDispatcher::new(
-            comms_manager_a.router().clone(),
-            Arc::new(trusted_for_a),
-        ),
+        inner: CommsToolDispatcher::new(comms_manager_a.router().clone(), Arc::new(trusted_for_a)),
         agent_name: "Agent A".to_string(),
     });
 
     let tools_b = Arc::new(LoggingToolDispatcher {
-        inner: CommsToolDispatcher::new(
-            comms_manager_b.router().clone(),
-            Arc::new(trusted_for_b),
-        ),
+        inner: CommsToolDispatcher::new(comms_manager_b.router().clone(), Arc::new(trusted_for_b)),
         agent_name: "Agent B".to_string(),
     });
 
@@ -403,7 +388,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╚══════════════════════════════════════════════════════════════╝");
 
     let result_a = agent_a
-        .run("Send the message 'Hello from Agent A!' to agent-b using the send_message tool.".to_string())
+        .run(
+            "Send the message 'Hello from Agent A!' to agent-b using the send_message tool."
+                .to_string(),
+        )
         .await?;
 
     println!("\n═══════════════════════════════════════════════════════════════");

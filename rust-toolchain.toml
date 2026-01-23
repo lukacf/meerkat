@@ -1,0 +1,10 @@
+# rust-toolchain.toml
+# Pin the Rust version for consistent builds across machines and CI
+
+[toolchain]
+channel = "1.89.0"
+
+components = [
+    "rustfmt",
+    "clippy",
+]

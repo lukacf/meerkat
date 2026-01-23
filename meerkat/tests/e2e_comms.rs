@@ -13,7 +13,7 @@ use futures::StreamExt;
 use meerkat::*;
 use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
 use meerkat_comms_agent::{
-    spawn_tcp_listener, CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher,
+    CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -371,7 +371,10 @@ mod two_agent_message {
             .expect("Agent A run should succeed");
 
         eprintln!("Agent A response: {}", result_a.text);
-        assert!(result_a.tool_calls > 0, "Agent A should have made tool calls");
+        assert!(
+            result_a.tool_calls > 0,
+            "Agent A should have made tool calls"
+        );
 
         // Give time for message to be delivered
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -616,16 +619,16 @@ mod three_agent_coordination {
         };
 
         // Create CommsManagers
-        let config_a = CommsManagerConfig::with_keypair(keypair_a)
-            .trusted_peers(trusted_for_a.clone());
+        let config_a =
+            CommsManagerConfig::with_keypair(keypair_a).trusted_peers(trusted_for_a.clone());
         let comms_manager_a = CommsManager::new(config_a);
 
-        let config_b = CommsManagerConfig::with_keypair(keypair_b)
-            .trusted_peers(trusted_for_b.clone());
+        let config_b =
+            CommsManagerConfig::with_keypair(keypair_b).trusted_peers(trusted_for_b.clone());
         let comms_manager_b = CommsManager::new(config_b);
 
-        let config_c = CommsManagerConfig::with_keypair(keypair_c)
-            .trusted_peers(trusted_for_c.clone());
+        let config_c =
+            CommsManagerConfig::with_keypair(keypair_c).trusted_peers(trusted_for_c.clone());
         let comms_manager_c = CommsManager::new(config_c);
 
         // Extract secrets and start listeners
@@ -738,13 +741,19 @@ mod three_agent_coordination {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         // Agent B processes
-        let result_b = agent_b.run_inbox_only().await.expect("Agent B should process");
+        let result_b = agent_b
+            .run_inbox_only()
+            .await
+            .expect("Agent B should process");
         if let Some(result) = result_b {
             eprintln!("Agent B received: {}", result.text);
         }
 
         // Agent C processes
-        let result_c = agent_c.run_inbox_only().await.expect("Agent C should process");
+        let result_c = agent_c
+            .run_inbox_only()
+            .await
+            .expect("Agent C should process");
         if let Some(result) = result_c {
             eprintln!("Agent C received: {}", result.text);
         }
@@ -802,7 +811,8 @@ mod sanity {
         };
         let trusted = Arc::new(trusted);
 
-        let config = CommsManagerConfig::with_keypair(keypair).trusted_peers(trusted.as_ref().clone());
+        let config =
+            CommsManagerConfig::with_keypair(keypair).trusted_peers(trusted.as_ref().clone());
         let manager = CommsManager::new(config);
 
         let dispatcher = CommsToolDispatcher::new(manager.router().clone(), trusted);

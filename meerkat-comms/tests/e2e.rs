@@ -255,9 +255,14 @@ async fn test_e2e_request_response_flow() {
     let peer_b_trust_clone = peer_b_trust.clone();
     let handle_b = tokio::spawn(async move {
         let (stream, _) = listener_b.accept().await.unwrap();
-        handle_connection(stream, &peer_b_keypair, &peer_b_trust_clone, &inbox_sender_b)
-            .await
-            .unwrap();
+        handle_connection(
+            stream,
+            &peer_b_keypair,
+            &peer_b_trust_clone,
+            &inbox_sender_b,
+        )
+        .await
+        .unwrap();
     });
 
     // A sends a Request to B
@@ -315,9 +320,7 @@ async fn test_e2e_untrusted_rejected() {
 
     // A sends a message (will connect, but B will reject it as untrusted)
     let router_a = Router::new(peer_a_keypair, peer_a_trust, CommsConfig::default());
-    let send_result = router_a
-        .send_message("peer-b", "Hello!".to_string())
-        .await;
+    let send_result = router_a.send_message("peer-b", "Hello!".to_string()).await;
 
     // The send should fail (no ack from B due to untrusted rejection)
     // Either timeout or immediate rejection

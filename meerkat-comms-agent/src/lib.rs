@@ -22,7 +22,7 @@ pub mod tool_dispatcher;
 pub mod types;
 
 pub use comms_agent::{CommsAgent, CommsAgentBuilder};
-pub use listener::{spawn_tcp_listener, spawn_uds_listener, ListenerHandle};
+pub use listener::{ListenerHandle, spawn_tcp_listener, spawn_uds_listener};
 pub use manager::{CommsManager, CommsManagerConfig};
 pub use tool_dispatcher::CommsToolDispatcher;
 pub use types::{CommsContent, CommsMessage};

@@ -387,9 +387,15 @@ pub mod tests {
         let body = client.build_request_body(&request);
 
         // Verify thinkingConfig is set in generationConfig
-        let generation_config = body.get("generationConfig").expect("generationConfig should exist");
-        let thinking_config = generation_config.get("thinkingConfig").expect("thinkingConfig should exist");
-        let thinking_budget = thinking_config.get("thinkingBudget").expect("thinkingBudget should exist");
+        let generation_config = body
+            .get("generationConfig")
+            .expect("generationConfig should exist");
+        let thinking_config = generation_config
+            .get("thinkingConfig")
+            .expect("thinkingConfig should exist");
+        let thinking_budget = thinking_config
+            .get("thinkingBudget")
+            .expect("thinkingBudget should exist");
 
         assert_eq!(thinking_budget.as_i64(), Some(10000));
     }
@@ -411,7 +417,9 @@ pub mod tests {
         let body = client.build_request_body(&request);
 
         // Verify topK is set in generationConfig
-        let generation_config = body.get("generationConfig").expect("generationConfig should exist");
+        let generation_config = body
+            .get("generationConfig")
+            .expect("generationConfig should exist");
         let top_k = generation_config.get("topK").expect("topK should exist");
 
         assert_eq!(top_k.as_i64(), Some(40));
@@ -434,15 +442,21 @@ pub mod tests {
 
         let body = client.build_request_body(&request);
 
-        let generation_config = body.get("generationConfig").expect("generationConfig should exist");
+        let generation_config = body
+            .get("generationConfig")
+            .expect("generationConfig should exist");
 
         // Verify topK
         let top_k = generation_config.get("topK").expect("topK should exist");
         assert_eq!(top_k.as_i64(), Some(20));
 
         // Verify thinkingConfig
-        let thinking_config = generation_config.get("thinkingConfig").expect("thinkingConfig should exist");
-        let thinking_budget = thinking_config.get("thinkingBudget").expect("thinkingBudget should exist");
+        let thinking_config = generation_config
+            .get("thinkingConfig")
+            .expect("thinkingConfig should exist");
+        let thinking_budget = thinking_config
+            .get("thinkingBudget")
+            .expect("thinkingBudget should exist");
         assert_eq!(thinking_budget.as_i64(), Some(5000));
     }
 
@@ -464,7 +478,9 @@ pub mod tests {
         // Should not panic - unknown params are silently ignored
         let body = client.build_request_body(&request);
 
-        let generation_config = body.get("generationConfig").expect("generationConfig should exist");
+        let generation_config = body
+            .get("generationConfig")
+            .expect("generationConfig should exist");
 
         // Verify unknown params are NOT in generationConfig
         assert!(generation_config.get("unknown_param").is_none());
@@ -490,7 +506,9 @@ pub mod tests {
 
         let body = client.build_request_body(&request);
 
-        let generation_config = body.get("generationConfig").expect("generationConfig should exist");
+        let generation_config = body
+            .get("generationConfig")
+            .expect("generationConfig should exist");
 
         // Verify no thinkingConfig when not requested
         assert!(generation_config.get("thinkingConfig").is_none());
@@ -684,7 +702,8 @@ pub mod tests {
     /// Test SSE parsing with valid response data
     #[test]
     fn test_parse_stream_line_valid_response() {
-        let line = r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#;
+        let line =
+            r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#;
         let response = GeminiClient::parse_stream_line(line);
         assert!(response.is_some());
         let response = response.unwrap();
@@ -697,7 +716,8 @@ pub mod tests {
     /// Test SSE parsing with usage metadata
     #[test]
     fn test_parse_stream_line_with_usage() {
-        let line = r#"{"candidates":[],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#;
+        let line =
+            r#"{"candidates":[],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#;
         let response = GeminiClient::parse_stream_line(line);
         assert!(response.is_some());
         let response = response.unwrap();
@@ -715,7 +735,13 @@ pub mod tests {
         assert!(response.is_some());
         let response = response.unwrap();
         let candidates = response.candidates.unwrap();
-        let parts = candidates[0].content.as_ref().unwrap().parts.as_ref().unwrap();
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .unwrap()
+            .parts
+            .as_ref()
+            .unwrap();
         let fc = parts[0].function_call.as_ref().unwrap();
         assert_eq!(fc.name, "get_weather");
         assert_eq!(fc.args.as_ref().unwrap()["city"], "Tokyo");

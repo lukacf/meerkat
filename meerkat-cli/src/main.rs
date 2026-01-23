@@ -343,10 +343,13 @@ fn parse_provider_params(params: &[String]) -> anyhow::Result<Option<serde_json:
 
     let mut map = serde_json::Map::new();
     for param in params {
-        let (key, value) = param
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("Invalid --param format '{}': expected KEY=VALUE", param))?;
-        map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+        let (key, value) = param.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("Invalid --param format '{}': expected KEY=VALUE", param)
+        })?;
+        map.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
     }
 
     Ok(Some(serde_json::Value::Object(map)))
@@ -507,14 +510,20 @@ async fn run_agent(
 
     // Add comms configuration if present
     if let Some(ref comms) = comms_config {
-        builder = builder.comms(comms.clone()).comms_base_dir(comms_base_dir.clone());
+        builder = builder
+            .comms(comms.clone())
+            .comms_base_dir(comms_base_dir.clone());
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter);
 
     // Store provider and model in session metadata for resume
-    agent.session_mut().set_metadata("provider", serde_json::json!(provider.as_str()));
-    agent.session_mut().set_metadata("model", serde_json::json!(model));
+    agent
+        .session_mut()
+        .set_metadata("provider", serde_json::json!(provider.as_str()));
+    agent
+        .session_mut()
+        .set_metadata("model", serde_json::json!(model));
 
     // Display comms status if enabled
     if let Some(comms_runtime) = agent.comms() {
@@ -994,7 +1003,12 @@ mod tests {
         let params = vec!["invalid_param".to_string()];
         let result = parse_provider_params(&params);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid --param format"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid --param format")
+        );
     }
 
     #[test]

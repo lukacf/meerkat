@@ -9,9 +9,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use meerkat_comms::{
-    handle_connection, Inbox, InboxSender, Keypair, PubKey, Router, TrustedPeers,
-};
+use meerkat_comms::{Inbox, InboxSender, Keypair, PubKey, Router, TrustedPeers, handle_connection};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -77,10 +75,7 @@ impl CommsMessage {
     pub fn to_user_message_text(&self) -> String {
         match &self.content {
             CommsContent::Message { body } => {
-                format!(
-                    "[Comms] Message from {}: {}",
-                    self.from_peer, body
-                )
+                format!("[Comms] Message from {}: {}", self.from_peer, body)
             }
             CommsContent::Request { intent, params } => {
                 format!(
@@ -198,11 +193,7 @@ impl CommsRuntime {
 
         // Create router with the comms config
         let comms_config = config.to_comms_config();
-        let router = Arc::new(Router::new(
-            keypair,
-            (*trusted_peers).clone(),
-            comms_config,
-        ));
+        let router = Arc::new(Router::new(keypair, (*trusted_peers).clone(), comms_config));
 
         Ok(Self {
             config,
@@ -527,7 +518,11 @@ mod tests {
         // So we test with a specific port
         runtime.config.listen_tcp = Some("127.0.0.1:44299".parse::<SocketAddr>().unwrap());
         let result = runtime.start_listeners().await;
-        assert!(result.is_ok(), "start_listeners should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "start_listeners should succeed: {:?}",
+            result
+        );
         assert!(!runtime.listener_handles.is_empty());
 
         // Second call should fail with AlreadyStarted
@@ -595,8 +590,10 @@ mod tests {
         assert!(trust_err.to_string().contains("Trust load error"));
         assert!(trust_err.to_string().contains("parse error"));
 
-        let listener_err =
-            CommsRuntimeError::ListenerError(std::io::Error::new(std::io::ErrorKind::NotFound, "socket not found"));
+        let listener_err = CommsRuntimeError::ListenerError(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "socket not found",
+        ));
         assert!(listener_err.to_string().contains("Listener error"));
 
         let already_started = CommsRuntimeError::AlreadyStarted;
@@ -682,7 +679,10 @@ mod tests {
         let runtime2 = CommsRuntime::new(config).unwrap();
         let pubkey2 = runtime2.public_key();
 
-        assert_eq!(pubkey1, pubkey2, "Keypair should persist across runtime instances");
+        assert_eq!(
+            pubkey1, pubkey2,
+            "Keypair should persist across runtime instances"
+        );
     }
 
     #[test]

@@ -125,7 +125,7 @@ impl RkatTestInstance {
         std::fs::create_dir_all(self.identity_dir())?;
         self.keypair
             .save(&self.identity_dir())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(())
     }
 
@@ -168,7 +168,7 @@ ack_timeout_secs = 30
         let trusted = TrustedPeers { peers };
         trusted
             .save(&self.trusted_peers_path())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         Ok(())
     }
@@ -201,9 +201,10 @@ ack_timeout_secs = 30
             std::io::Error::new(std::io::ErrorKind::NotFound, "Process not started")
         })?;
 
-        let stderr = process.stderr.take().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "No stderr")
-        })?;
+        let stderr = process
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No stderr"))?;
 
         let start = Instant::now();
         let reader = BufReader::new(stderr);
@@ -312,7 +313,10 @@ fn test_rkat_instance_spawn_kill() {
     // Verify keypair is valid Ed25519
     let pubkey = instance.public_key();
     let peer_id = pubkey.to_peer_id();
-    assert!(peer_id.starts_with("ed25519:"), "Peer ID should start with ed25519:");
+    assert!(
+        peer_id.starts_with("ed25519:"),
+        "Peer ID should start with ed25519:"
+    );
 }
 
 #[test]
@@ -322,8 +326,16 @@ fn test_rkat_temp_setup() {
 
     // Verify paths are within temp dir
     assert!(instance.config_dir().starts_with(instance.temp_dir.path()));
-    assert!(instance.identity_dir().starts_with(instance.temp_dir.path()));
-    assert!(instance.trusted_peers_path().starts_with(instance.temp_dir.path()));
+    assert!(
+        instance
+            .identity_dir()
+            .starts_with(instance.temp_dir.path())
+    );
+    assert!(
+        instance
+            .trusted_peers_path()
+            .starts_with(instance.temp_dir.path())
+    );
 
     // Write identity and verify files exist
     instance.write_identity().expect("Should write identity");
@@ -424,7 +436,10 @@ fn test_e2e_rkat_tcp_message_exchange() {
     let bob_ready = instance_b
         .wait_for_ready(Duration::from_secs(30))
         .expect("Bob wait_for_ready");
-    assert!(bob_ready, "Bob should start and show Peer ID or listening message");
+    assert!(
+        bob_ready,
+        "Bob should start and show Peer ID or listening message"
+    );
 
     // Spawn alice to send message
     instance_a
@@ -436,7 +451,10 @@ fn test_e2e_rkat_tcp_message_exchange() {
 
     // Wait for alice to complete (she sends and exits)
     let alice_exited = instance_a.wait_for_exit(Duration::from_secs(60));
-    assert!(alice_exited.is_some(), "Alice should complete within timeout");
+    assert!(
+        alice_exited.is_some(),
+        "Alice should complete within timeout"
+    );
 
     // Give bob time to process the incoming message
     std::thread::sleep(Duration::from_secs(5));
@@ -582,7 +600,10 @@ fn test_e2e_rkat_request_response_flow() {
 
     // Wait for requester to complete (should get response back)
     let exited = instance_a.wait_for_exit(Duration::from_secs(90));
-    assert!(exited.is_some(), "Requester should complete after getting response");
+    assert!(
+        exited.is_some(),
+        "Requester should complete after getting response"
+    );
 
     instance_a.kill();
     instance_b.kill();
@@ -600,7 +621,9 @@ fn test_e2e_rkat_untrusted_rejected() {
     let mut instance_b = RkatTestInstance::new("untrusted");
 
     // Set up A with B as trusted peer
-    instance_a.write_config(&[&instance_b]).expect("Write config A");
+    instance_a
+        .write_config(&[&instance_b])
+        .expect("Write config A");
 
     // Set up B with NO trusted peers (doesn't trust anyone)
     instance_b.write_config(&[]).expect("Write config B");
@@ -625,7 +648,10 @@ fn test_e2e_rkat_untrusted_rejected() {
 
     // Wait for A to complete - it should fail to authenticate
     let exited = instance_a.wait_for_exit(Duration::from_secs(30));
-    assert!(exited.is_some(), "A should complete (with connection failure)");
+    assert!(
+        exited.is_some(),
+        "A should complete (with connection failure)"
+    );
 
     // The test passes if:
     // 1. A was able to attempt sending
@@ -661,8 +687,12 @@ fn test_e2e_rkat_three_peer_coordination() {
         .spawn("You are worker-2. Wait for tasks from coordinator. When you receive one, acknowledge with WORKER_2_ACK.")
         .expect("Should spawn worker-2");
 
-    let b_ready = instance_b.wait_for_ready(Duration::from_secs(30)).expect("B wait");
-    let c_ready = instance_c.wait_for_ready(Duration::from_secs(30)).expect("C wait");
+    let b_ready = instance_b
+        .wait_for_ready(Duration::from_secs(30))
+        .expect("B wait");
+    let c_ready = instance_c
+        .wait_for_ready(Duration::from_secs(30))
+        .expect("C wait");
     assert!(b_ready && c_ready, "Workers should start");
 
     // Spawn coordinator to broadcast to both workers
@@ -676,7 +706,10 @@ fn test_e2e_rkat_three_peer_coordination() {
 
     // Wait for coordinator to complete
     let exited = instance_a.wait_for_exit(Duration::from_secs(90));
-    assert!(exited.is_some(), "Coordinator should complete after sending to both workers");
+    assert!(
+        exited.is_some(),
+        "Coordinator should complete after sending to both workers"
+    );
 
     instance_a.kill();
     instance_b.kill();
@@ -715,7 +748,9 @@ fn test_e2e_rkat_ack_is_immediate() {
         .spawn("You are a slow receiver. When you receive a message, think very carefully for a long time before responding.")
         .expect("Should spawn receiver");
 
-    let ready = instance_b.wait_for_ready(Duration::from_secs(30)).expect("B wait");
+    let ready = instance_b
+        .wait_for_ready(Duration::from_secs(30))
+        .expect("B wait");
     assert!(ready, "Receiver should start");
 
     // Spawn sender and measure time to completion
@@ -768,7 +803,9 @@ fn test_e2e_rkat_sender_nonblocking() {
         .spawn("You are a slow processor. When you receive messages, analyze them extensively before responding.")
         .expect("Should spawn processor");
 
-    let ready = instance_b.wait_for_ready(Duration::from_secs(30)).expect("B wait");
+    let ready = instance_b
+        .wait_for_ready(Duration::from_secs(30))
+        .expect("B wait");
     assert!(ready, "Processor should start");
 
     // Spawn sender to send multiple messages quickly

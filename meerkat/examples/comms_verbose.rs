@@ -56,6 +56,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
         tools: &[ToolDef],
         max_tokens: u32,
         temperature: Option<f32>,
+        provider_params: Option<&serde_json::Value>,
     ) -> Result<LlmStreamResult, AgentError> {
         let call_num = API_CALL_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -89,6 +90,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
             max_tokens,
             temperature,
             stop_sequences: None,
+            provider_params: provider_params.cloned(),
         };
 
         let mut stream = self.client.stream(&request);

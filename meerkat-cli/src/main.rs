@@ -74,6 +74,10 @@ enum Commands {
         #[arg(long)]
         stream: bool,
 
+        /// Provider-specific parameter (KEY=VALUE). Can be repeated.
+        #[arg(long = "param", value_name = "KEY=VALUE")]
+        params: Vec<String>,
+
         // === Comms flags ===
         /// Agent name for inter-agent communication. Enables comms if set.
         #[arg(long = "comms-name")]
@@ -249,6 +253,7 @@ async fn main() -> ExitCode {
             max_tool_calls,
             output,
             stream,
+            params,
             comms_name,
             comms_listen_tcp,
             no_comms,
@@ -261,6 +266,9 @@ async fn main() -> ExitCode {
             // Parse duration string if provided
             let duration = max_duration.map(|s| parse_duration(&s)).transpose();
 
+            // Parse provider params
+            let provider_params = parse_provider_params(&params);
+
             // Build comms overrides from CLI flags
             let comms_overrides = config::CommsOverrides {
                 name: comms_name,
@@ -268,8 +276,8 @@ async fn main() -> ExitCode {
                 disabled: no_comms,
             };
 
-            match duration {
-                Ok(dur) => {
+            match (duration, provider_params) {
+                (Ok(dur), Ok(parsed_params)) => {
                     let limits = BudgetLimits {
                         max_tokens: max_total_tokens,
                         max_duration: dur,
@@ -283,11 +291,13 @@ async fn main() -> ExitCode {
                         limits,
                         &output,
                         stream,
+                        parsed_params,
                         comms_overrides,
                     )
                     .await
                 }
-                Err(e) => Err(e),
+                (Err(e), _) => Err(e),
+                (_, Err(e)) => Err(e),
             }
         }
         Commands::Resume { session_id, prompt } => resume_session(&session_id, &prompt).await,
@@ -320,6 +330,26 @@ async fn main() -> ExitCode {
 /// Parse a duration string like "5m", "1h30m", "30s"
 fn parse_duration(s: &str) -> anyhow::Result<Duration> {
     humantime::parse_duration(s).map_err(|e| anyhow::anyhow!("Invalid duration '{}': {}", s, e))
+}
+
+/// Parse --param KEY=VALUE flags into a JSON object
+///
+/// Returns None if params is empty, Some(object) otherwise.
+/// Errors if any param is missing the '=' separator.
+fn parse_provider_params(params: &[String]) -> anyhow::Result<Option<serde_json::Value>> {
+    if params.is_empty() {
+        return Ok(None);
+    }
+
+    let mut map = serde_json::Map::new();
+    for param in params {
+        let (key, value) = param
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("Invalid --param format '{}': expected KEY=VALUE", param))?;
+        map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+    }
+
+    Ok(Some(serde_json::Value::Object(map)))
 }
 
 /// Get the default session store directory
@@ -406,6 +436,7 @@ async fn run_agent(
     limits: BudgetLimits,
     output: &str,
     stream: bool,
+    provider_params: Option<serde_json::Value>,
     comms_overrides: config::CommsOverrides,
 ) -> anyhow::Result<()> {
     use meerkat_core::event::AgentEvent;
@@ -433,13 +464,15 @@ async fn run_agent(
     // Create LLM adapter - with event channel if streaming is enabled
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let llm_adapter = if stream {
-        Arc::new(DynLlmClientAdapter::with_event_channel(
-            llm_client,
-            model.to_string(),
-            event_tx,
-        ))
+        Arc::new(
+            DynLlmClientAdapter::with_event_channel(llm_client, model.to_string(), event_tx)
+                .with_provider_params(provider_params),
+        )
     } else {
-        Arc::new(DynLlmClientAdapter::new(llm_client, model.to_string()))
+        Arc::new(
+            DynLlmClientAdapter::new(llm_client, model.to_string())
+                .with_provider_params(provider_params),
+        )
     };
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
@@ -922,6 +955,68 @@ impl Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // === Tests for --param flag parsing ===
+
+    #[test]
+    fn test_parse_provider_params_single() {
+        let params = vec!["reasoning_effort=high".to_string()];
+        let result = parse_provider_params(&params).unwrap();
+        assert!(result.is_some());
+        let json = result.unwrap();
+        assert_eq!(json["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn test_parse_provider_params_multiple() {
+        let params = vec![
+            "reasoning_effort=high".to_string(),
+            "seed=42".to_string(),
+            "custom_flag=true".to_string(),
+        ];
+        let result = parse_provider_params(&params).unwrap();
+        assert!(result.is_some());
+        let json = result.unwrap();
+        assert_eq!(json["reasoning_effort"], "high");
+        assert_eq!(json["seed"], "42");
+        assert_eq!(json["custom_flag"], "true");
+    }
+
+    #[test]
+    fn test_parse_provider_params_empty() {
+        let params: Vec<String> = vec![];
+        let result = parse_provider_params(&params).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_provider_params_invalid_no_equals() {
+        let params = vec!["invalid_param".to_string()];
+        let result = parse_provider_params(&params);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid --param format"));
+    }
+
+    #[test]
+    fn test_parse_provider_params_value_with_equals() {
+        // Value can contain equals signs (e.g., base64 encoded strings)
+        let params = vec!["key=value=with=equals".to_string()];
+        let result = parse_provider_params(&params).unwrap();
+        assert!(result.is_some());
+        let json = result.unwrap();
+        assert_eq!(json["key"], "value=with=equals");
+    }
+
+    #[test]
+    fn test_parse_provider_params_empty_value() {
+        let params = vec!["key=".to_string()];
+        let result = parse_provider_params(&params).unwrap();
+        assert!(result.is_some());
+        let json = result.unwrap();
+        assert_eq!(json["key"], "");
+    }
+
+    // === End of --param flag tests ===
 
     #[test]
     fn test_infer_provider_anthropic() {

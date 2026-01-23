@@ -225,6 +225,13 @@ pub struct AgentConfig {
     pub budget_warning_threshold: f32,
     /// Maximum turns before forced stop
     pub max_turns: Option<u32>,
+    /// Provider-specific parameters (e.g., thinking config, reasoning effort)
+    ///
+    /// This is a generic JSON bag that providers can extract provider-specific
+    /// options from. Each provider implementation is responsible for reading
+    /// and applying relevant parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<serde_json::Value>,
 }
 
 impl Default for AgentConfig {
@@ -238,6 +245,7 @@ impl Default for AgentConfig {
             checkpoint_interval: Some(5),
             budget_warning_threshold: 0.8,
             max_turns: None,
+            provider_params: None,
         }
     }
 }

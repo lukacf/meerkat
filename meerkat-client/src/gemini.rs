@@ -119,6 +119,21 @@ impl GeminiClient {
                 Value::Number(serde_json::Number::from_f64(temp as f64).unwrap());
         }
 
+        // Extract provider-specific parameters
+        if let Some(ref params) = request.provider_params {
+            // thinking_budget -> generationConfig.thinkingConfig.thinkingBudget
+            if let Some(thinking_budget) = params.get("thinking_budget") {
+                body["generationConfig"]["thinkingConfig"] = serde_json::json!({
+                    "thinkingBudget": thinking_budget
+                });
+            }
+
+            // top_k -> generationConfig.topK
+            if let Some(top_k) = params.get("top_k") {
+                body["generationConfig"]["topK"] = top_k.clone();
+            }
+        }
+
         if !request.tools.is_empty() {
             let function_declarations: Vec<Value> = request
                 .tools
@@ -345,6 +360,138 @@ pub mod tests {
     fn skip_if_no_key() -> Option<GeminiClient> {
         GeminiClient::from_env().ok()
     }
+
+    // ==================== Unit tests for provider_params extraction ====================
+
+    /// Test that thinking_budget is extracted and converted to Gemini's thinkingConfig format
+    #[test]
+    fn test_build_request_body_with_thinking_budget() {
+        let client = GeminiClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage {
+                content: "Test".to_string(),
+            })],
+        )
+        .with_max_tokens(1000)
+        .with_provider_param("thinking_budget", 10000);
+
+        let body = client.build_request_body(&request);
+
+        // Verify thinkingConfig is set in generationConfig
+        let generation_config = body.get("generationConfig").expect("generationConfig should exist");
+        let thinking_config = generation_config.get("thinkingConfig").expect("thinkingConfig should exist");
+        let thinking_budget = thinking_config.get("thinkingBudget").expect("thinkingBudget should exist");
+
+        assert_eq!(thinking_budget.as_i64(), Some(10000));
+    }
+
+    /// Test that top_k is extracted and added to generationConfig
+    #[test]
+    fn test_build_request_body_with_top_k() {
+        let client = GeminiClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage {
+                content: "Test".to_string(),
+            })],
+        )
+        .with_max_tokens(1000)
+        .with_provider_param("top_k", 40);
+
+        let body = client.build_request_body(&request);
+
+        // Verify topK is set in generationConfig
+        let generation_config = body.get("generationConfig").expect("generationConfig should exist");
+        let top_k = generation_config.get("topK").expect("topK should exist");
+
+        assert_eq!(top_k.as_i64(), Some(40));
+    }
+
+    /// Test that both thinking_budget and top_k work together
+    #[test]
+    fn test_build_request_body_with_multiple_provider_params() {
+        let client = GeminiClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage {
+                content: "Test".to_string(),
+            })],
+        )
+        .with_max_tokens(1000)
+        .with_provider_param("thinking_budget", 5000)
+        .with_provider_param("top_k", 20);
+
+        let body = client.build_request_body(&request);
+
+        let generation_config = body.get("generationConfig").expect("generationConfig should exist");
+
+        // Verify topK
+        let top_k = generation_config.get("topK").expect("topK should exist");
+        assert_eq!(top_k.as_i64(), Some(20));
+
+        // Verify thinkingConfig
+        let thinking_config = generation_config.get("thinkingConfig").expect("thinkingConfig should exist");
+        let thinking_budget = thinking_config.get("thinkingBudget").expect("thinkingBudget should exist");
+        assert_eq!(thinking_budget.as_i64(), Some(5000));
+    }
+
+    /// Test that unknown provider params are silently ignored (no error, no inclusion)
+    #[test]
+    fn test_build_request_body_unknown_params_ignored() {
+        let client = GeminiClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage {
+                content: "Test".to_string(),
+            })],
+        )
+        .with_max_tokens(1000)
+        .with_provider_param("unknown_param", "should_be_ignored")
+        .with_provider_param("another_unknown", 12345);
+
+        // Should not panic - unknown params are silently ignored
+        let body = client.build_request_body(&request);
+
+        let generation_config = body.get("generationConfig").expect("generationConfig should exist");
+
+        // Verify unknown params are NOT in generationConfig
+        assert!(generation_config.get("unknown_param").is_none());
+        assert!(generation_config.get("another_unknown").is_none());
+
+        // Verify the body doesn't have unknown params at the top level either
+        assert!(body.get("unknown_param").is_none());
+        assert!(body.get("another_unknown").is_none());
+    }
+
+    /// Test that no provider_params results in standard request body
+    #[test]
+    fn test_build_request_body_no_provider_params() {
+        let client = GeminiClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage {
+                content: "Test".to_string(),
+            })],
+        )
+        .with_max_tokens(1000);
+
+        let body = client.build_request_body(&request);
+
+        let generation_config = body.get("generationConfig").expect("generationConfig should exist");
+
+        // Verify no thinkingConfig when not requested
+        assert!(generation_config.get("thinkingConfig").is_none());
+        // Verify no topK when not requested
+        assert!(generation_config.get("topK").is_none());
+    }
+
+    // ==================== E2E tests (require GOOGLE_API_KEY) ====================
 
     #[tokio::test]
     async fn test_streaming_text_delta_normalization() {

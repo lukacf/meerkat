@@ -29,12 +29,20 @@ use tokio::sync::mpsc;
 #[async_trait]
 pub trait AgentLlmClient: Send + Sync {
     /// Stream a response from the LLM
+    ///
+    /// # Arguments
+    /// * `messages` - Conversation history
+    /// * `tools` - Available tool definitions
+    /// * `max_tokens` - Maximum tokens to generate
+    /// * `temperature` - Sampling temperature
+    /// * `provider_params` - Provider-specific parameters (e.g., thinking config)
     async fn stream_response(
         &self,
         messages: &[Message],
         tools: &[ToolDef],
         max_tokens: u32,
         temperature: Option<f32>,
+        provider_params: Option<&Value>,
     ) -> Result<LlmStreamResult, AgentError>;
 
     /// Get the provider name
@@ -174,6 +182,29 @@ impl AgentBuilder {
     /// Set budget limits
     pub fn budget(mut self, limits: BudgetLimits) -> Self {
         self.budget_limits = Some(limits);
+        self
+    }
+
+    /// Set provider-specific parameters (e.g., thinking config, reasoning effort)
+    ///
+    /// These parameters are passed through to the LLM client unchanged.
+    /// Each provider implementation is responsible for reading and applying
+    /// relevant parameters.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let agent = AgentBuilder::new()
+    ///     .model("claude-sonnet-4")
+    ///     .provider_params(serde_json::json!({
+    ///         "thinking": {
+    ///             "type": "enabled",
+    ///             "budget_tokens": 10000
+    ///         }
+    ///     }))
+    ///     .build(client, tools, store);
+    /// ```
+    pub fn provider_params(mut self, params: Value) -> Self {
+        self.config.provider_params = Some(params);
         self
     }
 
@@ -716,7 +747,13 @@ where
 
             match self
                 .client
-                .stream_response(messages, tools, max_tokens, self.config.temperature)
+                .stream_response(
+                    messages,
+                    tools,
+                    max_tokens,
+                    self.config.temperature,
+                    self.config.provider_params.as_ref(),
+                )
                 .await
             {
                 Ok(result) => return Ok(result),
@@ -1049,6 +1086,7 @@ mod tests {
             _tools: &[ToolDef],
             _max_tokens: u32,
             _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
         ) -> Result<LlmStreamResult, AgentError> {
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
@@ -1529,5 +1567,154 @@ mod tests {
         assert!(text.contains("[Comms]"), "Should have [Comms] prefix");
         assert!(text.contains("alice"), "Should include peer name");
         assert!(text.contains("Hello from Alice"), "Should include message body");
+    }
+
+    // =========================================================================
+    // Provider params tests (TDD)
+    // =========================================================================
+
+    #[test]
+    fn test_agent_config_accepts_provider_params() {
+        use crate::config::AgentConfig;
+
+        // Test that AgentConfig has provider_params field
+        let mut config = AgentConfig::default();
+        assert!(config.provider_params.is_none());
+
+        // Set provider params
+        config.provider_params = Some(serde_json::json!({
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": 10000
+            }
+        }));
+
+        assert!(config.provider_params.is_some());
+        let params = config.provider_params.unwrap();
+        assert_eq!(params["thinking"]["budget_tokens"], 10000);
+    }
+
+    #[test]
+    fn test_agent_builder_provider_params() {
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        // Test builder has provider_params method
+        let _agent = AgentBuilder::new()
+            .model("test-model")
+            .provider_params(serde_json::json!({
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 5000
+                }
+            }))
+            .build(client, tools, store);
+
+        // Agent builds successfully with provider_params
+    }
+
+    /// Mock client that captures provider_params for verification
+    struct ProviderParamsCapturingClient {
+        captured_params: Mutex<Option<Value>>,
+        responses: Mutex<Vec<LlmStreamResult>>,
+    }
+
+    impl ProviderParamsCapturingClient {
+        fn new(responses: Vec<LlmStreamResult>) -> Self {
+            Self {
+                captured_params: Mutex::new(None),
+                responses: Mutex::new(responses),
+            }
+        }
+
+        fn captured_params(&self) -> Option<Value> {
+            self.captured_params.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for ProviderParamsCapturingClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            provider_params: Option<&Value>,
+        ) -> Result<LlmStreamResult, AgentError> {
+            // Capture the provider_params
+            *self.captured_params.lock().unwrap() = provider_params.cloned();
+
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                Ok(LlmStreamResult {
+                    content: "Default response".to_string(),
+                    tool_calls: vec![],
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                })
+            } else {
+                Ok(responses.remove(0))
+            }
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock-capturing"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_provider_params_flows_to_stream_response() {
+        let client = Arc::new(ProviderParamsCapturingClient::new(vec![LlmStreamResult {
+            content: "Response with thinking".to_string(),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        let thinking_config = serde_json::json!({
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": 10000
+            }
+        });
+
+        let mut agent = AgentBuilder::new()
+            .model("test-model")
+            .provider_params(thinking_config.clone())
+            .build(client.clone(), tools, store);
+
+        let _result = agent.run("Test".to_string()).await.unwrap();
+
+        // Verify provider_params was passed to stream_response
+        let captured = client.captured_params();
+        assert!(captured.is_some(), "provider_params should be captured");
+        assert_eq!(captured.unwrap(), thinking_config);
+    }
+
+    #[tokio::test]
+    async fn test_provider_params_none_when_not_set() {
+        let client = Arc::new(ProviderParamsCapturingClient::new(vec![LlmStreamResult {
+            content: "Response".to_string(),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        // Build without provider_params
+        let mut agent = AgentBuilder::new()
+            .model("test-model")
+            .build(client.clone(), tools, store);
+
+        let _result = agent.run("Test".to_string()).await.unwrap();
+
+        // Verify provider_params was None
+        let captured = client.captured_params();
+        assert!(captured.is_none(), "provider_params should be None when not set");
     }
 }

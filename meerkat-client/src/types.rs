@@ -43,6 +43,13 @@ pub struct LlmRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
+    /// Provider-specific parameters (e.g., thinking config, reasoning effort)
+    ///
+    /// This is a generic JSON bag that providers can extract provider-specific
+    /// options from. Each provider implementation is responsible for reading
+    /// and applying relevant parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<Value>,
 }
 
 impl LlmRequest {
@@ -55,6 +62,7 @@ impl LlmRequest {
             max_tokens: 4096,
             temperature: None,
             stop_sequences: None,
+            provider_params: None,
         }
     }
 
@@ -73,6 +81,26 @@ impl LlmRequest {
     /// Add tools
     pub fn with_tools(mut self, tools: Vec<ToolDef>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// Set provider-specific parameters (replaces any existing params)
+    ///
+    /// Use this to pass the entire provider_params object at once.
+    pub fn with_provider_params(mut self, params: Value) -> Self {
+        self.provider_params = Some(params);
+        self
+    }
+
+    /// Set a single provider-specific parameter
+    ///
+    /// If provider_params is None, creates a new object.
+    /// If provider_params exists, merges the new key into it.
+    pub fn with_provider_param(mut self, key: &str, value: impl Into<Value>) -> Self {
+        let params = self.provider_params.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(obj) = params.as_object_mut() {
+            obj.insert(key.to_string(), value.into());
+        }
         self
     }
 }
@@ -240,5 +268,111 @@ mod tests {
         assert_eq!(request.model, "claude-3");
         assert_eq!(request.max_tokens, 8192);
         assert_eq!(request.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn test_llm_request_provider_params_serialization() {
+        // Test serialization with provider_params set
+        let request = LlmRequest::new("claude-3", vec![])
+            .with_provider_params(serde_json::json!({
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 10000
+                },
+                "custom_flag": true
+            }));
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json.get("provider_params").is_some());
+        assert_eq!(
+            json["provider_params"]["thinking"]["budget_tokens"],
+            10000
+        );
+
+        // Deserialize and verify
+        let parsed: LlmRequest = serde_json::from_value(json).unwrap();
+        assert!(parsed.provider_params.is_some());
+        let params = parsed.provider_params.unwrap();
+        assert_eq!(params["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn test_llm_request_provider_params_none_serialization() {
+        // Test serialization without provider_params (should serialize as null or be absent)
+        let request = LlmRequest::new("claude-3", vec![]);
+
+        let json = serde_json::to_value(&request).unwrap();
+        // provider_params should either be null or absent
+        let params = json.get("provider_params");
+        assert!(params.is_none() || params.unwrap().is_null());
+
+        // Deserialize should work
+        let parsed: LlmRequest = serde_json::from_value(json).unwrap();
+        assert!(parsed.provider_params.is_none());
+    }
+
+    #[test]
+    fn test_llm_request_with_provider_params() {
+        // Test with_provider_params sets the entire object
+        let params = serde_json::json!({
+            "reasoning_effort": "high",
+            "stream_options": { "include_usage": true }
+        });
+
+        let request = LlmRequest::new("gpt-4", vec![])
+            .with_provider_params(params.clone());
+
+        assert_eq!(request.provider_params, Some(params));
+    }
+
+    #[test]
+    fn test_llm_request_with_provider_param_single() {
+        // Test with_provider_param sets a single key
+        let request = LlmRequest::new("claude-3", vec![])
+            .with_provider_param("thinking", serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": 5000
+            }));
+
+        let params = request.provider_params.unwrap();
+        assert_eq!(params["thinking"]["type"], "enabled");
+        assert_eq!(params["thinking"]["budget_tokens"], 5000);
+    }
+
+    #[test]
+    fn test_llm_request_with_provider_param_multiple() {
+        // Test chaining multiple with_provider_param calls
+        let request = LlmRequest::new("claude-3", vec![])
+            .with_provider_param("thinking", serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": 10000
+            }))
+            .with_provider_param("custom_option", "value")
+            .with_provider_param("numeric_setting", 42);
+
+        let params = request.provider_params.unwrap();
+        assert_eq!(params["thinking"]["budget_tokens"], 10000);
+        assert_eq!(params["custom_option"], "value");
+        assert_eq!(params["numeric_setting"], 42);
+    }
+
+    #[test]
+    fn test_llm_request_with_provider_param_overwrites() {
+        // Test that setting the same key twice overwrites
+        let request = LlmRequest::new("claude-3", vec![])
+            .with_provider_param("key", "first")
+            .with_provider_param("key", "second");
+
+        let params = request.provider_params.unwrap();
+        assert_eq!(params["key"], "second");
+    }
+
+    #[test]
+    fn test_llm_request_provider_params_empty_object() {
+        // Test with empty object
+        let request = LlmRequest::new("claude-3", vec![])
+            .with_provider_params(serde_json::json!({}));
+
+        assert_eq!(request.provider_params, Some(serde_json::json!({})));
     }
 }

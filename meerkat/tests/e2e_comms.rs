@@ -44,6 +44,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         tools: &[ToolDef],
         max_tokens: u32,
         temperature: Option<f32>,
+        provider_params: Option<&serde_json::Value>,
     ) -> Result<LlmStreamResult, AgentError> {
         let request = LlmRequest {
             model: self.model.clone(),
@@ -52,6 +53,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
             max_tokens,
             temperature,
             stop_sequences: None,
+            provider_params: provider_params.cloned(),
         };
 
         let mut stream = self.client.stream(&request);

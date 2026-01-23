@@ -91,6 +91,7 @@ impl AgentLlmClient for AnthropicLlmAdapter {
         tools: &[ToolDef],
         max_tokens: u32,
         temperature: Option<f32>,
+        provider_params: Option<&serde_json::Value>,
     ) -> Result<LlmStreamResult, meerkat::AgentError> {
         use futures::StreamExt;
         use meerkat::{LlmEvent, LlmRequest, StopReason, ToolCall, Usage};
@@ -102,6 +103,7 @@ impl AgentLlmClient for AnthropicLlmAdapter {
             max_tokens,
             temperature,
             stop_sequences: None,
+            provider_params: provider_params.cloned(),
         };
 
         let mut stream = self.client.stream(&request);

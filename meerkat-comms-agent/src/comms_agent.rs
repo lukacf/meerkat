@@ -281,6 +281,7 @@ mod tests {
             _tools: &[ToolDef],
             _max_tokens: u32,
             _temperature: Option<f32>,
+            _provider_params: Option<&serde_json::Value>,
         ) -> Result<LlmStreamResult, AgentError> {
             // Record the last user message
             for msg in messages.iter().rev() {

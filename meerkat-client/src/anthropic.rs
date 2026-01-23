@@ -132,6 +132,26 @@ impl AnthropicClient {
             body["tools"] = Value::Array(tools);
         }
 
+        // Extract provider-specific params
+        if let Some(ref params) = request.provider_params {
+            // thinking_budget -> Anthropic thinking.budget_tokens (requires thinking.type = "enabled")
+            if let Some(thinking_budget) = params.get("thinking_budget") {
+                if let Some(budget) = thinking_budget.as_u64() {
+                    body["thinking"] = serde_json::json!({
+                        "type": "enabled",
+                        "budget_tokens": budget
+                    });
+                }
+            }
+
+            // top_k -> Anthropic top_k parameter
+            if let Some(top_k) = params.get("top_k") {
+                if let Some(k) = top_k.as_u64() {
+                    body["top_k"] = Value::Number(serde_json::Number::from(k));
+                }
+            }
+        }
+
         body
     }
 
@@ -505,6 +525,7 @@ pub mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_usage_mapping() {
         let Some(client) = skip_if_no_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -560,5 +581,112 @@ pub mod tests {
             "Expected auth error, got: {:?}",
             err
         );
+    }
+
+    // Unit tests for build_request_body with provider_params
+
+    #[test]
+    fn test_build_request_body_with_thinking_budget() {
+        let client = AnthropicClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("thinking_budget", 10000);
+
+        let body = client.build_request_body(&request);
+
+        // Should have thinking object with type "enabled" and budget_tokens
+        assert!(body.get("thinking").is_some(), "thinking field should be present");
+        let thinking = &body["thinking"];
+        assert_eq!(thinking["type"], "enabled");
+        assert_eq!(thinking["budget_tokens"], 10000);
+    }
+
+    #[test]
+    fn test_build_request_body_with_top_k() {
+        let client = AnthropicClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("top_k", 40);
+
+        let body = client.build_request_body(&request);
+
+        // Should have top_k at the top level
+        assert_eq!(body["top_k"], 40);
+    }
+
+    #[test]
+    fn test_build_request_body_with_thinking_and_top_k() {
+        let client = AnthropicClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("thinking_budget", 5000)
+        .with_provider_param("top_k", 50);
+
+        let body = client.build_request_body(&request);
+
+        // Both should be present
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 5000);
+        assert_eq!(body["top_k"], 50);
+    }
+
+    #[test]
+    fn test_build_request_body_unknown_params_ignored() {
+        let client = AnthropicClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("unknown_param", "some_value")
+        .with_provider_param("another_unknown", 123);
+
+        let body = client.build_request_body(&request);
+
+        // Unknown params should NOT be in the request body
+        assert!(body.get("unknown_param").is_none());
+        assert!(body.get("another_unknown").is_none());
+
+        // Request should still have standard fields
+        assert_eq!(body["model"], "claude-sonnet-4-20250514");
+        assert!(body.get("messages").is_some());
+    }
+
+    #[test]
+    fn test_build_request_body_no_provider_params() {
+        let client = AnthropicClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        );
+
+        let body = client.build_request_body(&request);
+
+        // Should not have thinking or top_k when no provider_params
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("top_k").is_none());
+
+        // Standard fields should be present
+        assert_eq!(body["model"], "claude-sonnet-4-20250514");
     }
 }

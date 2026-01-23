@@ -20,6 +20,8 @@ pub struct DynLlmClientAdapter {
     model: String,
     /// Optional channel to emit streaming events (text deltas)
     event_tx: Option<mpsc::Sender<AgentEvent>>,
+    /// Provider-specific parameters to pass with every request
+    provider_params: Option<Value>,
 }
 
 impl DynLlmClientAdapter {
@@ -28,6 +30,7 @@ impl DynLlmClientAdapter {
             client,
             model,
             event_tx: None,
+            provider_params: None,
         }
     }
 
@@ -42,7 +45,14 @@ impl DynLlmClientAdapter {
             client,
             model,
             event_tx: Some(event_tx),
+            provider_params: None,
         }
+    }
+
+    /// Set provider-specific parameters to pass with every request
+    pub fn with_provider_params(mut self, params: Option<Value>) -> Self {
+        self.provider_params = params;
+        self
     }
 }
 
@@ -54,7 +64,13 @@ impl AgentLlmClient for DynLlmClientAdapter {
         tools: &[ToolDef],
         max_tokens: u32,
         temperature: Option<f32>,
+        provider_params: Option<&Value>,
     ) -> Result<LlmStreamResult, AgentError> {
+        // Use provider_params from call-site if provided, otherwise use adapter-level defaults
+        let effective_params = provider_params
+            .cloned()
+            .or_else(|| self.provider_params.clone());
+
         // Build request
         let request = LlmRequest {
             model: self.model.clone(),
@@ -63,6 +79,7 @@ impl AgentLlmClient for DynLlmClientAdapter {
             max_tokens,
             temperature,
             stop_sequences: None,
+            provider_params: effective_params,
         };
 
         // Get stream

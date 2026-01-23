@@ -127,6 +127,29 @@ impl OpenAiClient {
             body["tools"] = Value::Array(tools);
         }
 
+        // Extract OpenAI-specific parameters from provider_params
+        if let Some(params) = &request.provider_params {
+            // reasoning_effort: for o1/o3 models
+            if let Some(reasoning_effort) = params.get("reasoning_effort") {
+                body["reasoning_effort"] = reasoning_effort.clone();
+            }
+
+            // seed: for reproducible outputs
+            if let Some(seed) = params.get("seed") {
+                body["seed"] = seed.clone();
+            }
+
+            // frequency_penalty: penalize frequent tokens
+            if let Some(frequency_penalty) = params.get("frequency_penalty") {
+                body["frequency_penalty"] = frequency_penalty.clone();
+            }
+
+            // presence_penalty: penalize already-used tokens
+            if let Some(presence_penalty) = params.get("presence_penalty") {
+                body["presence_penalty"] = presence_penalty.clone();
+            }
+        }
+
         body
     }
 
@@ -341,6 +364,135 @@ pub mod tests {
 
     fn skip_if_no_key() -> Option<OpenAiClient> {
         OpenAiClient::from_env().ok()
+    }
+
+    // Unit tests for provider_params extraction in build_request_body
+
+    #[test]
+    fn test_request_includes_reasoning_effort_from_provider_params() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "o1-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("reasoning_effort", "high");
+
+        let body = client.build_request_body(&request);
+
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn test_request_includes_seed_from_provider_params() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4o",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("seed", 12345);
+
+        let body = client.build_request_body(&request);
+
+        assert_eq!(body["seed"], 12345);
+    }
+
+    #[test]
+    fn test_request_includes_frequency_penalty_from_provider_params() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4o",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("frequency_penalty", 0.5);
+
+        let body = client.build_request_body(&request);
+
+        assert_eq!(body["frequency_penalty"], 0.5);
+    }
+
+    #[test]
+    fn test_request_includes_presence_penalty_from_provider_params() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4o",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("presence_penalty", 0.8);
+
+        let body = client.build_request_body(&request);
+
+        assert_eq!(body["presence_penalty"], 0.8);
+    }
+
+    #[test]
+    fn test_unknown_provider_params_are_ignored() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4o",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("unknown_param", "some_value")
+        .with_provider_param("another_unknown", 123)
+        .with_provider_param("seed", 42); // known param should still work
+
+        let body = client.build_request_body(&request);
+
+        // Unknown params should not be in the body
+        assert!(body.get("unknown_param").is_none());
+        assert!(body.get("another_unknown").is_none());
+        // Known param should be present
+        assert_eq!(body["seed"], 42);
+    }
+
+    #[test]
+    fn test_multiple_provider_params_combined() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "o1-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("reasoning_effort", "medium")
+        .with_provider_param("seed", 999)
+        .with_provider_param("frequency_penalty", 0.3)
+        .with_provider_param("presence_penalty", 0.4);
+
+        let body = client.build_request_body(&request);
+
+        assert_eq!(body["reasoning_effort"], "medium");
+        assert_eq!(body["seed"], 999);
+        assert_eq!(body["frequency_penalty"], 0.3);
+        assert_eq!(body["presence_penalty"], 0.4);
+    }
+
+    #[test]
+    fn test_no_provider_params_does_not_add_fields() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4o",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        );
+
+        let body = client.build_request_body(&request);
+
+        // These fields should not be present when no provider_params set
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("seed").is_none());
+        assert!(body.get("frequency_penalty").is_none());
+        assert!(body.get("presence_penalty").is_none());
     }
 
     #[tokio::test]

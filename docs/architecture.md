@@ -6,50 +6,89 @@ This document explains Meerkat's internal architecture, design decisions, and ex
 
 Meerkat is designed as a **minimal, composable agent harness**. It provides the core execution loop for LLM-powered agents without opinions about prompts, tools, or output formatting.
 
+### Design Philosophy
+
+1. **Minimal** - Provides the core execution loop without opinions about prompts, tools, or output formatting
+2. **Composable** - Clean trait boundaries allow swapping LLM providers, storage backends, and tool dispatchers
+3. **No I/O in Core** - `meerkat-core` has no network or filesystem dependencies; all I/O is in satellite crates
+4. **Streaming-First** - All LLM interactions use streaming for responsive user experiences
+5. **Budget-Aware** - Built-in resource tracking for tokens, time, and tool calls
+
+### High-Level Architecture
+
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              Access Patterns                                 │
-├───────────────┬───────────────┬─────────────────────┬───────────────────────┤
-│   meerkat-cli    │  meerkat-mcp     │     meerkat (SDK)      │   meerkat-rest (opt)     │
-│   (headless)  │  (server)     │                     │   (HTTP API)          │
-└───────┬───────┴───────┬───────┴──────────┬──────────┴───────────┬───────────┘
-        │               │                  │                      │
-        └───────────────┴─────────┬────────┴──────────────────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              meerkat-core                                       │
-│                                                                              │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │  Agent                                                                  │ │
-│  │  ├── llm_client: Arc<dyn AgentLlmClient>     (provider abstraction)    │ │
-│  │  ├── tool_dispatcher: Arc<dyn AgentToolDispatcher>  (tool routing)     │ │
-│  │  ├── session_store: Arc<dyn AgentSessionStore>      (persistence)      │ │
-│  │  ├── session: Session                               (conversation)     │ │
-│  │  ├── budget: Budget                                 (resource limits)  │ │
-│  │  └── retry_policy: RetryPolicy                      (error handling)   │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                  │
-                    ┌─────────────┼─────────────┐
-                    │             │             │
-                    ▼             ▼             ▼
-            ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-            │ meerkat-client │ │ meerkat-tools  │ │ meerkat-store  │
-            │             │ │             │ │             │
-            │ Anthropic   │ │ Registry    │ │ JsonlStore  │
-            │ OpenAI      │ │ Dispatcher  │ │ MemoryStore │
-            │ Gemini      │ │ Validation  │ │             │
-            └─────────────┘ └──────┬──────┘ └─────────────┘
-                                   │
-                                   ▼
-                           ┌─────────────────┐
-                           │ meerkat-mcp-client │
-                           │                 │
-                           │ MCP Protocol    │
-                           │ Tool Discovery  │
-                           │ Tool Dispatch   │
-                           └─────────────────┘
+                                    +------------------+
+                                    |     meerkat      |  <- Facade crate
+                                    |  (re-exports &   |     SDK helpers
+                                    |   SDK helpers)   |
+                                    +--------+---------+
+                                             |
+         +-----------------------------------+-----------------------------------+
+         |                   |               |               |                   |
++--------v-------+  +--------v-------+  +----v----+  +------v------+  +---------v---------+
+| meerkat-client |  | meerkat-store  |  | meerkat |  | meerkat-mcp |  | meerkat-mcp-server|
+| (LLM providers)|  | (persistence)  |  | -tools  |  |   -client   |  | (expose as MCP)   |
++--------+-------+  +--------+-------+  +----+----+  +------+------+  +---------+---------+
+         |                   |               |               |                   |
+         +-------------------+-------+-------+---------------+-------------------+
+                                     |
+                             +-------v-------+
+                             | meerkat-core  |  <- No I/O dependencies
+                             | (agent loop,  |     Pure logic
+                             |  state, types)|
+                             +---------------+
+```
+
+### Detailed Component View
+
+```
++-----------------------------------------------------------------------------+
+|                              Access Patterns                                 |
++---------------+---------------+---------------------+-----------------------+
+|  meerkat-cli  |  meerkat-mcp  |   meerkat (SDK)     |  meerkat-rest (opt)   |
+|  (headless)   |  (server)     |                     |  (HTTP API)           |
++-------+-------+-------+-------+----------+----------+-----------+-----------+
+        |               |                  |                      |
+        +---------------+---------+--------+----------------------+
+                                  |
+                                  v
++-----------------------------------------------------------------------------+
+|                              meerkat-core                                    |
+|                                                                              |
+|  +------------------------------------------------------------------------+  |
+|  |  Agent                                                                 |  |
+|  |  +-- llm_client: Arc<dyn AgentLlmClient>     (provider abstraction)    |  |
+|  |  +-- tool_dispatcher: Arc<dyn AgentToolDispatcher>  (tool routing)     |  |
+|  |  +-- session_store: Arc<dyn AgentSessionStore>      (persistence)      |  |
+|  |  +-- session: Session                               (conversation)     |  |
+|  |  +-- budget: Budget                                 (resource limits)  |  |
+|  |  +-- retry_policy: RetryPolicy                      (error handling)   |  |
+|  |  +-- state: LoopState                               (state machine)    |  |
+|  |  +-- sub_agent_manager: SubAgentManager             (child agents)     |  |
+|  +------------------------------------------------------------------------+  |
++-----------------------------------------------------------------------------+
+                                  |
+                    +-------------+-------------+
+                    |             |             |
+                    v             v             v
+            +-------------+ +-------------+ +-------------+
+            |meerkat-     | |meerkat-     | |meerkat-     |
+            |client       | |tools        | |store        |
+            |             | |             | |             |
+            | Anthropic   | | Registry    | | JsonlStore  |
+            | OpenAI      | | Dispatcher  | | MemoryStore |
+            | Gemini      | | Validation  | |             |
+            +-------------+ +------+------+ +-------------+
+                                   |
+                                   v
+                           +-----------------+
+                           | meerkat-mcp-    |
+                           | client          |
+                           |                 |
+                           | MCP Protocol    |
+                           | Tool Discovery  |
+                           | Tool Dispatch   |
+                           +-----------------+
 ```
 
 ## Crate Structure
@@ -132,37 +171,31 @@ pub use meerkat_store::{SessionStore, ...};
 
 ## Agent Loop
 
-The agent executes a state machine loop:
+The agent executes a state machine loop defined by `LoopState` in `meerkat-core/src/state.rs`:
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Agent Loop State Machine                     │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│                        ┌──────────────┐                             │
-│                        │  CallingLlm  │◄────────────────────┐       │
-│                        └──────┬───────┘                     │       │
-│                               │                             │       │
-│              ┌────────────────┼────────────────┐           │       │
-│              │                │                │           │       │
-│              ▼                ▼                ▼           │       │
-│       ┌──────────┐    ┌─────────────┐   ┌───────────┐     │       │
-│       │ Completed│    │WaitingForOps│   │ErrorRecov │     │       │
-│       └──────────┘    └──────┬──────┘   └─────┬─────┘     │       │
-│                              │                 │           │       │
-│                              ▼                 │           │       │
-│                       ┌─────────────┐         │           │       │
-│                       │DrainingEvts │─────────┼───────────┘       │
-│                       └──────┬──────┘         │                   │
-│                              │                 │                   │
-│                              ▼                 ▼                   │
-│                        ┌──────────┐     ┌──────────┐              │
-│                        │ Completed│     │ Completed│              │
-│                        └──────────┘     └──────────┘              │
-│                                                                      │
-│  Any State ──► Cancelling ──► Completed                            │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
+                              +------------------+
+                              |   CallingLlm     |<-----------+
+                              | (waiting for LLM)|            |
+                              +--------+---------+            |
+                                       |                      |
+            +-----------+   tool_use   |  end_turn    +-------+------+
+            |           |<-------------+------------->|   Completed  |
+            v           |                             | (terminal)   |
+    +-------+-------+   |                             +--------------+
+    | WaitingForOps |   |                                    ^
+    | (ops pending) |   |                                    |
+    +-------+-------+   |                                    |
+            |           |                             +------+-----+
+            | ops done  |                             |  Cancelling |
+            v           |                             | (cleanup)   |
+    +-------+-------+   |                             +------+-----+
+    | DrainingEvents|---+                                    ^
+    | (process      |   | error                              |
+    |  buffered)    |   +------------->+-------------+       |
+    +---------------+                  |ErrorRecovery+-------+
+                                       | (retry)     |
+                                       +-------------+
 ```
 
 ### States
@@ -170,25 +203,106 @@ The agent executes a state machine loop:
 | State | Description |
 |-------|-------------|
 | `CallingLlm` | Sending request to LLM, streaming response |
-| `WaitingForOps` | Waiting for tool operations to complete |
-| `DrainingEvents` | Processing buffered events at turn boundary |
-| `Cancelling` | Gracefully stopping after cancel signal |
-| `ErrorRecovery` | Attempting recovery from transient error |
-| `Completed` | Agent has finished (success or failure) |
+| `WaitingForOps` | No LLM work, waiting for tool operations to complete |
+| `DrainingEvents` | Processing buffered operation events at turn boundary |
+| `Cancelling` | Gracefully stopping after cancel signal or budget exhaustion |
+| `ErrorRecovery` | Attempting recovery from transient LLM error |
+| `Completed` | Terminal state - agent has finished (success or failure) |
+
+### Valid State Transitions
+
+```
+CallingLlm     -> WaitingForOps   (ops pending after tool dispatch)
+CallingLlm     -> DrainingEvents  (tool_use stop reason)
+CallingLlm     -> Completed       (end_turn and no ops)
+CallingLlm     -> ErrorRecovery   (LLM error)
+CallingLlm     -> Cancelling      (cancel signal)
+
+WaitingForOps  -> DrainingEvents  (when ops complete)
+WaitingForOps  -> Cancelling      (cancel signal)
+
+DrainingEvents -> CallingLlm      (more work needed)
+DrainingEvents -> Completed       (done)
+DrainingEvents -> Cancelling      (cancel signal)
+
+Cancelling     -> Completed       (after drain)
+
+ErrorRecovery  -> CallingLlm      (after recovery)
+ErrorRecovery  -> Completed       (if unrecoverable)
+ErrorRecovery  -> Cancelling      (cancel during recovery)
+
+Completed      -> (no transitions, terminal state)
+```
 
 ### Turn Boundaries
 
 Turn boundaries are critical moments where:
 
 1. Tool results are injected into the session
-2. Steering messages (from sub-agents) are applied
-3. Budget is checked
-4. Session is checkpointed
+2. Steering messages (from parent agents) are applied
+3. Comms inbox is drained and messages injected (for inter-agent communication)
+4. Sub-agent results are collected and injected
+5. Budget is checked
+6. Session is checkpointed
 
 Events that happen at turn boundaries:
 - `TurnCompleted`
 - `ToolResultReceived`
 - `CheckpointSaved`
+
+### Data Flow Through Agent Loop
+
+```
+User Input
+    |
+    v
++---+---+
+| Agent |---------------------------+
++---+---+                           |
+    |                               |
+    | 1. Add user message           |
+    v                               |
++--------+                          |
+| Session|                          |
++---+----+                          |
+    |                               |
+    | 2. Call LLM with retry        |
+    v                               |
++--------+     messages + tools     |
+|  LLM   |<-------------------------+
+| Client |                          |
++---+----+                          |
+    |                               |
+    | 3. Stream response            |
+    v                               |
++--------+                          |
+|Response|                          |
+|--------|                          |
+|content |                          |
+|tools[] |                          |
+|usage   |                          |
++---+----+                          |
+    |                               |
+    | 4. If tool_calls              |
+    v                               |
++--------+     name + args          |
+| Tool   |<-------------------------+
+|Dispatch|                          |
++---+----+                          |
+    |                               |
+    | 5. Execute & return           |
+    v                               |
++--------+                          |
+|Results |                          |
++---+----+                          |
+    |                               |
+    | 6. Add to session             |
+    | 7. Apply steering messages    |
+    | 8. Drain comms inbox          |
+    | 9. Collect sub-agent results  |
+    | 10. Loop back to step 2       |
+    +-------------------------------+
+```
 
 ## Type System
 
@@ -243,44 +357,203 @@ pub enum AgentEvent {
 
 ### Custom LLM Provider
 
-Implement `AgentLlmClient`:
+Implement `AgentLlmClient` (defined in `meerkat-core/src/agent.rs`):
 
 ```rust
 #[async_trait]
 pub trait AgentLlmClient: Send + Sync {
+    /// Stream a response from the LLM
+    ///
+    /// # Arguments
+    /// * `messages` - Conversation history
+    /// * `tools` - Available tool definitions
+    /// * `max_tokens` - Maximum tokens to generate
+    /// * `temperature` - Sampling temperature
+    /// * `provider_params` - Provider-specific parameters (e.g., thinking config)
     async fn stream_response(
         &self,
         messages: &[Message],
         tools: &[ToolDef],
         max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&Value>,
     ) -> Result<LlmStreamResult, AgentError>;
 
+    /// Get the provider name
     fn provider(&self) -> &'static str;
+}
+```
+
+**Example Implementation:**
+
+```rust
+use meerkat_core::{AgentLlmClient, AgentError, LlmStreamResult, Message, ToolDef};
+use serde_json::Value;
+
+pub struct CustomClient { /* ... */ }
+
+#[async_trait]
+impl AgentLlmClient for CustomClient {
+    async fn stream_response(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&Value>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        // 1. Convert messages to provider format
+        // 2. Make API request
+        // 3. Parse streaming response
+        // 4. Return normalized LlmStreamResult
+        todo!()
+    }
+
+    fn provider(&self) -> &'static str {
+        "custom"
+    }
 }
 ```
 
 ### Custom Tool Dispatcher
 
-Implement `AgentToolDispatcher`:
+Implement `AgentToolDispatcher` (defined in `meerkat-core/src/agent.rs`):
 
 ```rust
 #[async_trait]
 pub trait AgentToolDispatcher: Send + Sync {
+    /// Get available tool definitions
     fn tools(&self) -> Vec<ToolDef>;
+
+    /// Execute a tool call
     async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String>;
+}
+```
+
+**Example Implementation:**
+
+```rust
+use meerkat_core::{AgentToolDispatcher, ToolDef};
+use serde_json::Value;
+
+pub struct CustomDispatcher { /* ... */ }
+
+#[async_trait]
+impl AgentToolDispatcher for CustomDispatcher {
+    fn tools(&self) -> Vec<ToolDef> {
+        vec![
+            ToolDef {
+                name: "my_tool".to_string(),
+                description: "Does something useful".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "arg": { "type": "string" }
+                    },
+                    "required": ["arg"]
+                }),
+            }
+        ]
+    }
+
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+        match name {
+            "my_tool" => {
+                // Execute tool logic
+                let arg = args.get("arg").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(format!("Processed: {}", arg))
+            }
+            _ => Err(format!("Unknown tool: {}", name))
+        }
+    }
 }
 ```
 
 ### Custom Session Store
 
-Implement `AgentSessionStore`:
+Implement `AgentSessionStore` (defined in `meerkat-core/src/agent.rs`):
 
 ```rust
 #[async_trait]
 pub trait AgentSessionStore: Send + Sync {
+    /// Save a session
     async fn save(&self, session: &Session) -> Result<(), AgentError>;
+
+    /// Load a session by ID
     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError>;
 }
+```
+
+**Example Implementation:**
+
+```rust
+use meerkat_core::{AgentSessionStore, AgentError, Session};
+
+pub struct DatabaseStore {
+    pool: sqlx::PgPool,
+}
+
+#[async_trait]
+impl AgentSessionStore for DatabaseStore {
+    async fn save(&self, session: &Session) -> Result<(), AgentError> {
+        let json = serde_json::to_string(session)
+            .map_err(|e| AgentError::Internal(e.to_string()))?;
+
+        sqlx::query("INSERT INTO sessions (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = $2")
+            .bind(session.id().to_string())
+            .bind(json)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AgentError::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT data FROM sessions WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| AgentError::Internal(e.to_string()))?;
+
+        match row {
+            Some((json,)) => {
+                let session: Session = serde_json::from_str(&json)
+                    .map_err(|e| AgentError::Internal(e.to_string()))?;
+                Ok(Some(session))
+            }
+            None => Ok(None),
+        }
+    }
+}
+```
+
+### MCP Integration
+
+Add MCP servers for tool discovery using `McpRouter` (defined in `meerkat-mcp-client/src/router.rs`):
+
+```rust
+use meerkat_mcp_client::{McpRouter, McpServerConfig};
+use std::collections::HashMap;
+
+let mut router = McpRouter::new();
+
+// Add stdio server
+router.add_server(McpServerConfig::stdio(
+    "my-server",
+    "/path/to/server",
+    vec!["arg1".to_string(), "arg2".to_string()],
+    HashMap::new(),
+)).await?;
+
+// Tools are automatically discovered
+let tools = router.list_tools().await?;
+
+// Call a tool
+let result = router.call_tool("tool_name", &serde_json::json!({"arg": "value"})).await?;
+
+// Graceful shutdown
+router.shutdown().await;
 ```
 
 ## Sub-Agents
@@ -448,5 +721,167 @@ emit(AgentEvent::CheckpointSaved { session_id });
 2. **Tool Sandboxing**: Tools execute in MCP server processes
 3. **Input Validation**: JSON Schema validation for tool arguments
 4. **No Arbitrary Execution**: Meerkat doesn't execute code directly
+5. **Sub-agent Isolation**: Sub-agents cannot have comms enabled (no network exposure)
 
 See [DESIGN.md §15](../DESIGN.md#15-security-considerations) for full security considerations.
+
+## Crate Dependencies
+
+```
++----------------+
+|  meerkat-cli   |
++-------+--------+
+        |
+        v
++-------+--------+
+|    meerkat     |
++-------+--------+
+        |
+        +---------------------+---------------------+
+        |                     |                     |
+        v                     v                     v
++-------+--------+   +--------+-------+   +--------+-------+
+| meerkat-client |   | meerkat-tools  |   | meerkat-store  |
++-------+--------+   +--------+-------+   +--------+-------+
+        |                     |                     |
+        |            +--------+-------+             |
+        |            | meerkat-mcp-   |             |
+        |            |    client      |             |
+        |            +--------+-------+             |
+        |                     |                     |
+        +----------+----------+----------+----------+
+                   |
+                   v
+           +-------+-------+
+           | meerkat-core  |
+           +---------------+
+```
+
+**Dependency Rules:**
+1. `meerkat-core` depends on nothing in the workspace (only external crates)
+2. All other crates depend on `meerkat-core` for types and traits
+3. `meerkat-tools` depends on `meerkat-mcp-client` for MCP routing
+4. `meerkat` (facade) re-exports from all crates
+5. `meerkat-cli` is the top-level binary crate
+
+**Key External Dependencies:**
+
+| Dependency | Purpose |
+|------------|---------|
+| `tokio` | Async runtime |
+| `reqwest` | HTTP client for LLM APIs |
+| `serde` / `serde_json` | Serialization |
+| `async-trait` | Async trait support |
+| `uuid` | Session IDs (v7 for time-ordering) |
+| `rmcp` | MCP protocol implementation |
+| `jsonschema` | Tool argument validation |
+| `thiserror` | Error type derivation |
+| `tracing` | Structured logging |
+
+## Configuration System
+
+Configuration supports layered loading with precedence:
+
+```
+defaults < user config < project config < env vars < CLI args
+```
+
+**Configuration Files:**
+- User: `~/.config/meerkat/config.toml`
+- Project: `.rkat/config.toml` (searched up from cwd)
+- Local: `rkat.toml` (current directory)
+
+**Environment Variables:**
+- `RKAT_MODEL` - Default model
+- `RKAT_MAX_TOKENS` - Token budget
+- `RKAT_MAX_DURATION` - Time budget (humantime format: "5m", "1h30m")
+- `RKAT_STORAGE_DIR` - Storage directory
+- `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` - Provider keys
+
+**Example Config (TOML):**
+
+```toml
+[agent]
+model = "claude-sonnet-4-20250514"
+max_tokens_per_turn = 8192
+temperature = 0.7
+
+[budget]
+max_tokens = 100000
+max_duration = "30m"
+max_tool_calls = 100
+
+[retry]
+max_retries = 3
+initial_delay = "500ms"
+max_delay = "30s"
+multiplier = 2.0
+
+[storage]
+backend = "jsonl"
+directory = "~/.local/share/rkat/sessions"
+```
+
+## Budget Pool for Sub-Agents
+
+The budget system supports allocation to sub-agents:
+
+```
++------------------+
+|   BudgetPool     |
+|  (1000 tokens)   |
++--------+---------+
+         |
+    +----+----+
+    |         |
+    v         v
++-------+ +-------+
+|Agent A| |Agent B|
+|300 tok| |400 tok|
++-------+ +-------+
+    |         |
+    v         v
+ (used 200) (used 350)
+    |         |
+    +----+----+
+         |
+         v
+   Reclaim unused:
+   100 + 50 = 150
+   Available: 450
+```
+
+**Fork Budget Policies:**
+- `EqualSplit` - Divide remaining budget equally among branches
+- `Proportional(weights)` - Divide according to weights
+- `Fixed(tokens)` - Fixed allocation per branch
+
+## Session Management
+
+A `Session` maintains the complete conversation state (defined in `meerkat-core/src/session.rs`):
+
+```rust
+struct Session {
+    version: u32,                    // Format version for migrations (current: 1)
+    id: SessionId,                   // UUID v7 (time-ordered)
+    messages: Vec<Message>,          // Full conversation history
+    created_at: SystemTime,
+    updated_at: SystemTime,
+    metadata: Map<String, Value>,    // Arbitrary metadata
+}
+```
+
+**Session Features:**
+- Fork sessions at any message index for branching conversations
+- Automatic token counting from assistant message usage
+- Metadata for custom application state
+- Serializable for persistence
+- Version field for future migrations
+
+**Session Operations:**
+- `push(message)` - Add a message to the session
+- `fork_at(index)` - Fork at specific message index
+- `fork()` - Fork with full history
+- `set_system_prompt(prompt)` - Set or replace system prompt
+- `total_tokens()` - Calculate total tokens used
+- `set_metadata(key, value)` - Store custom metadata

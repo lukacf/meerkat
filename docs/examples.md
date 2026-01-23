@@ -1,231 +1,671 @@
-# Examples Guide
+# Meerkat Examples Walkthrough
 
-This guide provides detailed examples for common Meerkat use cases.
+This guide provides detailed walkthroughs of the runnable examples in the Meerkat repository. Each section explains not just *what* the code does, but *why* it's structured that way.
 
-## Running Examples
+## Overview
 
-All examples are in the `meerkat/examples/` directory:
+| Example | File | What It Demonstrates |
+|---------|------|---------------------|
+| Simple Chat | `simple.rs` | Minimal SDK usage, fluent API |
+| Using Tools | `with_tools.rs` | Custom tool implementation, AgentBuilder |
+| Multi-turn Tools | `multi_turn_tools.rs` | Stateful tools, conversation continuity |
+| Inter-Agent Comms | `comms_verbose.rs` | Two agents communicating via TCP |
+
+## Prerequisites
+
+### API Keys
+
+All examples require an Anthropic API key:
 
 ```bash
-# Set your API key
-export ANTHROPIC_API_KEY="your-key-here"
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
 
-# Run an example
+For the comms example, you can optionally specify a different model:
+
+```bash
+export ANTHROPIC_MODEL="claude-sonnet-4-20250514"
+```
+
+### Running Examples
+
+```bash
+# From the repository root
 cargo run --example simple
 cargo run --example with_tools
 cargo run --example multi_turn_tools
+cargo run --example comms_verbose
 ```
 
-## Basic Usage
+---
 
-### Simple Chat
+## 1. Simple Chat (`simple.rs`)
 
-The simplest way to use Meerkat:
+**Location:** `meerkat/examples/simple.rs`
+
+### What It Demonstrates
+
+This is the "hello world" of Meerkat. It shows the simplest possible way to interact with an LLM using the fluent SDK API.
+
+### Code Walkthrough
 
 ```rust
-use meerkat::prelude::*;
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    // Step 1: Get API key from environment
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .expect("ANTHROPIC_API_KEY environment variable must be set");
 
+    // Step 2: Build and run in one fluent chain
     let result = meerkat::with_anthropic(api_key)
         .model("claude-sonnet-4")
-        .run("What is the meaning of life?")
+        .system_prompt("You are a helpful assistant. Be concise in your responses.")
+        .max_tokens(1024)
+        .run("What is the capital of France? Answer in one sentence.")
         .await?;
 
-    println!("{}", result.text);
+    // Step 3: Use the result
+    println!("Response: {}", result.text);
+    println!("\n--- Stats ---");
+    println!("Session ID: {}", result.session_id);
+    println!("Turns: {}", result.turns);
+    println!("Total tokens: {}", result.usage.total_tokens());
+
     Ok(())
 }
 ```
 
-### With System Prompt
+### Why This Pattern?
 
-Guide the model's behavior:
+**Fluent builder API:** The `meerkat::with_anthropic(api_key)` pattern creates a builder that lets you chain configuration. This is idiomatic Rust and makes the code self-documenting:
 
 ```rust
-let result = meerkat::with_anthropic(api_key)
-    .model("claude-sonnet-4")
-    .system_prompt(r#"
-        You are a pirate captain. You speak like a pirate.
-        Always end your responses with "Arrr!"
-    "#)
-    .run("Tell me about the weather")
-    .await?;
+meerkat::with_anthropic(api_key)  // Start with provider + credentials
+    .model("...")                  // Required: which model
+    .system_prompt("...")          // Optional: guide behavior
+    .max_tokens(1024)              // Optional: limit response length
+    .run("...")                    // Execute with user prompt
 ```
 
-### JSON Output
+**The result struct:** `AgentResult` gives you everything you need:
+- `result.text` - The model's response
+- `result.session_id` - For resuming conversations later
+- `result.turns` - How many LLM calls were made
+- `result.usage` - Token counts for cost tracking
 
-Parse structured responses:
+### Expected Output
 
-```rust
-use serde::Deserialize;
+```
+Response: The capital of France is Paris.
 
-#[derive(Deserialize)]
-struct Analysis {
-    sentiment: String,
-    confidence: f64,
-    key_topics: Vec<String>,
-}
-
-let result = meerkat::with_anthropic(api_key)
-    .system_prompt("Respond only with valid JSON matching this schema: {sentiment: string, confidence: number, key_topics: string[]}")
-    .run("Analyze: The product exceeded expectations and the team delivered on time.")
-    .await?;
-
-let analysis: Analysis = serde_json::from_str(&result.text)?;
-println!("Sentiment: {} ({:.0}%)", analysis.sentiment, analysis.confidence * 100.0);
+--- Stats ---
+Session ID: sess_abc123...
+Turns: 1
+Total tokens: 47
 ```
 
-## Working with Tools
+### Key Learnings
 
-### Simple Calculator
+1. **Minimal boilerplate:** Meerkat handles session management, message formatting, and streaming internally.
+2. **Everything is async:** The `run()` method is async because it makes network calls.
+3. **Sensible defaults:** You only need to specify what matters for your use case.
+
+---
+
+## 2. Using Tools (`with_tools.rs`)
+
+**Location:** `meerkat/examples/with_tools.rs`
+
+### What It Demonstrates
+
+How to give an agent access to custom tools. This example shows the full `AgentBuilder` API with explicit components rather than the simplified SDK.
+
+### Architecture Overview
+
+The example creates three components that work together:
+
+```
++---------------------+     +----------------------+     +-------------+
+| MathToolDispatcher  |     | AnthropicLlmAdapter  |     | MemoryStore |
+| (your tools)        |     | (LLM provider)       |     | (sessions)  |
++---------+-----------+     +-----------+----------+     +------+------+
+          |                             |                       |
+          +-----------------------------+-----------------------+
+                                        |
+                                +-------v-------+
+                                |  AgentBuilder |
+                                +-------+-------+
+                                        |
+                                +-------v-------+
+                                |     Agent     |
+                                +---------------+
+```
+
+### Code Walkthrough
+
+#### Step 1: Implement `AgentToolDispatcher`
 
 ```rust
-use async_trait::async_trait;
-use meerkat::{AgentToolDispatcher, ToolDef};
-use serde_json::{json, Value};
-
-struct Calculator;
+struct MathToolDispatcher;
 
 #[async_trait]
-impl AgentToolDispatcher for Calculator {
+impl AgentToolDispatcher for MathToolDispatcher {
+    // Define what tools exist
     fn tools(&self) -> Vec<ToolDef> {
         vec![
             ToolDef {
-                name: "calculate".to_string(),
-                description: "Evaluate a mathematical expression".to_string(),
+                name: "add".to_string(),
+                description: "Add two numbers together".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "expression": {
-                            "type": "string",
-                            "description": "Math expression like '2 + 3 * 4'"
-                        }
+                        "a": {"type": "number", "description": "First number"},
+                        "b": {"type": "number", "description": "Second number"}
                     },
-                    "required": ["expression"]
+                    "required": ["a", "b"]
                 }),
             },
+            // ... multiply tool ...
         ]
     }
 
+    // Handle tool calls from the LLM
     async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        if name != "calculate" {
-            return Err(format!("Unknown tool: {}", name));
-        }
-
-        let expr = args["expression"]
-            .as_str()
-            .ok_or("Missing expression")?;
-
-        // Simple evaluation (use a proper math parser in production!)
-        let result = eval_math(expr)?;
-        Ok(format!("{}", result))
-    }
-}
-
-fn eval_math(expr: &str) -> Result<f64, String> {
-    // Implement or use a math parsing library
-    // This is simplified for the example
-    let parts: Vec<&str> = expr.split_whitespace().collect();
-    if parts.len() == 3 {
-        let a: f64 = parts[0].parse().map_err(|_| "Invalid number")?;
-        let b: f64 = parts[2].parse().map_err(|_| "Invalid number")?;
-        match parts[1] {
-            "+" => Ok(a + b),
-            "-" => Ok(a - b),
-            "*" => Ok(a * b),
-            "/" => Ok(a / b),
-            _ => Err("Unknown operator".to_string()),
-        }
-    } else {
-        Err("Invalid expression format".to_string())
-    }
-}
-```
-
-### File Operations
-
-```rust
-use std::fs;
-use std::path::Path;
-
-struct FileTools {
-    allowed_dir: String,
-}
-
-#[async_trait]
-impl AgentToolDispatcher for FileTools {
-    fn tools(&self) -> Vec<ToolDef> {
-        vec![
-            ToolDef {
-                name: "read_file".to_string(),
-                description: "Read contents of a file".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path to read"}
-                    },
-                    "required": ["path"]
-                }),
-            },
-            ToolDef {
-                name: "write_file".to_string(),
-                description: "Write contents to a file".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path to write"},
-                        "content": {"type": "string", "description": "Content to write"}
-                    },
-                    "required": ["path", "content"]
-                }),
-            },
-            ToolDef {
-                name: "list_files".to_string(),
-                description: "List files in a directory".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "Directory path"}
-                    },
-                    "required": ["path"]
-                }),
-            },
-        ]
-    }
-
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        let path = args["path"]
-            .as_str()
-            .ok_or("Missing path")?;
-
-        // Security: ensure path is within allowed directory
-        let full_path = Path::new(&self.allowed_dir).join(path);
-        if !full_path.starts_with(&self.allowed_dir) {
-            return Err("Path outside allowed directory".to_string());
-        }
-
         match name {
-            "read_file" => {
-                fs::read_to_string(&full_path)
-                    .map_err(|e| format!("Failed to read: {}", e))
+            "add" => {
+                let a = args["a"].as_f64().ok_or("Missing 'a' argument")?;
+                let b = args["b"].as_f64().ok_or("Missing 'b' argument")?;
+                Ok(format!("{}", a + b))
             }
-            "write_file" => {
-                let content = args["content"]
-                    .as_str()
-                    .ok_or("Missing content")?;
-                fs::write(&full_path, content)
-                    .map_err(|e| format!("Failed to write: {}", e))?;
-                Ok("File written successfully".to_string())
-            }
-            "list_files" => {
-                let entries: Vec<String> = fs::read_dir(&full_path)
-                    .map_err(|e| format!("Failed to list: {}", e))?
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect();
-                Ok(entries.join("\n"))
+            // ... other tools ...
+            _ => Err(format!("Unknown tool: {}", name)),
+        }
+    }
+}
+```
+
+**Why this design?**
+
+- **`tools()`** returns JSON Schema definitions. The LLM uses these to understand what tools are available and how to call them.
+- **`dispatch()`** executes the tool when called. It receives the tool name and arguments as JSON.
+- **Return `String`:** Tool results are always strings because they go back into the conversation.
+
+#### Step 2: Implement `AgentLlmClient`
+
+This wraps `AnthropicClient` to implement the trait:
+
+```rust
+#[async_trait]
+impl AgentLlmClient for AnthropicLlmAdapter {
+    async fn stream_response(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&serde_json::Value>,
+    ) -> Result<LlmStreamResult, meerkat::AgentError> {
+        // Build request
+        let request = LlmRequest {
+            model: self.model.clone(),
+            messages: messages.to_vec(),
+            tools: tools.to_vec(),
+            max_tokens,
+            temperature,
+            stop_sequences: None,
+            provider_params: provider_params.cloned(),
+        };
+
+        // Stream and collect response
+        let mut stream = self.client.stream(&request);
+        // ... process stream events ...
+
+        Ok(LlmStreamResult {
+            content,
+            tool_calls,
+            stop_reason,
+            usage,
+        })
+    }
+}
+```
+
+**Why implement this trait?**
+
+The `AgentLlmClient` trait abstracts over different LLM providers. Meerkat-core doesn't care if you're using Anthropic, OpenAI, or a local model - it just needs something that implements this trait.
+
+#### Step 3: Build and Run the Agent
+
+```rust
+let llm = Arc::new(AnthropicLlmAdapter::new(api_key, "claude-sonnet-4".to_string()));
+let tools = Arc::new(MathToolDispatcher);
+let store = Arc::new(MemoryStore::new());
+
+let mut agent = AgentBuilder::new()
+    .model("claude-sonnet-4")
+    .system_prompt("You are a math assistant. Use the provided tools to perform calculations.")
+    .max_tokens_per_turn(1024)
+    .build(llm, tools, store);
+
+let result = agent
+    .run("What is 25 + 17, and then multiply the result by 3?".to_string())
+    .await?;
+```
+
+### Expected Output
+
+```
+Response: Let me calculate that for you.
+
+First, 25 + 17 = 42
+
+Then, 42 * 3 = 126
+
+So the final answer is 126.
+
+--- Stats ---
+Session ID: sess_xyz...
+Turns: 3
+Tool calls: 2
+Total tokens: 234
+```
+
+Notice that `turns: 3` even though you only called `run()` once. This is because:
+1. Turn 1: LLM decides to call `add(25, 17)`
+2. Turn 2: LLM receives "42", decides to call `multiply(42, 3)`
+3. Turn 3: LLM receives "126", generates final response
+
+### Key Learnings
+
+1. **The agent loops automatically:** When an LLM wants to use a tool, Meerkat handles the back-and-forth.
+2. **Tools are JSON-defined:** Use JSON Schema to describe inputs. The LLM reads this.
+3. **Arc wrapping:** Components are wrapped in `Arc` because they're shared across async tasks.
+4. **Explicit is better:** The full API gives you control over every component.
+
+---
+
+## 3. Multi-turn with Tools (`multi_turn_tools.rs`)
+
+**Location:** `meerkat/examples/multi_turn_tools.rs`
+
+### What It Demonstrates
+
+- Stateful tools that persist data across conversation turns
+- Multiple conversation turns with a single agent instance
+- How the agent maintains context between `run()` calls
+
+### Architecture: Stateful Tools
+
+```rust
+struct MultiToolDispatcher {
+    // Tools can have internal state
+    state: std::sync::Mutex<AppState>,
+}
+
+struct AppState {
+    notes: Vec<String>,        // Persists across turns
+    calculations: Vec<f64>,    // History of calculations
+}
+```
+
+**Why use `Mutex`?**
+
+The dispatcher might be called from multiple async tasks. `Mutex` ensures thread-safe access to the state. For a single-threaded runtime, you could use `RefCell`, but `Mutex` is safer.
+
+### Tools Defined
+
+| Tool | Purpose |
+|------|---------|
+| `calculate` | Evaluate arithmetic expressions |
+| `save_note` | Store a note for later |
+| `get_notes` | Retrieve all saved notes |
+| `get_calculation_history` | Show past calculations |
+
+### Conversation Flow
+
+```rust
+// Turn 1: Calculate and save
+let result = agent
+    .run("Calculate 15 * 8, then save a note about the result.".to_string())
+    .await?;
+// LLM calls calculate("15 * 8") -> "120"
+// LLM calls save_note("The calculation 15 * 8 equals 120")
+
+// Turn 2: More calculations
+let result = agent
+    .run("Now calculate 100 / 4 and 25 + 37.".to_string())
+    .await?;
+// LLM calls calculate("100 / 4") -> "25"
+// LLM calls calculate("25 + 37") -> "62"
+
+// Turn 3: Review history (this proves state persists!)
+let result = agent
+    .run("Show me all the calculations we've done and any notes we've saved.".to_string())
+    .await?;
+// LLM calls get_calculation_history() -> "[120.0, 25.0, 62.0]"
+// LLM calls get_notes() -> "1. The calculation 15 * 8 equals 120"
+```
+
+### Key Pattern: Same Agent Instance
+
+```rust
+let mut agent = AgentBuilder::new()
+    // ... configuration ...
+    .build(llm, tools, store);
+
+// Reuse the SAME agent instance
+let result1 = agent.run("First message".to_string()).await?;
+let result2 = agent.run("Second message".to_string()).await?;  // Remembers result1
+let result3 = agent.run("Third message".to_string()).await?;   // Remembers result1 + result2
+```
+
+**Why this works:**
+
+The `Agent` holds a `Session` internally. Each `run()` call:
+1. Adds the user message to the session
+2. Calls the LLM with the full conversation history
+3. Adds the assistant response to the session
+4. Saves the session (via the store)
+
+### Expected Output
+
+```
+=== Multi-Turn Tool Usage Example ===
+
+--- Turn 1: Calculate and save a note ---
+Response: I calculated 15 * 8 = 120 and saved a note about it.
+Tool calls: 2
+
+--- Turn 2: More calculations ---
+Response: Here are the results: 100 / 4 = 25, and 25 + 37 = 62.
+Tool calls: 2
+
+--- Turn 3: Review calculation history and notes ---
+Response: Here's what we've done so far:
+
+Calculations: [120.0, 25.0, 62.0]
+
+Notes:
+1. The calculation 15 * 8 equals 120
+
+Tool calls: 2
+
+--- Turn 4: Save a summary ---
+Response: I've saved a summary note of our calculation session.
+Tool calls: 1
+
+=== Final Statistics ===
+Session ID: sess_...
+Total turns: 11
+Total tokens: 1847
+```
+
+### Key Learnings
+
+1. **Stateful tools are powerful:** Your tools can maintain state between turns, enabling complex workflows.
+2. **Conversation context is automatic:** The agent handles message history for you.
+3. **Turn count accumulates:** The `turns` field shows total LLM calls across all `run()` invocations.
+4. **Tool state vs conversation state:** Tools hold application state; the agent holds conversation state.
+
+---
+
+## 4. Inter-Agent Communication (`comms_verbose.rs`)
+
+**Location:** `meerkat/examples/comms_verbose.rs`
+
+### What It Demonstrates
+
+Two completely separate agent instances communicating over TCP using encrypted channels. This is the foundation for building multi-agent systems.
+
+### Architecture Overview
+
+```
++----------------------------------------------------------------+
+|                        AGENT A                                 |
+|  +--------------+  +---------------+  +------------------+     |
+|  | CommsManager |  | TCP Listener  |  | Agent + LLM      |     |
+|  | (keypair A)  |  | (port 12345)  |  | (send_message    |     |
+|  +--------------+  +---------------+  |  list_peers)     |     |
+|                                       +------------------+     |
++----------------------------------------------------------------+
+                              |
+                              | TCP + Encryption
+                              v
++----------------------------------------------------------------+
+|                        AGENT B                                 |
+|  +--------------+  +---------------+  +------------------+     |
+|  | CommsManager |  | TCP Listener  |  | Agent + LLM      |     |
+|  | (keypair B)  |  | (port 12346)  |  | (processes inbox)|     |
+|  +--------------+  +---------------+  +------------------+     |
++----------------------------------------------------------------+
+```
+
+### Code Walkthrough
+
+#### Step 1: Identity Setup (Cryptographic Keys)
+
+```rust
+let keypair_a = Keypair::generate();
+let keypair_b = Keypair::generate();
+let pubkey_a = keypair_a.public_key();
+let pubkey_b = keypair_b.public_key();
+```
+
+**Why keypairs?**
+
+Each agent has a cryptographic identity. Messages are signed and encrypted, ensuring:
+- Authentication: You know who sent a message
+- Integrity: Messages can't be tampered with
+- Confidentiality: Only the intended recipient can read it
+
+#### Step 2: Trusted Peers Configuration
+
+```rust
+// Agent A knows about Agent B
+let trusted_for_a = TrustedPeers {
+    peers: vec![TrustedPeer {
+        name: "agent-b".to_string(),
+        pubkey: pubkey_b,
+        addr: format!("tcp://{}", addr_b),
+    }],
+};
+
+// Agent B knows about Agent A
+let trusted_for_b = TrustedPeers {
+    peers: vec![TrustedPeer {
+        name: "agent-a".to_string(),
+        pubkey: pubkey_a,
+        addr: format!("tcp://{}", addr_a),
+    }],
+};
+```
+
+**Why explicit trust?**
+
+Agents only accept messages from peers in their trusted list. This prevents spam and ensures security in multi-agent systems.
+
+#### Step 3: CommsManager Setup
+
+```rust
+let config_a = CommsManagerConfig::with_keypair(keypair_a)
+    .trusted_peers(trusted_for_a.clone());
+let comms_manager_a = CommsManager::new(config_a);
+```
+
+The `CommsManager` handles:
+- Message encryption/decryption
+- Inbox queue management
+- Outbound message routing
+
+#### Step 4: TCP Listeners
+
+```rust
+let _handle_a = spawn_tcp_listener(
+    &addr_a.to_string(),
+    secret_a,
+    Arc::new(trusted_for_a.clone()),
+    comms_manager_a.inbox_sender().clone(),
+).await?;
+```
+
+Each agent listens on its own TCP port. When a message arrives:
+1. Verify the sender's signature against trusted peers
+2. Decrypt the message
+3. Push to the inbox queue
+
+#### Step 5: Comms Tools for LLM
+
+```rust
+let tools_a = CommsToolDispatcher::new(
+    comms_manager_a.router().clone(),
+    Arc::new(trusted_for_a),
+);
+```
+
+This gives the LLM two tools:
+- `send_message` - Send a message to a named peer
+- `list_peers` - List all trusted peers
+
+#### Step 6: Build CommsAgent
+
+```rust
+let agent_a_inner = AgentBuilder::new()
+    .model(&model)
+    .system_prompt(
+        "You are Agent A. You can communicate with other agents using the send_message tool."
+    )
+    .build(llm_a, tools_a, store.clone());
+
+let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+```
+
+`CommsAgent` wraps a regular `Agent` and adds:
+- Automatic inbox polling
+- Message injection into conversation
+
+### Execution Flow
+
+```
+Phase 1: Agent A sends message
+------------------------------
+User -> Agent A: "Send 'Hello from Agent A!' to agent-b"
+Agent A LLM: Calls send_message tool
+send_message: Encrypts + TCP sends to Agent B's port
+Agent A LLM: "I've sent the message"
+
+Phase 2: Message delivery (500ms delay)
+---------------------------------------
+TCP packet arrives at Agent B's listener
+Listener: Verifies signature, decrypts, pushes to inbox
+
+Phase 3: Agent B processes inbox
+--------------------------------
+Agent B: Checks inbox, finds message from agent-a
+Agent B LLM: Receives message as context
+Agent B LLM: "I received: 'Hello from Agent A!' from agent-a"
+```
+
+### Logging Output
+
+The example includes detailed logging wrappers that show every API call:
+
+```
++==============================================================+
+|  ANTHROPIC API CALL #1 - Agent A
++==============================================================+
+| Model: claude-sonnet-4-20250514
+| Tools provided: ["send_message", "list_peers"]
+| Messages in context: 2
+| Last user message: Send the message 'Hello from Agent A!' to agent-b...
++==============================================================+
+
++--- LLM REQUESTED TOOL: send_message ---+
+| Args: {"to":"agent-b","message":"Hello from Agent A!"}
++----------------------------------------+
+
++==============================================================+
+|  TOOL EXECUTION #1 - Agent A calling 'send_message'
++==============================================================+
+| Args: {
+|   "to": "agent-b",
+|   "message": "Hello from Agent A!"
+| }
+| SUCCESS: Message sent to agent-b
++==============================================================+
+```
+
+### Key Learnings
+
+1. **Agents are fully independent:** Each has its own keypair, port, LLM client, and state.
+2. **Security is built-in:** Cryptographic signatures and encryption by default.
+3. **Tools enable communication:** The LLM uses tools to interact with the comms layer.
+4. **Async inbox processing:** Messages arrive asynchronously; agents check when ready.
+
+---
+
+## Building Your Own Examples
+
+### Template for New Examples
+
+```rust
+//! Brief description of what this example demonstrates
+//!
+//! Run with:
+//! ```bash
+//! ANTHROPIC_API_KEY=your-key cargo run --example your_example
+//! ```
+
+use meerkat::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Setup: Get configuration from environment
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .expect("ANTHROPIC_API_KEY environment variable must be set");
+
+    // 2. Build your agent (choose one approach)
+
+    // Option A: Simple SDK (no tools)
+    let result = meerkat::with_anthropic(api_key)
+        .model("claude-sonnet-4")
+        .run("Your prompt here")
+        .await?;
+
+    // Option B: Full builder (with tools)
+    // let llm = Arc::new(YourLlmAdapter::new(api_key));
+    // let tools = Arc::new(YourToolDispatcher);
+    // let store = Arc::new(MemoryStore::new());
+    // let mut agent = AgentBuilder::new()
+    //     .model("claude-sonnet-4")
+    //     .build(llm, tools, store);
+    // let result = agent.run("Your prompt".to_string()).await?;
+
+    // 3. Handle the result
+    println!("Response: {}", result.text);
+
+    Ok(())
+}
+```
+
+### Common Patterns
+
+#### Pattern: Tool with External State
+
+```rust
+struct DatabaseTools {
+    pool: Arc<sqlx::PgPool>,
+}
+
+#[async_trait]
+impl AgentToolDispatcher for DatabaseTools {
+    // ... tool definitions ...
+
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+        match name {
+            "query" => {
+                let sql = args["sql"].as_str().ok_or("Missing sql")?;
+                // Use self.pool to execute query
+                Ok("results...".to_string())
             }
             _ => Err(format!("Unknown tool: {}", name)),
         }
@@ -233,340 +673,129 @@ impl AgentToolDispatcher for FileTools {
 }
 ```
 
-### HTTP Client Tool
+#### Pattern: Composing Multiple Tool Dispatchers
 
 ```rust
-struct HttpTools;
-
-#[async_trait]
-impl AgentToolDispatcher for HttpTools {
-    fn tools(&self) -> Vec<ToolDef> {
-        vec![
-            ToolDef {
-                name: "http_get".to_string(),
-                description: "Make an HTTP GET request".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL to fetch"}
-                    },
-                    "required": ["url"]
-                }),
-            },
-            ToolDef {
-                name: "http_post".to_string(),
-                description: "Make an HTTP POST request".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL to post to"},
-                        "body": {"type": "string", "description": "Request body"}
-                    },
-                    "required": ["url", "body"]
-                }),
-            },
-        ]
-    }
-
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        let url = args["url"].as_str().ok_or("Missing url")?;
-
-        let client = reqwest::Client::new();
-
-        match name {
-            "http_get" => {
-                client.get(url)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .text()
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            "http_post" => {
-                let body = args["body"].as_str().ok_or("Missing body")?;
-                client.post(url)
-                    .body(body.to_string())
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .text()
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            _ => Err(format!("Unknown tool: {}", name)),
-        }
-    }
-}
-```
-
-## Multi-Turn Conversations
-
-### Maintaining Context
-
-```rust
-// First turn
-let mut agent = AgentBuilder::new()
-    .model("claude-sonnet-4")
-    .system_prompt("You are a helpful math tutor.")
-    .build(llm, tools, store);
-
-let result1 = agent.run("What is a quadratic equation?".to_string()).await?;
-println!("Turn 1: {}", result1.text);
-
-// Second turn - context is maintained
-let result2 = agent.run("Can you give me an example?".to_string()).await?;
-println!("Turn 2: {}", result2.text);
-
-// Third turn - still has full context
-let result3 = agent.run("How do I solve it?".to_string()).await?;
-println!("Turn 3: {}", result3.text);
-
-println!("Total turns: {}", result3.turns);
-println!("Total tokens: {}", result3.usage.total_tokens());
-```
-
-### Session Resume
-
-```rust
-use meerkat::{JsonlStore, SessionId};
-
-// Run initial conversation
-let store = Arc::new(JsonlStore::new("./sessions"));
-store.init().await?;
-
-let mut agent = AgentBuilder::new()
-    .model("claude-sonnet-4")
-    .build(llm.clone(), tools.clone(), store.clone());
-
-let result = agent.run("Remember: the secret code is ALPHA-7".to_string()).await?;
-let session_id = result.session_id.clone();
-println!("Session: {}", session_id);
-
-// Later: resume the session
-let session = store.load(&session_id).await?.expect("Session not found");
-
-let mut resumed = AgentBuilder::new()
-    .model("claude-sonnet-4")
-    .resume_session(session)
-    .build(llm, tools, store);
-
-let result = resumed.run("What was the secret code?".to_string()).await?;
-println!("Response: {}", result.text);  // Should mention ALPHA-7
-```
-
-## MCP Integration
-
-### Using MCP Servers
-
-```rust
-use meerkat::{McpRouter, McpServerConfig};
-use std::collections::HashMap;
-
-// Configure MCP servers
-let filesystem_config = McpServerConfig {
-    name: "filesystem".to_string(),
-    command: "npx".to_string(),
-    args: vec!["-y".to_string(), "@anthropic/mcp-server-filesystem".to_string(), "/tmp".to_string()],
-    env: HashMap::new(),
-};
-
-let memory_config = McpServerConfig {
-    name: "memory".to_string(),
-    command: "npx".to_string(),
-    args: vec!["-y".to_string(), "@anthropic/mcp-server-memory".to_string()],
-    env: HashMap::new(),
-};
-
-// Create router with multiple servers
-let router = McpRouter::new();
-router.add_server(filesystem_config).await?;
-router.add_server(memory_config).await?;
-
-// List available tools
-let tools = router.list_tools().await?;
-println!("Available tools:");
-for tool in &tools {
-    println!("  - {}: {}", tool.name, tool.description);
-}
-
-// Use with agent
-let agent = AgentBuilder::new()
-    .model("claude-sonnet-4")
-    .build(llm, Arc::new(router), store);
-```
-
-## Error Handling
-
-### Graceful Degradation
-
-```rust
-let result = meerkat::with_anthropic(api_key)
-    .with_budget(BudgetLimits {
-        max_tokens: Some(1000),
-        max_duration: Some(Duration::from_secs(30)),
-        ..Default::default()
-    })
-    .run("Write a very long essay about the history of computing")
-    .await;
-
-match result {
-    Ok(r) => {
-        println!("Response: {}", r.text);
-        if r.usage.total_tokens() >= 1000 {
-            println!("Note: Response may be truncated due to token limit");
-        }
-    }
-    Err(AgentError::BudgetExhausted(budget_type)) => {
-        println!("Budget exceeded: {:?}", budget_type);
-    }
-    Err(e) => {
-        eprintln!("Error: {}", e);
-    }
-}
-```
-
-### Retry Logic
-
-```rust
-use meerkat::RetryPolicy;
-
-let result = meerkat::with_anthropic(api_key)
-    .with_retry_policy(RetryPolicy {
-        max_retries: 5,                              // More retries
-        initial_delay: Duration::from_secs(1),       // Start slower
-        max_delay: Duration::from_secs(60),          // Wait up to 1 minute
-        multiplier: 2.0,                             // Double each time
-    })
-    .run("Important task that must complete")
-    .await?;
-```
-
-## Advanced Patterns
-
-### Parallel Processing
-
-Process multiple prompts concurrently:
-
-```rust
-use futures::future::join_all;
-
-let prompts = vec![
-    "Summarize document A",
-    "Summarize document B",
-    "Summarize document C",
-];
-
-let futures: Vec<_> = prompts.iter().map(|prompt| {
-    meerkat::with_anthropic(api_key.clone())
-        .model("claude-sonnet-4")
-        .run(*prompt)
-}).collect();
-
-let results = join_all(futures).await;
-
-for (i, result) in results.into_iter().enumerate() {
-    match result {
-        Ok(r) => println!("Result {}: {}", i, r.text),
-        Err(e) => eprintln!("Error {}: {}", i, e),
-    }
-}
-```
-
-### Streaming Responses
-
-Get responses as they arrive:
-
-```rust
-use meerkat::{AgentBuilder, AgentEvent};
-use tokio::sync::mpsc;
-
-let (tx, mut rx) = mpsc::channel(100);
-
-// Run agent with event channel
-let handle = tokio::spawn(async move {
-    let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4")
-        .build(llm, tools, store);
-
-    agent.run_with_events("Write a poem".to_string(), tx).await
-});
-
-// Process events as they arrive
-while let Some(event) = rx.recv().await {
-    match event {
-        AgentEvent::TextDelta { delta } => {
-            print!("{}", delta);  // Print without newline
-            std::io::stdout().flush()?;
-        }
-        AgentEvent::TurnCompleted { turn, usage } => {
-            println!("\n[Turn {} complete, {} tokens]", turn, usage.total_tokens());
-        }
-        AgentEvent::RunCompleted { result } => {
-            println!("\n[Done! Session: {}]", result.session_id);
-        }
-        _ => {}
-    }
-}
-
-let result = handle.await??;
-```
-
-### Chain of Thought
-
-Force step-by-step reasoning:
-
-```rust
-let result = meerkat::with_anthropic(api_key)
-    .system_prompt(r#"
-        You are a careful reasoner. For every question:
-        1. First, break down the problem into steps
-        2. Work through each step explicitly
-        3. Show your reasoning at each point
-        4. Only then give your final answer
-
-        Format your response as:
-        ANALYSIS:
-        [Your step-by-step reasoning]
-
-        ANSWER:
-        [Your final answer]
-    "#)
-    .run("If a train leaves Chicago at 9am going 60mph, and another leaves New York at 10am going 80mph, when do they meet?")
-    .await?;
-```
-
-### Tool Selection Strategy
-
-Control which tools the model can use:
-
-```rust
-struct SelectiveTools {
-    all_tools: Vec<ToolDef>,
-    allowed: HashSet<String>,
-}
-
-impl SelectiveTools {
-    fn allow_only(&mut self, names: &[&str]) {
-        self.allowed = names.iter().map(|s| s.to_string()).collect();
-    }
+struct CompositeDispatcher {
+    dispatchers: Vec<Arc<dyn AgentToolDispatcher>>,
 }
 
 #[async_trait]
-impl AgentToolDispatcher for SelectiveTools {
+impl AgentToolDispatcher for CompositeDispatcher {
     fn tools(&self) -> Vec<ToolDef> {
-        self.all_tools.iter()
-            .filter(|t| self.allowed.contains(&t.name))
-            .cloned()
+        self.dispatchers.iter()
+            .flat_map(|d| d.tools())
             .collect()
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        if !self.allowed.contains(name) {
-            return Err(format!("Tool '{}' is not allowed", name));
+        for dispatcher in &self.dispatchers {
+            if dispatcher.tools().iter().any(|t| t.name == name) {
+                return dispatcher.dispatch(name, args).await;
+            }
         }
-        // Dispatch to underlying implementation...
-        Ok("result".to_string())
+        Err(format!("Unknown tool: {}", name))
     }
 }
 ```
+
+#### Pattern: Validating Tool Arguments
+
+```rust
+async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    match name {
+        "send_email" => {
+            // Extract and validate
+            let to = args["to"].as_str()
+                .ok_or("Missing 'to' field")?;
+            let subject = args["subject"].as_str()
+                .ok_or("Missing 'subject' field")?;
+            let body = args["body"].as_str()
+                .ok_or("Missing 'body' field")?;
+
+            // Validate format
+            if !to.contains('@') {
+                return Err("Invalid email address".to_string());
+            }
+
+            // Execute
+            send_email(to, subject, body).await
+                .map_err(|e| format!("Failed to send: {}", e))
+        }
+        _ => Err(format!("Unknown tool: {}", name)),
+    }
+}
+```
+
+### Error Handling Best Practices
+
+```rust
+// DO: Return descriptive error messages
+async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    let path = args["path"].as_str()
+        .ok_or("Missing required 'path' argument")?;
+
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read '{}': {}", path, e))
+}
+
+// DON'T: Return generic errors
+async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    let path = args["path"].as_str().ok_or("error")?;
+    std::fs::read_to_string(path).map_err(|_| "failed".to_string())
+}
+```
+
+### Testing Your Agent
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_tool_dispatch() {
+        let dispatcher = MathToolDispatcher;
+
+        // Test add
+        let result = dispatcher.dispatch(
+            "add",
+            &json!({"a": 2, "b": 3})
+        ).await;
+        assert_eq!(result, Ok("5".to_string()));
+
+        // Test missing argument
+        let result = dispatcher.dispatch(
+            "add",
+            &json!({"a": 2})
+        ).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore]  // Requires API key
+    async fn test_full_agent() {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+        let result = meerkat::with_anthropic(api_key)
+            .model("claude-sonnet-4")
+            .run("Say 'hello' and nothing else")
+            .await
+            .unwrap();
+
+        assert!(result.text.to_lowercase().contains("hello"));
+    }
+}
+```
+
+---
+
+## Summary
+
+| Example | Key Concept | When to Use This Pattern |
+|---------|-------------|-------------------------|
+| `simple.rs` | Fluent SDK API | Quick scripts, simple queries |
+| `with_tools.rs` | Custom tools + AgentBuilder | Apps that need tool access |
+| `multi_turn_tools.rs` | Stateful tools + conversation | Complex workflows, assistants |
+| `comms_verbose.rs` | Inter-agent communication | Multi-agent systems |
+
+Start with `simple.rs` to understand the basics, then progress to the others as your needs grow. The examples are designed to build on each other conceptually.

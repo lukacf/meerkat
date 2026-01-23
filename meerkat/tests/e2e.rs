@@ -186,8 +186,8 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Vec::new()
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
-        Err(format!("Unknown tool: {}", name))
+    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+        Err(ToolError::not_found(name))
     }
 }
 
@@ -224,11 +224,12 @@ impl AgentToolDispatcher for MockToolDispatcher {
         self.tools.clone()
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
+    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
         self.results
             .get(name)
             .cloned()
-            .ok_or_else(|| format!("Unknown tool: {}", name))
+            .map(Value::String)
+            .ok_or_else(|| ToolError::not_found(name))
     }
 }
 
@@ -458,11 +459,16 @@ mod tool_invocation {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+        async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
             // Call the tool through the router
             match self.router.call_tool(name, args).await {
-                Ok(result) => Ok(result),
-                Err(e) => Err(e.to_string()),
+                Ok(result) => {
+                    #[allow(clippy::unnecessary_lazy_evaluations)]
+                    let value =
+                        serde_json::from_str(&result).unwrap_or_else(|_| Value::String(result));
+                    Ok(value)
+                }
+                Err(e) => Err(ToolError::execution_failed(e.to_string())),
             }
         }
     }
@@ -976,7 +982,7 @@ mod parallel_tools {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+        async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
             let start = std::time::Instant::now();
 
             // Simulate network/processing delay
@@ -995,20 +1001,20 @@ mod parallel_tools {
                         .get("city")
                         .and_then(|v| v.as_str())
                         .unwrap_or("Unknown");
-                    Ok(format!("Weather in {}: Sunny, 22°C", city))
+                    Ok(Value::String(format!("Weather in {}: Sunny, 22°C", city)))
                 }
                 "get_time" => {
                     let tz = args
                         .get("timezone")
                         .and_then(|v| v.as_str())
                         .unwrap_or("UTC");
-                    Ok(format!("Current time in {}: 14:30 PM", tz))
+                    Ok(Value::String(format!("Current time in {}: 14:30 PM", tz)))
                 }
                 "get_stock" => {
                     let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("???");
-                    Ok(format!("Stock {}: $150.25 (+2.3%)", symbol))
+                    Ok(Value::String(format!("Stock {}: $150.25 (+2.3%)", symbol)))
                 }
-                _ => Err(format!("Unknown tool: {}", name)),
+                _ => Err(ToolError::not_found(name)),
             }
         }
     }
@@ -1193,19 +1199,21 @@ mod parallel_tools {
                 ]
             }
 
-            async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
+            async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
                 // Simulate some processing time
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
                 match name {
-                    "working_tool" => Ok("Working tool result: success!".to_string()),
-                    "broken_tool" => {
-                        Err("Error: broken_tool encountered a critical failure".to_string())
+                    "working_tool" => {
+                        Ok(Value::String("Working tool result: success!".to_string()))
                     }
-                    "another_working_tool" => {
-                        Ok("Another working tool result: also success!".to_string())
-                    }
-                    _ => Err(format!("Unknown tool: {}", name)),
+                    "broken_tool" => Err(ToolError::execution_failed(
+                        "Error: broken_tool encountered a critical failure",
+                    )),
+                    "another_working_tool" => Ok(Value::String(
+                        "Another working tool result: also success!".to_string(),
+                    )),
+                    _ => Err(ToolError::not_found(name)),
                 }
             }
         }

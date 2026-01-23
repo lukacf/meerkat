@@ -323,8 +323,12 @@ mod tests {
             vec![]
         }
 
-        async fn dispatch(&self, _name: &str, _args: &serde_json::Value) -> Result<String, String> {
-            Ok("mock result".to_string())
+        async fn dispatch(
+            &self,
+            _name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<serde_json::Value, meerkat_core::error::ToolError> {
+            Ok(serde_json::Value::String("mock result".to_string()))
         }
     }
 

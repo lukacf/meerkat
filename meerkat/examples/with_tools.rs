@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use meerkat::prelude::*;
 use meerkat::{
     AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult, Session,
-    ToolDef,
+    ToolDef, ToolError,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -51,19 +51,27 @@ impl AgentToolDispatcher for MathToolDispatcher {
         ]
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
         match name {
             "add" => {
-                let a = args["a"].as_f64().ok_or("Missing 'a' argument")?;
-                let b = args["b"].as_f64().ok_or("Missing 'b' argument")?;
-                Ok(format!("{}", a + b))
+                let a = args["a"]
+                    .as_f64()
+                    .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'a' argument"))?;
+                let b = args["b"]
+                    .as_f64()
+                    .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'b' argument"))?;
+                Ok(json!(a + b))
             }
             "multiply" => {
-                let a = args["a"].as_f64().ok_or("Missing 'a' argument")?;
-                let b = args["b"].as_f64().ok_or("Missing 'b' argument")?;
-                Ok(format!("{}", a * b))
+                let a = args["a"]
+                    .as_f64()
+                    .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'a' argument"))?;
+                let b = args["b"]
+                    .as_f64()
+                    .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'b' argument"))?;
+                Ok(json!(a * b))
             }
-            _ => Err(format!("Unknown tool: {}", name)),
+            _ => Err(ToolError::not_found(name)),
         }
     }
 }

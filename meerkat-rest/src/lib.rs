@@ -21,7 +21,7 @@ use futures::stream::Stream;
 use meerkat::{
     AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     AnthropicClient, JsonlStore, LlmClient, LlmStreamResult, Message, Session, SessionId,
-    SessionMeta, SessionStore, ToolDef,
+    SessionMeta, SessionStore, ToolDef, ToolError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -463,8 +463,8 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Vec::new()
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<String, String> {
-        Err(format!("Unknown tool: {}", name))
+    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+        Err(ToolError::not_found(name))
     }
 }
 

@@ -27,7 +27,7 @@ pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use comms_config::{CoreCommsConfig, ResolvedCommsConfig};
 pub use comms_runtime::{CommsContent, CommsMessage, CommsRuntime, CommsRuntimeError, CommsStatus};
 pub use config::{AgentConfig, BudgetConfig, Config, ProviderConfig, RetryConfig, StorageConfig};
-pub use error::AgentError;
+pub use error::{AgentError, ToolError};
 pub use event::{AgentEvent, BudgetType};
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use ops::{

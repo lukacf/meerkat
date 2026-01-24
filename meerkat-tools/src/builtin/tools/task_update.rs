@@ -39,6 +39,18 @@ struct TaskUpdateParams {
     /// Task IDs to remove from blocks list (optional)
     #[serde(default)]
     remove_blocks: Option<Vec<String>>,
+    /// New owner/assignee (optional)
+    #[serde(default)]
+    owner: Option<String>,
+    /// Metadata key-value pairs to merge (null value = delete key)
+    #[serde(default)]
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// Task IDs to add to blocked_by list (optional)
+    #[serde(default)]
+    add_blocked_by: Option<Vec<String>>,
+    /// Task IDs to remove from blocked_by list (optional)
+    #[serde(default)]
+    remove_blocked_by: Option<Vec<String>>,
 }
 
 /// Tool for updating existing tasks
@@ -121,6 +133,25 @@ impl BuiltinTool for TaskUpdateTool {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Task IDs to remove from blocks list"
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "New owner/assignee"
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "Metadata key-value pairs to merge (null value deletes key)"
+                    },
+                    "add_blocked_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Task IDs to add to blocked_by list"
+                    },
+                    "remove_blocked_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Task IDs to remove from blocked_by list"
                     }
                 },
                 "required": ["id"]
@@ -174,6 +205,14 @@ impl BuiltinTool for TaskUpdateTool {
             remove_blocks: params
                 .remove_blocks
                 .map(|ids| ids.into_iter().map(TaskId).collect()),
+            owner: params.owner,
+            metadata: params.metadata,
+            add_blocked_by: params
+                .add_blocked_by
+                .map(|ids| ids.into_iter().map(TaskId).collect()),
+            remove_blocked_by: params
+                .remove_blocked_by
+                .map(|ids| ids.into_iter().map(TaskId).collect()),
         };
 
         let task = self
@@ -204,6 +243,7 @@ mod tests {
                     priority: Some(TaskPriority::Medium),
                     labels: Some(vec!["initial".to_string()]),
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -379,6 +419,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -406,6 +447,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -440,6 +482,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: Some(vec![blocker1.clone(), blocker2.clone()]),
+                    ..Default::default()
                 },
                 None,
             )
@@ -592,5 +635,313 @@ mod tests {
             updated.labels,
             vec!["done".to_string(), "reviewed".to_string()]
         );
+    }
+
+    // ======================================================================
+    // Tests for TaskUpdateTool new parameters: owner, metadata, add_blocked_by, remove_blocked_by
+    // These tests verify the tool accepts and processes the new parameters
+    // ======================================================================
+
+    #[test]
+    fn test_task_update_tool_def_has_owner_param() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let tool = TaskUpdateTool::new(store);
+        let def = tool.def();
+
+        // Schema should include owner parameter
+        let props = def.input_schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("owner"),
+            "Schema should have owner property"
+        );
+
+        let owner_schema = &props["owner"];
+        assert_eq!(owner_schema["type"], "string");
+        assert!(
+            owner_schema["description"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("owner"),
+            "Owner description should mention owner"
+        );
+    }
+
+    #[test]
+    fn test_task_update_tool_def_has_metadata_param() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let tool = TaskUpdateTool::new(store);
+        let def = tool.def();
+
+        // Schema should include metadata parameter
+        let props = def.input_schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("metadata"),
+            "Schema should have metadata property"
+        );
+
+        let metadata_schema = &props["metadata"];
+        assert_eq!(metadata_schema["type"], "object");
+    }
+
+    #[test]
+    fn test_task_update_tool_def_has_add_blocked_by_param() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let tool = TaskUpdateTool::new(store);
+        let def = tool.def();
+
+        // Schema should include add_blocked_by parameter
+        let props = def.input_schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("add_blocked_by"),
+            "Schema should have add_blocked_by property"
+        );
+
+        let add_blocked_by_schema = &props["add_blocked_by"];
+        assert_eq!(add_blocked_by_schema["type"], "array");
+        assert_eq!(add_blocked_by_schema["items"]["type"], "string");
+    }
+
+    #[test]
+    fn test_task_update_tool_def_has_remove_blocked_by_param() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let tool = TaskUpdateTool::new(store);
+        let def = tool.def();
+
+        // Schema should include remove_blocked_by parameter
+        let props = def.input_schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("remove_blocked_by"),
+            "Schema should have remove_blocked_by property"
+        );
+
+        let remove_blocked_by_schema = &props["remove_blocked_by"];
+        assert_eq!(remove_blocked_by_schema["type"], "array");
+        assert_eq!(remove_blocked_by_schema["items"]["type"], "string");
+    }
+
+    #[tokio::test]
+    async fn test_task_update_tool_set_owner() {
+        let (store, task) = create_store_with_task().await;
+        let tool = TaskUpdateTool::new(store.clone());
+
+        // Set owner via tool
+        let result = tool
+            .call(json!({
+                "id": task.id.0,
+                "owner": "alice"
+            }))
+            .await
+            .unwrap();
+
+        let updated: Task = serde_json::from_value(result).unwrap();
+        assert_eq!(updated.owner, Some("alice".to_string()));
+        assert_eq!(updated.subject, "Test task"); // unchanged
+
+        // Verify in store
+        let stored = store.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(stored.owner, Some("alice".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_task_update_tool_set_metadata() {
+        let (store, task) = create_store_with_task().await;
+        let tool = TaskUpdateTool::new(store.clone());
+
+        // Set metadata via tool
+        let result = tool
+            .call(json!({
+                "id": task.id.0,
+                "metadata": {
+                    "category": "feature",
+                    "estimated_hours": 8,
+                    "tags": ["frontend", "urgent"]
+                }
+            }))
+            .await
+            .unwrap();
+
+        let updated: Task = serde_json::from_value(result).unwrap();
+        assert_eq!(updated.metadata.get("category"), Some(&json!("feature")));
+        assert_eq!(updated.metadata.get("estimated_hours"), Some(&json!(8)));
+        assert_eq!(
+            updated.metadata.get("tags"),
+            Some(&json!(["frontend", "urgent"]))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_update_tool_metadata_merge() {
+        let (store, task) = create_store_with_task().await;
+        let tool = TaskUpdateTool::new(store.clone());
+
+        // Set initial metadata
+        tool.call(json!({
+            "id": task.id.0,
+            "metadata": {
+                "key1": "value1",
+                "key2": "value2"
+            }
+        }))
+        .await
+        .unwrap();
+
+        // Merge more metadata (update key2, add key3)
+        let result = tool
+            .call(json!({
+                "id": task.id.0,
+                "metadata": {
+                    "key2": "updated",
+                    "key3": "new"
+                }
+            }))
+            .await
+            .unwrap();
+
+        let updated: Task = serde_json::from_value(result).unwrap();
+        assert_eq!(updated.metadata.get("key1"), Some(&json!("value1"))); // unchanged
+        assert_eq!(updated.metadata.get("key2"), Some(&json!("updated"))); // updated
+        assert_eq!(updated.metadata.get("key3"), Some(&json!("new"))); // added
+    }
+
+    #[tokio::test]
+    async fn test_task_update_tool_metadata_delete_with_null() {
+        let (store, task) = create_store_with_task().await;
+        let tool = TaskUpdateTool::new(store.clone());
+
+        // Set initial metadata
+        tool.call(json!({
+            "id": task.id.0,
+            "metadata": {
+                "keep": "keep me",
+                "delete_me": "will be deleted"
+            }
+        }))
+        .await
+        .unwrap();
+
+        // Delete key by setting to null
+        let result = tool
+            .call(json!({
+                "id": task.id.0,
+                "metadata": {
+                    "delete_me": null
+                }
+            }))
+            .await
+            .unwrap();
+
+        let updated: Task = serde_json::from_value(result).unwrap();
+        assert_eq!(updated.metadata.get("keep"), Some(&json!("keep me")));
+        assert!(!updated.metadata.contains_key("delete_me"));
+    }
+
+    #[tokio::test]
+    async fn test_task_update_tool_add_blocked_by() {
+        let (store, task) = create_store_with_task().await;
+        let tool = TaskUpdateTool::new(store.clone());
+
+        // Create a blocker task
+        let blocker = store
+            .create(
+                NewTask {
+                    subject: "Blocker task".to_string(),
+                    description: "".to_string(),
+                    priority: None,
+                    labels: None,
+                    blocks: None,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Add blocked_by via tool
+        let result = tool
+            .call(json!({
+                "id": task.id.0,
+                "add_blocked_by": [blocker.id.0]
+            }))
+            .await
+            .unwrap();
+
+        let updated: Task = serde_json::from_value(result).unwrap();
+        assert_eq!(updated.blocked_by.len(), 1);
+        assert_eq!(updated.blocked_by[0], blocker.id);
+    }
+
+    #[tokio::test]
+    async fn test_task_update_tool_remove_blocked_by() {
+        let store = Arc::new(MemoryTaskStore::new());
+
+        // Create task and add blocked_by
+        let blocker1 = TaskId::from_string("blocker-1");
+        let blocker2 = TaskId::from_string("blocker-2");
+
+        let task = store
+            .create(
+                NewTask {
+                    subject: "Task with blockers".to_string(),
+                    description: "".to_string(),
+                    priority: None,
+                    labels: None,
+                    blocks: None,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let tool = TaskUpdateTool::new(store.clone());
+
+        // First add blocked_by
+        tool.call(json!({
+            "id": task.id.0,
+            "add_blocked_by": ["blocker-1", "blocker-2"]
+        }))
+        .await
+        .unwrap();
+
+        // Remove one via tool
+        let result = tool
+            .call(json!({
+                "id": task.id.0,
+                "remove_blocked_by": ["blocker-1"]
+            }))
+            .await
+            .unwrap();
+
+        let updated: Task = serde_json::from_value(result).unwrap();
+        assert_eq!(updated.blocked_by.len(), 1);
+        assert!(!updated.blocked_by.contains(&blocker1));
+        assert!(updated.blocked_by.contains(&blocker2));
+    }
+
+    #[tokio::test]
+    async fn test_task_update_tool_all_new_params_together() {
+        let (store, task) = create_store_with_task().await;
+        let tool = TaskUpdateTool::new(store.clone());
+
+        // Use all new parameters in one call
+        let result = tool
+            .call(json!({
+                "id": task.id.0,
+                "owner": "team-lead",
+                "metadata": {
+                    "sprint": 42,
+                    "points": 5
+                },
+                "add_blocked_by": ["prerequisite-task-1", "prerequisite-task-2"]
+            }))
+            .await
+            .unwrap();
+
+        let updated: Task = serde_json::from_value(result).unwrap();
+        assert_eq!(updated.owner, Some("team-lead".to_string()));
+        assert_eq!(updated.metadata.get("sprint"), Some(&json!(42)));
+        assert_eq!(updated.metadata.get("points"), Some(&json!(5)));
+        assert_eq!(updated.blocked_by.len(), 2);
     }
 }

@@ -36,6 +36,7 @@ mod config;
 pub mod file_store;
 pub mod memory_store;
 pub mod project;
+pub mod shell;
 pub mod store;
 pub mod tools;
 pub mod types;

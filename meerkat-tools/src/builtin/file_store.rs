@@ -161,6 +161,9 @@ impl TaskStore for FileTaskStore {
             updated_at: now,
             created_by_session: session_id.map(String::from),
             updated_by_session: session_id.map(String::from),
+            owner: new_task.owner,
+            metadata: new_task.metadata.unwrap_or_default(),
+            blocked_by: new_task.blocked_by.unwrap_or_default(),
         };
 
         data.tasks.push(task.clone());
@@ -208,6 +211,31 @@ impl TaskStore for FileTaskStore {
         }
         if let Some(remove_blocks) = update.remove_blocks {
             task.blocks.retain(|b| !remove_blocks.contains(b));
+        }
+
+        // Handle new fields: owner, metadata, add_blocked_by, remove_blocked_by
+        if let Some(owner) = update.owner {
+            task.owner = Some(owner);
+        }
+        if let Some(metadata) = update.metadata {
+            for (key, value) in metadata {
+                if value.is_null() {
+                    // Null value means delete the key
+                    task.metadata.remove(&key);
+                } else {
+                    task.metadata.insert(key, value);
+                }
+            }
+        }
+        if let Some(add_blocked_by) = update.add_blocked_by {
+            for block_id in add_blocked_by {
+                if !task.blocked_by.contains(&block_id) {
+                    task.blocked_by.push(block_id);
+                }
+            }
+        }
+        if let Some(remove_blocked_by) = update.remove_blocked_by {
+            task.blocked_by.retain(|b| !remove_blocked_by.contains(b));
         }
 
         task.updated_at = chrono::Utc::now().to_rfc3339();
@@ -258,6 +286,7 @@ mod tests {
             priority: Some(TaskPriority::High),
             labels: Some(vec!["test".to_string(), "important".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, Some("session-1")).await.unwrap();
@@ -301,6 +330,7 @@ mod tests {
             priority: Some(TaskPriority::Low),
             labels: None,
             blocks: None,
+            ..Default::default()
         };
         let task2 = NewTask {
             subject: "Task 2".to_string(),
@@ -308,6 +338,7 @@ mod tests {
             priority: Some(TaskPriority::High),
             labels: None,
             blocks: None,
+            ..Default::default()
         };
         let task3 = NewTask {
             subject: "Task 3".to_string(),
@@ -315,6 +346,7 @@ mod tests {
             priority: None,
             labels: Some(vec!["urgent".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created1 = store.create(task1, None).await.unwrap();
@@ -342,6 +374,7 @@ mod tests {
             priority: Some(TaskPriority::Low),
             labels: Some(vec!["initial".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, Some("session-1")).await.unwrap();
@@ -359,6 +392,10 @@ mod tests {
             labels: Some(vec!["updated".to_string(), "reviewed".to_string()]),
             add_blocks: None,
             remove_blocks: None,
+            owner: None,
+            metadata: None,
+            add_blocked_by: None,
+            remove_blocked_by: None,
         };
 
         let updated = store
@@ -392,6 +429,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();
@@ -444,6 +482,7 @@ mod tests {
                 priority: Some(TaskPriority::High),
                 labels: Some(vec!["persistent".to_string()]),
                 blocks: None,
+                ..Default::default()
             };
             let created = store.create(new_task, Some("session-1")).await.unwrap();
             task_id = created.id;
@@ -485,6 +524,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();
@@ -513,6 +553,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         store.create(new_task, None).await.unwrap();
@@ -541,6 +582,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -561,6 +603,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -609,6 +652,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -623,6 +667,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -695,6 +740,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();

@@ -98,6 +98,9 @@ mod tests {
                 priority: task.priority.unwrap_or_default(),
                 labels: task.labels.unwrap_or_default(),
                 blocks: task.blocks.unwrap_or_default(),
+                owner: task.owner,
+                metadata: task.metadata.unwrap_or_default(),
+                blocked_by: task.blocked_by.unwrap_or_default(),
                 created_at: now.clone(),
                 updated_at: now,
                 created_by_session: session_id.map(String::from),
@@ -171,6 +174,7 @@ mod tests {
             priority: Some(TaskPriority::High),
             labels: Some(vec!["test".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, Some("session-1")).await.unwrap();
@@ -196,6 +200,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
         let task2 = NewTask {
             subject: "Task 2".to_string(),
@@ -203,6 +208,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         store.create(task1, None).await.unwrap();
@@ -222,6 +228,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();
@@ -267,6 +274,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();
@@ -296,6 +304,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -310,6 +319,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )

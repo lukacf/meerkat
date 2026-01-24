@@ -142,6 +142,7 @@ mod tests {
                     priority: Some(TaskPriority::High),
                     labels: Some(vec!["feature".to_string(), "frontend".to_string()]),
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -157,6 +158,7 @@ mod tests {
                     priority: Some(TaskPriority::High),
                     labels: Some(vec!["bug".to_string(), "backend".to_string()]),
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -185,6 +187,7 @@ mod tests {
                     priority: Some(TaskPriority::Medium),
                     labels: Some(vec!["feature".to_string(), "backend".to_string()]),
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -213,6 +216,7 @@ mod tests {
                     priority: Some(TaskPriority::Low),
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )

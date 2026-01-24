@@ -30,6 +30,15 @@ struct TaskCreateParams {
     /// IDs of tasks that this task blocks
     #[serde(default)]
     blocks: Option<Vec<String>>,
+    /// Owner/assignee of the task
+    #[serde(default)]
+    owner: Option<String>,
+    /// Arbitrary key-value metadata
+    #[serde(default)]
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// IDs of tasks that block THIS task
+    #[serde(default)]
+    blocked_by: Option<Vec<String>>,
 }
 
 /// Built-in tool for creating tasks
@@ -120,6 +129,20 @@ impl BuiltinTool for TaskCreateTool {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "IDs of tasks that this task blocks"
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "Owner/assignee of the task"
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "Arbitrary key-value metadata"
+                    },
+                    "blocked_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "IDs of tasks that block THIS task"
                     }
                 },
                 "required": ["subject", "description"]
@@ -155,6 +178,11 @@ impl BuiltinTool for TaskCreateTool {
             labels: params.labels,
             blocks: params
                 .blocks
+                .map(|ids| ids.into_iter().map(TaskId).collect()),
+            owner: params.owner,
+            metadata: params.metadata,
+            blocked_by: params
+                .blocked_by
                 .map(|ids| ids.into_iter().map(TaskId).collect()),
         };
 

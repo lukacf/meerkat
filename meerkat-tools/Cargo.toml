@@ -22,6 +22,12 @@ tracing = { workspace = true }
 ulid = { workspace = true }
 chrono = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[dependencies.which]
+workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }

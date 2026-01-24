@@ -43,6 +43,23 @@ pub struct MeerkatRunInput {
     /// Tool definitions for the agent to use
     #[serde(default)]
     pub tools: Vec<McpToolDef>,
+    /// Enable built-in tools (task management, shell, etc.)
+    #[serde(default)]
+    pub enable_builtins: bool,
+    /// Configuration for built-in tools (only used when enable_builtins is true)
+    #[serde(default)]
+    pub builtin_config: Option<BuiltinConfigInput>,
+}
+
+/// Configuration options for built-in tools
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct BuiltinConfigInput {
+    /// Enable shell tools (default: false)
+    #[serde(default)]
+    pub enable_shell: bool,
+    /// Default timeout for shell commands in seconds (default: 30)
+    #[serde(default)]
+    pub shell_timeout_secs: Option<u64>,
 }
 
 fn default_model() -> String {
@@ -64,6 +81,12 @@ pub struct MeerkatResumeInput {
     /// Tool results to provide for pending tool calls
     #[serde(default)]
     pub tool_results: Vec<ToolResultInput>,
+    /// Enable built-in tools (task management, shell, etc.)
+    #[serde(default)]
+    pub enable_builtins: bool,
+    /// Configuration for built-in tools (only used when enable_builtins is true)
+    #[serde(default)]
+    pub builtin_config: Option<BuiltinConfigInput>,
 }
 
 /// Tool result provided by the MCP client
@@ -203,11 +226,20 @@ pub async fn handle_tools_call(tool_name: &str, arguments: &Value) -> Result<Val
 }
 
 async fn handle_meerkat_run(input: MeerkatRunInput) -> Result<Value, String> {
+    // Branch based on whether builtins are enabled
+    if input.enable_builtins {
+        handle_meerkat_run_with_builtins(input).await
+    } else {
+        handle_meerkat_run_simple(input).await
+    }
+}
+
+async fn handle_meerkat_run_simple(input: MeerkatRunInput) -> Result<Value, String> {
     // Get API key from environment
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
 
-    // Create store
+    // Create session store
     let store_path = std::env::var("RKAT_STORE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -277,7 +309,154 @@ async fn handle_meerkat_run(input: MeerkatRunInput) -> Result<Value, String> {
     }
 }
 
+async fn handle_meerkat_run_with_builtins(input: MeerkatRunInput) -> Result<Value, String> {
+    use meerkat_tools::{
+        BuiltinToolConfig, CompositeDispatcher, EnforcedToolPolicy, FileTaskStore, ToolMode,
+        ToolPolicyLayer, builtin::shell::ShellConfig, ensure_rkat_dir, find_project_root,
+    };
+
+    // Get API key from environment
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
+
+    // Create session store
+    let store_path = std::env::var("RKAT_STORE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("meerkat")
+                .join("sessions")
+        });
+
+    let session_store = JsonlStore::new(store_path);
+    session_store
+        .init()
+        .await
+        .map_err(|e| format!("Store init failed: {}", e))?;
+
+    // Create LLM client
+    let llm_client = Arc::new(AnthropicClient::new(api_key));
+    let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, input.model.clone()));
+
+    // Generate session ID upfront for task tracking
+    let meerkat_session_id = meerkat::SessionId::new();
+
+    // Set up built-in tools
+    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current dir: {}", e))?;
+    let project_root = find_project_root(&cwd);
+    ensure_rkat_dir(&project_root).map_err(|e| format!("Failed to create .rkat dir: {}", e))?;
+    let task_store = Arc::new(FileTaskStore::in_project(&project_root));
+
+    // Build builtin tool config - enable shell tools if requested
+    let mut policy = ToolPolicyLayer::new().with_mode(ToolMode::AllowAll);
+    let enable_shell = input
+        .builtin_config
+        .as_ref()
+        .is_some_and(|c| c.enable_shell);
+    if enable_shell {
+        policy = policy
+            .enable_tool("shell")
+            .enable_tool("shell_job_status")
+            .enable_tool("shell_jobs")
+            .enable_tool("shell_job_cancel");
+    }
+
+    let config = BuiltinToolConfig {
+        policy,
+        enforced: EnforcedToolPolicy::default(),
+    };
+
+    // Create shell config if enabled
+    let shell_config = if enable_shell {
+        let mut shell_cfg = ShellConfig::with_project_root(project_root);
+        shell_cfg.enabled = true;
+        if let Some(timeout) = input
+            .builtin_config
+            .as_ref()
+            .and_then(|c| c.shell_timeout_secs)
+        {
+            shell_cfg.default_timeout_secs = timeout;
+        }
+        Some(shell_cfg)
+    } else {
+        None
+    };
+
+    // Create external dispatcher for MCP callback tools (if any)
+    let external: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
+        None
+    } else {
+        Some(Arc::new(MpcToolDispatcher::new(&input.tools)))
+    };
+
+    // Create composite dispatcher
+    let tools = Arc::new(
+        CompositeDispatcher::new(
+            task_store,
+            &config,
+            shell_config,
+            external,
+            Some(meerkat_session_id.to_string()),
+        )
+        .map_err(|e| format!("Failed to create dispatcher: {}", e))?,
+    );
+
+    let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(session_store)));
+
+    // Build agent
+    let mut builder = AgentBuilder::new()
+        .model(&input.model)
+        .max_tokens_per_turn(input.max_tokens);
+
+    if let Some(sys_prompt) = &input.system_prompt {
+        builder = builder.system_prompt(sys_prompt);
+    }
+
+    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+
+    // Run agent
+    let result = agent.run(input.prompt).await;
+
+    match result {
+        Ok(result) => Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": result.text
+            }],
+            "session_id": result.session_id.to_string(),
+            "turns": result.turns,
+            "tool_calls": result.tool_calls
+        })),
+        Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
+            let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
+            let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
+            let session_id = agent.session().id();
+
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Agent is waiting for tool results"
+                }],
+                "session_id": session_id.to_string(),
+                "status": "pending_tool_call",
+                "pending_tool_calls": [pending]
+            }))
+        }
+        Err(e) => Err(format!("Agent error: {}", e)),
+    }
+}
+
 async fn handle_meerkat_resume(input: MeerkatResumeInput) -> Result<Value, String> {
+    // Branch based on whether builtins are enabled
+    if input.enable_builtins {
+        handle_meerkat_resume_with_builtins(input).await
+    } else {
+        handle_meerkat_resume_simple(input).await
+    }
+}
+
+async fn handle_meerkat_resume_simple(input: MeerkatResumeInput) -> Result<Value, String> {
     // Get API key from environment
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
@@ -328,7 +507,7 @@ async fn handle_meerkat_resume(input: MeerkatResumeInput) -> Result<Value, Strin
     let model = "claude-opus-4-5".to_string();
     let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.clone()));
 
-    // Create tool dispatcher based on provided tools
+    // Create tool dispatcher
     let tools = Arc::new(MpcToolDispatcher::new(&input.tools));
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
 
@@ -365,6 +544,169 @@ async fn handle_meerkat_resume(input: MeerkatResumeInput) -> Result<Value, Strin
             let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
 
             // Get session ID from agent state
+            let session_id = agent.session().id();
+
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Agent is waiting for tool results"
+                }],
+                "session_id": session_id.to_string(),
+                "status": "pending_tool_call",
+                "pending_tool_calls": [pending]
+            }))
+        }
+        Err(e) => Err(format!("Agent error: {}", e)),
+    }
+}
+
+async fn handle_meerkat_resume_with_builtins(input: MeerkatResumeInput) -> Result<Value, String> {
+    use meerkat_tools::{
+        BuiltinToolConfig, CompositeDispatcher, EnforcedToolPolicy, FileTaskStore, ToolMode,
+        ToolPolicyLayer, builtin::shell::ShellConfig, ensure_rkat_dir, find_project_root,
+    };
+
+    // Get API key from environment
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
+
+    // Create store
+    let store_path = std::env::var("RKAT_STORE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("meerkat")
+                .join("sessions")
+        });
+
+    let session_store = JsonlStore::new(store_path);
+    session_store
+        .init()
+        .await
+        .map_err(|e| format!("Store init failed: {}", e))?;
+
+    // Load existing session
+    let session_id = meerkat::SessionId::parse(&input.session_id)
+        .map_err(|e| format!("Invalid session ID: {}", e))?;
+
+    let mut session = session_store
+        .load(&session_id)
+        .await
+        .map_err(|e| format!("Failed to load session: {}", e))?
+        .ok_or_else(|| format!("Session not found: {}", input.session_id))?;
+
+    // If tool results are provided, inject them into the session
+    if !input.tool_results.is_empty() {
+        use meerkat::ToolResult;
+        let results: Vec<ToolResult> = input
+            .tool_results
+            .iter()
+            .map(|r| ToolResult {
+                tool_use_id: r.tool_use_id.clone(),
+                content: r.content.clone(),
+                is_error: r.is_error,
+            })
+            .collect();
+        session.push(Message::ToolResults { results });
+    }
+
+    // Create LLM client
+    let llm_client = Arc::new(AnthropicClient::new(api_key));
+    let model = "claude-opus-4-5".to_string();
+    let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.clone()));
+
+    // Set up built-in tools
+    let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current dir: {}", e))?;
+    let project_root = find_project_root(&cwd);
+    ensure_rkat_dir(&project_root).map_err(|e| format!("Failed to create .rkat dir: {}", e))?;
+    let task_store = Arc::new(FileTaskStore::in_project(&project_root));
+
+    // Build builtin tool config - enable shell tools if requested
+    let mut policy = ToolPolicyLayer::new().with_mode(ToolMode::AllowAll);
+    let enable_shell = input
+        .builtin_config
+        .as_ref()
+        .is_some_and(|c| c.enable_shell);
+    if enable_shell {
+        policy = policy
+            .enable_tool("shell")
+            .enable_tool("shell_job_status")
+            .enable_tool("shell_jobs")
+            .enable_tool("shell_job_cancel");
+    }
+
+    let config = BuiltinToolConfig {
+        policy,
+        enforced: EnforcedToolPolicy::default(),
+    };
+
+    // Create shell config if enabled
+    let shell_config = if enable_shell {
+        let mut shell_cfg = ShellConfig::with_project_root(project_root);
+        shell_cfg.enabled = true;
+        if let Some(timeout) = input
+            .builtin_config
+            .as_ref()
+            .and_then(|c| c.shell_timeout_secs)
+        {
+            shell_cfg.default_timeout_secs = timeout;
+        }
+        Some(shell_cfg)
+    } else {
+        None
+    };
+
+    // Create external dispatcher for MCP callback tools (if any)
+    let external: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
+        None
+    } else {
+        Some(Arc::new(MpcToolDispatcher::new(&input.tools)))
+    };
+
+    // Create composite dispatcher
+    let tools = Arc::new(
+        CompositeDispatcher::new(
+            task_store,
+            &config,
+            shell_config,
+            external,
+            Some(session_id.to_string()),
+        )
+        .map_err(|e| format!("Failed to create dispatcher: {}", e))?,
+    );
+
+    let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(session_store)));
+
+    // Build agent with resumed session
+    let mut agent = AgentBuilder::new()
+        .model(&model)
+        .max_tokens_per_turn(4096)
+        .resume_session(session)
+        .build(llm_adapter, tools, store_adapter);
+
+    // Run agent - use empty prompt if only providing tool results
+    let prompt = if input.prompt.is_empty() && !input.tool_results.is_empty() {
+        String::new()
+    } else {
+        input.prompt
+    };
+
+    let result = agent.run(prompt).await;
+
+    match result {
+        Ok(result) => Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": result.text
+            }],
+            "session_id": result.session_id.to_string(),
+            "turns": result.turns,
+            "tool_calls": result.tool_calls
+        })),
+        Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
+            let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
+            let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
             let session_id = agent.session().id();
 
             Ok(json!({

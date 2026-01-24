@@ -5,6 +5,12 @@
 //! - POST /sessions/:id/messages - Continue an existing session
 //! - GET /sessions/:id - Get session details
 //! - GET /sessions/:id/events - SSE stream for agent events
+//!
+//! # Built-in Tools
+//! Set `RKAT_ENABLE_BUILTINS=true` to enable built-in tools (task management, shell).
+//! When enabled, also set `RKAT_PROJECT_ROOT` to the project directory.
+//!
+//! Shell tools require explicit enable: `RKAT_ENABLE_SHELL=true`
 
 use axum::{
     Json, Router,
@@ -23,6 +29,10 @@ use meerkat::{
     AnthropicClient, JsonlStore, LlmClient, LlmStreamResult, Message, Session, SessionId,
     SessionMeta, SessionStore, ToolDef, ToolError,
 };
+use meerkat_tools::builtin::{
+    BuiltinToolConfig, CompositeDispatcher, FileTaskStore, ToolPolicyLayer, ensure_rkat_dir,
+    find_project_root, shell::ShellConfig,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::convert::Infallible;
@@ -35,6 +45,12 @@ pub struct AppState {
     pub store_path: PathBuf,
     pub default_model: String,
     pub max_tokens: u32,
+    /// Whether to enable built-in tools (task management, shell)
+    pub enable_builtins: bool,
+    /// Whether to enable shell tools (requires enable_builtins=true)
+    pub enable_shell: bool,
+    /// Project root for file-based task store and shell working directory
+    pub project_root: Option<PathBuf>,
 }
 
 impl Default for AppState {
@@ -48,6 +64,24 @@ impl Default for AppState {
                     .join("sessions")
             });
 
+        let enable_builtins = std::env::var("RKAT_ENABLE_BUILTINS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let enable_shell = std::env::var("RKAT_ENABLE_SHELL")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let project_root = std::env::var("RKAT_PROJECT_ROOT")
+            .map(PathBuf::from)
+            .ok()
+            .or_else(|| {
+                // Try to find project root from current directory
+                std::env::current_dir()
+                    .ok()
+                    .map(|cwd| find_project_root(&cwd))
+            });
+
         Self {
             store_path,
             default_model: std::env::var("RKAT_MODEL")
@@ -56,6 +90,9 @@ impl Default for AppState {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(4096),
+            enable_builtins,
+            enable_shell,
+            project_root,
         }
     }
 }
@@ -129,6 +166,57 @@ async fn health_check() -> &'static str {
     "ok"
 }
 
+/// Create a tool dispatcher based on configuration
+///
+/// When builtins are enabled, creates a CompositeDispatcher with task tools
+/// and optionally shell tools. Otherwise returns an EmptyToolDispatcher.
+fn create_tool_dispatcher(state: &AppState) -> Result<Arc<RestToolDispatcher>, ApiError> {
+    if !state.enable_builtins {
+        return Ok(Arc::new(RestToolDispatcher::Empty(EmptyToolDispatcher)));
+    }
+
+    // Need project root for file-based task store
+    let project_root = state.project_root.as_ref().ok_or_else(|| {
+        ApiError::Configuration(
+            "RKAT_PROJECT_ROOT required when RKAT_ENABLE_BUILTINS=true".to_string(),
+        )
+    })?;
+
+    // Ensure .rkat directory exists
+    ensure_rkat_dir(project_root)
+        .map_err(|e| ApiError::Internal(format!("Failed to create .rkat directory: {}", e)))?;
+
+    // Create file-based task store
+    let task_store = Arc::new(FileTaskStore::in_project(project_root));
+
+    // Create shell config if shell is enabled
+    let shell_config = if state.enable_shell {
+        Some(ShellConfig::with_project_root(project_root.clone()))
+    } else {
+        None
+    };
+
+    // Create builtin tool config - if shell is enabled, enable shell tools in policy
+    let config = if state.enable_shell {
+        BuiltinToolConfig {
+            policy: ToolPolicyLayer::new()
+                .enable_tool("shell")
+                .enable_tool("shell_job_status")
+                .enable_tool("shell_jobs")
+                .enable_tool("shell_job_cancel"),
+            ..Default::default()
+        }
+    } else {
+        BuiltinToolConfig::default()
+    };
+
+    // Create composite dispatcher
+    let dispatcher = CompositeDispatcher::builtins_only(task_store, &config, shell_config, None)
+        .map_err(|e| ApiError::Internal(format!("Failed to create tool dispatcher: {}", e)))?;
+
+    Ok(Arc::new(RestToolDispatcher::Composite(dispatcher)))
+}
+
 /// Create and run a new session
 async fn create_session(
     State(state): State<AppState>,
@@ -137,10 +225,10 @@ async fn create_session(
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| ApiError::Configuration("ANTHROPIC_API_KEY not set".to_string()))?;
 
-    let model = req.model.unwrap_or(state.default_model);
+    let model = req.model.unwrap_or(state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
 
-    let store = JsonlStore::new(state.store_path);
+    let store = JsonlStore::new(state.store_path.clone());
     store
         .init()
         .await
@@ -148,7 +236,7 @@ async fn create_session(
 
     let llm_client = Arc::new(AnthropicClient::new(api_key));
     let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.clone()));
-    let tools = Arc::new(EmptyToolDispatcher);
+    let tools = create_tool_dispatcher(&state)?;
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
 
     let mut builder = AgentBuilder::new()
@@ -239,7 +327,7 @@ async fn continue_session(
     let model = state.default_model.clone();
     let llm_client = Arc::new(AnthropicClient::new(api_key));
     let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.clone()));
-    let tools = Arc::new(EmptyToolDispatcher);
+    let tools = create_tool_dispatcher(&state)?;
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
 
     let mut agent = AgentBuilder::new()
@@ -455,6 +543,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
 }
 
 /// Empty tool dispatcher
+#[derive(Debug)]
 pub struct EmptyToolDispatcher;
 
 #[async_trait]
@@ -465,6 +554,41 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 
     async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
         Err(ToolError::not_found(name))
+    }
+}
+
+/// Tool dispatcher that can be either empty or composite
+///
+/// This enum allows us to use different tool dispatcher implementations
+/// while still satisfying the generic type requirements of AgentBuilder.
+pub enum RestToolDispatcher {
+    Empty(EmptyToolDispatcher),
+    Composite(CompositeDispatcher),
+}
+
+impl std::fmt::Debug for RestToolDispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RestToolDispatcher::Empty(_) => write!(f, "RestToolDispatcher::Empty"),
+            RestToolDispatcher::Composite(_) => write!(f, "RestToolDispatcher::Composite"),
+        }
+    }
+}
+
+#[async_trait]
+impl AgentToolDispatcher for RestToolDispatcher {
+    fn tools(&self) -> Vec<ToolDef> {
+        match self {
+            RestToolDispatcher::Empty(d) => d.tools(),
+            RestToolDispatcher::Composite(d) => d.tools(),
+        }
+    }
+
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+        match self {
+            RestToolDispatcher::Empty(d) => d.dispatch(name, args).await,
+            RestToolDispatcher::Composite(d) => d.dispatch(name, args).await,
+        }
     }
 }
 
@@ -519,5 +643,90 @@ mod tests {
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("test error"));
         assert!(json.contains("TEST_ERROR"));
+    }
+
+    #[test]
+    fn test_app_state_builtins_disabled_by_default() {
+        let state = AppState::default();
+        assert!(!state.enable_builtins);
+        assert!(!state.enable_shell);
+    }
+
+    #[test]
+    fn test_create_tool_dispatcher_without_builtins() {
+        let state = AppState {
+            enable_builtins: false,
+            ..Default::default()
+        };
+        let result = create_tool_dispatcher(&state);
+        assert!(result.is_ok());
+        let dispatcher = result.unwrap();
+        // Empty dispatcher should have no tools
+        assert!(dispatcher.tools().is_empty());
+    }
+
+    #[test]
+    fn test_create_tool_dispatcher_with_builtins() {
+        let temp_dir = std::env::temp_dir().join("meerkat-rest-test");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let state = AppState {
+            enable_builtins: true,
+            enable_shell: false,
+            project_root: Some(temp_dir.clone()),
+            ..Default::default()
+        };
+        let result = create_tool_dispatcher(&state);
+        assert!(result.is_ok());
+        let dispatcher = result.unwrap();
+        // Should have task tools
+        let tools = dispatcher.tools();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(tool_names.contains(&"task_create"));
+        assert!(tool_names.contains(&"task_list"));
+        // Should not have shell tools (not enabled)
+        assert!(!tool_names.contains(&"shell"));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_create_tool_dispatcher_with_shell() {
+        let temp_dir = std::env::temp_dir().join("meerkat-rest-test-shell");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let state = AppState {
+            enable_builtins: true,
+            enable_shell: true,
+            project_root: Some(temp_dir.clone()),
+            ..Default::default()
+        };
+        let result = create_tool_dispatcher(&state);
+        assert!(result.is_ok());
+        let dispatcher = result.unwrap();
+        // Should have both task and shell tools
+        let tools = dispatcher.tools();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(tool_names.contains(&"task_create"));
+        assert!(tool_names.contains(&"shell"));
+        assert!(tool_names.contains(&"shell_job_status"));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_create_tool_dispatcher_requires_project_root() {
+        let state = AppState {
+            enable_builtins: true,
+            enable_shell: false,
+            project_root: None,
+            ..Default::default()
+        };
+        let result = create_tool_dispatcher(&state);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ApiError::Configuration(_)));
     }
 }

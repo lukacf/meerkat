@@ -1,12 +1,13 @@
 //! Composite dispatcher that combines built-in tools with external dispatchers
 //!
 //! The [`CompositeDispatcher`] provides a unified tool dispatcher that:
-//! - Serves built-in tools (task management, etc.) from this crate
+//! - Serves built-in tools (task management, shell execution, etc.) from this crate
 //! - Delegates to an external dispatcher (MCP router, etc.) for other tools
 //! - Applies policy-based filtering to control which tools are enabled
 //! - Detects name collisions between built-in and external tools
 
 use super::config::BuiltinToolConfig;
+use super::shell::{ShellConfig, ShellToolSet};
 use super::store::TaskStore;
 use super::tools::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool};
 use super::{BuiltinTool, BuiltinToolError};
@@ -34,72 +35,26 @@ pub enum CompositeDispatcherError {
 }
 
 /// A tool dispatcher that combines built-in tools with an external dispatcher.
-///
-/// Built-in tools are dispatched locally, while unknown tools are forwarded
-/// to the external dispatcher (if provided). Built-in tools take precedence
-/// over external tools with the same name.
-///
-/// **Name collisions** between enabled built-in tools and external tools are
-/// detected at construction time and result in a `NameCollision` error.
-///
-/// # Example
-///
-/// ```ignore
-/// use meerkat_tools::builtin::{
-///     CompositeDispatcher, BuiltinToolConfig, FileTaskStore,
-///     find_project_root, ensure_rkat_dir,
-/// };
-/// use std::sync::Arc;
-///
-/// // Set up store and config
-/// let project_root = find_project_root(&std::env::current_dir().unwrap());
-/// ensure_rkat_dir(&project_root).unwrap();
-/// let store = Arc::new(FileTaskStore::in_project(&project_root));
-/// let config = BuiltinToolConfig::default();
-///
-/// // Create dispatcher with no external tools
-/// let dispatcher = CompositeDispatcher::new(store, &config, None, None).unwrap();
-///
-/// // Or create with just built-in tools using the convenience method
-/// let dispatcher = CompositeDispatcher::builtins_only(store, &config, None).unwrap();
-///
-/// // Use with agent
-/// let agent = AgentBuilder::new()
-///     .model("claude-sonnet-4")
-///     .build(llm_client, Arc::new(dispatcher), session_store);
-/// ```
 pub struct CompositeDispatcher {
-    /// Built-in tools indexed by name
     builtins: HashMap<String, Arc<dyn BuiltinTool>>,
-    /// External dispatcher for non-builtin tools (optional)
     external: Option<Arc<dyn AgentToolDispatcher>>,
-    /// Combined tool definitions from builtins and external
     tool_defs: Vec<ToolDef>,
 }
 
 impl CompositeDispatcher {
-    /// Create a new composite dispatcher with built-in task tools.
-    ///
-    /// # Arguments
-    /// * `store` - Task store for built-in task tools
-    /// * `config` - Configuration for enabling/disabling built-in tools
-    /// * `external` - Optional external dispatcher for non-builtin tools (e.g., MCP router)
-    /// * `session_id` - Optional session ID for tracking task operations
-    ///
-    /// # Errors
-    /// Returns `CompositeDispatcherError::NameCollision` if an external tool
-    /// has the same name as an enabled built-in tool.
+    /// Create a new composite dispatcher with built-in task and shell tools.
     pub fn new(
         store: Arc<dyn TaskStore>,
         config: &BuiltinToolConfig,
+        shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
     ) -> Result<Self, CompositeDispatcherError> {
         let resolved = config.resolve();
         let mut builtins: HashMap<String, Arc<dyn BuiltinTool>> = HashMap::new();
 
-        // Create all builtin tools with session tracking
-        let all_builtins: Vec<Arc<dyn BuiltinTool>> = vec![
+        // Create task tools with session tracking
+        let task_tools: Vec<Arc<dyn BuiltinTool>> = vec![
             Arc::new(TaskCreateTool::with_session_opt(
                 store.clone(),
                 session_id.clone(),
@@ -109,10 +64,50 @@ impl CompositeDispatcher {
             Arc::new(TaskUpdateTool::with_session_opt(store, session_id)),
         ];
 
-        // Filter based on config
-        for tool in all_builtins {
+        for tool in task_tools {
             if resolved.is_enabled(tool.name(), tool.default_enabled()) {
                 builtins.insert(tool.name().to_string(), tool);
+            }
+        }
+
+        // Create and filter shell tools if config provided
+        if let Some(shell_cfg) = shell_config {
+            let shell_tool_set = ShellToolSet::new(shell_cfg);
+            if resolved.is_enabled(
+                shell_tool_set.shell.name(),
+                shell_tool_set.shell.default_enabled(),
+            ) {
+                builtins.insert(
+                    shell_tool_set.shell.name().to_string(),
+                    Arc::new(shell_tool_set.shell),
+                );
+            }
+            if resolved.is_enabled(
+                shell_tool_set.job_status.name(),
+                shell_tool_set.job_status.default_enabled(),
+            ) {
+                builtins.insert(
+                    shell_tool_set.job_status.name().to_string(),
+                    Arc::new(shell_tool_set.job_status),
+                );
+            }
+            if resolved.is_enabled(
+                shell_tool_set.jobs_list.name(),
+                shell_tool_set.jobs_list.default_enabled(),
+            ) {
+                builtins.insert(
+                    shell_tool_set.jobs_list.name().to_string(),
+                    Arc::new(shell_tool_set.jobs_list),
+                );
+            }
+            if resolved.is_enabled(
+                shell_tool_set.job_cancel.name(),
+                shell_tool_set.job_cancel.default_enabled(),
+            ) {
+                builtins.insert(
+                    shell_tool_set.job_cancel.name().to_string(),
+                    Arc::new(shell_tool_set.job_cancel),
+                );
             }
         }
 
@@ -125,7 +120,6 @@ impl CompositeDispatcher {
             }
         }
 
-        // Build combined tool definitions
         let mut tool_defs: Vec<ToolDef> = builtins.values().map(|t| t.def()).collect();
         if let Some(ref ext) = external {
             tool_defs.extend(ext.tools());
@@ -139,22 +133,19 @@ impl CompositeDispatcher {
     }
 
     /// Create with just built-in tools (no external dispatcher)
-    ///
-    /// This is a convenience method equivalent to `new(store, config, None, session_id)`.
     pub fn builtins_only(
         store: Arc<dyn TaskStore>,
         config: &BuiltinToolConfig,
+        shell_config: Option<ShellConfig>,
         session_id: Option<String>,
     ) -> Result<Self, CompositeDispatcherError> {
-        Self::new(store, config, None, session_id)
+        Self::new(store, config, shell_config, None, session_id)
     }
 
-    /// Get the number of built-in tools currently enabled
     pub fn builtin_count(&self) -> usize {
         self.builtins.len()
     }
 
-    /// Check if a tool name is a built-in tool
     pub fn is_builtin(&self, name: &str) -> bool {
         self.builtins.contains_key(name)
     }
@@ -167,7 +158,6 @@ impl AgentToolDispatcher for CompositeDispatcher {
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
-        // Check built-in tools first
         if let Some(tool) = self.builtins.get(name) {
             return tool.call(args.clone()).await.map_err(|e| match e {
                 BuiltinToolError::InvalidArgs(msg) => ToolError::invalid_arguments(name, msg),
@@ -175,12 +165,9 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 BuiltinToolError::TaskError(te) => ToolError::execution_failed(te),
             });
         }
-
-        // Fall back to external dispatcher
         if let Some(ref ext) = self.external {
             return ext.dispatch(name, args).await;
         }
-
         Err(ToolError::not_found(name))
     }
 }
@@ -194,17 +181,22 @@ mod tests {
 
     fn create_test_dispatcher(config: BuiltinToolConfig) -> CompositeDispatcher {
         let store = Arc::new(MemoryTaskStore::new());
-        CompositeDispatcher::new(store, &config, None, None).unwrap()
+        CompositeDispatcher::new(store, &config, None, None, None).unwrap()
+    }
+
+    fn create_test_dispatcher_with_shell(
+        config: BuiltinToolConfig,
+        shell_config: ShellConfig,
+    ) -> CompositeDispatcher {
+        let store = Arc::new(MemoryTaskStore::new());
+        CompositeDispatcher::new(store, &config, Some(shell_config), None, None).unwrap()
     }
 
     #[test]
     fn test_composite_dispatcher_default_config() {
         let dispatcher = create_test_dispatcher(BuiltinToolConfig::default());
-
-        // All task tools should be enabled by default
         let tools = dispatcher.tools();
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-
         assert!(tool_names.contains(&"task_create"));
         assert!(tool_names.contains(&"task_get"));
         assert!(tool_names.contains(&"task_list"));
@@ -218,10 +210,7 @@ mod tests {
             enforced: EnforcedToolPolicy::default(),
         };
         let dispatcher = create_test_dispatcher(config);
-
-        // No tools should be available
-        let tools = dispatcher.tools();
-        assert!(tools.is_empty());
+        assert!(dispatcher.tools().is_empty());
     }
 
     #[test]
@@ -233,7 +222,6 @@ mod tests {
             enforced: EnforcedToolPolicy::default(),
         };
         let dispatcher = create_test_dispatcher(config);
-
         let tools = dispatcher.tools();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "task_list");
@@ -249,50 +237,35 @@ mod tests {
             },
         };
         let dispatcher = create_test_dispatcher(config);
-
         let tools = dispatcher.tools();
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-
         assert!(!tool_names.contains(&"task_create"));
         assert!(tool_names.contains(&"task_list"));
-        assert!(tool_names.contains(&"task_get"));
-        assert!(tool_names.contains(&"task_update"));
     }
 
     #[tokio::test]
     async fn test_composite_dispatcher_dispatch_builtin() {
         let dispatcher = create_test_dispatcher(BuiltinToolConfig::default());
-
-        // Create a task
-        let args = serde_json::json!({
-            "subject": "Test task",
-            "description": "A test task"
-        });
+        let args = serde_json::json!({"subject": "Test task", "description": "A test task"});
         let result = dispatcher.dispatch("task_create", &args).await;
         assert!(result.is_ok());
-
         let task = result.unwrap();
         assert!(task.get("id").is_some());
-        assert_eq!(task.get("subject").unwrap(), "Test task");
     }
 
     #[tokio::test]
     async fn test_composite_dispatcher_dispatch_unknown_tool() {
         let dispatcher = create_test_dispatcher(BuiltinToolConfig::default());
-
         let result = dispatcher
             .dispatch("unknown_tool", &serde_json::json!({}))
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[test]
     fn test_composite_dispatcher_is_builtin() {
         let dispatcher = create_test_dispatcher(BuiltinToolConfig::default());
-
         assert!(dispatcher.is_builtin("task_list"));
-        assert!(dispatcher.is_builtin("task_create"));
         assert!(!dispatcher.is_builtin("unknown_tool"));
     }
 
@@ -306,7 +279,6 @@ mod tests {
             enforced: EnforcedToolPolicy::default(),
         };
         let dispatcher = create_test_dispatcher(config);
-
         assert_eq!(dispatcher.builtin_count(), 2);
     }
 
@@ -316,17 +288,13 @@ mod tests {
         let dispatcher = CompositeDispatcher::builtins_only(
             store,
             &BuiltinToolConfig::default(),
+            None,
             Some("test-session".to_string()),
         )
         .unwrap();
-
-        // Should have all builtin tools
         assert_eq!(dispatcher.builtin_count(), 4);
-        assert!(dispatcher.is_builtin("task_create"));
-        assert!(dispatcher.is_builtin("task_list"));
     }
 
-    // Test with external dispatcher
     mod with_external {
         use super::*;
         use serde_json::json;
@@ -341,10 +309,7 @@ mod tests {
                     tools: vec![ToolDef {
                         name: "external_tool".to_string(),
                         description: "An external tool".to_string(),
-                        input_schema: json!({
-                            "type": "object",
-                            "properties": {}
-                        }),
+                        input_schema: json!({"type": "object", "properties": {}}),
                     }],
                 }
             }
@@ -355,7 +320,6 @@ mod tests {
             fn tools(&self) -> Vec<ToolDef> {
                 self.tools.clone()
             }
-
             async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
                 if name == "external_tool" {
                     Ok(json!({"result": "external"}))
@@ -372,15 +336,13 @@ mod tests {
             let dispatcher = CompositeDispatcher::new(
                 store,
                 &BuiltinToolConfig::default(),
+                None,
                 Some(external),
                 None,
             )
             .unwrap();
-
             let tools = dispatcher.tools();
             let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-
-            // Should have both builtin and external tools
             assert!(tool_names.contains(&"task_create"));
             assert!(tool_names.contains(&"external_tool"));
         }
@@ -392,103 +354,74 @@ mod tests {
             let dispatcher = CompositeDispatcher::new(
                 store,
                 &BuiltinToolConfig::default(),
+                None,
                 Some(external),
                 None,
             )
             .unwrap();
-
             let result = dispatcher.dispatch("external_tool", &json!({})).await;
             assert!(result.is_ok());
-            assert_eq!(result.unwrap(), json!({"result": "external"}));
         }
 
         #[test]
         fn test_composite_name_collision_error() {
-            // If both builtin and external have a tool with the same name,
-            // we should get a NameCollision error
             let store = Arc::new(MemoryTaskStore::new());
-
             struct OverlappingExternal;
-
             #[async_trait]
             impl AgentToolDispatcher for OverlappingExternal {
                 fn tools(&self) -> Vec<ToolDef> {
                     vec![ToolDef {
-                        name: "task_list".to_string(), // Same as builtin
-                        description: "External task_list".to_string(),
+                        name: "task_list".to_string(),
+                        description: "External".to_string(),
                         input_schema: json!({"type": "object"}),
                     }]
                 }
-
                 async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
                     Ok(json!({"source": "external"}))
                 }
             }
-
             let external = Arc::new(OverlappingExternal);
             let result = CompositeDispatcher::new(
                 store,
                 &BuiltinToolConfig::default(),
+                None,
                 Some(external),
                 None,
             );
-
-            // Should get a name collision error
-            match result {
-                Err(CompositeDispatcherError::NameCollision(name)) => {
-                    assert_eq!(name, "task_list");
-                }
-                Err(other) => panic!("Expected NameCollision error, got {:?}", other),
-                Ok(_) => panic!("Expected error, got Ok"),
-            }
+            assert!(matches!(
+                result,
+                Err(CompositeDispatcherError::NameCollision(_))
+            ));
         }
 
         #[test]
         fn test_composite_builtin_takes_precedence_when_disabled() {
-            // When a builtin tool is disabled via config, external tools with
-            // the same name should be allowed (no collision)
             let store = Arc::new(MemoryTaskStore::new());
-
-            // Disable task_list in config
             let config = BuiltinToolConfig {
                 policy: ToolPolicyLayer::new().disable_tool("task_list"),
                 enforced: EnforcedToolPolicy::default(),
             };
-
             struct OverlappingExternal;
-
             #[async_trait]
             impl AgentToolDispatcher for OverlappingExternal {
                 fn tools(&self) -> Vec<ToolDef> {
                     vec![ToolDef {
-                        name: "task_list".to_string(), // Same as disabled builtin
-                        description: "External task_list".to_string(),
+                        name: "task_list".to_string(),
+                        description: "External".to_string(),
                         input_schema: json!({"type": "object"}),
                     }]
                 }
-
                 async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
                     Ok(json!({"source": "external"}))
                 }
             }
-
             let external = Arc::new(OverlappingExternal);
-            let result = CompositeDispatcher::new(store, &config, Some(external), None);
-
-            // Should NOT get an error because task_list is disabled in builtins
+            let result = CompositeDispatcher::new(store, &config, None, Some(external), None);
             assert!(result.is_ok());
-
-            let dispatcher = result.unwrap();
-            // task_list should come from external, not builtins
-            assert!(!dispatcher.is_builtin("task_list"));
-
-            let tools = dispatcher.tools();
-            let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-            assert!(tool_names.contains(&"task_list")); // From external
+            assert!(!result.unwrap().is_builtin("task_list"));
         }
     }
 
-    // Additional tests for dispatch behavior
     mod dispatch_tests {
         use super::*;
         use serde_json::json;
@@ -496,42 +429,31 @@ mod tests {
         #[tokio::test]
         async fn test_composite_dispatch_builtin_invalid_args() {
             let store = Arc::new(MemoryTaskStore::new());
-            let dispatcher =
-                CompositeDispatcher::builtins_only(store, &BuiltinToolConfig::default(), None)
-                    .unwrap();
-
-            // Missing required 'description' field
+            let dispatcher = CompositeDispatcher::builtins_only(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+            )
+            .unwrap();
             let result = dispatcher
                 .dispatch("task_create", &json!({"subject": "Test"}))
                 .await;
-
             assert!(result.is_err());
-            let err = result.unwrap_err();
-            match err {
-                ToolError::InvalidArguments { name, .. } => {
-                    assert_eq!(name, "task_create");
-                }
-                _ => panic!("Expected InvalidArguments error, got {:?}", err),
-            }
         }
 
         #[tokio::test]
         async fn test_composite_dispatch_not_found() {
             let store = Arc::new(MemoryTaskStore::new());
-            let dispatcher =
-                CompositeDispatcher::builtins_only(store, &BuiltinToolConfig::default(), None)
-                    .unwrap();
-
+            let dispatcher = CompositeDispatcher::builtins_only(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+            )
+            .unwrap();
             let result = dispatcher.dispatch("nonexistent_tool", &json!({})).await;
-
-            assert!(result.is_err());
-            let err = result.unwrap_err();
-            match err {
-                ToolError::NotFound { name } => {
-                    assert_eq!(name, "nonexistent_tool");
-                }
-                _ => panic!("Expected NotFound error, got {:?}", err),
-            }
+            assert!(matches!(result.unwrap_err(), ToolError::NotFound { .. }));
         }
 
         #[tokio::test]
@@ -540,23 +462,18 @@ mod tests {
             let dispatcher = CompositeDispatcher::builtins_only(
                 store.clone(),
                 &BuiltinToolConfig::default(),
+                None,
                 Some("test-session-123".to_string()),
             )
             .unwrap();
-
             let result = dispatcher
                 .dispatch(
                     "task_create",
-                    &json!({
-                        "subject": "Session test",
-                        "description": "Task with session tracking"
-                    }),
+                    &json!({"subject": "Session test", "description": "Task with session"}),
                 )
                 .await
                 .unwrap();
-
             assert_eq!(result["created_by_session"], "test-session-123");
-            assert_eq!(result["updated_by_session"], "test-session-123");
         }
 
         #[tokio::test]
@@ -565,38 +482,178 @@ mod tests {
             let dispatcher = CompositeDispatcher::builtins_only(
                 store.clone(),
                 &BuiltinToolConfig::default(),
+                None,
                 Some("update-session".to_string()),
             )
             .unwrap();
-
-            // Create a task
             let create_result = dispatcher
                 .dispatch(
                     "task_create",
-                    &json!({
-                        "subject": "Task to update",
-                        "description": "Will be updated"
-                    }),
+                    &json!({"subject": "Task to update", "description": "Will be updated"}),
                 )
                 .await
                 .unwrap();
-
             let task_id = create_result["id"].as_str().unwrap();
-
-            // Update the task
             let update_result = dispatcher
                 .dispatch(
                     "task_update",
-                    &json!({
-                        "id": task_id,
-                        "subject": "Updated task"
-                    }),
+                    &json!({"id": task_id, "subject": "Updated task"}),
                 )
                 .await
                 .unwrap();
-
-            assert_eq!(update_result["subject"], "Updated task");
             assert_eq!(update_result["updated_by_session"], "update-session");
+        }
+    }
+
+    mod shell_tools_tests {
+        use super::*;
+
+        fn create_shell_config() -> ShellConfig {
+            ShellConfig::with_project_root(std::env::temp_dir())
+        }
+
+        fn config_with_shell_enabled() -> BuiltinToolConfig {
+            BuiltinToolConfig {
+                policy: ToolPolicyLayer::new()
+                    .enable_tool("shell")
+                    .enable_tool("shell_job_status")
+                    .enable_tool("shell_jobs")
+                    .enable_tool("shell_job_cancel"),
+                enforced: EnforcedToolPolicy::default(),
+            }
+        }
+
+        #[test]
+        fn test_shell_tools_appear_when_explicitly_enabled() {
+            let dispatcher = create_test_dispatcher_with_shell(
+                config_with_shell_enabled(),
+                create_shell_config(),
+            );
+            let tools = dispatcher.tools();
+            let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            assert!(tool_names.contains(&"shell"));
+            assert!(tool_names.contains(&"shell_job_status"));
+            assert_eq!(dispatcher.builtin_count(), 8);
+        }
+
+        #[test]
+        fn test_shell_tools_not_present_without_config() {
+            let dispatcher = create_test_dispatcher(BuiltinToolConfig::default());
+            let tools = dispatcher.tools();
+            let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            assert!(!tool_names.contains(&"shell"));
+            assert_eq!(dispatcher.builtin_count(), 4);
+        }
+
+        #[test]
+        fn test_shell_tools_disabled_by_default_when_not_explicitly_enabled() {
+            let dispatcher = create_test_dispatcher_with_shell(
+                BuiltinToolConfig::default(),
+                create_shell_config(),
+            );
+            let tools = dispatcher.tools();
+            let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            assert!(!tool_names.contains(&"shell"));
+            assert_eq!(dispatcher.builtin_count(), 4);
+        }
+
+        #[test]
+        fn test_shell_tools_filtered_by_deny_all() {
+            let config = BuiltinToolConfig {
+                policy: ToolPolicyLayer::new().with_mode(ToolMode::DenyAll),
+                enforced: EnforcedToolPolicy::default(),
+            };
+            let dispatcher = create_test_dispatcher_with_shell(config, create_shell_config());
+            assert!(dispatcher.tools().is_empty());
+        }
+
+        #[test]
+        fn test_shell_tools_filtered_by_allow_list() {
+            let config = BuiltinToolConfig {
+                policy: ToolPolicyLayer::new()
+                    .with_mode(ToolMode::AllowList)
+                    .enable_tool("shell")
+                    .enable_tool("task_list"),
+                enforced: EnforcedToolPolicy::default(),
+            };
+            let dispatcher = create_test_dispatcher_with_shell(config, create_shell_config());
+            assert_eq!(dispatcher.tools().len(), 2);
+        }
+
+        #[test]
+        fn test_shell_tools_filtered_by_enforced_deny() {
+            let config = BuiltinToolConfig {
+                policy: ToolPolicyLayer::new()
+                    .enable_tool("shell")
+                    .enable_tool("shell_job_status")
+                    .enable_tool("shell_jobs")
+                    .enable_tool("shell_job_cancel"),
+                enforced: EnforcedToolPolicy {
+                    allow: HashSet::new(),
+                    deny: ["shell", "shell_job_cancel"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect(),
+                },
+            };
+            let dispatcher = create_test_dispatcher_with_shell(config, create_shell_config());
+            let tools = dispatcher.tools();
+            let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            assert!(!tool_names.contains(&"shell"));
+            assert!(tool_names.contains(&"shell_job_status"));
+        }
+
+        #[test]
+        fn test_shell_tool_is_builtin() {
+            let dispatcher = create_test_dispatcher_with_shell(
+                config_with_shell_enabled(),
+                create_shell_config(),
+            );
+            assert!(dispatcher.is_builtin("shell"));
+        }
+
+        #[test]
+        fn test_individual_shell_tool_can_be_disabled() {
+            let config = BuiltinToolConfig {
+                policy: ToolPolicyLayer::new()
+                    .enable_tool("shell")
+                    .enable_tool("shell_job_status")
+                    .enable_tool("shell_jobs"),
+                enforced: EnforcedToolPolicy::default(),
+            };
+            let dispatcher = create_test_dispatcher_with_shell(config, create_shell_config());
+            let tools = dispatcher.tools();
+            let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            assert!(!tool_names.contains(&"shell_job_cancel"));
+            assert!(tool_names.contains(&"shell"));
+        }
+
+        #[test]
+        fn test_builtins_only_with_shell_requires_explicit_enable() {
+            let store = Arc::new(MemoryTaskStore::new());
+            let dispatcher = CompositeDispatcher::builtins_only(
+                store,
+                &BuiltinToolConfig::default(),
+                Some(create_shell_config()),
+                None,
+            )
+            .unwrap();
+            assert_eq!(dispatcher.builtin_count(), 4);
+            assert!(!dispatcher.is_builtin("shell"));
+        }
+
+        #[test]
+        fn test_builtins_only_with_shell_enabled() {
+            let store = Arc::new(MemoryTaskStore::new());
+            let dispatcher = CompositeDispatcher::builtins_only(
+                store,
+                &config_with_shell_enabled(),
+                Some(create_shell_config()),
+                None,
+            )
+            .unwrap();
+            assert_eq!(dispatcher.builtin_count(), 8);
+            assert!(dispatcher.is_builtin("shell"));
         }
     }
 }

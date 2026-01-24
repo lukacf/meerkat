@@ -288,6 +288,7 @@ impl AgentSessionStore for MemorySessionStore {
 }
 
 // Re-export builtin types for convenience
+pub use meerkat_tools::builtin::shell::ShellConfig;
 pub use meerkat_tools::{
     BuiltinToolConfig, CompositeDispatcher, CompositeDispatcherError, FileTaskStore, TaskStore,
     ensure_rkat_dir, find_project_root,
@@ -321,7 +322,8 @@ pub use meerkat_tools::{
 ///
 /// let dispatcher = create_dispatcher_with_builtins(
 ///     &BuiltinToolConfig::default(),
-///     None,
+///     None,  // shell_config
+///     None,  // external
 ///     Some("my-session".to_string()),
 /// )?;
 ///
@@ -331,6 +333,7 @@ pub use meerkat_tools::{
 /// ```
 pub fn create_dispatcher_with_builtins(
     config: &BuiltinToolConfig,
+    shell_config: Option<ShellConfig>,
     external: Option<std::sync::Arc<dyn crate::AgentToolDispatcher>>,
     session_id: Option<String>,
 ) -> Result<std::sync::Arc<CompositeDispatcher>, CompositeDispatcherError> {
@@ -338,14 +341,14 @@ pub fn create_dispatcher_with_builtins(
     let project_root = find_project_root(&cwd);
     ensure_rkat_dir(&project_root).map_err(CompositeDispatcherError::Io)?;
     let store = std::sync::Arc::new(FileTaskStore::in_project(&project_root));
-    let dispatcher = CompositeDispatcher::new(store, config, external, session_id)?;
+    let dispatcher = CompositeDispatcher::new(store, config, shell_config, external, session_id)?;
     Ok(std::sync::Arc::new(dispatcher))
 }
 
-/// Create a tool dispatcher with only built-in tools (no external tools).
+/// Create a tool dispatcher with only built-in task tools (no shell tools, no external tools).
 ///
 /// This is a convenience wrapper around [`create_dispatcher_with_builtins`]
-/// for the common case of using only built-in tools.
+/// for the common case of using only task tools.
 ///
 /// # Example
 ///
@@ -365,7 +368,36 @@ pub fn create_builtins_dispatcher(
     config: &BuiltinToolConfig,
     session_id: Option<String>,
 ) -> Result<std::sync::Arc<CompositeDispatcher>, CompositeDispatcherError> {
-    create_dispatcher_with_builtins(config, None, session_id)
+    create_dispatcher_with_builtins(config, None, None, session_id)
+}
+
+/// Create a tool dispatcher with built-in task and shell tools.
+///
+/// This is a convenience wrapper for the common case of using both
+/// task management and shell command execution tools.
+///
+/// # Example
+///
+/// ```ignore
+/// use meerkat::{create_shell_dispatcher, BuiltinToolConfig, ShellConfig, AgentBuilder};
+///
+/// let shell_config = ShellConfig::with_project_root("/path/to/project".into());
+/// let dispatcher = create_shell_dispatcher(
+///     &BuiltinToolConfig::default(),
+///     shell_config,
+///     Some("my-session".to_string()),
+/// )?;
+///
+/// let agent = AgentBuilder::new()
+///     .model("claude-sonnet-4")
+///     .build(llm_client, dispatcher, store);
+/// ```
+pub fn create_shell_dispatcher(
+    config: &BuiltinToolConfig,
+    shell_config: ShellConfig,
+    session_id: Option<String>,
+) -> Result<std::sync::Arc<CompositeDispatcher>, CompositeDispatcherError> {
+    create_dispatcher_with_builtins(config, Some(shell_config), None, session_id)
 }
 
 #[cfg(test)]
@@ -386,7 +418,7 @@ mod tests {
         let store = Arc::new(MemoryTaskStore::new());
         let config = BuiltinToolConfig::default();
         let dispatcher =
-            CompositeDispatcher::new(store, &config, None, Some("test-session".to_string()))
+            CompositeDispatcher::new(store, &config, None, None, Some("test-session".to_string()))
                 .unwrap();
 
         // Should have all 4 task tools
@@ -403,7 +435,7 @@ mod tests {
 
         let store = Arc::new(MemoryTaskStore::new());
         let config = BuiltinToolConfig::default();
-        let dispatcher = CompositeDispatcher::new(store, &config, None, None).unwrap();
+        let dispatcher = CompositeDispatcher::new(store, &config, None, None, None).unwrap();
 
         // Create a task
         let args = serde_json::json!({
@@ -467,9 +499,14 @@ mod tests {
         // Create dispatcher with FileTaskStore
         let store = Arc::new(FileTaskStore::in_project(temp_path));
         let config = BuiltinToolConfig::default();
-        let dispatcher =
-            CompositeDispatcher::new(store, &config, None, Some("file-test-session".to_string()))
-                .unwrap();
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &config,
+            None,
+            None,
+            Some("file-test-session".to_string()),
+        )
+        .unwrap();
 
         // Create a task
         let create_result = dispatcher

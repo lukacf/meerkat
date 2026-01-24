@@ -10,7 +10,7 @@ use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{
-    model::{CallToolRequestParam, RawContent},
+    model::{CallToolRequestParams, RawContent},
     service::{RoleClient, RunningService, ServiceExt},
     transport::TokioChildProcess,
 };
@@ -132,9 +132,10 @@ impl McpConnection {
 
         let result = self
             .service
-            .call_tool(CallToolRequestParam {
+            .call_tool(CallToolRequestParams {
                 name: name.to_string().into(),
                 arguments,
+                meta: None,
                 task: None,
             })
             .await

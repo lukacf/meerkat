@@ -8,6 +8,10 @@ use adapters::{
     CliToolDispatcher, DynLlmClientAdapter, EmptyToolDispatcher, McpRouterAdapter,
     SessionStoreAdapter,
 };
+use meerkat_tools::builtin::{
+    BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolMode, ToolPolicyLayer,
+    shell::ShellConfig,
+};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use meerkat_client::{AnthropicClient, GeminiClient, OpenAiClient};
@@ -90,6 +94,20 @@ enum Commands {
         /// Disable inter-agent communication entirely
         #[arg(long = "no-comms")]
         no_comms: bool,
+
+        // === Built-in tools flags ===
+        /// Enable built-in tools (tasks, shell). Adds task management tools.
+        #[arg(long)]
+        enable_builtins: bool,
+
+        /// Enable shell tool (requires --enable-builtins). Allows executing shell commands.
+        #[arg(long, requires = "enable_builtins")]
+        enable_shell: bool,
+
+        // === Output verbosity ===
+        /// Verbose output: show each turn, tool calls, and results as they happen
+        #[arg(long, short = 'v')]
+        verbose: bool,
     },
 
     /// Resume a previous session
@@ -257,6 +275,9 @@ async fn main() -> ExitCode {
             comms_name,
             comms_listen_tcp,
             no_comms,
+            enable_builtins,
+            enable_shell,
+            verbose,
         } => {
             // Resolve provider: explicit flag > infer from model > default
             let resolved_provider = provider
@@ -293,6 +314,9 @@ async fn main() -> ExitCode {
                         stream,
                         parsed_params,
                         comms_overrides,
+                        enable_builtins,
+                        enable_shell,
+                        verbose,
                     )
                     .await
                 }
@@ -441,6 +465,9 @@ async fn run_agent(
     stream: bool,
     provider_params: Option<serde_json::Value>,
     comms_overrides: config::CommsOverrides,
+    enable_builtins: bool,
+    enable_shell: bool,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     use meerkat_core::event::AgentEvent;
     use std::io::Write;
@@ -481,12 +508,87 @@ async fn run_agent(
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
 
     // Load MCP config and create tool dispatcher
-    let tools: Arc<CliToolDispatcher> = match create_mcp_tools().await {
-        Ok(Some(adapter)) => Arc::new(CliToolDispatcher::Mcp(Box::new(adapter))),
-        Ok(None) => Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher)),
-        Err(e) => {
-            tracing::warn!("Failed to load MCP tools: {}", e);
-            Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher))
+    let tools: Arc<CliToolDispatcher> = if enable_builtins {
+        use std::collections::HashSet;
+
+        // Create builtin tool configuration
+        let mut enabled_tools: HashSet<String> =
+            ["task_list", "task_get", "task_create", "task_update"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+
+        // Add shell tools if enabled
+        if enable_shell {
+            enabled_tools.extend([
+                "shell".to_string(),
+                "job_status".to_string(),
+                "jobs_list".to_string(),
+                "job_cancel".to_string(),
+            ]);
+        }
+
+        let builtin_config = BuiltinToolConfig {
+            policy: ToolPolicyLayer {
+                mode: Some(ToolMode::AllowList),
+                enable: enabled_tools,
+                disable: HashSet::new(),
+            },
+            enforced: Default::default(),
+        };
+
+        // Create shell config if shell is enabled
+        let shell_config = if enable_shell {
+            let project_root =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            Some(ShellConfig {
+                enabled: true,
+                default_timeout_secs: 300,
+                restrict_to_project: true,
+                shell: "bash".to_string(),
+                shell_path: None,
+                project_root,
+                max_completed_jobs: 100,
+                completed_job_ttl_secs: 300,
+            })
+        } else {
+            None
+        };
+
+        // Create in-memory task store
+        let task_store = MemoryTaskStore::new();
+
+        // Create composite dispatcher with MCP tools if available
+        let mcp_adapter = match create_mcp_tools().await {
+            Ok(Some(adapter)) => {
+                Some(Arc::new(adapter) as Arc<dyn meerkat_core::agent::AgentToolDispatcher>)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("Failed to load MCP tools: {}", e);
+                None
+            }
+        };
+
+        let composite = CompositeDispatcher::new(
+            Arc::new(task_store),
+            &builtin_config,
+            shell_config,
+            mcp_adapter,
+            None, // session_id - will be set later
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create composite dispatcher: {}", e))?;
+
+        Arc::new(CliToolDispatcher::Composite(Arc::new(composite)))
+    } else {
+        // No builtins - just MCP or empty
+        match create_mcp_tools().await {
+            Ok(Some(adapter)) => Arc::new(CliToolDispatcher::Mcp(Box::new(adapter))),
+            Ok(None) => Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher)),
+            Err(e) => {
+                tracing::warn!("Failed to load MCP tools: {}", e);
+                Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher))
+            }
         }
     };
 
@@ -547,7 +649,7 @@ async fn run_agent(
     // Run the agent
     tracing::info!("Running agent with model: {}", model);
 
-    // Spawn streaming output task if enabled
+    // Spawn streaming output task if enabled (for LLM text deltas)
     let stream_task = if stream {
         Some(tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
@@ -563,7 +665,99 @@ async fn run_agent(
         None
     };
 
-    let result = agent.run(prompt.to_string()).await?;
+    // Run with or without verbose agent events
+    let result = if verbose {
+        // Create channel for agent events
+        let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
+
+        // Spawn task to display verbose events
+        let verbose_task = tokio::spawn(async move {
+            while let Some(event) = agent_event_rx.recv().await {
+                match event {
+                    AgentEvent::TurnStarted { turn_number } => {
+                        eprintln!("\n━━━ Turn {} ━━━", turn_number + 1);
+                    }
+                    AgentEvent::ToolCallRequested { name, args, .. } => {
+                        let args_str = serde_json::to_string(&args).unwrap_or_default();
+                        let args_preview = if args_str.len() > 100 {
+                            format!("{}...", &args_str[..100])
+                        } else {
+                            args_str
+                        };
+                        eprintln!("  → Calling tool: {} {}", name, args_preview);
+                    }
+                    AgentEvent::ToolExecutionCompleted {
+                        name,
+                        result,
+                        is_error,
+                        duration_ms,
+                        ..
+                    } => {
+                        let status = if is_error { "✗" } else { "✓" };
+                        let result_preview = if result.len() > 200 {
+                            format!("{}...", &result[..200])
+                        } else {
+                            result
+                        };
+                        eprintln!(
+                            "  {} {} ({}ms): {}",
+                            status, name, duration_ms, result_preview
+                        );
+                    }
+                    AgentEvent::TurnCompleted { stop_reason, usage } => {
+                        eprintln!(
+                            "  ── Turn complete: {:?} ({} in / {} out tokens)",
+                            stop_reason, usage.input_tokens, usage.output_tokens
+                        );
+                    }
+                    AgentEvent::TextComplete { content } => {
+                        if !content.is_empty() {
+                            let preview = if content.len() > 500 {
+                                format!("{}...", &content[..500])
+                            } else {
+                                content
+                            };
+                            eprintln!("  💬 Response: {}", preview);
+                        }
+                    }
+                    AgentEvent::Retrying {
+                        attempt,
+                        max_attempts,
+                        error,
+                        delay_ms,
+                    } => {
+                        eprintln!(
+                            "  ⟳ Retry {}/{}: {} (waiting {}ms)",
+                            attempt, max_attempts, error, delay_ms
+                        );
+                    }
+                    AgentEvent::BudgetWarning {
+                        budget_type,
+                        used,
+                        limit,
+                        percent,
+                    } => {
+                        eprintln!(
+                            "  ⚠ Budget warning: {:?} at {:.0}% ({}/{})",
+                            budget_type,
+                            percent * 100.0,
+                            used,
+                            limit
+                        );
+                    }
+                    _ => {} // Ignore other events
+                }
+            }
+        });
+
+        let result = agent
+            .run_with_events(prompt.to_string(), agent_event_tx)
+            .await?;
+        let _ = verbose_task.await;
+        result
+    } else {
+        agent.run(prompt.to_string()).await?
+    };
 
     // Wait for streaming task to complete (it will end when sender is dropped)
     if let Some(task) = stream_task {

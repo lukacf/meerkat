@@ -235,6 +235,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 }
 
 use meerkat_mcp_client::McpRouter;
+use meerkat_tools::builtin::CompositeDispatcher;
 use tokio::sync::RwLock;
 
 /// Adapter that wraps an McpRouter to implement AgentToolDispatcher
@@ -306,18 +307,22 @@ impl AgentToolDispatcher for McpRouterAdapter {
     }
 }
 
-/// Combined tool dispatcher that can be either empty or MCP-backed
+/// Combined tool dispatcher that can be empty, MCP-backed, or composite (with builtins)
 pub enum CliToolDispatcher {
     Empty(EmptyToolDispatcher),
     Mcp(Box<McpRouterAdapter>),
+    Composite(std::sync::Arc<CompositeDispatcher>),
 }
 
 impl CliToolDispatcher {
-    /// Gracefully shutdown MCP connections (no-op for Empty)
+    /// Gracefully shutdown MCP connections (no-op for Empty and Composite)
     pub async fn shutdown(&self) {
         match self {
             CliToolDispatcher::Empty(_) => {}
             CliToolDispatcher::Mcp(adapter) => adapter.shutdown().await,
+            CliToolDispatcher::Composite(_) => {
+                // CompositeDispatcher doesn't have external connections to shut down
+            }
         }
     }
 }
@@ -328,6 +333,7 @@ impl AgentToolDispatcher for CliToolDispatcher {
         match self {
             CliToolDispatcher::Empty(d) => d.tools(),
             CliToolDispatcher::Mcp(d) => d.tools(),
+            CliToolDispatcher::Composite(d) => d.tools(),
         }
     }
 
@@ -335,6 +341,7 @@ impl AgentToolDispatcher for CliToolDispatcher {
         match self {
             CliToolDispatcher::Empty(d) => d.dispatch(name, args).await,
             CliToolDispatcher::Mcp(d) => d.dispatch(name, args).await,
+            CliToolDispatcher::Composite(d) => d.dispatch(name, args).await,
         }
     }
 }

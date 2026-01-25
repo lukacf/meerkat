@@ -28,9 +28,11 @@ impl GeminiClient {
         }
     }
 
-    /// Create from environment variable GOOGLE_API_KEY
+    /// Create from environment variable GEMINI_API_KEY (or GOOGLE_API_KEY for backwards compatibility)
     pub fn from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("GOOGLE_API_KEY").map_err(|_| LlmError::InvalidApiKey)?;
+        let api_key = std::env::var("GEMINI_API_KEY")
+            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+            .map_err(|_| LlmError::InvalidApiKey)?;
         Ok(Self::new(api_key))
     }
 
@@ -38,6 +40,37 @@ impl GeminiClient {
     pub fn with_base_url(mut self, url: String) -> Self {
         self.base_url = url;
         self
+    }
+
+    /// Sanitize JSON Schema for Gemini API compatibility
+    ///
+    /// Gemini's function declarations don't support advanced JSON Schema features:
+    /// - $defs / $ref (JSON Schema references)
+    /// - additionalProperties
+    /// - $schema
+    fn sanitize_schema_for_gemini(schema: &Value) -> Value {
+        match schema {
+            Value::Object(map) => {
+                let mut sanitized = serde_json::Map::new();
+                for (key, value) in map {
+                    // Skip unsupported JSON Schema features
+                    if key == "$defs"
+                        || key == "$ref"
+                        || key == "$schema"
+                        || key == "additionalProperties"
+                    {
+                        continue;
+                    }
+                    // Recursively sanitize nested objects
+                    sanitized.insert(key.clone(), Self::sanitize_schema_for_gemini(value));
+                }
+                Value::Object(sanitized)
+            }
+            Value::Array(arr) => {
+                Value::Array(arr.iter().map(Self::sanitize_schema_for_gemini).collect())
+            }
+            other => other.clone(),
+        }
     }
 
     /// Build request body for Gemini API
@@ -66,12 +99,24 @@ impl GeminiClient {
                     }
 
                     for tc in &a.tool_calls {
-                        parts.push(serde_json::json!({
-                            "functionCall": {
-                                "name": tc.name,
-                                "args": tc.args
-                            }
-                        }));
+                        // For Gemini 3+, include thoughtSignature in functionCall parts
+                        let part = if let Some(sig) = &tc.thought_signature {
+                            serde_json::json!({
+                                "functionCall": {
+                                    "name": tc.name,
+                                    "args": tc.args
+                                },
+                                "thoughtSignature": sig
+                            })
+                        } else {
+                            serde_json::json!({
+                                "functionCall": {
+                                    "name": tc.name,
+                                    "args": tc.args
+                                }
+                            })
+                        };
+                        parts.push(part);
                     }
 
                     contents.push(serde_json::json!({
@@ -83,15 +128,30 @@ impl GeminiClient {
                     let parts: Vec<Value> = results
                         .iter()
                         .map(|r| {
-                            serde_json::json!({
-                                "functionResponse": {
-                                    "name": r.tool_use_id,  // Gemini uses name, not id
-                                    "response": {
-                                        "content": r.content,
-                                        "error": r.is_error
+                            // Build the functionResponse with thought_signature at the correct level
+                            // For Gemini 3+, thoughtSignature must be at the part level (sibling to functionResponse)
+                            if let Some(sig) = &r.thought_signature {
+                                serde_json::json!({
+                                    "functionResponse": {
+                                        "name": r.tool_use_id,  // Gemini uses name, not id
+                                        "response": {
+                                            "content": r.content,
+                                            "error": r.is_error
+                                        }
+                                    },
+                                    "thoughtSignature": sig
+                                })
+                            } else {
+                                serde_json::json!({
+                                    "functionResponse": {
+                                        "name": r.tool_use_id,
+                                        "response": {
+                                            "content": r.content,
+                                            "error": r.is_error
+                                        }
                                     }
-                                }
-                            })
+                                })
+                            }
                         })
                         .collect();
 
@@ -142,7 +202,7 @@ impl GeminiClient {
                     serde_json::json!({
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.input_schema
+                        "parameters": Self::sanitize_schema_for_gemini(&t.input_schema)
                     })
                 })
                 .collect();
@@ -241,15 +301,21 @@ impl LlmClient for GeminiClient {
                                     }
 
                                     // Function call part
-                                    if let Some(fc) = part.function_call {
+                                    if let Some(fc) = &part.function_call {
                                         let id = format!("fc_{}", tool_index);
                                         tool_index += 1;
 
                                         // Gemini sends complete function calls
+                                        // For Gemini 3+, capture the thought_signature to pass back
+                                        // Try both part-level and FunctionCall-level thought_signature
+                                        let thought_sig = part.thought_signature.clone()
+                                            .or_else(|| fc.thought_signature.clone());
+
                                         yield LlmEvent::ToolCallComplete {
                                             id,
-                                            name: fc.name,
-                                            args: fc.args.unwrap_or(Value::Object(Default::default())),
+                                            name: fc.name.clone(),
+                                            args: fc.args.clone().unwrap_or(Value::Object(Default::default())),
+                                            thought_signature: thought_sig,
                                         };
                                     }
                                 }
@@ -338,6 +404,8 @@ struct Content {
 struct Part {
     text: Option<String>,
     function_call: Option<FunctionCall>,
+    /// Thought signature for Gemini 3+ models (must be passed back)
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -345,6 +413,8 @@ struct Part {
 struct FunctionCall {
     name: String,
     args: Option<Value>,
+    /// Thought signature might also be at FunctionCall level for some models
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

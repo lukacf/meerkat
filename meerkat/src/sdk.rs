@@ -202,8 +202,18 @@ impl<C: LlmClient + 'static> AgentLlmClient for QuickLlmAdapter<C> {
                     LlmEvent::TextDelta { delta } => {
                         content.push_str(&delta);
                     }
-                    LlmEvent::ToolCallComplete { id, name, args } => {
-                        tool_calls.push(ToolCall { id, name, args });
+                    LlmEvent::ToolCallComplete {
+                        id,
+                        name,
+                        args,
+                        thought_signature,
+                    } => {
+                        let tc = if let Some(sig) = thought_signature {
+                            ToolCall::with_thought_signature(id, name, args, sig)
+                        } else {
+                            ToolCall::new(id, name, args)
+                        };
+                        tool_calls.push(tc);
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;

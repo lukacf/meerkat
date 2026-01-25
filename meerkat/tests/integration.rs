@@ -361,11 +361,11 @@ mod session_persistence {
             content: "Call a tool".to_string(),
         }));
         session.push(Message::ToolResults {
-            results: vec![ToolResult {
-                tool_use_id: "call_123".to_string(),
-                content: "Tool output".to_string(),
-                is_error: false,
-            }],
+            results: vec![ToolResult::new(
+                "call_123".to_string(),
+                "Tool output".to_string(),
+                false,
+            )],
         });
 
         let original_id = session.id().clone();
@@ -975,11 +975,11 @@ mod combined {
 
         session.push(Message::Assistant(AssistantMessage {
             content: "".to_string(),
-            tool_calls: vec![ToolCall {
-                id: "tc_1".to_string(),
-                name: "test_tool".to_string(),
-                args: serde_json::json!({"input": "test"}),
-            }],
+            tool_calls: vec![ToolCall::new(
+                "tc_1".to_string(),
+                "test_tool".to_string(),
+                serde_json::json!({"input": "test"}),
+            )],
             stop_reason: StopReason::ToolUse,
             usage: Usage {
                 input_tokens: 100,
@@ -990,11 +990,11 @@ mod combined {
         }));
 
         session.push(Message::ToolResults {
-            results: vec![ToolResult {
-                tool_use_id: "tc_1".to_string(),
-                content: "Tool result".to_string(),
-                is_error: false,
-            }],
+            results: vec![ToolResult::new(
+                "tc_1".to_string(),
+                "Tool result".to_string(),
+                false,
+            )],
         });
 
         session.push(Message::Assistant(AssistantMessage {

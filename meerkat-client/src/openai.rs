@@ -284,6 +284,7 @@ impl LlmClient for OpenAiClient {
                                             id: tc.id,
                                             name: tc.name,
                                             args: tc.args,
+                                            thought_signature: None, // OpenAI doesn't use thought signatures
                                         };
                                     }
                                 }
@@ -520,11 +521,11 @@ pub mod tests {
                 }),
                 Message::Assistant(AssistantMessage {
                     content: String::new(),
-                    tool_calls: vec![ToolCall {
-                        id: "call_123".to_string(),
-                        name: "get_weather".to_string(),
-                        args: tool_args.clone(),
-                    }],
+                    tool_calls: vec![ToolCall::new(
+                        "call_123".to_string(),
+                        "get_weather".to_string(),
+                        tool_args.clone(),
+                    )],
                     stop_reason: CoreStopReason::ToolUse,
                     usage: CoreUsage::default(),
                 }),

@@ -15,6 +15,25 @@ use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use uuid::Uuid;
 
+/// Information about a sub-agent (public view)
+#[derive(Debug, Clone)]
+pub struct SubAgentInfo {
+    /// Operation ID for this sub-agent
+    pub id: OperationId,
+    /// Name/identifier for this sub-agent
+    pub name: String,
+    /// Current state
+    pub state: SubAgentState,
+    /// Nesting depth
+    pub depth: u32,
+    /// Duration running in milliseconds
+    pub running_ms: u64,
+    /// Number of pending steering messages
+    pub pending_steering: usize,
+    /// Result when completed
+    pub result: Option<OperationResult>,
+}
+
 /// A running sub-agent handle
 #[derive(Debug)]
 pub struct SubAgentHandle {
@@ -343,6 +362,37 @@ impl SubAgentManager {
     pub async fn get_state(&self, id: &OperationId) -> Option<SubAgentState> {
         let agents = self.agents.read().await;
         agents.get(id).map(|h| h.state.clone())
+    }
+
+    /// Get detailed information about a sub-agent (for status queries)
+    pub async fn get_agent_info(&self, id: &OperationId) -> Option<SubAgentInfo> {
+        let agents = self.agents.read().await;
+        agents.get(id).map(|h| SubAgentInfo {
+            id: h.id.clone(),
+            name: h.name.clone(),
+            state: h.state.clone(),
+            depth: h.depth,
+            running_ms: h.started_at.elapsed().as_millis() as u64,
+            pending_steering: h.steering_queue.len(),
+            result: h.result.clone(),
+        })
+    }
+
+    /// Get all agent infos (for list queries)
+    pub async fn list_agents(&self) -> Vec<SubAgentInfo> {
+        let agents = self.agents.read().await;
+        agents
+            .values()
+            .map(|h| SubAgentInfo {
+                id: h.id.clone(),
+                name: h.name.clone(),
+                state: h.state.clone(),
+                depth: h.depth,
+                running_ms: h.started_at.elapsed().as_millis() as u64,
+                pending_steering: h.steering_queue.len(),
+                result: h.result.clone(),
+            })
+            .collect()
     }
 
     /// Get all running sub-agent IDs

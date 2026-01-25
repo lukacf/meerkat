@@ -351,6 +351,7 @@ impl LlmClient for AnthropicClient {
                                             id: tc.id,
                                             name: tc.name,
                                             args: tc.args,
+                                            thought_signature: None, // Anthropic doesn't use thought signatures
                                         };
                                     }
                                 }

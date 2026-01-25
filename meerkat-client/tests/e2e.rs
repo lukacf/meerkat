@@ -92,7 +92,7 @@ async fn test_anthropic_tool_call() {
 
     while let Some(event) = stream.next().await {
         match event {
-            Ok(LlmEvent::ToolCallComplete { id, name, args }) => {
+            Ok(LlmEvent::ToolCallComplete { id, name, args, .. }) => {
                 got_tool_call = true;
                 assert!(!id.is_empty());
                 assert_eq!(name, "get_weather");
@@ -281,7 +281,7 @@ async fn test_openai_tool_call() {
 
     while let Some(event) = stream.next().await {
         match event {
-            Ok(LlmEvent::ToolCallComplete { id, name, args }) => {
+            Ok(LlmEvent::ToolCallComplete { id, name, args, .. }) => {
                 got_tool_call = true;
                 assert!(!id.is_empty());
                 assert_eq!(name, "get_weather");
@@ -460,7 +460,7 @@ async fn test_gemini_tool_call() {
 
     while let Some(event) = stream.next().await {
         match event {
-            Ok(LlmEvent::ToolCallComplete { id, name, args }) => {
+            Ok(LlmEvent::ToolCallComplete { id, name, args, .. }) => {
                 got_tool_call = true;
                 assert!(!id.is_empty());
                 assert_eq!(name, "get_weather");

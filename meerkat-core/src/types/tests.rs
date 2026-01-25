@@ -57,11 +57,11 @@ fn test_message_json_schema() {
 
     // Tool results
     let tool_results = Message::ToolResults {
-        results: vec![ToolResult {
-            tool_use_id: "tool_123".to_string(),
-            content: "Result content".to_string(),
-            is_error: false,
-        }],
+        results: vec![ToolResult::new(
+            "tool_123".to_string(),
+            "Result content".to_string(),
+            false,
+        )],
     };
     let json = serde_json::to_value(&tool_results).unwrap();
     assert_eq!(json["role"], "tool_results");
@@ -70,11 +70,11 @@ fn test_message_json_schema() {
 
 #[test]
 fn test_tool_call_serialization() {
-    let tool_call = ToolCall {
-        id: "tc_abc123".to_string(),
-        name: "read_file".to_string(),
-        args: json!({"path": "/tmp/test.txt"}),
-    };
+    let tool_call = ToolCall::new(
+        "tc_abc123".to_string(),
+        "read_file".to_string(),
+        json!({"path": "/tmp/test.txt"}),
+    );
 
     let json = serde_json::to_string(&tool_call).unwrap();
     let parsed: ToolCall = serde_json::from_str(&json).unwrap();
@@ -82,15 +82,35 @@ fn test_tool_call_serialization() {
     assert_eq!(parsed.id, "tc_abc123");
     assert_eq!(parsed.name, "read_file");
     assert_eq!(parsed.args["path"], "/tmp/test.txt");
+    assert!(parsed.thought_signature.is_none());
+}
+
+#[test]
+fn test_tool_call_with_thought_signature() {
+    let tool_call = ToolCall::with_thought_signature(
+        "tc_gemini".to_string(),
+        "search".to_string(),
+        json!({"query": "test"}),
+        "encrypted_thought_abc123".to_string(),
+    );
+
+    let json = serde_json::to_string(&tool_call).unwrap();
+    let parsed: ToolCall = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.id, "tc_gemini");
+    assert_eq!(
+        parsed.thought_signature,
+        Some("encrypted_thought_abc123".to_string())
+    );
 }
 
 #[test]
 fn test_tool_result_serialization() {
-    let result = ToolResult {
-        tool_use_id: "tc_abc123".to_string(),
-        content: "File contents here".to_string(),
-        is_error: false,
-    };
+    let result = ToolResult::new(
+        "tc_abc123".to_string(),
+        "File contents here".to_string(),
+        false,
+    );
 
     let json = serde_json::to_string(&result).unwrap();
     let parsed: ToolResult = serde_json::from_str(&json).unwrap();
@@ -98,17 +118,53 @@ fn test_tool_result_serialization() {
     assert_eq!(parsed.tool_use_id, "tc_abc123");
     assert_eq!(parsed.content, "File contents here");
     assert!(!parsed.is_error);
+    assert!(parsed.thought_signature.is_none());
 
     // Error result
-    let error_result = ToolResult {
-        tool_use_id: "tc_abc124".to_string(),
-        content: "Permission denied".to_string(),
-        is_error: true,
-    };
+    let error_result = ToolResult::new(
+        "tc_abc124".to_string(),
+        "Permission denied".to_string(),
+        true,
+    );
 
     let json = serde_json::to_string(&error_result).unwrap();
     let parsed: ToolResult = serde_json::from_str(&json).unwrap();
     assert!(parsed.is_error);
+}
+
+#[test]
+fn test_tool_result_with_thought_signature() {
+    let result = ToolResult::with_thought_signature(
+        "tc_gemini".to_string(),
+        "Search results here".to_string(),
+        false,
+        "encrypted_thought_xyz".to_string(),
+    );
+
+    let json = serde_json::to_string(&result).unwrap();
+    let parsed: ToolResult = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(
+        parsed.thought_signature,
+        Some("encrypted_thought_xyz".to_string())
+    );
+}
+
+#[test]
+fn test_tool_result_from_tool_call() {
+    let tool_call = ToolCall::with_thought_signature(
+        "tc_123".to_string(),
+        "test_tool".to_string(),
+        json!({}),
+        "thought_sig".to_string(),
+    );
+
+    let result = ToolResult::from_tool_call(&tool_call, "output".to_string(), false);
+
+    assert_eq!(result.tool_use_id, "tc_123");
+    assert_eq!(result.content, "output");
+    assert!(!result.is_error);
+    assert_eq!(result.thought_signature, Some("thought_sig".to_string()));
 }
 
 #[test]
@@ -257,11 +313,11 @@ fn test_session_checkpoint_complex() {
             // With tool calls
             messages.push(Message::Assistant(AssistantMessage {
                 content: format!("Let me help with request {}", i),
-                tool_calls: vec![ToolCall {
-                    id: format!("tc_{}", i),
-                    name: "test_tool".to_string(),
-                    args: json!({"index": i}),
-                }],
+                tool_calls: vec![ToolCall::new(
+                    format!("tc_{}", i),
+                    "test_tool".to_string(),
+                    json!({"index": i}),
+                )],
                 stop_reason: StopReason::ToolUse,
                 usage: Usage {
                     input_tokens: 100 + i as u64,
@@ -272,11 +328,11 @@ fn test_session_checkpoint_complex() {
             }));
 
             messages.push(Message::ToolResults {
-                results: vec![ToolResult {
-                    tool_use_id: format!("tc_{}", i),
-                    content: format!("Tool result for {}", i),
-                    is_error: false,
-                }],
+                results: vec![ToolResult::new(
+                    format!("tc_{}", i),
+                    format!("Tool result for {}", i),
+                    false,
+                )],
             });
 
             messages.push(Message::Assistant(AssistantMessage {

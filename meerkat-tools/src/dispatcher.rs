@@ -56,11 +56,7 @@ impl ToolDispatcher {
     pub async fn dispatch_one(&self, call: &ToolCall) -> ToolResult {
         match self.dispatch_one_inner(call).await {
             Ok(result) => result,
-            Err(e) => ToolResult {
-                tool_use_id: call.id.clone(),
-                content: e.to_string(),
-                is_error: true,
-            },
+            Err(e) => ToolResult::from_tool_call(call, e.to_string(), true),
         }
     }
 
@@ -79,11 +75,7 @@ impl ToolDispatcher {
             timeout_ms: self.default_timeout.as_millis() as u64,
         })??;
 
-        Ok(ToolResult {
-            tool_use_id: call.id.clone(),
-            content: result,
-            is_error: false,
-        })
+        Ok(ToolResult::from_tool_call(call, result, false))
     }
 
     /// Dispatch multiple tool calls in parallel

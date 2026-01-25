@@ -10,6 +10,8 @@ repository.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
+meerkat-client = { workspace = true }
+meerkat-comms = { workspace = true }
 meerkat-mcp-client = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,6 +22,7 @@ async-trait = { workspace = true }
 jsonschema = { workspace = true }
 tracing = { workspace = true }
 ulid = { workspace = true }
+uuid = { workspace = true }
 chrono = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

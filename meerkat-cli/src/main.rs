@@ -8,9 +8,13 @@ use adapters::{
     CliToolDispatcher, DynLlmClientAdapter, EmptyToolDispatcher, McpRouterAdapter,
     SessionStoreAdapter,
 };
+use meerkat_client::{DefaultClientFactory, LlmClientFactory};
+use meerkat_core::ops::ConcurrencyLimits;
+use meerkat_core::sub_agent::SubAgentManager;
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolMode, ToolPolicyLayer,
     shell::ShellConfig,
+    sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState},
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -103,6 +107,10 @@ enum Commands {
         /// Enable shell tool (requires --enable-builtins). Allows executing shell commands.
         #[arg(long, requires = "enable_builtins")]
         enable_shell: bool,
+
+        /// Enable sub-agent tools (requires --enable-builtins). Allows spawning/managing sub-agents.
+        #[arg(long, requires = "enable_builtins")]
+        enable_subagents: bool,
 
         // === Output verbosity ===
         /// Verbose output: show each turn, tool calls, and results as they happen
@@ -277,6 +285,7 @@ async fn main() -> ExitCode {
             no_comms,
             enable_builtins,
             enable_shell,
+            enable_subagents,
             verbose,
         } => {
             // Resolve provider: explicit flag > infer from model > default
@@ -316,6 +325,7 @@ async fn main() -> ExitCode {
                         comms_overrides,
                         enable_builtins,
                         enable_shell,
+                        enable_subagents,
                         verbose,
                     )
                     .await
@@ -467,6 +477,7 @@ async fn run_agent(
     comms_overrides: config::CommsOverrides,
     enable_builtins: bool,
     enable_shell: bool,
+    enable_subagents: bool,
     verbose: bool,
 ) -> anyhow::Result<()> {
     use meerkat_core::event::AgentEvent;
@@ -528,6 +539,18 @@ async fn run_agent(
             ]);
         }
 
+        // Add sub-agent tools if enabled
+        if enable_subagents {
+            enabled_tools.extend([
+                "agent_spawn".to_string(),
+                "agent_fork".to_string(),
+                "agent_steer".to_string(),
+                "agent_status".to_string(),
+                "agent_cancel".to_string(),
+                "agent_list".to_string(),
+            ]);
+        }
+
         let builtin_config = BuiltinToolConfig {
             policy: ToolPolicyLayer {
                 mode: Some(ToolMode::AllowList),
@@ -570,14 +593,90 @@ async fn run_agent(
             }
         };
 
-        let composite = CompositeDispatcher::new(
+        // Clone shell_config for sub-agents before it's moved
+        let shell_config_for_subagents = shell_config.clone();
+
+        let mut composite = CompositeDispatcher::new(
             Arc::new(task_store),
             &builtin_config,
             shell_config,
-            mcp_adapter,
+            mcp_adapter.clone(),
             None, // session_id - will be set later
         )
         .map_err(|e| anyhow::anyhow!("Failed to create composite dispatcher: {}", e))?;
+
+        // Register sub-agent tools if enabled
+        if enable_subagents {
+            use meerkat_core::Session;
+            use tokio::sync::RwLock;
+
+            // Create the dependencies for SubAgentToolState
+            let limits = ConcurrencyLimits::default();
+            let manager = Arc::new(SubAgentManager::new(limits, 0));
+            let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
+
+            // Create a tool dispatcher for sub-agents with task + shell + MCP tools
+            // (but NOT sub-agent tools - to prevent infinite nesting)
+            let sub_agent_builtin_config = BuiltinToolConfig {
+                policy: ToolPolicyLayer {
+                    mode: Some(ToolMode::AllowList),
+                    enable: {
+                        let mut tools: std::collections::HashSet<String> =
+                            ["task_list", "task_get", "task_create", "task_update"]
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect();
+                        if enable_shell {
+                            tools.extend([
+                                "shell".to_string(),
+                                "job_status".to_string(),
+                                "jobs_list".to_string(),
+                                "job_cancel".to_string(),
+                            ]);
+                        }
+                        tools
+                    },
+                    disable: std::collections::HashSet::new(),
+                },
+                enforced: Default::default(),
+            };
+
+            let sub_agent_task_store = MemoryTaskStore::new();
+            let sub_agent_dispatcher = CompositeDispatcher::new(
+                Arc::new(sub_agent_task_store),
+                &sub_agent_builtin_config,
+                shell_config_for_subagents,
+                mcp_adapter.clone(),
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create sub-agent dispatcher: {}", e))?;
+
+            let sub_agent_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                Arc::new(sub_agent_dispatcher);
+
+            // Use a memory store for sub-agent sessions (wrapped in adapter)
+            let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+                SessionStoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
+            );
+
+            let parent_session = Arc::new(RwLock::new(Session::new()));
+            let sub_agent_config = SubAgentConfig::default();
+
+            let state = Arc::new(SubAgentToolState::new(
+                manager,
+                client_factory,
+                sub_agent_tools,
+                sub_agent_store,
+                parent_session,
+                sub_agent_config,
+                0, // depth
+            ));
+
+            let tool_set = SubAgentToolSet::new(state);
+            composite
+                .register_sub_agent_tools(tool_set, &builtin_config)
+                .map_err(|e| anyhow::anyhow!("Failed to register sub-agent tools: {}", e))?;
+        }
 
         Arc::new(CliToolDispatcher::Composite(Arc::new(composite)))
     } else {
@@ -1131,7 +1230,7 @@ impl Provider {
         match self {
             Provider::Anthropic => "ANTHROPIC_API_KEY",
             Provider::Openai => "OPENAI_API_KEY",
-            Provider::Gemini => "GOOGLE_API_KEY",
+            Provider::Gemini => "GEMINI_API_KEY",
         }
     }
 
@@ -1317,6 +1416,6 @@ mod tests {
     fn test_api_key_env_var() {
         assert_eq!(Provider::Anthropic.api_key_env_var(), "ANTHROPIC_API_KEY");
         assert_eq!(Provider::Openai.api_key_env_var(), "OPENAI_API_KEY");
-        assert_eq!(Provider::Gemini.api_key_env_var(), "GOOGLE_API_KEY");
+        assert_eq!(Provider::Gemini.api_key_env_var(), "GEMINI_API_KEY");
     }
 }

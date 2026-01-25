@@ -126,6 +126,8 @@ pub enum LlmEvent {
         id: String,
         name: String,
         args: Value,
+        /// Thought signature for Gemini 3+ (must be passed back)
+        thought_signature: Option<String>,
     },
 
     /// Token usage update
@@ -196,11 +198,11 @@ impl ToolCallBuffer {
             serde_json::from_str(&self.args_json).ok()?
         };
 
-        Some(meerkat_core::ToolCall {
-            id: self.id.clone(),
-            name: name.clone(),
+        Some(meerkat_core::ToolCall::new(
+            self.id.clone(),
+            name.clone(),
             args,
-        })
+        ))
     }
 }
 
@@ -223,6 +225,7 @@ mod tests {
                 id: "tc_1".to_string(),
                 name: "read_file".to_string(),
                 args: serde_json::json!({"path": "/tmp/test"}),
+                thought_signature: None,
             },
             LlmEvent::UsageUpdate {
                 usage: Usage {

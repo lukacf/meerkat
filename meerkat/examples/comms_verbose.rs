@@ -40,11 +40,7 @@ impl ToolCallBuffer {
     fn try_complete(&self) -> Option<ToolCall> {
         let name = self.name.as_ref()?;
         let args: serde_json::Value = serde_json::from_str(&self.args_json).ok()?;
-        Some(ToolCall {
-            id: self.id.clone(),
-            name: name.clone(),
-            args,
-        })
+        Some(ToolCall::new(self.id.clone(), name.clone(), args))
     }
 }
 
@@ -118,14 +114,14 @@ impl AgentLlmClient for LoggingLlmAdapter {
                         }
                         buffer.args_json.push_str(&args_delta);
                     }
-                    LlmEvent::ToolCallComplete { id, name, args } => {
+                    LlmEvent::ToolCallComplete { id, name, args, .. } => {
                         println!("\n┌─── LLM REQUESTED TOOL: {} ───┐", name);
                         println!(
                             "│ Args: {}",
                             serde_json::to_string(&args).unwrap_or_default()
                         );
                         println!("└────────────────────────────────────────┘");
-                        tool_calls.push(ToolCall { id, name, args });
+                        tool_calls.push(ToolCall::new(id, name, args));
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;

@@ -5,6 +5,7 @@
 //! `LlmEvent` type, hiding provider-specific quirks.
 
 pub mod error;
+pub mod factory;
 pub mod types;
 
 #[cfg(feature = "anthropic")]
@@ -17,6 +18,9 @@ pub mod openai;
 pub mod gemini;
 
 pub use error::LlmError;
+pub use factory::{
+    DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClientFactory, LlmProvider,
+};
 pub use types::{LlmClient, LlmEvent, LlmRequest, LlmResponse};
 
 #[cfg(feature = "anthropic")]

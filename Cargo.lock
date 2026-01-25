@@ -1482,6 +1482,8 @@ dependencies = [
  "chrono",
  "futures",
  "jsonschema",
+ "meerkat-client",
+ "meerkat-comms",
  "meerkat-core",
  "meerkat-mcp-client",
  "nix 0.29.0",
@@ -1492,6 +1494,7 @@ dependencies = [
  "tokio",
  "tracing",
  "ulid",
+ "uuid",
  "which",
 ]
 

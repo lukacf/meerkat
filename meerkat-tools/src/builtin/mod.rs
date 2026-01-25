@@ -38,6 +38,7 @@ pub mod memory_store;
 pub mod project;
 pub mod shell;
 pub mod store;
+pub mod sub_agent;
 pub mod tools;
 pub mod types;
 
@@ -49,6 +50,13 @@ pub use file_store::FileTaskStore;
 pub use memory_store::MemoryTaskStore;
 pub use project::{ensure_rkat_dir, find_project_root};
 pub use store::TaskStore;
+pub use sub_agent::{
+    AgentCancelTool, AgentForkTool, AgentListTool, AgentSpawnTool, AgentStatusTool, AgentSteerTool,
+    ParentCommsContext, SubAgentCommsConfig, SubAgentConfig, SubAgentError, SubAgentHandle,
+    SubAgentRunnerError, SubAgentToolSet, SubAgentToolState, create_child_comms_config,
+    create_child_peer_entry, create_child_trusted_peers, create_fork_session, create_spawn_session,
+    setup_child_comms,
+};
 pub use tools::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool};
 pub use types::{
     NewTask, Task, TaskError, TaskId, TaskPriority, TaskStatus, TaskStoreData, TaskStoreMeta,

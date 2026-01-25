@@ -493,11 +493,7 @@ async fn handle_meerkat_resume_simple(input: MeerkatResumeInput) -> Result<Value
         let results: Vec<ToolResult> = input
             .tool_results
             .iter()
-            .map(|r| ToolResult {
-                tool_use_id: r.tool_use_id.clone(),
-                content: r.content.clone(),
-                is_error: r.is_error,
-            })
+            .map(|r| ToolResult::new(r.tool_use_id.clone(), r.content.clone(), r.is_error))
             .collect();
         session.push(Message::ToolResults { results });
     }
@@ -602,11 +598,7 @@ async fn handle_meerkat_resume_with_builtins(input: MeerkatResumeInput) -> Resul
         let results: Vec<ToolResult> = input
             .tool_results
             .iter()
-            .map(|r| ToolResult {
-                tool_use_id: r.tool_use_id.clone(),
-                content: r.content.clone(),
-                is_error: r.is_error,
-            })
+            .map(|r| ToolResult::new(r.tool_use_id.clone(), r.content.clone(), r.is_error))
             .collect();
         session.push(Message::ToolResults { results });
     }
@@ -778,8 +770,8 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                     LlmEvent::TextDelta { delta } => {
                         content.push_str(&delta);
                     }
-                    LlmEvent::ToolCallComplete { id, name, args } => {
-                        tool_calls.push(ToolCall { id, name, args });
+                    LlmEvent::ToolCallComplete { id, name, args, .. } => {
+                        tool_calls.push(ToolCall::new(id, name, args));
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;

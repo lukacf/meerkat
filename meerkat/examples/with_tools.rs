@@ -127,8 +127,8 @@ impl AgentLlmClient for AnthropicLlmAdapter {
                     LlmEvent::TextDelta { delta } => {
                         content.push_str(&delta);
                     }
-                    LlmEvent::ToolCallComplete { id, name, args } => {
-                        tool_calls.push(ToolCall { id, name, args });
+                    LlmEvent::ToolCallComplete { id, name, args, .. } => {
+                        tool_calls.push(ToolCall::new(id, name, args));
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;

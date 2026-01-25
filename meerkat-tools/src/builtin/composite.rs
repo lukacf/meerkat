@@ -9,6 +9,7 @@
 use super::config::BuiltinToolConfig;
 use super::shell::{ShellConfig, ShellToolSet};
 use super::store::TaskStore;
+use super::sub_agent::SubAgentToolSet;
 use super::tools::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool};
 use super::{BuiltinTool, BuiltinToolError};
 use async_trait::async_trait;
@@ -148,6 +149,95 @@ impl CompositeDispatcher {
 
     pub fn is_builtin(&self, name: &str) -> bool {
         self.builtins.contains_key(name)
+    }
+
+    /// Register sub-agent tools with this dispatcher
+    ///
+    /// Sub-agent tools require runtime context (parent session, client factory, etc.)
+    /// that isn't available at dispatcher construction time. Call this method after
+    /// creating the dispatcher to add sub-agent tool support.
+    ///
+    /// # Arguments
+    /// * `tool_set` - The SubAgentToolSet containing all sub-agent tools
+    /// * `config` - Tool configuration to determine which tools are enabled
+    ///
+    /// # Returns
+    /// * `Ok(())` - If tools were registered successfully
+    /// * `Err(...)` - If there's a name collision with existing tools
+    pub fn register_sub_agent_tools(
+        &mut self,
+        tool_set: SubAgentToolSet,
+        config: &BuiltinToolConfig,
+    ) -> Result<(), CompositeDispatcherError> {
+        let resolved = config.resolve();
+
+        // Check for collisions first
+        for name in tool_set.tool_names() {
+            if self.builtins.contains_key(name) {
+                return Err(CompositeDispatcherError::NameCollision(name.to_string()));
+            }
+            if let Some(ref ext) = self.external {
+                for ext_tool in ext.tools() {
+                    if ext_tool.name == name {
+                        return Err(CompositeDispatcherError::NameCollision(name.to_string()));
+                    }
+                }
+            }
+        }
+
+        // Register spawn tool
+        if resolved.is_enabled(tool_set.spawn.name(), tool_set.spawn.default_enabled()) {
+            let def = tool_set.spawn.def();
+            self.builtins
+                .insert(tool_set.spawn.name().to_string(), Arc::new(tool_set.spawn));
+            self.tool_defs.push(def);
+        }
+
+        // Register fork tool
+        if resolved.is_enabled(tool_set.fork.name(), tool_set.fork.default_enabled()) {
+            let def = tool_set.fork.def();
+            self.builtins
+                .insert(tool_set.fork.name().to_string(), Arc::new(tool_set.fork));
+            self.tool_defs.push(def);
+        }
+
+        // Register steer tool
+        if resolved.is_enabled(tool_set.steer.name(), tool_set.steer.default_enabled()) {
+            let def = tool_set.steer.def();
+            self.builtins
+                .insert(tool_set.steer.name().to_string(), Arc::new(tool_set.steer));
+            self.tool_defs.push(def);
+        }
+
+        // Register status tool
+        if resolved.is_enabled(tool_set.status.name(), tool_set.status.default_enabled()) {
+            let def = tool_set.status.def();
+            self.builtins.insert(
+                tool_set.status.name().to_string(),
+                Arc::new(tool_set.status),
+            );
+            self.tool_defs.push(def);
+        }
+
+        // Register cancel tool
+        if resolved.is_enabled(tool_set.cancel.name(), tool_set.cancel.default_enabled()) {
+            let def = tool_set.cancel.def();
+            self.builtins.insert(
+                tool_set.cancel.name().to_string(),
+                Arc::new(tool_set.cancel),
+            );
+            self.tool_defs.push(def);
+        }
+
+        // Register list tool
+        if resolved.is_enabled(tool_set.list.name(), tool_set.list.default_enabled()) {
+            let def = tool_set.list.def();
+            self.builtins
+                .insert(tool_set.list.name().to_string(), Arc::new(tool_set.list));
+            self.tool_defs.push(def);
+        }
+
+        Ok(())
     }
 }
 
@@ -654,6 +744,240 @@ mod tests {
             .unwrap();
             assert_eq!(dispatcher.builtin_count(), 8);
             assert!(dispatcher.is_builtin("shell"));
+        }
+    }
+
+    mod sub_agent_tools_tests {
+        use super::*;
+        use crate::builtin::sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState};
+        use meerkat_client::{FactoryError, LlmClient, LlmClientFactory, LlmProvider};
+        use meerkat_core::AgentSessionStore;
+        use meerkat_core::error::AgentError;
+        use meerkat_core::ops::ConcurrencyLimits;
+        use meerkat_core::session::Session;
+        use meerkat_core::sub_agent::SubAgentManager;
+        use serde_json::json;
+        use tokio::sync::RwLock;
+
+        struct MockClientFactory;
+
+        impl LlmClientFactory for MockClientFactory {
+            fn create_client(
+                &self,
+                _provider: LlmProvider,
+                _api_key: Option<String>,
+            ) -> Result<Arc<dyn LlmClient>, FactoryError> {
+                Err(FactoryError::MissingApiKey("mock".into()))
+            }
+
+            fn supported_providers(&self) -> Vec<LlmProvider> {
+                vec![]
+            }
+        }
+
+        struct MockToolDispatcher;
+
+        #[async_trait]
+        impl AgentToolDispatcher for MockToolDispatcher {
+            fn tools(&self) -> Vec<ToolDef> {
+                vec![]
+            }
+
+            async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
+                Err(ToolError::not_found("mock"))
+            }
+        }
+
+        struct MockSessionStore;
+
+        #[async_trait]
+        impl AgentSessionStore for MockSessionStore {
+            async fn save(&self, _session: &Session) -> Result<(), AgentError> {
+                Ok(())
+            }
+
+            async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
+                Ok(None)
+            }
+        }
+
+        fn create_sub_agent_tool_set() -> SubAgentToolSet {
+            let limits = ConcurrencyLimits::default();
+            let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+            let client_factory = Arc::new(MockClientFactory);
+            let tool_dispatcher = Arc::new(MockToolDispatcher);
+            let session_store = Arc::new(MockSessionStore);
+            let parent_session = Arc::new(RwLock::new(Session::new()));
+            let config = SubAgentConfig::default();
+
+            let state = Arc::new(SubAgentToolState::new(
+                manager,
+                client_factory,
+                tool_dispatcher,
+                session_store,
+                parent_session,
+                config,
+                0,
+            ));
+
+            SubAgentToolSet::new(state)
+        }
+
+        fn config_with_sub_agent_enabled() -> BuiltinToolConfig {
+            BuiltinToolConfig {
+                policy: ToolPolicyLayer::new()
+                    .enable_tool("agent_spawn")
+                    .enable_tool("agent_fork")
+                    .enable_tool("agent_steer")
+                    .enable_tool("agent_status")
+                    .enable_tool("agent_cancel")
+                    .enable_tool("agent_list"),
+                enforced: EnforcedToolPolicy::default(),
+            }
+        }
+
+        #[test]
+        fn test_register_sub_agent_tools() {
+            let store = Arc::new(MemoryTaskStore::new());
+            let mut dispatcher = CompositeDispatcher::builtins_only(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+            )
+            .unwrap();
+
+            let initial_count = dispatcher.builtin_count();
+            assert_eq!(initial_count, 4); // task tools
+
+            let tool_set = create_sub_agent_tool_set();
+            dispatcher
+                .register_sub_agent_tools(tool_set, &config_with_sub_agent_enabled())
+                .unwrap();
+
+            // Should have 4 task tools + 6 sub-agent tools = 10
+            assert_eq!(dispatcher.builtin_count(), 10);
+            assert!(dispatcher.is_builtin("agent_spawn"));
+            assert!(dispatcher.is_builtin("agent_fork"));
+            assert!(dispatcher.is_builtin("agent_steer"));
+            assert!(dispatcher.is_builtin("agent_status"));
+            assert!(dispatcher.is_builtin("agent_cancel"));
+            assert!(dispatcher.is_builtin("agent_list"));
+        }
+
+        #[test]
+        fn test_register_sub_agent_tools_respects_policy() {
+            let store = Arc::new(MemoryTaskStore::new());
+            let mut dispatcher = CompositeDispatcher::builtins_only(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+            )
+            .unwrap();
+
+            // Only enable agent_spawn and agent_status
+            let partial_config = BuiltinToolConfig {
+                policy: ToolPolicyLayer::new()
+                    .enable_tool("agent_spawn")
+                    .enable_tool("agent_status"),
+                enforced: EnforcedToolPolicy::default(),
+            };
+
+            let tool_set = create_sub_agent_tool_set();
+            dispatcher
+                .register_sub_agent_tools(tool_set, &partial_config)
+                .unwrap();
+
+            // Should have 4 task tools + 2 sub-agent tools = 6
+            assert_eq!(dispatcher.builtin_count(), 6);
+            assert!(dispatcher.is_builtin("agent_spawn"));
+            assert!(dispatcher.is_builtin("agent_status"));
+            assert!(!dispatcher.is_builtin("agent_fork"));
+            assert!(!dispatcher.is_builtin("agent_steer"));
+        }
+
+        #[test]
+        fn test_sub_agent_tools_disabled_by_default() {
+            let store = Arc::new(MemoryTaskStore::new());
+            let mut dispatcher = CompositeDispatcher::builtins_only(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+            )
+            .unwrap();
+
+            let tool_set = create_sub_agent_tool_set();
+            // Use default config - sub-agent tools should NOT be enabled
+            dispatcher
+                .register_sub_agent_tools(tool_set, &BuiltinToolConfig::default())
+                .unwrap();
+
+            // Should still have just 4 task tools (sub-agent tools not enabled)
+            assert_eq!(dispatcher.builtin_count(), 4);
+            assert!(!dispatcher.is_builtin("agent_spawn"));
+        }
+
+        #[test]
+        fn test_sub_agent_tools_in_tool_defs() {
+            let store = Arc::new(MemoryTaskStore::new());
+            let mut dispatcher = CompositeDispatcher::builtins_only(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+            )
+            .unwrap();
+
+            let tool_set = create_sub_agent_tool_set();
+            dispatcher
+                .register_sub_agent_tools(tool_set, &config_with_sub_agent_enabled())
+                .unwrap();
+
+            let tool_defs = dispatcher.tools();
+            let tool_names: Vec<_> = tool_defs.iter().map(|t| t.name.as_str()).collect();
+            assert!(tool_names.contains(&"agent_spawn"));
+            assert!(tool_names.contains(&"agent_fork"));
+        }
+
+        #[test]
+        fn test_sub_agent_tools_collision_detection() {
+            let store = Arc::new(MemoryTaskStore::new());
+
+            // Create a dispatcher with an external tool named "agent_spawn"
+            struct OverlappingExternal;
+            #[async_trait]
+            impl AgentToolDispatcher for OverlappingExternal {
+                fn tools(&self) -> Vec<ToolDef> {
+                    vec![ToolDef {
+                        name: "agent_spawn".to_string(),
+                        description: "Conflicting tool".to_string(),
+                        input_schema: json!({"type": "object"}),
+                    }]
+                }
+                async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
+                    Ok(json!({}))
+                }
+            }
+
+            let mut dispatcher = CompositeDispatcher::new(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                Some(Arc::new(OverlappingExternal)),
+                None,
+            )
+            .unwrap();
+
+            let tool_set = create_sub_agent_tool_set();
+            let result =
+                dispatcher.register_sub_agent_tools(tool_set, &config_with_sub_agent_enabled());
+
+            assert!(matches!(
+                result,
+                Err(CompositeDispatcherError::NameCollision(_))
+            ));
         }
     }
 }

@@ -39,5 +39,5 @@ pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig}
 pub use retry::RetryPolicy;
 pub use session::{SESSION_VERSION, Session, SessionMeta};
 pub use state::LoopState;
-pub use sub_agent::SubAgentManager;
+pub use sub_agent::{SubAgentInfo, SubAgentManager};
 pub use types::*;

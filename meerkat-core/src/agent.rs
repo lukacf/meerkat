@@ -72,13 +72,13 @@ pub trait AgentToolDispatcher: Send + Sync {
 }
 
 /// A tool dispatcher that filters tools based on a policy
-pub struct FilteredToolDispatcher<T: AgentToolDispatcher> {
+pub struct FilteredToolDispatcher<T: AgentToolDispatcher + ?Sized> {
     inner: Arc<T>,
     /// HashSet for O(1) lookup instead of Vec O(n)
     allowed_tools: HashSet<String>,
 }
 
-impl<T: AgentToolDispatcher> FilteredToolDispatcher<T> {
+impl<T: AgentToolDispatcher + ?Sized> FilteredToolDispatcher<T> {
     pub fn new(inner: Arc<T>, allowed_tools: Vec<String>) -> Self {
         Self {
             inner,
@@ -88,7 +88,7 @@ impl<T: AgentToolDispatcher> FilteredToolDispatcher<T> {
 }
 
 #[async_trait]
-impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for FilteredToolDispatcher<T> {
+impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for FilteredToolDispatcher<T> {
     fn tools(&self) -> Vec<ToolDef> {
         self.inner
             .tools()
@@ -153,9 +153,15 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the nesting depth (internal, used for sub-agents)
-    #[allow(dead_code)]
-    pub(crate) fn depth(mut self, depth: u32) -> Self {
+    /// Set the nesting depth for sub-agents
+    ///
+    /// This controls how deeply nested this agent is in the sub-agent hierarchy.
+    /// Depth 0 is the top-level agent. Sub-agents spawned from it have depth 1, etc.
+    ///
+    /// The depth affects:
+    /// - Whether comms listeners are enabled (only depth 0 can have listeners)
+    /// - Max depth limit checking for further sub-agent spawning
+    pub fn depth(mut self, depth: u32) -> Self {
         self.depth = depth;
         self
     }
@@ -248,11 +254,13 @@ impl AgentBuilder {
     }
 
     /// Build the agent
+    ///
+    /// Supports both concrete types and trait objects (`dyn Trait`).
     pub fn build<C, T, S>(self, client: Arc<C>, tools: Arc<T>, store: Arc<S>) -> Agent<C, T, S>
     where
-        C: AgentLlmClient,
-        T: AgentToolDispatcher,
-        S: AgentSessionStore,
+        C: AgentLlmClient + ?Sized,
+        T: AgentToolDispatcher + ?Sized,
+        S: AgentSessionStore + ?Sized,
     {
         let session = self.session.unwrap_or_else(|| {
             let mut s = Session::new();
@@ -322,11 +330,14 @@ impl AgentBuilder {
 }
 
 /// The main Agent struct
+///
+/// Supports both concrete types and trait objects (`dyn Trait`).
+/// When using trait objects, pass `Arc<dyn AgentLlmClient>` etc.
 pub struct Agent<C, T, S>
 where
-    C: AgentLlmClient,
-    T: AgentToolDispatcher,
-    S: AgentSessionStore,
+    C: AgentLlmClient + ?Sized,
+    T: AgentToolDispatcher + ?Sized,
+    S: AgentSessionStore + ?Sized,
 {
     config: AgentConfig,
     client: Arc<C>,
@@ -347,9 +358,9 @@ where
 
 impl<C, T, S> Agent<C, T, S>
 where
-    C: AgentLlmClient + 'static,
-    T: AgentToolDispatcher + 'static,
-    S: AgentSessionStore + 'static,
+    C: AgentLlmClient + ?Sized + 'static,
+    T: AgentToolDispatcher + ?Sized + 'static,
+    S: AgentSessionStore + ?Sized + 'static,
 {
     /// Create a new agent builder
     pub fn builder() -> AgentBuilder {
@@ -910,11 +921,12 @@ where
                                 let id = tc.id.clone();
                                 let name = tc.name.clone();
                                 let args = tc.args.clone();
+                                let thought_signature = tc.thought_signature.clone();
                                 async move {
                                     let start = std::time::Instant::now();
                                     let dispatch_result = tools_ref.dispatch(&name, &args).await;
                                     let duration_ms = start.elapsed().as_millis() as u64;
-                                    (id, name, dispatch_result, duration_ms)
+                                    (id, name, dispatch_result, duration_ms, thought_signature)
                                 }
                             })
                             .collect();
@@ -923,7 +935,9 @@ where
 
                         // Process results and emit events
                         let mut tool_results = Vec::with_capacity(num_tool_calls);
-                        for (id, name, dispatch_result, duration_ms) in dispatch_results {
+                        for (id, name, dispatch_result, duration_ms, thought_signature) in
+                            dispatch_results
+                        {
                             let (content, is_error) = match dispatch_result {
                                 Ok(v) => {
                                     // Stringify the Value for the LLM
@@ -956,6 +970,7 @@ where
                                 tool_use_id: id,
                                 content,
                                 is_error,
+                                thought_signature,
                             });
 
                             // Track tool call in budget
@@ -989,6 +1004,7 @@ where
                                     tool_use_id: r.id.to_string(),
                                     content: r.content,
                                     is_error: r.is_error,
+                                    thought_signature: None, // Sub-agents don't use thought signatures
                                 })
                                 .collect();
                             self.session.push(Message::ToolResults { results });
@@ -1207,11 +1223,11 @@ mod tests {
             // First response: tool call
             LlmStreamResult {
                 content: "Let me get the weather.".to_string(),
-                tool_calls: vec![ToolCall {
-                    id: "tc_1".to_string(),
-                    name: "get_weather".to_string(),
-                    args: serde_json::json!({"city": "Tokyo"}),
-                }],
+                tool_calls: vec![ToolCall::new(
+                    "tc_1".to_string(),
+                    "get_weather".to_string(),
+                    serde_json::json!({"city": "Tokyo"}),
+                )],
                 stop_reason: StopReason::ToolUse,
                 usage: Usage {
                     input_tokens: 10,
@@ -1537,11 +1553,11 @@ mod tests {
             // First: tool call response
             LlmStreamResult {
                 content: "Calling tool".to_string(),
-                tool_calls: vec![ToolCall {
-                    id: "tc_1".to_string(),
-                    name: "test_tool".to_string(),
-                    args: serde_json::json!({}),
-                }],
+                tool_calls: vec![ToolCall::new(
+                    "tc_1".to_string(),
+                    "test_tool".to_string(),
+                    serde_json::json!({}),
+                )],
                 stop_reason: StopReason::ToolUse,
                 usage: Usage::default(),
             },
@@ -1833,21 +1849,21 @@ mod tests {
             LlmStreamResult {
                 content: "Calling tools".to_string(),
                 tool_calls: vec![
-                    ToolCall {
-                        id: "tc_1".to_string(),
-                        name: "tool_a".to_string(),
-                        args: serde_json::json!({}),
-                    },
-                    ToolCall {
-                        id: "tc_2".to_string(),
-                        name: "tool_b".to_string(),
-                        args: serde_json::json!({}),
-                    },
-                    ToolCall {
-                        id: "tc_3".to_string(),
-                        name: "tool_c".to_string(),
-                        args: serde_json::json!({}),
-                    },
+                    ToolCall::new(
+                        "tc_1".to_string(),
+                        "tool_a".to_string(),
+                        serde_json::json!({}),
+                    ),
+                    ToolCall::new(
+                        "tc_2".to_string(),
+                        "tool_b".to_string(),
+                        serde_json::json!({}),
+                    ),
+                    ToolCall::new(
+                        "tc_3".to_string(),
+                        "tool_c".to_string(),
+                        serde_json::json!({}),
+                    ),
                 ],
                 stop_reason: StopReason::ToolUse,
                 usage: Usage::default(),
@@ -1946,21 +1962,21 @@ mod tests {
             LlmStreamResult {
                 content: "Calling tools".to_string(),
                 tool_calls: vec![
-                    ToolCall {
-                        id: "tc_1".to_string(),
-                        name: "slow_tool_1".to_string(),
-                        args: serde_json::json!({}),
-                    },
-                    ToolCall {
-                        id: "tc_2".to_string(),
-                        name: "slow_tool_2".to_string(),
-                        args: serde_json::json!({}),
-                    },
-                    ToolCall {
-                        id: "tc_3".to_string(),
-                        name: "slow_tool_3".to_string(),
-                        args: serde_json::json!({}),
-                    },
+                    ToolCall::new(
+                        "tc_1".to_string(),
+                        "slow_tool_1".to_string(),
+                        serde_json::json!({}),
+                    ),
+                    ToolCall::new(
+                        "tc_2".to_string(),
+                        "slow_tool_2".to_string(),
+                        serde_json::json!({}),
+                    ),
+                    ToolCall::new(
+                        "tc_3".to_string(),
+                        "slow_tool_3".to_string(),
+                        serde_json::json!({}),
+                    ),
                 ],
                 stop_reason: StopReason::ToolUse,
                 usage: Usage::default(),
@@ -2095,21 +2111,21 @@ mod tests {
             LlmStreamResult {
                 content: "Calling tools".to_string(),
                 tool_calls: vec![
-                    ToolCall {
-                        id: "tc_1".to_string(),
-                        name: "tool_a".to_string(),
-                        args: serde_json::json!({}),
-                    },
-                    ToolCall {
-                        id: "tc_2".to_string(),
-                        name: "tool_b".to_string(),
-                        args: serde_json::json!({}),
-                    },
-                    ToolCall {
-                        id: "tc_3".to_string(),
-                        name: "tool_c".to_string(),
-                        args: serde_json::json!({}),
-                    },
+                    ToolCall::new(
+                        "tc_1".to_string(),
+                        "tool_a".to_string(),
+                        serde_json::json!({}),
+                    ),
+                    ToolCall::new(
+                        "tc_2".to_string(),
+                        "tool_b".to_string(),
+                        serde_json::json!({}),
+                    ),
+                    ToolCall::new(
+                        "tc_3".to_string(),
+                        "tool_c".to_string(),
+                        serde_json::json!({}),
+                    ),
                 ],
                 stop_reason: StopReason::ToolUse,
                 usage: Usage::default(),
@@ -2185,21 +2201,21 @@ mod tests {
             LlmStreamResult {
                 content: "Calling tools".to_string(),
                 tool_calls: vec![
-                    ToolCall {
-                        id: "tc_1".to_string(),
-                        name: "good_tool".to_string(),
-                        args: serde_json::json!({}),
-                    },
-                    ToolCall {
-                        id: "tc_2".to_string(),
-                        name: "bad_tool".to_string(),
-                        args: serde_json::json!({}),
-                    },
-                    ToolCall {
-                        id: "tc_3".to_string(),
-                        name: "another_good_tool".to_string(),
-                        args: serde_json::json!({}),
-                    },
+                    ToolCall::new(
+                        "tc_1".to_string(),
+                        "good_tool".to_string(),
+                        serde_json::json!({}),
+                    ),
+                    ToolCall::new(
+                        "tc_2".to_string(),
+                        "bad_tool".to_string(),
+                        serde_json::json!({}),
+                    ),
+                    ToolCall::new(
+                        "tc_3".to_string(),
+                        "another_good_tool".to_string(),
+                        serde_json::json!({}),
+                    ),
                 ],
                 stop_reason: StopReason::ToolUse,
                 usage: Usage::default(),
@@ -2284,16 +2300,16 @@ mod tests {
             LlmStreamResult {
                 content: "Calling tools".to_string(),
                 tool_calls: vec![
-                    ToolCall {
-                        id: "tc_1".to_string(),
-                        name: "fail1".to_string(),
-                        args: serde_json::json!({}),
-                    },
-                    ToolCall {
-                        id: "tc_2".to_string(),
-                        name: "fail2".to_string(),
-                        args: serde_json::json!({}),
-                    },
+                    ToolCall::new(
+                        "tc_1".to_string(),
+                        "fail1".to_string(),
+                        serde_json::json!({}),
+                    ),
+                    ToolCall::new(
+                        "tc_2".to_string(),
+                        "fail2".to_string(),
+                        serde_json::json!({}),
+                    ),
                 ],
                 stop_reason: StopReason::ToolUse,
                 usage: Usage::default(),

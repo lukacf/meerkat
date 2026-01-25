@@ -393,7 +393,7 @@ async fn test_gemini_streaming_text_delta() {
     };
 
     let request = LlmRequest::new(
-        "gemini-1.5-flash",
+        "gemini-3-flash-preview",
         vec![Message::User(UserMessage {
             content: "Say 'hello' and nothing else.".to_string(),
         })],
@@ -446,7 +446,7 @@ async fn test_gemini_tool_call() {
     }];
 
     let request = LlmRequest::new(
-        "gemini-1.5-flash",
+        "gemini-3-flash-preview",
         vec![Message::User(UserMessage {
             content: "What's the weather in Tokyo? Use the get_weather tool.".to_string(),
         })],
@@ -489,7 +489,7 @@ async fn test_gemini_stop_reason() {
     };
 
     let request = LlmRequest::new(
-        "gemini-1.5-flash",
+        "gemini-3-flash-preview",
         vec![Message::User(UserMessage {
             content: "Say 'hi'".to_string(),
         })],
@@ -516,7 +516,7 @@ async fn test_gemini_usage() {
     };
 
     let request = LlmRequest::new(
-        "gemini-1.5-flash",
+        "gemini-3-flash-preview",
         vec![Message::User(UserMessage {
             content: "Say 'test'".to_string(),
         })],
@@ -542,7 +542,7 @@ async fn test_gemini_auth_error() {
     let client = GeminiClient::new("invalid-key".to_string());
 
     let request = LlmRequest::new(
-        "gemini-1.5-flash",
+        "gemini-3-flash-preview",
         vec![Message::User(UserMessage {
             content: "test".to_string(),
         })],

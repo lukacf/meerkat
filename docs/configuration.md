@@ -189,9 +189,8 @@ let mut agent = AgentBuilder::new()
 
 | Model | Context | Best For |
 |-------|---------|----------|
-| `gemini-2.0-flash-exp` | 1M | Fast, large context |
-| `gemini-1.5-pro` | 2M | Largest context window |
-| `gemini-1.5-flash` | 1M | Balanced |
+| `gemini-3-pro-preview` | 1M | Advanced reasoning, complex tasks |
+| `gemini-3-flash-preview` | 1M | Fast, balanced performance |
 
 ## Budget Configuration
 

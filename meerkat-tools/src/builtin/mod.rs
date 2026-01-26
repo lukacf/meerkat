@@ -28,9 +28,16 @@
 //! let project_root = find_project_root(&std::env::current_dir().unwrap());
 //! ensure_rkat_dir(&project_root).unwrap();
 //! let store = Arc::new(FileTaskStore::in_project(&project_root));
-//! let dispatcher = CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None)?;
+//! let dispatcher = CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None)?;
 //! ```
+//!
+//! ## Comms Tools
+//!
+//! Comms tools are NOT part of CompositeDispatcher. Comms is infrastructure,
+//! not a tool category. The `comms` module provides [`CommsToolSet`] as a
+//! separate tool surface that should be composed via a ToolGateway.
 
+pub mod comms;
 mod composite;
 mod config;
 pub mod file_store;
@@ -41,7 +48,12 @@ pub mod store;
 pub mod sub_agent;
 pub mod tools;
 pub mod types;
+pub mod utility;
 
+pub use comms::{
+    CommsToolSet, CommsToolSurface, ListPeersTool, SendMessageTool, SendRequestTool,
+    SendResponseTool,
+};
 pub use composite::{CompositeDispatcher, CompositeDispatcherError};
 pub use config::{
     BuiltinToolConfig, EnforcedToolPolicy, ResolvedToolPolicy, ToolMode, ToolPolicyLayer,
@@ -51,17 +63,20 @@ pub use memory_store::MemoryTaskStore;
 pub use project::{ensure_rkat_dir, find_project_root};
 pub use store::TaskStore;
 pub use sub_agent::{
-    AgentCancelTool, AgentForkTool, AgentListTool, AgentSpawnTool, AgentStatusTool, AgentSteerTool,
+    AgentCancelTool, AgentForkTool, AgentListTool, AgentSpawnTool, AgentStatusTool,
     ParentCommsContext, SubAgentCommsConfig, SubAgentConfig, SubAgentError, SubAgentHandle,
     SubAgentRunnerError, SubAgentToolSet, SubAgentToolState, create_child_comms_config,
     create_child_peer_entry, create_child_trusted_peers, create_fork_session, create_spawn_session,
     setup_child_comms,
 };
-pub use tools::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool};
+pub use tools::{
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool, task_tools_usage_instructions,
+};
 pub use types::{
     NewTask, Task, TaskError, TaskId, TaskPriority, TaskStatus, TaskStoreData, TaskStoreMeta,
     TaskUpdate,
 };
+pub use utility::{DateTimeTool, UtilityToolSet, WaitInterrupt, WaitTool};
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;

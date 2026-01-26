@@ -40,6 +40,9 @@ pub enum PeerAddr {
     /// TCP address as "host:port" string (supports both IP addresses and hostnames).
     /// DNS resolution happens at connect time via ToSocketAddrs.
     Tcp(String),
+    /// In-process address for sub-agent communication.
+    /// Messages are delivered directly via in-memory channels.
+    Inproc(String),
 }
 
 impl PeerAddr {
@@ -48,6 +51,7 @@ impl PeerAddr {
     /// Supported formats:
     /// - `uds:///path/to/socket.sock`
     /// - `tcp://host:port` (host can be IP address or hostname)
+    /// - `inproc://agent-name` (in-process delivery via registry)
     pub fn parse(s: &str) -> Result<Self, TransportError> {
         if let Some(path) = s.strip_prefix("uds://") {
             Ok(PeerAddr::Uds(PathBuf::from(path)))
@@ -60,10 +64,30 @@ impl PeerAddr {
             }
             // Store as string for DNS resolution at connect time
             Ok(PeerAddr::Tcp(addr_str.to_string()))
+        } else if let Some(name) = s.strip_prefix("inproc://") {
+            if name.is_empty() {
+                return Err(TransportError::InvalidAddress(
+                    "Inproc address must include agent name".to_string(),
+                ));
+            }
+            Ok(PeerAddr::Inproc(name.to_string()))
         } else {
             Err(TransportError::InvalidAddress(format!(
-                "unknown scheme, expected uds:// or tcp://: {s}"
+                "unknown scheme, expected uds://, tcp://, or inproc://: {s}"
             )))
+        }
+    }
+
+    /// Check if this is an in-process address.
+    pub fn is_inproc(&self) -> bool {
+        matches!(self, PeerAddr::Inproc(_))
+    }
+
+    /// Get the agent name for inproc addresses.
+    pub fn inproc_name(&self) -> Option<&str> {
+        match self {
+            PeerAddr::Inproc(name) => Some(name),
+            _ => None,
         }
     }
 }
@@ -233,6 +257,52 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("unknown scheme"));
+    }
+
+    #[test]
+    fn test_peer_addr_inproc_variant() {
+        let addr = PeerAddr::Inproc("sub-agent-123".to_string());
+        match addr {
+            PeerAddr::Inproc(name) => assert_eq!(name, "sub-agent-123"),
+            _ => panic!("expected Inproc variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_inproc_addr() {
+        let addr = PeerAddr::parse("inproc://my-sub-agent").unwrap();
+        match addr {
+            PeerAddr::Inproc(name) => assert_eq!(name, "my-sub-agent"),
+            _ => panic!("expected Inproc variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_inproc_addr_empty_name() {
+        let result = PeerAddr::parse("inproc://");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("agent name"));
+    }
+
+    #[test]
+    fn test_inproc_is_inproc() {
+        let inproc = PeerAddr::Inproc("test".to_string());
+        let uds = PeerAddr::Uds(PathBuf::from("/tmp/test.sock"));
+        let tcp = PeerAddr::Tcp("localhost:8080".to_string());
+
+        assert!(inproc.is_inproc());
+        assert!(!uds.is_inproc());
+        assert!(!tcp.is_inproc());
+    }
+
+    #[test]
+    fn test_inproc_name() {
+        let inproc = PeerAddr::Inproc("my-agent".to_string());
+        let uds = PeerAddr::Uds(PathBuf::from("/tmp/test.sock"));
+
+        assert_eq!(inproc.inproc_name(), Some("my-agent"));
+        assert_eq!(uds.inproc_name(), None);
     }
 
     #[test]

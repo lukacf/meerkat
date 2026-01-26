@@ -9,10 +9,14 @@ use adapters::{
     SessionStoreAdapter,
 };
 use meerkat_client::{DefaultClientFactory, LlmClientFactory};
+use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ParentCommsContext;
+use meerkat_core::ToolGatewayBuilder;
 use meerkat_core::ops::ConcurrencyLimits;
 use meerkat_core::sub_agent::SubAgentManager;
 use meerkat_tools::builtin::{
-    BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolMode, ToolPolicyLayer,
+    BuiltinToolConfig, CommsToolSurface, CompositeDispatcher, MemoryTaskStore, ToolMode,
+    ToolPolicyLayer,
     shell::ShellConfig,
     sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState},
 };
@@ -34,6 +38,21 @@ use std::time::Duration;
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 const EXIT_BUDGET_EXHAUSTED: u8 = 2;
+
+/// Safely truncate a string to approximately `max_bytes`, respecting UTF-8 char boundaries.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Find the last char boundary before max_bytes
+    let truncate_at = s
+        .char_indices()
+        .take_while(|(i, _)| *i < max_bytes)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    &s[..truncate_at]
+}
 
 #[derive(Parser)]
 #[command(name = "meerkat")]
@@ -108,9 +127,9 @@ enum Commands {
         #[arg(long, requires = "enable_builtins")]
         enable_shell: bool,
 
-        /// Enable sub-agent tools (requires --enable-builtins). Allows spawning/managing sub-agents.
-        #[arg(long, requires = "enable_builtins")]
-        enable_subagents: bool,
+        /// Disable sub-agent tools (agent_spawn, agent_fork, etc.). They are enabled by default.
+        #[arg(long)]
+        no_subagents: bool,
 
         // === Output verbosity ===
         /// Verbose output: show each turn, tool calls, and results as they happen
@@ -285,7 +304,7 @@ async fn main() -> ExitCode {
             no_comms,
             enable_builtins,
             enable_shell,
-            enable_subagents,
+            no_subagents,
             verbose,
         } => {
             // Resolve provider: explicit flag > infer from model > default
@@ -325,7 +344,7 @@ async fn main() -> ExitCode {
                         comms_overrides,
                         enable_builtins,
                         enable_shell,
-                        enable_subagents,
+                        !no_subagents, // sub-agents enabled by default
                         verbose,
                     )
                     .await
@@ -518,18 +537,103 @@ async fn run_agent(
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
 
+    // Load comms configuration early (needed for CommsToolDispatcher)
+    let (mut comms_config, comms_base_dir) = config::load_comms_config(&comms_overrides);
+
+    // Create CommsRuntime early if enabled (so we can share router/trusted_peers with tools)
+    let mut comms_runtime = if let Some(ref config) = comms_config {
+        if config.enabled {
+            let resolved = config.resolve_paths(&comms_base_dir);
+            match meerkat_core::CommsRuntime::new(resolved) {
+                Ok(mut runtime) => {
+                    tracing::info!(
+                        "Comms enabled for agent '{}' (peer ID: {})",
+                        config.name,
+                        runtime.public_key().to_peer_id()
+                    );
+                    // Start listeners
+                    if let Err(e) = futures::executor::block_on(runtime.start_listeners()) {
+                        tracing::warn!("Failed to start comms listeners: {}", e);
+                    }
+                    Some(runtime)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create comms runtime: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Auto-enable inproc comms for sub-agents when no explicit comms config is provided.
+    if comms_runtime.is_none()
+        && enable_subagents
+        && comms_config.is_none()
+        && !comms_overrides.disabled
+    {
+        let session_id = SessionId::new();
+        let parent_name = format!("parent-{}", session_id);
+        match meerkat_core::CommsRuntime::inproc_only(&parent_name) {
+            Ok(runtime) => {
+                tracing::info!(
+                    "Auto-enabled inproc comms for sub-agents '{}' (peer ID: {})",
+                    parent_name,
+                    runtime.public_key().to_peer_id()
+                );
+                comms_runtime = Some(runtime);
+                comms_config = Some(meerkat_core::comms_config::CoreCommsConfig::with_name(
+                    &parent_name,
+                ));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to auto-enable inproc comms: {}", e);
+            }
+        }
+    }
+
+    // Load MCP tools (available for all modes)
+    let mcp_router_adapter = match create_mcp_tools().await {
+        Ok(adapter) => adapter,
+        Err(e) => {
+            tracing::warn!("Failed to load MCP tools: {}", e);
+            None
+        }
+    };
+
+    // Determine if we need CompositeDispatcher (builtins OR subagents)
+    let need_composite = enable_builtins || enable_subagents;
+
     // Load MCP config and create tool dispatcher
-    let tools: Arc<CliToolDispatcher> = if enable_builtins {
+    let (tools, tool_usage_instructions): (Arc<CliToolDispatcher>, String) = if need_composite {
+        // Convert MCP adapter to trait object for CompositeDispatcher
+        let mcp_adapter = mcp_router_adapter
+            .map(|a| Arc::new(a) as Arc<dyn meerkat_core::agent::AgentToolDispatcher>);
         use std::collections::HashSet;
 
-        // Create builtin tool configuration
-        let mut enabled_tools: HashSet<String> =
-            ["task_list", "task_get", "task_create", "task_update"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+        // Build enabled tools based on flags
+        let mut enabled_tools: HashSet<String> = HashSet::new();
 
-        // Add shell tools if enabled
+        // Add builtin tools (task + utility) if enabled
+        if enable_builtins {
+            enabled_tools.extend(
+                [
+                    "task_list",
+                    "task_get",
+                    "task_create",
+                    "task_update",
+                    "wait",
+                    "datetime",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+        }
+
+        // Add shell tools if enabled (requires --enable-builtins)
         if enable_shell {
             enabled_tools.extend([
                 "shell".to_string(),
@@ -539,12 +643,11 @@ async fn run_agent(
             ]);
         }
 
-        // Add sub-agent tools if enabled
+        // Add sub-agent tools if enabled (default: true, regardless of builtins)
         if enable_subagents {
             enabled_tools.extend([
                 "agent_spawn".to_string(),
                 "agent_fork".to_string(),
-                "agent_steer".to_string(),
                 "agent_status".to_string(),
                 "agent_cancel".to_string(),
                 "agent_list".to_string(),
@@ -573,6 +676,7 @@ async fn run_agent(
                 project_root,
                 max_completed_jobs: 100,
                 completed_job_ttl_secs: 300,
+                max_concurrent_processes: 10,
             })
         } else {
             None
@@ -581,33 +685,29 @@ async fn run_agent(
         // Create in-memory task store
         let task_store = MemoryTaskStore::new();
 
-        // Create composite dispatcher with MCP tools if available
-        let mcp_adapter = match create_mcp_tools().await {
-            Ok(Some(adapter)) => {
-                Some(Arc::new(adapter) as Arc<dyn meerkat_core::agent::AgentToolDispatcher>)
-            }
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!("Failed to load MCP tools: {}", e);
-                None
-            }
-        };
-
         // Clone shell_config for sub-agents before it's moved
         let shell_config_for_subagents = shell_config.clone();
 
-        let mut composite = CompositeDispatcher::new(
+        // Create composite dispatcher - enable wait interrupt if subagents or comms are enabled
+        // so wait can be interrupted when a sub-agent completes or a comms message arrives
+        let enable_wait_interrupt = enable_subagents || comms_runtime.is_some();
+        let mut composite = CompositeDispatcher::new_with_interrupt(
             Arc::new(task_store),
             &builtin_config,
             shell_config,
             mcp_adapter.clone(),
             None, // session_id - will be set later
+            enable_wait_interrupt,
         )
         .map_err(|e| anyhow::anyhow!("Failed to create composite dispatcher: {}", e))?;
+
+        // Get wait interrupt sender before registering sub-agents
+        let wait_interrupt_tx = composite.wait_interrupt_sender();
 
         // Register sub-agent tools if enabled
         if enable_subagents {
             use meerkat_core::Session;
+            use meerkat_tools::builtin::utility::WaitInterrupt;
             use tokio::sync::RwLock;
 
             // Create the dependencies for SubAgentToolState
@@ -615,36 +715,42 @@ async fn run_agent(
             let manager = Arc::new(SubAgentManager::new(limits, 0));
             let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
 
-            // Create a tool dispatcher for sub-agents with task + shell + MCP tools
-            // (but NOT sub-agent tools - to prevent infinite nesting)
-            let sub_agent_builtin_config = BuiltinToolConfig {
-                policy: ToolPolicyLayer {
-                    mode: Some(ToolMode::AllowList),
-                    enable: {
-                        let mut tools: std::collections::HashSet<String> =
-                            ["task_list", "task_get", "task_create", "task_update"]
-                                .iter()
-                                .map(|s| s.to_string())
-                                .collect();
-                        if enable_shell {
-                            tools.extend([
-                                "shell".to_string(),
-                                "job_status".to_string(),
-                                "jobs_list".to_string(),
-                                "job_cancel".to_string(),
-                            ]);
+            // Wire up sub-agent completion to interrupt wait
+            if let Some(interrupt_tx) = wait_interrupt_tx {
+                let completion_rx = manager.completion_receiver();
+                tokio::spawn(async move {
+                    let mut rx = completion_rx;
+                    while rx.changed().await.is_ok() {
+                        if let Some(completion) = rx.borrow().clone() {
+                            let reason = format!(
+                                "Sub-agent '{}' {} with: {}",
+                                completion.agent_name,
+                                if completion.is_error {
+                                    "failed"
+                                } else {
+                                    "completed"
+                                },
+                                completion.summary
+                            );
+                            let _ = interrupt_tx.send(Some(WaitInterrupt { reason }));
                         }
-                        tools
-                    },
-                    disable: std::collections::HashSet::new(),
-                },
-                enforced: Default::default(),
-            };
+                    }
+                });
+            }
 
+            // Create a tool dispatcher for sub-agents that inherits all parent tools
+            // EXCEPT sub-agent tools (to prevent infinite nesting).
+            //
+            // Sub-agents use the same builtin_config as the parent. Sub-agent tools
+            // won't be available because they're not registered in sub_agent_dispatcher
+            // (they're only registered in the parent's composite dispatcher).
+            //
+            // Comms tools are added later in spawn_sub_agent_dyn via CommsBootstrap,
+            // ensuring uniform comms setup for all agents.
             let sub_agent_task_store = MemoryTaskStore::new();
             let sub_agent_dispatcher = CompositeDispatcher::new(
                 Arc::new(sub_agent_task_store),
-                &sub_agent_builtin_config,
+                &builtin_config, // Same config as parent - inherits all builtin tools
                 shell_config_for_subagents,
                 mcp_adapter.clone(),
                 None,
@@ -662,15 +768,43 @@ async fn run_agent(
             let parent_session = Arc::new(RwLock::new(Session::new()));
             let sub_agent_config = SubAgentConfig::default();
 
-            let state = Arc::new(SubAgentToolState::new(
-                manager,
-                client_factory,
-                sub_agent_tools,
-                sub_agent_store,
-                parent_session,
-                sub_agent_config,
-                0, // depth
-            ));
+            // Build parent comms context if comms is enabled
+            // This allows sub-agents to communicate back to the parent
+            let state = if let (Some(runtime), Some(config)) = (&comms_runtime, &comms_config) {
+                // Use inproc address for sub-agents (they run in-process)
+                // The parent registers in InprocRegistry when start_listeners() is called,
+                // so in-process sub-agents can reach us via inproc:// without network I/O.
+                let parent_addr = format!("inproc://{}", config.name);
+
+                let parent_comms = ParentCommsContext {
+                    parent_name: config.name.clone(),
+                    parent_pubkey: *runtime.public_key().as_bytes(),
+                    parent_addr,
+                    comms_base_dir: comms_base_dir.clone(),
+                };
+
+                Arc::new(SubAgentToolState::with_comms(
+                    manager,
+                    client_factory,
+                    sub_agent_tools,
+                    sub_agent_store,
+                    parent_session,
+                    sub_agent_config,
+                    0, // depth
+                    parent_comms,
+                    runtime.trusted_peers_shared(),
+                ))
+            } else {
+                Arc::new(SubAgentToolState::new(
+                    manager,
+                    client_factory,
+                    sub_agent_tools,
+                    sub_agent_store,
+                    parent_session,
+                    sub_agent_config,
+                    0, // depth
+                ))
+            };
 
             let tool_set = SubAgentToolSet::new(state);
             composite
@@ -678,28 +812,73 @@ async fn run_agent(
                 .map_err(|e| anyhow::anyhow!("Failed to register sub-agent tools: {}", e))?;
         }
 
-        Arc::new(CliToolDispatcher::Composite(Arc::new(composite)))
-    } else {
-        // No builtins - just MCP or empty
-        match create_mcp_tools().await {
-            Ok(Some(adapter)) => Arc::new(CliToolDispatcher::Mcp(Box::new(adapter))),
-            Ok(None) => Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher)),
-            Err(e) => {
-                tracing::warn!("Failed to load MCP tools: {}", e);
-                Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher))
-            }
+        // Wire comms notify to interrupt wait when messages arrive
+        if let Some(ref runtime) = comms_runtime {
+            composite.register_comms_notify(runtime.inbox_notify());
         }
+
+        // Get tool usage instructions before wrapping
+        let tool_usage_instructions = composite.usage_instructions();
+
+        (
+            Arc::new(CliToolDispatcher::Composite(Arc::new(composite))),
+            tool_usage_instructions,
+        )
+    } else {
+        // No builtins and no subagents - just MCP or empty (no tool usage instructions)
+        let dispatcher = match mcp_router_adapter {
+            Some(adapter) => Arc::new(CliToolDispatcher::Mcp(Box::new(adapter))),
+            None => Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher)),
+        };
+        (dispatcher, String::new())
+    };
+
+    // Compose tools with comms via ToolGateway if comms is enabled
+    //
+    // Comms tools use dynamic availability based on peer count:
+    // - When peers exist: comms tools are visible and callable
+    // - When no peers: comms tools are hidden (ToolError::Unavailable on dispatch)
+    let (tools, tool_usage_instructions, comms_runtime) = if let Some(runtime) = comms_runtime {
+        // Get shared peers reference for availability predicate
+        let trusted_peers = runtime.trusted_peers_shared();
+
+        // Create comms tool surface
+        let comms_surface = CommsToolSurface::new(runtime.router_arc(), trusted_peers.clone());
+
+        // Create availability predicate - tools visible only when peers exist
+        let availability = CommsToolSurface::peer_availability(trusted_peers);
+
+        // Compose base dispatcher with comms surface via gateway
+        // Comms tools are registered (for collision detection) but only visible when peers exist
+        let gateway = ToolGatewayBuilder::new()
+            .add_dispatcher(tools as Arc<dyn AgentToolDispatcher>)
+            .add_dispatcher_with_availability(Arc::new(comms_surface), availability)
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to create tool gateway: {}", e))?;
+
+        // Append comms usage instructions
+        let mut instructions = tool_usage_instructions;
+        if !instructions.is_empty() {
+            instructions.push_str("\n\n");
+        }
+        instructions.push_str(CommsToolSurface::usage_instructions());
+
+        let wrapped = Arc::new(CliToolDispatcher::WithComms(Arc::new(gateway)));
+        (wrapped, instructions, Some(runtime))
+    } else {
+        (tools, tool_usage_instructions, None)
     };
 
     // Create persistent session store
     let store = create_session_store();
     let store_adapter = Arc::new(SessionStoreAdapter::new(store));
 
-    // Compose system prompt (with AGENTS.md if present)
-    let system_prompt = SystemPromptConfig::new().compose();
-
-    // Load comms configuration
-    let (comms_config, comms_base_dir) = config::load_comms_config(&comms_overrides);
+    // Compose system prompt (with AGENTS.md and tool usage instructions)
+    let mut system_prompt = SystemPromptConfig::new().compose();
+    if !tool_usage_instructions.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&tool_usage_instructions);
+    }
 
     // Build the agent with budget limits (clone tools Arc so we can shutdown later)
     let tools_for_shutdown = tools.clone();
@@ -709,11 +888,9 @@ async fn run_agent(
         .system_prompt(system_prompt)
         .budget(limits);
 
-    // Add comms configuration if present
-    if let Some(ref comms) = comms_config {
-        builder = builder
-            .comms(comms.clone())
-            .comms_base_dir(comms_base_dir.clone());
+    // Add pre-created comms runtime if present
+    if let Some(runtime) = comms_runtime {
+        builder = builder.with_comms_runtime(runtime);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter);
@@ -779,7 +956,7 @@ async fn run_agent(
                     AgentEvent::ToolCallRequested { name, args, .. } => {
                         let args_str = serde_json::to_string(&args).unwrap_or_default();
                         let args_preview = if args_str.len() > 100 {
-                            format!("{}...", &args_str[..100])
+                            format!("{}...", truncate_str(&args_str, 100))
                         } else {
                             args_str
                         };
@@ -794,7 +971,7 @@ async fn run_agent(
                     } => {
                         let status = if is_error { "✗" } else { "✓" };
                         let result_preview = if result.len() > 200 {
-                            format!("{}...", &result[..200])
+                            format!("{}...", truncate_str(&result, 200))
                         } else {
                             result
                         };
@@ -812,7 +989,7 @@ async fn run_agent(
                     AgentEvent::TextComplete { content } => {
                         if !content.is_empty() {
                             let preview = if content.len() > 500 {
-                                format!("{}...", &content[..500])
+                                format!("{}...", truncate_str(&content, 500))
                             } else {
                                 content
                             };
@@ -1075,7 +1252,7 @@ async fn show_session(id: &str) -> anyhow::Result<()> {
                 if !a.content.is_empty() {
                     // Truncate long responses
                     let display_text = if a.content.len() > 500 {
-                        format!("{}...", &a.content[..500])
+                        format!("{}...", truncate_str(&a.content, 500))
                     } else {
                         a.content.clone()
                     };
@@ -1094,7 +1271,7 @@ async fn show_session(id: &str) -> anyhow::Result<()> {
                     let status = if result.is_error { "ERROR" } else { "OK" };
                     // Truncate long results
                     let content = if result.content.len() > 200 {
-                        format!("{}...", &result.content[..200])
+                        format!("{}...", truncate_str(&result.content, 200))
                     } else {
                         result.content.clone()
                     };
@@ -1417,5 +1594,256 @@ mod tests {
         assert_eq!(Provider::Anthropic.api_key_env_var(), "ANTHROPIC_API_KEY");
         assert_eq!(Provider::Openai.api_key_env_var(), "OPENAI_API_KEY");
         assert_eq!(Provider::Gemini.api_key_env_var(), "GEMINI_API_KEY");
+    }
+
+    #[test]
+    fn test_comms_tool_dispatcher_provides_comms_tools() {
+        use meerkat_comms::{CommsConfig, Keypair, TrustedPeers};
+        use meerkat_comms_agent::CommsToolDispatcher;
+        use meerkat_core::AgentToolDispatcher;
+        use tokio::sync::RwLock;
+
+        // Create mock comms infrastructure
+        let keypair = Keypair::generate();
+        let trusted_peers = TrustedPeers::new();
+        let trusted_peers = std::sync::Arc::new(RwLock::new(trusted_peers));
+        let router = std::sync::Arc::new(meerkat_comms::Router::with_shared_peers(
+            keypair,
+            trusted_peers.clone(),
+            CommsConfig::default(),
+        ));
+
+        // Create CommsToolDispatcher with no inner dispatcher
+        let dispatcher = CommsToolDispatcher::new(router, trusted_peers);
+
+        // Verify comms tools are available
+        let tools = dispatcher.tools();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+        assert!(tool_names.contains(&"send_message"));
+        assert!(tool_names.contains(&"send_request"));
+        assert!(tool_names.contains(&"send_response"));
+        assert!(tool_names.contains(&"list_peers"));
+    }
+
+    // === Tests for sub-agent flag behavior ===
+
+    /// Test that sub-agents are enabled by default (need_composite should be true)
+    #[test]
+    fn test_subagent_enabled_by_default() {
+        // Simulate default flag values
+        let enable_builtins = false;
+        let no_subagents = false; // default
+        let enable_subagents = !no_subagents;
+
+        // This is the logic from run_agent
+        let need_composite = enable_builtins || enable_subagents;
+
+        assert!(
+            need_composite,
+            "CompositeDispatcher should be used when subagents are enabled by default"
+        );
+        assert!(enable_subagents, "Sub-agents should be enabled by default");
+    }
+
+    /// Test that --no-subagents disables sub-agent tools
+    #[test]
+    fn test_no_subagents_flag_disables_subagents() {
+        // Simulate --no-subagents flag
+        let enable_builtins = false;
+        let no_subagents = true;
+        let enable_subagents = !no_subagents;
+
+        let need_composite = enable_builtins || enable_subagents;
+
+        assert!(
+            !enable_subagents,
+            "Sub-agents should be disabled when --no-subagents is passed"
+        );
+        assert!(
+            !need_composite,
+            "CompositeDispatcher should NOT be used when both builtins and subagents are disabled"
+        );
+    }
+
+    /// Test that --enable-builtins alone enables builtins but not subagents (when --no-subagents)
+    #[test]
+    fn test_enable_builtins_with_no_subagents() {
+        let enable_builtins = true;
+        let no_subagents = true;
+        let enable_subagents = !no_subagents;
+
+        let need_composite = enable_builtins || enable_subagents;
+
+        assert!(
+            need_composite,
+            "CompositeDispatcher should be used when builtins are enabled"
+        );
+        assert!(!enable_subagents, "Sub-agents should be disabled");
+    }
+
+    /// Test that sub-agents work independently of --enable-builtins
+    #[test]
+    fn test_subagents_independent_of_builtins() {
+        // Without --enable-builtins but with default subagents (enabled)
+        let enable_builtins = false;
+        let no_subagents = false;
+        let enable_subagents = !no_subagents;
+
+        let need_composite = enable_builtins || enable_subagents;
+
+        assert!(
+            enable_subagents,
+            "Sub-agents should be enabled regardless of builtins"
+        );
+        assert!(
+            need_composite,
+            "CompositeDispatcher should be used for sub-agents even without builtins"
+        );
+    }
+
+    /// Test the enabled tools set when only subagents are enabled
+    #[test]
+    fn test_enabled_tools_subagents_only() {
+        use std::collections::HashSet;
+
+        let enable_builtins = false;
+        let enable_shell = false;
+        let enable_subagents = true;
+
+        // Replicate the logic from run_agent
+        let mut enabled_tools: HashSet<String> = HashSet::new();
+
+        if enable_builtins {
+            enabled_tools.extend(
+                [
+                    "task_list",
+                    "task_get",
+                    "task_create",
+                    "task_update",
+                    "wait",
+                    "datetime",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+        }
+
+        if enable_shell {
+            enabled_tools.extend([
+                "shell".to_string(),
+                "job_status".to_string(),
+                "jobs_list".to_string(),
+                "job_cancel".to_string(),
+            ]);
+        }
+
+        if enable_subagents {
+            enabled_tools.extend([
+                "agent_spawn".to_string(),
+                "agent_fork".to_string(),
+                "agent_status".to_string(),
+                "agent_cancel".to_string(),
+                "agent_list".to_string(),
+            ]);
+        }
+
+        // Verify only sub-agent tools are enabled
+        assert!(
+            enabled_tools.contains("agent_spawn"),
+            "agent_spawn should be enabled"
+        );
+        assert!(
+            enabled_tools.contains("agent_fork"),
+            "agent_fork should be enabled"
+        );
+        assert!(
+            enabled_tools.contains("agent_status"),
+            "agent_status should be enabled"
+        );
+        assert!(
+            enabled_tools.contains("agent_cancel"),
+            "agent_cancel should be enabled"
+        );
+        assert!(
+            enabled_tools.contains("agent_list"),
+            "agent_list should be enabled"
+        );
+
+        // Verify task tools are NOT enabled (since builtins is false)
+        assert!(
+            !enabled_tools.contains("task_list"),
+            "task_list should NOT be enabled without --enable-builtins"
+        );
+        assert!(
+            !enabled_tools.contains("wait"),
+            "wait should NOT be enabled without --enable-builtins"
+        );
+
+        // Verify exact count
+        assert_eq!(
+            enabled_tools.len(),
+            5,
+            "Should have exactly 5 sub-agent tools enabled"
+        );
+    }
+
+    /// Test the enabled tools set when both builtins and subagents are enabled
+    #[test]
+    fn test_enabled_tools_builtins_and_subagents() {
+        use std::collections::HashSet;
+
+        let enable_builtins = true;
+        let enable_shell = false;
+        let enable_subagents = true;
+
+        let mut enabled_tools: HashSet<String> = HashSet::new();
+
+        if enable_builtins {
+            enabled_tools.extend(
+                [
+                    "task_list",
+                    "task_get",
+                    "task_create",
+                    "task_update",
+                    "wait",
+                    "datetime",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+        }
+
+        if enable_shell {
+            enabled_tools.extend([
+                "shell".to_string(),
+                "job_status".to_string(),
+                "jobs_list".to_string(),
+                "job_cancel".to_string(),
+            ]);
+        }
+
+        if enable_subagents {
+            enabled_tools.extend([
+                "agent_spawn".to_string(),
+                "agent_fork".to_string(),
+                "agent_status".to_string(),
+                "agent_cancel".to_string(),
+                "agent_list".to_string(),
+            ]);
+        }
+
+        // Verify both task and sub-agent tools are enabled
+        assert!(enabled_tools.contains("task_list"));
+        assert!(enabled_tools.contains("wait"));
+        assert!(enabled_tools.contains("agent_spawn"));
+        assert!(enabled_tools.contains("agent_list"));
+
+        // 6 task/utility tools + 5 sub-agent tools = 11
+        assert_eq!(
+            enabled_tools.len(),
+            11,
+            "Should have 11 tools (6 task/utility + 5 sub-agent)"
+        );
     }
 }

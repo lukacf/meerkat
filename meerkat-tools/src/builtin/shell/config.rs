@@ -66,6 +66,15 @@ pub enum ShellError {
     #[error("Background execution not configured")]
     BackgroundNotConfigured,
 
+    /// Concurrency limit exceeded
+    #[error("Concurrency limit exceeded: {current} running jobs, limit is {limit}")]
+    ConcurrencyLimitExceeded {
+        /// Current number of running jobs
+        current: usize,
+        /// Configured limit
+        limit: usize,
+    },
+
     /// IO error during shell operations
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -112,6 +121,13 @@ pub struct ShellConfig {
     /// during cleanup, even if under the max_completed_jobs limit.
     #[serde(default = "default_completed_job_ttl_secs")]
     pub completed_job_ttl_secs: u64,
+
+    /// Maximum number of concurrent running processes (default: 10)
+    ///
+    /// When this limit is reached, new job spawn requests will be rejected
+    /// with a ConcurrencyLimitExceeded error. Set to 0 for unlimited.
+    #[serde(default = "default_max_concurrent_processes")]
+    pub max_concurrent_processes: usize,
 }
 
 fn default_max_completed_jobs() -> usize {
@@ -120,6 +136,10 @@ fn default_max_completed_jobs() -> usize {
 
 fn default_completed_job_ttl_secs() -> u64 {
     300 // 5 minutes
+}
+
+fn default_max_concurrent_processes() -> usize {
+    10
 }
 
 impl Default for ShellConfig {
@@ -133,6 +153,7 @@ impl Default for ShellConfig {
             project_root: PathBuf::new(),
             max_completed_jobs: default_max_completed_jobs(),
             completed_job_ttl_secs: default_completed_job_ttl_secs(),
+            max_concurrent_processes: default_max_concurrent_processes(),
         }
     }
 }
@@ -212,6 +233,7 @@ mod tests {
             project_root: PathBuf::from("/home/user/project"),
             max_completed_jobs: 50,
             completed_job_ttl_secs: 600,
+            max_concurrent_processes: 5,
         };
 
         assert!(config.enabled);
@@ -222,6 +244,7 @@ mod tests {
         assert_eq!(config.project_root, PathBuf::from("/home/user/project"));
         assert_eq!(config.max_completed_jobs, 50);
         assert_eq!(config.completed_job_ttl_secs, 600);
+        assert_eq!(config.max_concurrent_processes, 5);
     }
 
     // ==================== Default Test ====================
@@ -246,6 +269,10 @@ mod tests {
             PathBuf::new(),
             "project_root should default to empty PathBuf"
         );
+        assert_eq!(
+            config.max_concurrent_processes, 10,
+            "max_concurrent_processes should default to 10"
+        );
     }
 
     // ==================== Serde Roundtrip Test ====================
@@ -261,6 +288,7 @@ mod tests {
             project_root: PathBuf::from("/tmp/test"),
             max_completed_jobs: 200,
             completed_job_ttl_secs: 600,
+            max_concurrent_processes: 15,
         };
 
         // Serialize to JSON
@@ -438,6 +466,15 @@ mod tests {
 
         let err = ShellError::BackgroundNotConfigured;
         assert_eq!(err.to_string(), "Background execution not configured");
+
+        let err = ShellError::ConcurrencyLimitExceeded {
+            current: 10,
+            limit: 10,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Concurrency limit exceeded: 10 running jobs, limit is 10"
+        );
     }
 
     #[test]

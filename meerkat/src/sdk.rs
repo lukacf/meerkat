@@ -431,12 +431,14 @@ mod tests {
             CompositeDispatcher::new(store, &config, None, None, Some("test-session".to_string()))
                 .unwrap();
 
-        // Should have all 4 task tools
-        assert_eq!(dispatcher.builtin_count(), 4);
+        // Should have 4 task tools + 2 utility tools (wait, datetime)
+        assert_eq!(dispatcher.builtin_count(), 6);
         assert!(dispatcher.is_builtin("task_create"));
         assert!(dispatcher.is_builtin("task_list"));
         assert!(dispatcher.is_builtin("task_get"));
         assert!(dispatcher.is_builtin("task_update"));
+        assert!(dispatcher.is_builtin("wait"));
+        assert!(dispatcher.is_builtin("datetime"));
     }
 
     #[tokio::test]
@@ -492,7 +494,8 @@ mod tests {
 
         assert!(result.is_ok());
         let dispatcher = result.unwrap();
-        assert_eq!(dispatcher.builtin_count(), 4);
+        // 4 task tools + 2 utility tools (wait, datetime)
+        assert_eq!(dispatcher.builtin_count(), 6);
     }
 
     #[tokio::test]

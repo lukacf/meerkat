@@ -129,6 +129,8 @@ pub struct AgentBuilder {
     comms_config: Option<CoreCommsConfig>,
     /// Base directory for resolving comms paths (defaults to current dir)
     comms_base_dir: Option<std::path::PathBuf>,
+    /// Pre-created comms runtime (alternative to comms_config)
+    comms_runtime: Option<CommsRuntime>,
 }
 
 impl AgentBuilder {
@@ -144,6 +146,7 @@ impl AgentBuilder {
             depth: 0,
             comms_config: None,
             comms_base_dir: None,
+            comms_runtime: None,
         }
     }
 
@@ -238,7 +241,8 @@ impl AgentBuilder {
     /// - Provide comms tools (send_message, send_request, send_response, list_peers)
     /// - Drain inbox at turn boundaries and inject messages into the session
     ///
-    /// Note: Subagents cannot have comms enabled (security restriction).
+    /// Note: For top-level agents (depth == 0), this config is used to create comms.
+    /// For sub-agents, use `with_comms_runtime()` to pass a pre-configured runtime.
     pub fn comms(mut self, config: CoreCommsConfig) -> Self {
         self.comms_config = Some(config);
         self
@@ -250,6 +254,17 @@ impl AgentBuilder {
     /// Defaults to current working directory if not set.
     pub fn comms_base_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.comms_base_dir = Some(dir);
+        self
+    }
+
+    /// Set a pre-created comms runtime.
+    ///
+    /// Use this when you need to share the router/trusted_peers with other components
+    /// (e.g., CommsToolDispatcher) before building the agent.
+    ///
+    /// This takes precedence over `comms()` configuration.
+    pub fn with_comms_runtime(mut self, runtime: CommsRuntime) -> Self {
+        self.comms_runtime = Some(runtime);
         self
     }
 
@@ -276,9 +291,18 @@ impl AgentBuilder {
         // Create steering channel for receiving steering messages from parent
         let (steering_tx, steering_rx) = mpsc::channel(16);
 
-        // Create comms runtime if enabled AND this is not a subagent.
-        // Subagents cannot have comms for security reasons (no network exposure).
-        let comms_runtime = if self.depth == 0 {
+        // Create comms runtime.
+        // Priority: 1) Pre-created runtime (always used, regardless of depth)
+        //           2) Create from config (only for top-level agents, depth == 0)
+        //
+        // Sub-agents can have comms when explicitly provided via with_comms_runtime().
+        // This allows parent-child communication over UDS sockets.
+        let comms_runtime = if let Some(runtime) = self.comms_runtime {
+            // Always use pre-created runtime regardless of depth
+            // This enables sub-agent comms when the parent sets it up
+            Some(runtime)
+        } else if self.depth == 0 {
+            // Only auto-create from config for top-level agents
             self.comms_config.filter(|c| c.enabled).and_then(|config| {
                 let base_dir = self.comms_base_dir.unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -306,8 +330,8 @@ impl AgentBuilder {
                 }
             })
         } else {
-            // Subagents cannot have comms - this is a security restriction to prevent
-            // subagents from having network exposure.
+            // Sub-agents without explicit comms runtime get None
+            // (They can still communicate via parent-provided runtime)
             None
         };
 
@@ -719,10 +743,10 @@ where
     /// Drain comms inbox and inject messages into session.
     ///
     /// This is called at turn boundaries to process incoming inter-agent messages.
-    /// It is non-blocking - if the inbox is empty, it returns immediately.
-    fn drain_comms_inbox(&mut self) {
+    /// It is non-blocking on the inbox but awaits the trusted peers read lock.
+    async fn drain_comms_inbox(&mut self) {
         if let Some(ref mut comms) = self.comms_runtime {
-            let messages = comms.drain_messages();
+            let messages = comms.drain_messages().await;
             if !messages.is_empty() {
                 tracing::debug!("Injecting {} comms messages into session", messages.len());
 
@@ -991,8 +1015,8 @@ where
                         // Apply any pending steering messages from parent
                         self.apply_pending_steering().await;
 
-                        // Drain comms inbox and inject messages into session (non-blocking)
-                        self.drain_comms_inbox();
+                        // Drain comms inbox and inject messages into session
+                        self.drain_comms_inbox().await;
 
                         // Collect completed sub-agent results and inject into session
                         let sub_agent_results = self.collect_sub_agent_results().await;
@@ -1431,6 +1455,53 @@ mod tests {
         // Subagents cannot have comms - security restriction
         assert!(agent.comms().is_none());
         assert_eq!(agent.depth(), 1);
+    }
+
+    #[test]
+    fn test_agent_with_comms_runtime() {
+        use crate::comms_config::CoreCommsConfig;
+        use crate::comms_runtime::CommsRuntime;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let mut config = CoreCommsConfig::with_name("test-agent");
+        config.identity_dir = tmp.path().join("identity");
+        config.trusted_peers_path = tmp.path().join("trusted.json");
+        config.listen_uds = None;
+        config.listen_tcp = None;
+
+        // Create CommsRuntime externally
+        let resolved = config.resolve_paths(tmp.path());
+        let runtime = CommsRuntime::new(resolved).unwrap();
+
+        // Get Arc clones before moving runtime
+        let router_arc = runtime.router_arc();
+        let trusted_peers_shared = runtime.trusted_peers_shared();
+
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        // Inject the pre-created runtime
+        let agent = AgentBuilder::new()
+            .with_comms_runtime(runtime)
+            .build(client, tools, store);
+
+        // Agent should have comms
+        assert!(agent.comms().is_some());
+
+        // The router should be the same as what we extracted
+        assert!(std::ptr::eq(
+            agent.comms().unwrap().router() as *const _,
+            router_arc.as_ref() as *const _
+        ));
+
+        // The trusted_peers should point to the same underlying data (shared Arc<RwLock<...>>)
+        // We verify this by checking that the Arc pointers are the same
+        assert!(std::sync::Arc::ptr_eq(
+            &agent.comms().unwrap().trusted_peers_shared(),
+            &trusted_peers_shared
+        ));
     }
 
     #[test]

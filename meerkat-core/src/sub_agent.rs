@@ -12,8 +12,30 @@ use crate::session::Session;
 use crate::types::{Message, ToolDef, UserMessage};
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use uuid::Uuid;
+
+/// Notification sent when a sub-agent completes
+#[derive(Debug, Clone)]
+pub struct SubAgentCompletion {
+    /// Agent ID that completed
+    pub agent_id: OperationId,
+    /// Agent name
+    pub agent_name: String,
+    /// Whether it was an error
+    pub is_error: bool,
+    /// Brief summary of the result (truncated if needed)
+    pub summary: String,
+}
+
+/// Comms metadata for a sub-agent (for parent to send messages)
+#[derive(Debug, Clone)]
+pub struct SubAgentCommsInfo {
+    /// Child's public key (Ed25519)
+    pub pubkey: [u8; 32],
+    /// Address to reach the child (e.g., "uds:///tmp/child.sock")
+    pub addr: String,
+}
 
 /// Information about a sub-agent (public view)
 #[derive(Debug, Clone)]
@@ -32,6 +54,8 @@ pub struct SubAgentInfo {
     pub pending_steering: usize,
     /// Result when completed
     pub result: Option<OperationResult>,
+    /// Comms info for sending messages to this sub-agent
+    pub comms: Option<SubAgentCommsInfo>,
 }
 
 /// A running sub-agent handle
@@ -55,6 +79,8 @@ pub struct SubAgentHandle {
     steering_tx: mpsc::Sender<SteeringMessage>,
     /// Result when completed
     pub result: Option<OperationResult>,
+    /// Comms info for sending messages to this sub-agent
+    pub comms: Option<SubAgentCommsInfo>,
 }
 
 impl SubAgentHandle {
@@ -91,17 +117,32 @@ pub struct SubAgentManager {
     current_depth: u32,
     /// Completed results waiting to be collected
     completed_results: Mutex<Vec<OperationResult>>,
+    /// Notification sender for sub-agent completions
+    completion_tx: watch::Sender<Option<SubAgentCompletion>>,
+    /// Notification receiver (clone this for listeners)
+    completion_rx: watch::Receiver<Option<SubAgentCompletion>>,
 }
 
 impl SubAgentManager {
     /// Create a new sub-agent manager
     pub fn new(limits: ConcurrencyLimits, current_depth: u32) -> Self {
+        let (completion_tx, completion_rx) = watch::channel(None);
         Self {
             agents: RwLock::new(HashMap::new()),
             limits,
             current_depth,
             completed_results: Mutex::new(Vec::new()),
+            completion_tx,
+            completion_rx,
         }
+    }
+
+    /// Get a receiver for sub-agent completion notifications
+    ///
+    /// The receiver will be notified whenever any sub-agent completes (success or failure).
+    /// Use this to interrupt wait operations when sub-agents finish.
+    pub fn completion_receiver(&self) -> watch::Receiver<Option<SubAgentCompletion>> {
+        self.completion_rx.clone()
     }
 
     /// Check if we can spawn more sub-agents
@@ -259,6 +300,17 @@ impl SubAgentManager {
         name: String,
         steering_tx: mpsc::Sender<SteeringMessage>,
     ) -> Result<(), AgentError> {
+        self.register_with_comms(id, name, steering_tx, None).await
+    }
+
+    /// Register a new sub-agent with comms info
+    pub async fn register_with_comms(
+        &self,
+        id: OperationId,
+        name: String,
+        steering_tx: mpsc::Sender<SteeringMessage>,
+        comms: Option<SubAgentCommsInfo>,
+    ) -> Result<(), AgentError> {
         let mut agents = self.agents.write().await;
 
         if agents.len() >= self.limits.max_concurrent_agents {
@@ -277,6 +329,7 @@ impl SubAgentManager {
             depth: self.current_depth + 1,
             steering_tx,
             result: None,
+            comms,
         };
 
         agents.insert(id, handle);
@@ -318,30 +371,65 @@ impl SubAgentManager {
 
     /// Mark a sub-agent as completed
     pub async fn complete(&self, id: &OperationId, result: OperationResult) {
-        let mut agents = self.agents.write().await;
-        if let Some(handle) = agents.get_mut(id) {
-            handle.state = SubAgentState::Completed;
-            handle.result = Some(result.clone());
+        let agent_name;
+        {
+            let mut agents = self.agents.write().await;
+            if let Some(handle) = agents.get_mut(id) {
+                handle.state = SubAgentState::Completed;
+                handle.result = Some(result.clone());
+                agent_name = handle.name.clone();
+            } else {
+                agent_name = "unknown".to_string();
+            }
         }
 
         // Add to completed results for collection
-        let mut completed = self.completed_results.lock().await;
-        completed.push(result);
+        {
+            let mut completed = self.completed_results.lock().await;
+            completed.push(result.clone());
+        }
+
+        // Notify listeners
+        let summary = if result.content.len() > 200 {
+            format!("{}...", &result.content[..200])
+        } else {
+            result.content.clone()
+        };
+        let _ = self.completion_tx.send(Some(SubAgentCompletion {
+            agent_id: id.clone(),
+            agent_name,
+            is_error: result.is_error,
+            summary,
+        }));
     }
 
     /// Mark a sub-agent as failed
     pub async fn fail(&self, id: &OperationId, error: String) {
-        let mut agents = self.agents.write().await;
-        if let Some(handle) = agents.get_mut(id) {
-            handle.state = SubAgentState::Failed;
-            handle.result = Some(OperationResult {
-                id: id.clone(),
-                content: error,
-                is_error: true,
-                duration_ms: handle.started_at.elapsed().as_millis() as u64,
-                tokens_used: 0,
-            });
+        let agent_name;
+        {
+            let mut agents = self.agents.write().await;
+            if let Some(handle) = agents.get_mut(id) {
+                handle.state = SubAgentState::Failed;
+                handle.result = Some(OperationResult {
+                    id: id.clone(),
+                    content: error.clone(),
+                    is_error: true,
+                    duration_ms: handle.started_at.elapsed().as_millis() as u64,
+                    tokens_used: 0,
+                });
+                agent_name = handle.name.clone();
+            } else {
+                agent_name = "unknown".to_string();
+            }
         }
+
+        // Notify listeners
+        let _ = self.completion_tx.send(Some(SubAgentCompletion {
+            agent_id: id.clone(),
+            agent_name,
+            is_error: true,
+            summary: error,
+        }));
     }
 
     /// Cancel a sub-agent
@@ -375,6 +463,7 @@ impl SubAgentManager {
             running_ms: h.started_at.elapsed().as_millis() as u64,
             pending_steering: h.steering_queue.len(),
             result: h.result.clone(),
+            comms: h.comms.clone(),
         })
     }
 
@@ -391,6 +480,7 @@ impl SubAgentManager {
                 running_ms: h.started_at.elapsed().as_millis() as u64,
                 pending_steering: h.steering_queue.len(),
                 result: h.result.clone(),
+                comms: h.comms.clone(),
             })
             .collect()
     }

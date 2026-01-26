@@ -13,6 +13,14 @@ pub enum ToolError {
     #[error("Tool not found: {name}")]
     NotFound { name: String },
 
+    /// The tool exists but is currently unavailable
+    ///
+    /// Unlike NotFound (tool doesn't exist), this indicates the tool exists
+    /// but cannot be used right now due to runtime conditions (e.g., no peers
+    /// configured for comms tools).
+    #[error("Tool '{name}' is currently unavailable: {reason}")]
+    Unavailable { name: String, reason: String },
+
     /// The tool arguments failed validation
     #[error("Invalid arguments for tool '{name}': {reason}")]
     InvalidArguments { name: String, reason: String },
@@ -38,6 +46,14 @@ impl ToolError {
     /// Create a new "not found" error
     pub fn not_found(name: impl Into<String>) -> Self {
         Self::NotFound { name: name.into() }
+    }
+
+    /// Create a new "unavailable" error
+    pub fn unavailable(name: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::Unavailable {
+            name: name.into(),
+            reason: reason.into(),
+        }
     }
 
     /// Create a new "invalid arguments" error

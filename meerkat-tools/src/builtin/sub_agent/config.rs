@@ -30,6 +30,14 @@ pub enum SubAgentError {
     #[error("Invalid provider: {provider}")]
     InvalidProvider { provider: String },
 
+    /// Invalid model specified (not in allowlist)
+    #[error("Model '{model}' is not in allowlist for provider '{provider}'. Allowed models: {}", allowed.join(", "))]
+    InvalidModel {
+        model: String,
+        provider: String,
+        allowed: Vec<String>,
+    },
+
     /// Missing API key for provider
     #[error("Missing API key for provider: {provider}")]
     MissingApiKey { provider: String },

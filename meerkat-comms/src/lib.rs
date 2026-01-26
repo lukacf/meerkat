@@ -3,6 +3,7 @@
 
 pub mod identity;
 pub mod inbox;
+pub mod inproc;
 pub mod io_task;
 pub mod router;
 pub mod transport;
@@ -11,6 +12,7 @@ pub mod types;
 
 pub use identity::{IdentityError, Keypair, PubKey, Signature};
 pub use inbox::{Inbox, InboxError, InboxSender};
+pub use inproc::{InprocRegistry, InprocSendError};
 pub use io_task::{handle_connection, IoTaskError};
 pub use router::{CommsConfig, Router, SendError, DEFAULT_MAX_MESSAGE_BYTES};
 pub use transport::{PeerAddr, TransportError};

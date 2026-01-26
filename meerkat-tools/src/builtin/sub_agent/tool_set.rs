@@ -6,7 +6,6 @@ use super::list::AgentListTool;
 use super::spawn::AgentSpawnTool;
 use super::state::SubAgentToolState;
 use super::status::AgentStatusTool;
-use super::steer::AgentSteerTool;
 use crate::builtin::BuiltinTool;
 use std::sync::Arc;
 
@@ -19,8 +18,6 @@ pub struct SubAgentToolSet {
     pub spawn: AgentSpawnTool,
     /// Tool for forking with continued context
     pub fork: AgentForkTool,
-    /// Tool for sending guidance to running sub-agents
-    pub steer: AgentSteerTool,
     /// Tool for checking sub-agent status
     pub status: AgentStatusTool,
     /// Tool for cancelling running sub-agents
@@ -37,7 +34,6 @@ impl SubAgentToolSet {
         Self {
             spawn: AgentSpawnTool::new(state.clone()),
             fork: AgentForkTool::new(state.clone()),
-            steer: AgentSteerTool::new(state.clone()),
             status: AgentStatusTool::new(state.clone()),
             cancel: AgentCancelTool::new(state.clone()),
             list: AgentListTool::new(state.clone()),
@@ -50,7 +46,6 @@ impl SubAgentToolSet {
         vec![
             &self.spawn as &dyn BuiltinTool,
             &self.fork as &dyn BuiltinTool,
-            &self.steer as &dyn BuiltinTool,
             &self.status as &dyn BuiltinTool,
             &self.cancel as &dyn BuiltinTool,
             &self.list as &dyn BuiltinTool,
@@ -67,11 +62,58 @@ impl SubAgentToolSet {
         vec![
             "agent_spawn",
             "agent_fork",
-            "agent_steer",
             "agent_status",
             "agent_cancel",
             "agent_list",
         ]
+    }
+
+    /// Get usage instructions for the LLM on how to properly use sub-agent tools
+    ///
+    /// These instructions should be injected into the system prompt when
+    /// sub-agent tools are enabled.
+    pub fn usage_instructions() -> &'static str {
+        r#"# Sub-Agent Tools
+
+You have access to tools for spawning and managing sub-agents. Sub-agents are independent LLM agents that can work in parallel on subtasks.
+
+## Available Tools
+- `agent_spawn` - Create a sub-agent with clean context (just your prompt)
+- `agent_fork` - Create a sub-agent that inherits your full conversation history
+- `agent_status` - Check the status and output of a sub-agent
+- `agent_cancel` - Cancel a running sub-agent
+- `agent_list` - List all sub-agents and their states
+
+## Communicating with Sub-Agents
+To send messages to running sub-agents, use the `comms_send` tool. Sub-agents automatically
+trust their parent and can receive messages at turn boundaries.
+
+## Best Practices
+
+### Spawning Sub-Agents
+- Give sub-agents clear, self-contained tasks with all necessary context in the prompt
+- Sub-agents inherit your tools by default (tool_access policy can restrict this)
+- Use different providers/models for different strengths (e.g., gemini-3-pro-preview for analysis, gpt-5.2 for coding)
+- Set appropriate budgets (max_turns, max_tokens, max_tool_calls) to prevent runaway costs
+
+### Monitoring Sub-Agents
+- **CRITICAL: DO NOT poll agent_status repeatedly** - this wastes tokens and provides no benefit
+- Sub-agents run asynchronously and take time to complete (typically 10-120 seconds)
+- **Instead of polling**: do other useful work, then check status once or twice near the end
+- Use `agent_list` to see all sub-agents at once - much more efficient than individual status checks
+- When `is_final: true`, the sub-agent is done and `output` contains the result
+- If you find yourself checking status more than 3 times total per agent, you're polling too much
+
+### When to Use Sub-Agents
+- Parallel independent tasks (e.g., analyze multiple files simultaneously)
+- Tasks requiring different model strengths
+- Long-running work you want to delegate while doing other things
+- Breaking complex problems into specialized subtasks
+
+### When NOT to Use Sub-Agents
+- Simple tasks you can do directly
+- Tasks requiring tight coordination (use sequential steps instead)
+- When you need immediate results (sub-agents add latency)"#
     }
 }
 
@@ -167,7 +209,6 @@ mod tests {
 
         assert_eq!(tool_set.spawn.name(), "agent_spawn");
         assert_eq!(tool_set.fork.name(), "agent_fork");
-        assert_eq!(tool_set.steer.name(), "agent_steer");
         assert_eq!(tool_set.status.name(), "agent_status");
         assert_eq!(tool_set.cancel.name(), "agent_cancel");
         assert_eq!(tool_set.list.name(), "agent_list");
@@ -179,12 +220,11 @@ mod tests {
         let tool_set = SubAgentToolSet::new(state);
         let tools = tool_set.tools();
 
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 5);
 
         let names: Vec<_> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"agent_spawn"));
         assert!(names.contains(&"agent_fork"));
-        assert!(names.contains(&"agent_steer"));
         assert!(names.contains(&"agent_status"));
         assert!(names.contains(&"agent_cancel"));
         assert!(names.contains(&"agent_list"));
@@ -196,10 +236,9 @@ mod tests {
         let tool_set = SubAgentToolSet::new(state);
         let names = tool_set.tool_names();
 
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"agent_spawn"));
         assert!(names.contains(&"agent_fork"));
-        assert!(names.contains(&"agent_steer"));
         assert!(names.contains(&"agent_status"));
         assert!(names.contains(&"agent_cancel"));
         assert!(names.contains(&"agent_list"));

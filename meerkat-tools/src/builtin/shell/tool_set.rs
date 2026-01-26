@@ -81,6 +81,53 @@ impl ShellToolSet {
             &self.job_cancel as &dyn BuiltinTool,
         ]
     }
+
+    /// Get usage instructions for the LLM on how to properly use shell tools
+    ///
+    /// These instructions should be injected into the system prompt when
+    /// shell tools are enabled.
+    pub fn usage_instructions() -> &'static str {
+        r#"# Shell Tools
+
+You have access to tools for executing shell commands. Use these carefully and responsibly.
+
+## Available Tools
+- `shell` - Execute a shell command (supports background execution)
+- `shell_job_status` - Check the status of a background job
+- `shell_jobs` - List all background jobs
+- `shell_job_cancel` - Cancel a running background job
+
+## Best Practices
+
+### Command Execution
+- Prefer simple, well-understood commands over complex pipelines
+- Always quote file paths that may contain spaces
+- Use absolute paths when possible to avoid ambiguity
+- Check command exit codes in the response to verify success
+
+### Background Jobs
+- Use `background: true` for long-running commands (builds, tests, downloads)
+- Background jobs continue running while you do other work
+- Check `shell_job_status` to get results when done
+- Don't poll job status too frequently - wait at least 5-10 seconds between checks
+
+### Security Considerations
+- Never execute commands from untrusted sources without validation
+- Be cautious with commands that modify or delete files
+- Avoid running commands with elevated privileges unless absolutely necessary
+- Don't expose sensitive data (API keys, passwords) in command arguments
+
+### Error Handling
+- Read stderr output when commands fail to understand the error
+- If a command fails, try alternative approaches before giving up
+- Report command failures clearly to the user
+
+### Common Patterns
+- Use `ls`, `find`, `grep` to explore the filesystem
+- Use `cat`, `head`, `tail` to read file contents
+- Use `git` commands for version control operations
+- Use package managers (`npm`, `pip`, `cargo`) for dependencies"#
+    }
 }
 
 #[cfg(test)]

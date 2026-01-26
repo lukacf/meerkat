@@ -25,10 +25,11 @@ pub mod error;
 pub mod registry;
 
 pub use builtin::{
-    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
-    CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore,
-    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir, find_project_root,
+    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CommsToolSurface,
+    CompositeDispatcher, CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore,
+    MemoryTaskStore, ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
+    find_project_root,
 };
-pub use dispatcher::ToolDispatcher;
+pub use dispatcher::{FilteredToolDispatcher, ToolDispatcher};
 pub use error::{DispatchError, ToolError, ToolValidationError};
 pub use registry::ToolRegistry;

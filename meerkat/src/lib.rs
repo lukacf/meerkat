@@ -36,6 +36,9 @@ pub use meerkat_core::{
     AgentToolDispatcher,
     ArtifactRef,
     AssistantMessage,
+    // Gateway for composing dispatchers
+    Availability,
+    AvailabilityCheck,
     // Budget
     Budget,
     BudgetConfig,
@@ -83,6 +86,8 @@ pub use meerkat_core::{
     ToolCall,
     ToolDef,
     ToolError,
+    ToolGateway,
+    ToolGatewayBuilder,
     ToolResult,
     Usage,
     UserMessage,
@@ -116,9 +121,10 @@ pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidat
 
 // Re-export builtin tools infrastructure
 pub use meerkat_tools::{
-    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
-    CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore,
-    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir, find_project_root,
+    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CommsToolSurface,
+    CompositeDispatcher, CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore,
+    MemoryTaskStore, ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
+    find_project_root,
 };
 
 // Re-export MCP client

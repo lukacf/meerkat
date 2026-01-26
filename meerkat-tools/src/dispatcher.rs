@@ -7,6 +7,7 @@ use meerkat_core::error::ToolError;
 use meerkat_core::{AgentToolDispatcher, ToolCall, ToolDef, ToolResult};
 use meerkat_mcp_client::McpRouter;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -109,6 +110,61 @@ impl AgentToolDispatcher for ToolDispatcher {
         #[allow(clippy::unnecessary_lazy_evaluations)]
         let value = serde_json::from_str(&result).unwrap_or_else(|_| Value::String(result));
         Ok(value)
+    }
+}
+
+/// A tool dispatcher that wraps another dispatcher and filters out specific tools.
+///
+/// This is useful for sub-agents that should inherit most tools from the parent
+/// but not have access to certain tools (e.g., sub-agent tools to prevent infinite nesting).
+pub struct FilteredToolDispatcher {
+    inner: Arc<dyn AgentToolDispatcher>,
+    /// Tools to hide (deny list)
+    denied_tools: HashSet<String>,
+}
+
+impl FilteredToolDispatcher {
+    /// Create a new filtered dispatcher that hides the specified tools.
+    pub fn new(inner: Arc<dyn AgentToolDispatcher>, denied_tools: HashSet<String>) -> Self {
+        Self {
+            inner,
+            denied_tools,
+        }
+    }
+
+    /// Create a filtered dispatcher that denies sub-agent tools.
+    ///
+    /// This is the standard configuration for sub-agents to prevent infinite nesting.
+    pub fn deny_sub_agent_tools(inner: Arc<dyn AgentToolDispatcher>) -> Self {
+        let denied = [
+            "agent_spawn",
+            "agent_fork",
+            "agent_status",
+            "agent_cancel",
+            "agent_list",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        Self::new(inner, denied)
+    }
+}
+
+#[async_trait]
+impl AgentToolDispatcher for FilteredToolDispatcher {
+    fn tools(&self) -> Vec<ToolDef> {
+        self.inner
+            .tools()
+            .into_iter()
+            .filter(|t| !self.denied_tools.contains(&t.name))
+            .collect()
+    }
+
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+        if self.denied_tools.contains(name) {
+            return Err(ToolError::not_found(name));
+        }
+        self.inner.dispatch(name, args).await
     }
 }
 

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use meerkat_comms::{CommsConfig, Keypair, Router, Status, TrustedPeers};
@@ -163,14 +164,18 @@ pub fn tools_list() -> Vec<Value> {
 /// Context needed to handle tool calls
 pub struct ToolContext {
     pub router: Arc<Router>,
-    pub trusted_peers: Arc<TrustedPeers>,
+    pub trusted_peers: Arc<RwLock<TrustedPeers>>,
 }
 
 impl ToolContext {
     /// Create a new tool context
     pub fn new(keypair: Keypair, trusted_peers: TrustedPeers, config: CommsConfig) -> Self {
-        let trusted_peers = Arc::new(trusted_peers.clone());
-        let router = Arc::new(Router::new(keypair, trusted_peers.as_ref().clone(), config));
+        let trusted_peers = Arc::new(RwLock::new(trusted_peers.clone()));
+        let router = Arc::new(Router::with_shared_peers(
+            keypair,
+            trusted_peers.clone(),
+            config,
+        ));
         Self {
             router,
             trusted_peers,
@@ -254,8 +259,8 @@ async fn handle_send_response(
 }
 
 async fn handle_list_peers(ctx: &ToolContext) -> Result<Value, String> {
-    let peers: Vec<PeerInfo> = ctx
-        .trusted_peers
+    let trusted_peers = ctx.trusted_peers.read().await;
+    let peers: Vec<PeerInfo> = trusted_peers
         .peers
         .iter()
         .map(|p| PeerInfo {

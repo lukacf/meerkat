@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use meerkat_comms::{InboxSender, Keypair, TrustedPeers, handle_connection};
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 /// Handle to a spawned listener task.
@@ -42,7 +43,7 @@ impl ListenerHandle {
 /// # Arguments
 /// * `path` - Path for the UDS socket
 /// * `keypair_secret` - 32-byte secret key for signing acks
-/// * `trusted` - Trusted peers list for validation
+/// * `trusted` - Trusted peers list for validation (shared for dynamic updates)
 /// * `inbox_sender` - Channel to send validated messages to
 ///
 /// # Returns
@@ -51,7 +52,7 @@ impl ListenerHandle {
 pub fn spawn_uds_listener(
     path: impl AsRef<Path>,
     keypair_secret: [u8; 32],
-    trusted: Arc<TrustedPeers>,
+    trusted: Arc<RwLock<TrustedPeers>>,
     inbox_sender: InboxSender,
 ) -> std::io::Result<ListenerHandle> {
     use tokio::net::UnixListener;
@@ -77,8 +78,11 @@ pub fn spawn_uds_listener(
                     let inbox_sender = inbox_sender.clone();
 
                     tokio::spawn(async move {
+                        // Get a snapshot of trusted peers for this connection
+                        let trusted_snapshot = trusted.read().await.clone();
                         if let Err(e) =
-                            handle_connection(stream, &keypair, &trusted, &inbox_sender).await
+                            handle_connection(stream, &keypair, &trusted_snapshot, &inbox_sender)
+                                .await
                         {
                             tracing::warn!("UDS connection error: {}", e);
                         }
@@ -103,7 +107,7 @@ pub fn spawn_uds_listener(
 /// # Arguments
 /// * `addr` - Address to bind to (e.g., "127.0.0.1:4200")
 /// * `keypair_secret` - 32-byte secret key for signing acks
-/// * `trusted` - Trusted peers list for validation
+/// * `trusted` - Trusted peers list for validation (shared for dynamic updates)
 /// * `inbox_sender` - Channel to send validated messages to
 ///
 /// # Returns
@@ -111,7 +115,7 @@ pub fn spawn_uds_listener(
 pub async fn spawn_tcp_listener(
     addr: &str,
     keypair_secret: [u8; 32],
-    trusted: Arc<TrustedPeers>,
+    trusted: Arc<RwLock<TrustedPeers>>,
     inbox_sender: InboxSender,
 ) -> std::io::Result<ListenerHandle> {
     let listener = TcpListener::bind(addr).await?;
@@ -125,8 +129,11 @@ pub async fn spawn_tcp_listener(
                     let inbox_sender = inbox_sender.clone();
 
                     tokio::spawn(async move {
+                        // Get a snapshot of trusted peers for this connection
+                        let trusted_snapshot = trusted.read().await.clone();
                         if let Err(e) =
-                            handle_connection(stream, &keypair, &trusted, &inbox_sender).await
+                            handle_connection(stream, &keypair, &trusted_snapshot, &inbox_sender)
+                                .await
                         {
                             tracing::warn!("TCP connection error: {}", e);
                         }
@@ -206,9 +213,13 @@ mod tests {
 
         let (mut inbox, inbox_sender) = Inbox::new();
 
-        let handle =
-            spawn_uds_listener(&sock_path, receiver_secret, Arc::new(trusted), inbox_sender)
-                .unwrap();
+        let handle = spawn_uds_listener(
+            &sock_path,
+            receiver_secret,
+            Arc::new(RwLock::new(trusted)),
+            inbox_sender,
+        )
+        .unwrap();
 
         // Give listener time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -271,7 +282,7 @@ mod tests {
         let handle = spawn_tcp_listener(
             &addr.to_string(),
             receiver_secret,
-            Arc::new(trusted),
+            Arc::new(RwLock::new(trusted)),
             inbox_sender,
         )
         .await
@@ -345,7 +356,7 @@ mod tests {
         let handle = spawn_uds_listener(
             &sock_path,
             keypair_secret,
-            Arc::new(trusted),
+            Arc::new(RwLock::new(trusted)),
             manager.inbox_sender().clone(),
         )
         .unwrap();
@@ -394,7 +405,7 @@ mod tests {
         let sock_path = tmp.path().join("abort.sock");
         let keypair = make_keypair();
         let secret = keypair_to_secret(&keypair);
-        let trusted = Arc::new(TrustedPeers::new());
+        let trusted = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, inbox_sender) = Inbox::new();
 
         let handle = spawn_uds_listener(&sock_path, secret, trusted, inbox_sender).unwrap();

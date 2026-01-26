@@ -34,6 +34,7 @@ fn create_test_config(temp_dir: &TempDir) -> ShellConfig {
         project_root: temp_dir.path().to_path_buf(),
         max_completed_jobs: 100,
         completed_job_ttl_secs: 300,
+        max_concurrent_processes: 0, // Unlimited for e2e tests
     }
 }
 
@@ -48,6 +49,7 @@ fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
         project_root: temp_dir.path().to_path_buf(),
         max_completed_jobs: 100,
         completed_job_ttl_secs: 300,
+        max_concurrent_processes: 0, // Unlimited for e2e tests
     }
 }
 

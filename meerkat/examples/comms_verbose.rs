@@ -10,6 +10,7 @@ use meerkat_comms_agent::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::RwLock;
 
 static API_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static TOOL_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -293,10 +294,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let secret_a = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair());
     let secret_b = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair());
 
+    // Create shared trusted peers for each agent (allows dynamic updates)
+    let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a.clone()));
+    let trusted_b_shared = Arc::new(RwLock::new(trusted_for_b.clone()));
+
     let _handle_a = spawn_tcp_listener(
         &addr_a.to_string(),
         secret_a,
-        Arc::new(trusted_for_a.clone()),
+        trusted_a_shared.clone(),
         comms_manager_a.inbox_sender().clone(),
     )
     .await?;
@@ -305,7 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _handle_b = spawn_tcp_listener(
         &addr_b.to_string(),
         secret_b,
-        Arc::new(trusted_for_b.clone()),
+        trusted_b_shared.clone(),
         comms_manager_b.inbox_sender().clone(),
     )
     .await?;
@@ -314,10 +319,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Show available tools
-    let tools_check = CommsToolDispatcher::new(
-        comms_manager_a.router().clone(),
-        Arc::new(trusted_for_a.clone()),
-    );
+    let tools_check =
+        CommsToolDispatcher::new(comms_manager_a.router().clone(), trusted_a_shared.clone());
     println!("\n=== COMMS TOOLS AVAILABLE TO EACH AGENT ===");
     for tool in tools_check.tools() {
         println!("  • {} - {}", tool.name, tool.description);
@@ -325,12 +328,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create logging tool dispatchers (separate for each agent)
     let tools_a = Arc::new(LoggingToolDispatcher {
-        inner: CommsToolDispatcher::new(comms_manager_a.router().clone(), Arc::new(trusted_for_a)),
+        inner: CommsToolDispatcher::new(comms_manager_a.router().clone(), trusted_a_shared),
         agent_name: "Agent A".to_string(),
     });
 
     let tools_b = Arc::new(LoggingToolDispatcher {
-        inner: CommsToolDispatcher::new(comms_manager_b.router().clone(), Arc::new(trusted_for_b)),
+        inner: CommsToolDispatcher::new(comms_manager_b.router().clone(), trusted_b_shared),
         agent_name: "Agent B".to_string(),
     });
 

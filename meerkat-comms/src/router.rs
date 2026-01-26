@@ -3,16 +3,19 @@
 //! The router provides a simple API for sending messages to peers,
 //! handling envelope creation, signing, connection, and ack waiting.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::identity::{Keypair, Signature};
+use crate::inproc::InprocRegistry;
 use crate::transport::{PeerAddr, TransportError, MAX_PAYLOAD_SIZE};
-use crate::trust::TrustedPeers;
+use crate::trust::{TrustedPeer, TrustedPeers};
 use crate::types::{Envelope, MessageKind, Status};
 
 /// Default ack timeout in seconds.
@@ -62,8 +65,8 @@ pub enum SendError {
 pub struct Router {
     /// Our keypair for signing messages.
     keypair: Keypair,
-    /// List of trusted peers.
-    trusted_peers: TrustedPeers,
+    /// Shared list of trusted peers (allows dynamic updates).
+    trusted_peers: Arc<RwLock<TrustedPeers>>,
     /// Configuration.
     config: CommsConfig,
 }
@@ -73,9 +76,58 @@ impl Router {
     pub fn new(keypair: Keypair, trusted_peers: TrustedPeers, config: CommsConfig) -> Self {
         Self {
             keypair,
+            trusted_peers: Arc::new(RwLock::new(trusted_peers)),
+            config,
+        }
+    }
+
+    /// Create a new router with shared trusted peers.
+    ///
+    /// Use this when you need to share the trusted peers with other components
+    /// (e.g., listeners that validate incoming connections, or dynamic peer updates).
+    pub fn with_shared_peers(
+        keypair: Keypair,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        config: CommsConfig,
+    ) -> Self {
+        Self {
+            keypair,
             trusted_peers,
             config,
         }
+    }
+
+    /// Get a reference to the shared trusted peers.
+    pub fn shared_trusted_peers(&self) -> Arc<RwLock<TrustedPeers>> {
+        self.trusted_peers.clone()
+    }
+
+    /// Check if there are any trusted peers (requires async read lock).
+    ///
+    /// For hot-path usage, consider using `shared_trusted_peers()` with
+    /// `try_read()` to avoid blocking.
+    pub async fn has_peers(&self) -> bool {
+        self.trusted_peers.read().await.has_peers()
+    }
+
+    /// Check if there are any trusted peers (non-blocking).
+    ///
+    /// Returns `None` if the lock couldn't be acquired immediately.
+    /// Returns `Some(true)` if peers exist, `Some(false)` if no peers.
+    pub fn try_has_peers(&self) -> Option<bool> {
+        self.trusted_peers.try_read().ok().map(|g| g.has_peers())
+    }
+
+    /// Add or update a trusted peer dynamically.
+    pub async fn add_trusted_peer(&self, peer: TrustedPeer) {
+        let mut peers = self.trusted_peers.write().await;
+        peers.upsert(peer);
+    }
+
+    /// Remove a trusted peer by pubkey.
+    pub async fn remove_trusted_peer(&self, pubkey: &crate::identity::PubKey) -> bool {
+        let mut peers = self.trusted_peers.write().await;
+        peers.remove(pubkey)
     }
 
     /// Send a message to a peer by name.
@@ -89,15 +141,18 @@ impl Router {
     /// 6. Wait for Ack (30s timeout) - unless sending Ack/Response
     /// 7. If timeout, return SendError::PeerOffline
     pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<(), SendError> {
-        // Look up peer
-        let peer = self
-            .trusted_peers
-            .get_by_name(peer_name)
-            .ok_or_else(|| SendError::PeerNotFound(peer_name.to_string()))?;
+        // Look up peer (read lock)
+        let (peer_pubkey, peer_addr) = {
+            let peers = self.trusted_peers.read().await;
+            let peer = peers
+                .get_by_name(peer_name)
+                .ok_or_else(|| SendError::PeerNotFound(peer_name.to_string()))?;
+            (peer.pubkey, peer.addr.clone())
+        };
 
         // Parse peer address
         let addr =
-            PeerAddr::parse(&peer.addr).map_err(|e| SendError::InvalidAddress(e.to_string()))?;
+            PeerAddr::parse(&peer_addr).map_err(|e| SendError::InvalidAddress(e.to_string()))?;
 
         // Determine if we should wait for ack
         let wait_for_ack = should_wait_for_ack(&kind);
@@ -106,7 +161,7 @@ impl Router {
         let mut envelope = Envelope {
             id: Uuid::new_v4(),
             from: self.keypair.public_key(),
-            to: peer.pubkey,
+            to: peer_pubkey,
             kind,
             sig: Signature::new([0u8; 64]),
         };
@@ -116,14 +171,35 @@ impl Router {
         match addr {
             PeerAddr::Uds(path) => {
                 let mut stream = UnixStream::connect(&path).await?;
-                self.send_on_stream(&mut stream, &envelope, wait_for_ack, &peer.pubkey)
+                self.send_on_stream(&mut stream, &envelope, wait_for_ack, &peer_pubkey)
                     .await?;
             }
             PeerAddr::Tcp(addr_str) => {
                 // DNS resolution happens here via ToSocketAddrs
                 let mut stream = TcpStream::connect(&addr_str).await?;
-                self.send_on_stream(&mut stream, &envelope, wait_for_ack, &peer.pubkey)
+                self.send_on_stream(&mut stream, &envelope, wait_for_ack, &peer_pubkey)
                     .await?;
+            }
+            PeerAddr::Inproc(name) => {
+                // In-process delivery via global registry
+                // The envelope is already signed, deliver directly to the peer's inbox
+                //
+                // IMPORTANT: We strictly require the pubkey to match. This preserves
+                // trust invariants - we only deliver to the identity specified in
+                // trusted_peers, not whatever happens to be registered under that name.
+                let registry = InprocRegistry::global();
+                if let Some(sender) = registry.get_by_pubkey(&peer_pubkey) {
+                    sender
+                        .send(crate::types::InboxItem::External { envelope })
+                        .map_err(|_| SendError::PeerOffline)?;
+                    // No ack needed for inproc - delivery is synchronous
+                } else {
+                    return Err(SendError::PeerNotFound(format!(
+                        "Inproc peer '{}' (pubkey {:?}) not found in registry",
+                        name,
+                        &peer_pubkey.as_bytes()[..8]
+                    )));
+                }
             }
         }
 
@@ -305,6 +381,7 @@ async fn write_envelope_async<W: AsyncWriteExt + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::PubKey;
     use std::io;
 
     fn make_keypair() -> Keypair {
@@ -319,8 +396,67 @@ mod tests {
         let router = Router::new(keypair, trusted_peers, config);
         // Router exists with all fields
         let _ = router.keypair.public_key();
-        let _ = router.trusted_peers.peers.len();
+        let _ = router.shared_trusted_peers(); // Access via shared_trusted_peers()
         let _ = router.config.ack_timeout_secs;
+    }
+
+    #[tokio::test]
+    async fn test_router_dynamic_trust_updates() {
+        let keypair = make_keypair();
+        let trusted_peers = TrustedPeers::new();
+        let config = CommsConfig::default();
+        let router = Router::new(keypair, trusted_peers, config);
+
+        // Initially no peers
+        {
+            let peers = router.shared_trusted_peers();
+            let guard = peers.read().await;
+            assert_eq!(guard.peers.len(), 0);
+        }
+
+        // Add a peer dynamically
+        let peer = TrustedPeer {
+            name: "dynamic-peer".to_string(),
+            pubkey: PubKey::new([42u8; 32]),
+            addr: "uds:///tmp/dynamic.sock".to_string(),
+        };
+        router.add_trusted_peer(peer.clone()).await;
+
+        // Verify peer was added
+        {
+            let peers = router.shared_trusted_peers();
+            let guard = peers.read().await;
+            assert_eq!(guard.peers.len(), 1);
+            assert_eq!(guard.peers[0].name, "dynamic-peer");
+        }
+
+        // Update the peer (same pubkey, different addr)
+        let updated_peer = TrustedPeer {
+            name: "dynamic-peer-updated".to_string(),
+            pubkey: PubKey::new([42u8; 32]),
+            addr: "uds:///tmp/updated.sock".to_string(),
+        };
+        router.add_trusted_peer(updated_peer).await;
+
+        // Verify peer was updated (still 1 peer)
+        {
+            let peers = router.shared_trusted_peers();
+            let guard = peers.read().await;
+            assert_eq!(guard.peers.len(), 1);
+            assert_eq!(guard.peers[0].name, "dynamic-peer-updated");
+            assert_eq!(guard.peers[0].addr, "uds:///tmp/updated.sock");
+        }
+
+        // Remove the peer
+        let removed = router.remove_trusted_peer(&PubKey::new([42u8; 32])).await;
+        assert!(removed);
+
+        // Verify peer was removed
+        {
+            let peers = router.shared_trusted_peers();
+            let guard = peers.read().await;
+            assert_eq!(guard.peers.len(), 0);
+        }
     }
 
     #[test]

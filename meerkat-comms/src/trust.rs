@@ -80,6 +80,21 @@ impl TrustedPeers {
         Self::default()
     }
 
+    /// Returns true if there are no trusted peers.
+    pub fn is_empty(&self) -> bool {
+        self.peers.is_empty()
+    }
+
+    /// Returns true if there is at least one trusted peer.
+    pub fn has_peers(&self) -> bool {
+        !self.peers.is_empty()
+    }
+
+    /// Returns the number of trusted peers.
+    pub fn len(&self) -> usize {
+        self.peers.len()
+    }
+
     /// Load trusted peers from a JSON file.
     pub fn load(path: &Path) -> Result<Self, TrustError> {
         let content = fs::read_to_string(path)?;
@@ -107,6 +122,25 @@ impl TrustedPeers {
     /// Get a peer by their name.
     pub fn get_by_name(&self, name: &str) -> Option<&TrustedPeer> {
         self.peers.iter().find(|p| p.name == name)
+    }
+
+    /// Add or update a trusted peer.
+    ///
+    /// If a peer with the same pubkey already exists, it will be updated.
+    /// Otherwise, a new peer will be added.
+    pub fn upsert(&mut self, peer: TrustedPeer) {
+        if let Some(existing) = self.peers.iter_mut().find(|p| p.pubkey == peer.pubkey) {
+            *existing = peer;
+        } else {
+            self.peers.push(peer);
+        }
+    }
+
+    /// Remove a peer by pubkey.
+    pub fn remove(&mut self, pubkey: &PubKey) -> bool {
+        let len_before = self.peers.len();
+        self.peers.retain(|p| &p.pubkey != pubkey);
+        self.peers.len() != len_before
     }
 }
 
@@ -330,5 +364,134 @@ mod tests {
         original.save(&path).unwrap();
         let loaded = TrustedPeers::load(&path).unwrap();
         assert_eq!(original, loaded);
+    }
+
+    #[test]
+    fn test_upsert_adds_new_peer() {
+        let mut peers = TrustedPeers::new();
+        assert_eq!(peers.peers.len(), 0);
+
+        let peer = TrustedPeer {
+            name: "new-peer".to_string(),
+            pubkey: PubKey::new([42u8; 32]),
+            addr: "uds:///tmp/new.sock".to_string(),
+        };
+        peers.upsert(peer);
+
+        assert_eq!(peers.peers.len(), 1);
+        assert_eq!(peers.peers[0].name, "new-peer");
+    }
+
+    #[test]
+    fn test_upsert_updates_existing_peer() {
+        let mut peers = TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "original".to_string(),
+                pubkey: PubKey::new([42u8; 32]),
+                addr: "uds:///tmp/original.sock".to_string(),
+            }],
+        };
+
+        // Same pubkey, different name/addr
+        let updated = TrustedPeer {
+            name: "updated".to_string(),
+            pubkey: PubKey::new([42u8; 32]),
+            addr: "uds:///tmp/updated.sock".to_string(),
+        };
+        peers.upsert(updated);
+
+        assert_eq!(peers.peers.len(), 1);
+        assert_eq!(peers.peers[0].name, "updated");
+        assert_eq!(peers.peers[0].addr, "uds:///tmp/updated.sock");
+    }
+
+    #[test]
+    fn test_remove_existing_peer() {
+        let mut peers = TrustedPeers {
+            peers: vec![
+                TrustedPeer {
+                    name: "peer1".to_string(),
+                    pubkey: PubKey::new([1u8; 32]),
+                    addr: "tcp://localhost:4201".to_string(),
+                },
+                TrustedPeer {
+                    name: "peer2".to_string(),
+                    pubkey: PubKey::new([2u8; 32]),
+                    addr: "tcp://localhost:4202".to_string(),
+                },
+            ],
+        };
+
+        let removed = peers.remove(&PubKey::new([1u8; 32]));
+        assert!(removed);
+        assert_eq!(peers.peers.len(), 1);
+        assert_eq!(peers.peers[0].name, "peer2");
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let peers = TrustedPeers::new();
+        assert!(peers.is_empty());
+
+        let peers_with_one = TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "peer1".to_string(),
+                pubkey: PubKey::new([1u8; 32]),
+                addr: "tcp://localhost:4201".to_string(),
+            }],
+        };
+        assert!(!peers_with_one.is_empty());
+    }
+
+    #[test]
+    fn test_has_peers() {
+        let peers = TrustedPeers::new();
+        assert!(!peers.has_peers());
+
+        let peers_with_one = TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "peer1".to_string(),
+                pubkey: PubKey::new([1u8; 32]),
+                addr: "tcp://localhost:4201".to_string(),
+            }],
+        };
+        assert!(peers_with_one.has_peers());
+    }
+
+    #[test]
+    fn test_len() {
+        let peers = TrustedPeers::new();
+        assert_eq!(peers.len(), 0);
+
+        let peers_with_two = TrustedPeers {
+            peers: vec![
+                TrustedPeer {
+                    name: "peer1".to_string(),
+                    pubkey: PubKey::new([1u8; 32]),
+                    addr: "tcp://localhost:4201".to_string(),
+                },
+                TrustedPeer {
+                    name: "peer2".to_string(),
+                    pubkey: PubKey::new([2u8; 32]),
+                    addr: "tcp://localhost:4202".to_string(),
+                },
+            ],
+        };
+        assert_eq!(peers_with_two.len(), 2);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_peer() {
+        let mut peers = TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "peer1".to_string(),
+                pubkey: PubKey::new([1u8; 32]),
+                addr: "tcp://localhost:4201".to_string(),
+            }],
+        };
+
+        let removed = peers.remove(&PubKey::new([99u8; 32]));
+        assert!(!removed);
+        assert_eq!(peers.peers.len(), 1);
     }
 }

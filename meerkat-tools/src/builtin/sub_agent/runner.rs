@@ -11,6 +11,8 @@ use futures::StreamExt;
 use meerkat_client::LlmClient;
 use meerkat_client::{LlmEvent, LlmRequest};
 use meerkat_comms::{PubKey, TrustedPeer, TrustedPeers};
+use meerkat_comms_agent::wrap_with_comms;
+use meerkat_core::comms_bootstrap::CommsBootstrap;
 use meerkat_core::comms_config::CoreCommsConfig;
 use meerkat_core::comms_runtime::CommsRuntime;
 use meerkat_core::ops::{OperationId, OperationResult, SteeringMessage};
@@ -19,15 +21,14 @@ use meerkat_core::sub_agent::SubAgentManager;
 use meerkat_core::types::{Message, StopReason, SystemMessage, ToolCall, Usage, UserMessage};
 use meerkat_core::{
     AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, BudgetLimits,
-    LlmStreamResult, ToolDef,
+    LlmStreamResult, ParentCommsContext, ToolDef,
 };
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
-
-use super::state::ParentCommsContext;
 
 /// Configuration for spawning a sub-agent with comms
 #[derive(Debug, Clone)]
@@ -403,18 +404,33 @@ pub struct DynSubAgentSpec {
     pub depth: u32,
     /// System prompt override
     pub system_prompt: Option<String>,
+    /// Comms configuration (if comms should be enabled for this sub-agent)
+    pub comms_config: Option<SubAgentCommsConfig>,
+    /// Parent's trusted peers (for adding this sub-agent as trusted)
+    /// When set, the sub-agent will be added to this list after comms setup
+    /// so the parent can accept connections from the sub-agent.
+    pub parent_trusted_peers: Option<Arc<RwLock<TrustedPeers>>>,
 }
 
 /// Spawn and run a sub-agent in a background task (trait object version)
 ///
 /// This version works with trait objects as returned by LlmClientFactory.
 /// It internally uses DynLlmClientAdapter to bridge to AgentLlmClient.
+///
+/// ## Comms Setup
+///
+/// If `spec.comms_config` is provided, this function uses `CommsBootstrap::for_child`
+/// to set up comms for the sub-agent in a uniform way. The tools are then wrapped
+/// with comms tools using `wrap_with_comms`, ensuring sub-agents have full comms
+/// capabilities just like the main agent.
 pub async fn spawn_sub_agent_dyn(
     id: OperationId,
     name: String,
     spec: DynSubAgentSpec,
     manager: Arc<SubAgentManager>,
 ) -> Result<mpsc::Sender<SteeringMessage>, SubAgentRunnerError> {
+    use meerkat_core::sub_agent::SubAgentCommsInfo;
+
     let started_at = Instant::now();
 
     // Create the LLM client adapter (bridges LlmClient -> AgentLlmClient)
@@ -435,8 +451,60 @@ pub async fn spawn_sub_agent_dyn(
         builder = builder.budget(budget);
     }
 
+    // Set up comms for the sub-agent if configured
+    // Uses CommsBootstrap::for_child_inproc for lightweight in-process communication
+    // No network listeners or filesystem resources needed
+    let (tools, comms_info) = if let Some(comms_config) = spec.comms_config {
+        let bootstrap = CommsBootstrap::for_child_inproc(
+            comms_config.name.clone(),
+            comms_config.parent_context.clone(),
+        );
+
+        match bootstrap.prepare().await {
+            Ok(Some(prepared)) => {
+                // Wrap tools with comms - this is the uniform way to add comms tools
+                let tools_with_comms = wrap_with_comms(spec.tools.clone(), &prepared.runtime);
+
+                // Extract advertise info for parent trust
+                let comms_info = prepared.advertise.map(|adv| SubAgentCommsInfo {
+                    pubkey: adv.pubkey,
+                    addr: adv.addr.clone(),
+                });
+
+                // Add the child to the parent's trusted peers so the parent
+                // will accept connections from this sub-agent
+                if let (Some(info), Some(parent_peers)) = (&comms_info, &spec.parent_trusted_peers)
+                {
+                    let child_peer = TrustedPeer {
+                        name: name.clone(),
+                        pubkey: PubKey::new(info.pubkey),
+                        addr: info.addr.clone(),
+                    };
+                    let mut peers = parent_peers.write().await;
+                    peers.upsert(child_peer);
+                    tracing::debug!("Added sub-agent '{}' to parent's trusted peers", name);
+                }
+
+                // Pass the comms runtime to the builder
+                builder = builder.with_comms_runtime(prepared.runtime);
+
+                (tools_with_comms, comms_info)
+            }
+            Ok(None) => {
+                // Comms disabled (shouldn't happen for Child mode, but handle gracefully)
+                (spec.tools, None)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to set up comms for sub-agent '{}': {}", name, e);
+                (spec.tools, None)
+            }
+        }
+    } else {
+        (spec.tools, None)
+    };
+
     // Pass trait objects directly - no wrappers needed thanks to ?Sized bounds
-    let mut agent = builder.build(llm_adapter, spec.tools, spec.store);
+    let mut agent = builder.build(llm_adapter, tools, spec.store);
 
     // Get the steering sender from the agent
     let steering_tx = agent.steering_sender();
@@ -444,7 +512,7 @@ pub async fn spawn_sub_agent_dyn(
     // Register the sub-agent with the manager BEFORE spawning the task
     // This is critical - without registration, status/steer/cancel won't find the agent
     manager
-        .register(id.clone(), name.clone(), steering_tx.clone())
+        .register_with_comms(id.clone(), name.clone(), steering_tx.clone(), comms_info)
         .await
         .map_err(|e| {
             SubAgentRunnerError::ExecutionError(format!("Failed to register sub-agent: {}", e))

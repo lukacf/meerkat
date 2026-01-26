@@ -16,6 +16,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
 use super::config::{ShellConfig, ShellError};
+use super::security::{ValidationResult, validate_command_or_error};
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 
 /// Maximum number of characters to keep in output before truncation.
@@ -292,6 +293,15 @@ impl BuiltinTool for ShellTool {
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
 
         info!(command = %input.command, background = %input.background, "Executing shell command");
+
+        // Security validation: check for dangerous patterns and characters
+        let validation = validate_command_or_error(&input.command)
+            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
+
+        // Log warnings for chaining characters but allow execution
+        if let ValidationResult::Warning { reason } = &validation {
+            warn!(command = %input.command, reason = %reason, "Command contains shell chaining");
+        }
 
         // Validate and resolve working directory
         let working_dir = if let Some(ref dir) = input.working_dir {
@@ -851,6 +861,7 @@ mod tests {
     /// Commands that produce non-UTF-8 bytes should not crash and should
     /// use lossy UTF-8 conversion with the lossy flag set.
     #[tokio::test]
+    #[ignore = "e2e: spawns real shell process"]
     async fn test_non_utf8_output() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -917,6 +928,7 @@ mod tests {
     ///
     /// Multiple sync tool calls should be able to run concurrently via tokio.
     #[tokio::test]
+    #[ignore = "e2e: spawns real shell process"]
     async fn test_sync_parallel_execution() {
         use std::time::Instant;
 
@@ -1226,6 +1238,126 @@ mod tests {
                 );
             }
             Err(e) => panic!("Unexpected error type: {:?}", e),
+        }
+    }
+
+    // ==================== Security Validation Integration Tests ====================
+
+    /// Test that commands with dangerous patterns are blocked at the tool level
+    #[tokio::test]
+    async fn test_shell_tool_blocks_rm_rf_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let tool = ShellTool::new(config);
+
+        let result = tool
+            .call(json!({
+                "command": "rm -rf /"
+            }))
+            .await;
+
+        assert!(result.is_err(), "rm -rf / should be blocked");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("blocked"),
+            "Error should mention blocked: {}",
+            err
+        );
+    }
+
+    /// Test that command substitution (backtick) is blocked
+    #[tokio::test]
+    async fn test_shell_tool_blocks_command_substitution() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let tool = ShellTool::new(config);
+
+        let result = tool
+            .call(json!({
+                "command": "echo `whoami`"
+            }))
+            .await;
+
+        assert!(result.is_err(), "Command substitution should be blocked");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("dangerous") || err.contains("`"),
+            "Error should mention dangerous character: {}",
+            err
+        );
+    }
+
+    /// Test that variable expansion ($) is blocked
+    #[tokio::test]
+    async fn test_shell_tool_blocks_variable_expansion() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let tool = ShellTool::new(config);
+
+        let result = tool
+            .call(json!({
+                "command": "echo $HOME"
+            }))
+            .await;
+
+        assert!(result.is_err(), "Variable expansion should be blocked");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("dangerous") || err.contains("$"),
+            "Error should mention dangerous character: {}",
+            err
+        );
+    }
+
+    /// Test that fork bomb is blocked
+    #[tokio::test]
+    async fn test_shell_tool_blocks_fork_bomb() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let tool = ShellTool::new(config);
+
+        let result = tool
+            .call(json!({
+                "command": ":(){ :|:& };:"
+            }))
+            .await;
+
+        assert!(result.is_err(), "Fork bomb should be blocked");
+    }
+
+    /// Test that safe commands pass validation
+    #[tokio::test]
+    #[ignore = "e2e: spawns real shell process"]
+    async fn test_shell_tool_allows_safe_commands() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.shell = "sh".to_string(); // Use sh for broad compatibility
+
+        let tool = ShellTool::new(config);
+
+        // Simple echo without special characters
+        let result = tool
+            .call(json!({
+                "command": "echo hello"
+            }))
+            .await;
+
+        // Should pass validation (may fail on shell execution if sh not found, but
+        // validation itself should pass)
+        match result {
+            Ok(output) => {
+                let output_str = serde_json::to_string(&output).unwrap();
+                assert!(output_str.contains("hello") || output_str.contains("exit_code"));
+            }
+            Err(e) => {
+                // Should not be a security-related error
+                let err_str = e.to_string();
+                assert!(
+                    !err_str.contains("blocked") && !err_str.contains("dangerous"),
+                    "Safe command should not be blocked: {}",
+                    err_str
+                );
+            }
         }
     }
 }

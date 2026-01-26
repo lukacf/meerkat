@@ -10,7 +10,10 @@ use super::config::BuiltinToolConfig;
 use super::shell::{ShellConfig, ShellToolSet};
 use super::store::TaskStore;
 use super::sub_agent::SubAgentToolSet;
-use super::tools::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool};
+use super::tools::{
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool, task_tools_usage_instructions,
+};
+use super::utility::{UtilityToolSet, WaitInterrupt};
 use super::{BuiltinTool, BuiltinToolError};
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
@@ -18,6 +21,7 @@ use meerkat_core::{AgentToolDispatcher, ToolDef};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::watch;
 
 /// Errors that can occur when creating or using CompositeDispatcher
 #[derive(Debug, thiserror::Error)]
@@ -36,20 +40,57 @@ pub enum CompositeDispatcherError {
 }
 
 /// A tool dispatcher that combines built-in tools with an external dispatcher.
+///
+/// This dispatcher handles "pure tool concerns" - shell, task management, utilities,
+/// sub-agents, and MCP tools. It does NOT handle comms tools because comms is
+/// infrastructure, not a tool category.
+///
+/// For agents that need comms, compose this with a CommsToolSurface via ToolGateway.
 pub struct CompositeDispatcher {
     builtins: HashMap<String, Arc<dyn BuiltinTool>>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
     tool_defs: Vec<ToolDef>,
+    /// Track which tool sets are enabled for usage instructions
+    has_task_tools: bool,
+    has_shell_tools: bool,
+    has_sub_agent_tools: bool,
+    has_utility_tools: bool,
+    /// Sender to interrupt the wait tool (if configured)
+    wait_interrupt_tx: Option<watch::Sender<Option<WaitInterrupt>>>,
 }
 
 impl CompositeDispatcher {
-    /// Create a new composite dispatcher with built-in task and shell tools.
+    /// Create a new composite dispatcher with built-in task, shell, and utility tools.
+    ///
+    /// This creates the dispatcher without wait interrupt support. Use
+    /// [`new_with_interrupt`] to enable wait interruption.
+    ///
+    /// Note: This dispatcher does NOT include comms tools. Comms is infrastructure,
+    /// not a tool category. Use ToolGateway to compose with CommsToolSurface.
     pub fn new(
         store: Arc<dyn TaskStore>,
         config: &BuiltinToolConfig,
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
+    ) -> Result<Self, CompositeDispatcherError> {
+        Self::new_with_interrupt(store, config, shell_config, external, session_id, false)
+    }
+
+    /// Create a composite dispatcher with wait interrupt support.
+    ///
+    /// When `enable_wait_interrupt` is true, the wait tool can be interrupted
+    /// by calling [`interrupt_wait`] on this dispatcher.
+    ///
+    /// Note: This dispatcher does NOT include comms tools. Comms is infrastructure,
+    /// not a tool category. Use ToolGateway to compose with CommsToolSurface.
+    pub fn new_with_interrupt(
+        store: Arc<dyn TaskStore>,
+        config: &BuiltinToolConfig,
+        shell_config: Option<ShellConfig>,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
+        session_id: Option<String>,
+        enable_wait_interrupt: bool,
     ) -> Result<Self, CompositeDispatcherError> {
         let resolved = config.resolve();
         let mut builtins: HashMap<String, Arc<dyn BuiltinTool>> = HashMap::new();
@@ -112,6 +153,34 @@ impl CompositeDispatcher {
             }
         }
 
+        // Create utility tools (enabled by default)
+        // Optionally set up interrupt channel for wait tool
+        let (wait_interrupt_tx, utility_tool_set) = if enable_wait_interrupt {
+            let (tx, rx) = watch::channel(None);
+            (Some(tx), UtilityToolSet::with_interrupt(rx))
+        } else {
+            (None, UtilityToolSet::new())
+        };
+
+        if resolved.is_enabled(
+            utility_tool_set.wait.name(),
+            utility_tool_set.wait.default_enabled(),
+        ) {
+            builtins.insert(
+                utility_tool_set.wait.name().to_string(),
+                Arc::new(utility_tool_set.wait),
+            );
+        }
+        if resolved.is_enabled(
+            utility_tool_set.datetime.name(),
+            utility_tool_set.datetime.default_enabled(),
+        ) {
+            builtins.insert(
+                utility_tool_set.datetime.name().to_string(),
+                Arc::new(utility_tool_set.datetime),
+            );
+        }
+
         // Check for collisions with external tools
         if let Some(ref ext) = external {
             for ext_tool in ext.tools() {
@@ -126,14 +195,85 @@ impl CompositeDispatcher {
             tool_defs.extend(ext.tools());
         }
 
+        // Track which tool categories are enabled
+        let has_task_tools = builtins.contains_key("task_create")
+            || builtins.contains_key("task_list")
+            || builtins.contains_key("task_get")
+            || builtins.contains_key("task_update");
+
+        let has_shell_tools = builtins.contains_key("shell")
+            || builtins.contains_key("shell_job_status")
+            || builtins.contains_key("shell_jobs")
+            || builtins.contains_key("shell_job_cancel");
+
+        let has_utility_tools = builtins.contains_key("wait") || builtins.contains_key("datetime");
+
         Ok(Self {
             builtins,
             external,
             tool_defs,
+            has_task_tools,
+            has_shell_tools,
+            has_sub_agent_tools: false, // Set later via register_sub_agent_tools
+            has_utility_tools,
+            wait_interrupt_tx,
         })
     }
 
-    /// Create with just built-in tools (no external dispatcher)
+    /// Interrupt the wait tool with a reason.
+    ///
+    /// This will cause any currently running `wait` call to return early
+    /// with status "interrupted" and the provided reason.
+    ///
+    /// Returns `false` if wait interruption was not enabled during construction.
+    pub fn interrupt_wait(&self, reason: &str) -> bool {
+        if let Some(ref tx) = self.wait_interrupt_tx {
+            let _ = tx.send(Some(WaitInterrupt {
+                reason: reason.to_string(),
+            }));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get a clone of the wait interrupt sender (for external triggering)
+    ///
+    /// Returns None if wait interruption was not enabled during construction.
+    pub fn wait_interrupt_sender(&self) -> Option<watch::Sender<Option<WaitInterrupt>>> {
+        self.wait_interrupt_tx.clone()
+    }
+
+    /// Register a comms notify to interrupt waits when messages arrive.
+    ///
+    /// This spawns a background task that waits on the notify and calls
+    /// `interrupt_wait("comms message")` when triggered.
+    ///
+    /// Call this after construction when comms is enabled for the agent.
+    /// Returns `false` if wait interruption was not enabled during construction.
+    pub fn register_comms_notify(&self, notify: std::sync::Arc<tokio::sync::Notify>) -> bool {
+        let Some(ref tx) = self.wait_interrupt_tx else {
+            return false;
+        };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            loop {
+                notify.notified().await;
+                // Exit loop if receiver is dropped (dispatcher was dropped)
+                if tx
+                    .send(Some(WaitInterrupt {
+                        reason: "comms message".to_string(),
+                    }))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        true
+    }
+
+    /// Create with just built-in tools (no external dispatcher).
     pub fn builtins_only(
         store: Arc<dyn TaskStore>,
         config: &BuiltinToolConfig,
@@ -201,14 +341,6 @@ impl CompositeDispatcher {
             self.tool_defs.push(def);
         }
 
-        // Register steer tool
-        if resolved.is_enabled(tool_set.steer.name(), tool_set.steer.default_enabled()) {
-            let def = tool_set.steer.def();
-            self.builtins
-                .insert(tool_set.steer.name().to_string(), Arc::new(tool_set.steer));
-            self.tool_defs.push(def);
-        }
-
         // Register status tool
         if resolved.is_enabled(tool_set.status.name(), tool_set.status.default_enabled()) {
             let def = tool_set.status.def();
@@ -237,7 +369,46 @@ impl CompositeDispatcher {
             self.tool_defs.push(def);
         }
 
+        // Check if any sub-agent tools were actually registered
+        self.has_sub_agent_tools = self.builtins.contains_key("agent_spawn")
+            || self.builtins.contains_key("agent_fork")
+            || self.builtins.contains_key("agent_status")
+            || self.builtins.contains_key("agent_cancel")
+            || self.builtins.contains_key("agent_list");
+
         Ok(())
+    }
+
+    /// Get usage instructions for all enabled built-in tool categories
+    ///
+    /// Returns a string containing usage guidance for the LLM on how to properly
+    /// use the enabled built-in tools. This should be injected into the system prompt.
+    ///
+    /// Only includes instructions for tool categories that are actually enabled.
+    pub fn usage_instructions(&self) -> String {
+        let mut sections = Vec::new();
+
+        if self.has_task_tools {
+            sections.push(task_tools_usage_instructions());
+        }
+
+        if self.has_shell_tools {
+            sections.push(ShellToolSet::usage_instructions());
+        }
+
+        if self.has_sub_agent_tools {
+            sections.push(SubAgentToolSet::usage_instructions());
+        }
+
+        if self.has_utility_tools {
+            sections.push(UtilityToolSet::usage_instructions());
+        }
+
+        if sections.is_empty() {
+            return String::new();
+        }
+
+        sections.join("\n\n")
     }
 }
 
@@ -382,7 +553,8 @@ mod tests {
             Some("test-session".to_string()),
         )
         .unwrap();
-        assert_eq!(dispatcher.builtin_count(), 4);
+        // 4 task tools + 2 utility tools = 6
+        assert_eq!(dispatcher.builtin_count(), 6);
     }
 
     mod with_external {
@@ -623,7 +795,8 @@ mod tests {
             let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
             assert!(tool_names.contains(&"shell"));
             assert!(tool_names.contains(&"shell_job_status"));
-            assert_eq!(dispatcher.builtin_count(), 8);
+            // 4 task + 4 shell + 2 utility = 10
+            assert_eq!(dispatcher.builtin_count(), 10);
         }
 
         #[test]
@@ -632,7 +805,8 @@ mod tests {
             let tools = dispatcher.tools();
             let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
             assert!(!tool_names.contains(&"shell"));
-            assert_eq!(dispatcher.builtin_count(), 4);
+            // 4 task + 2 utility = 6
+            assert_eq!(dispatcher.builtin_count(), 6);
         }
 
         #[test]
@@ -644,7 +818,8 @@ mod tests {
             let tools = dispatcher.tools();
             let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
             assert!(!tool_names.contains(&"shell"));
-            assert_eq!(dispatcher.builtin_count(), 4);
+            // 4 task + 2 utility = 6
+            assert_eq!(dispatcher.builtin_count(), 6);
         }
 
         #[test]
@@ -728,7 +903,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            assert_eq!(dispatcher.builtin_count(), 4);
+            assert_eq!(dispatcher.builtin_count(), 6); // 4 task + 2 utility
             assert!(!dispatcher.is_builtin("shell"));
         }
 
@@ -742,7 +917,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            assert_eq!(dispatcher.builtin_count(), 8);
+            assert_eq!(dispatcher.builtin_count(), 10); // 4 task + 2 utility + 4 shell
             assert!(dispatcher.is_builtin("shell"));
         }
     }
@@ -828,7 +1003,6 @@ mod tests {
                 policy: ToolPolicyLayer::new()
                     .enable_tool("agent_spawn")
                     .enable_tool("agent_fork")
-                    .enable_tool("agent_steer")
                     .enable_tool("agent_status")
                     .enable_tool("agent_cancel")
                     .enable_tool("agent_list"),
@@ -848,18 +1022,17 @@ mod tests {
             .unwrap();
 
             let initial_count = dispatcher.builtin_count();
-            assert_eq!(initial_count, 4); // task tools
+            assert_eq!(initial_count, 6); // 4 task + 2 utility tools
 
             let tool_set = create_sub_agent_tool_set();
             dispatcher
                 .register_sub_agent_tools(tool_set, &config_with_sub_agent_enabled())
                 .unwrap();
 
-            // Should have 4 task tools + 6 sub-agent tools = 10
-            assert_eq!(dispatcher.builtin_count(), 10);
+            // Should have 4 task + 2 utility + 5 sub-agent tools = 11
+            assert_eq!(dispatcher.builtin_count(), 11);
             assert!(dispatcher.is_builtin("agent_spawn"));
             assert!(dispatcher.is_builtin("agent_fork"));
-            assert!(dispatcher.is_builtin("agent_steer"));
             assert!(dispatcher.is_builtin("agent_status"));
             assert!(dispatcher.is_builtin("agent_cancel"));
             assert!(dispatcher.is_builtin("agent_list"));
@@ -889,12 +1062,11 @@ mod tests {
                 .register_sub_agent_tools(tool_set, &partial_config)
                 .unwrap();
 
-            // Should have 4 task tools + 2 sub-agent tools = 6
-            assert_eq!(dispatcher.builtin_count(), 6);
+            // Should have 4 task + 2 utility + 2 sub-agent tools = 8
+            assert_eq!(dispatcher.builtin_count(), 8);
             assert!(dispatcher.is_builtin("agent_spawn"));
             assert!(dispatcher.is_builtin("agent_status"));
             assert!(!dispatcher.is_builtin("agent_fork"));
-            assert!(!dispatcher.is_builtin("agent_steer"));
         }
 
         #[test]
@@ -914,8 +1086,8 @@ mod tests {
                 .register_sub_agent_tools(tool_set, &BuiltinToolConfig::default())
                 .unwrap();
 
-            // Should still have just 4 task tools (sub-agent tools not enabled)
-            assert_eq!(dispatcher.builtin_count(), 4);
+            // Should still have just 4 task + 2 utility tools (sub-agent tools not enabled)
+            assert_eq!(dispatcher.builtin_count(), 6);
             assert!(!dispatcher.is_builtin("agent_spawn"));
         }
 

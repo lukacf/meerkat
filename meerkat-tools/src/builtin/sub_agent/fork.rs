@@ -69,6 +69,17 @@ struct ForkResponse {
     messages_inherited: usize,
     /// Additional info
     message: String,
+    /// How to communicate with this child (if comms enabled)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comms: Option<String>,
+}
+
+/// Generate comms instructions for parent about messaging forked child
+fn parent_comms_instructions(child_name: &str) -> String {
+    format!(
+        "To message this fork: send_message(\"{child_name}\", \"your message\")",
+        child_name = child_name
+    )
 }
 
 /// Tool for forking the current agent with continued context
@@ -171,8 +182,10 @@ impl AgentForkTool {
         drop(parent_session);
 
         // Generate operation ID and name
+        // Use first 12 hex chars (8 + 4 after dash) to avoid collision with UUIDv7
         let op_id = OperationId::new();
-        let name = format!("fork-{}", &op_id.to_string()[..8]);
+        let op_id_str = op_id.to_string();
+        let name = format!("fork-{}{}", &op_id_str[..8], &op_id_str[9..13]);
 
         // Create steering channel
         let (tx, _rx) = tokio::sync::mpsc::channel(32);
@@ -192,6 +205,13 @@ impl AgentForkTool {
         // 3. Build an Agent with the forked session
         // 4. Spawn a task that runs agent.run() and reports results back
 
+        // Generate comms instructions for parent if comms is enabled
+        let comms_instructions = self
+            .state
+            .parent_comms
+            .as_ref()
+            .map(|_| parent_comms_instructions(&name));
+
         Ok(ForkResponse {
             agent_id: op_id.to_string(),
             name,
@@ -200,6 +220,7 @@ impl AgentForkTool {
             state: "running".to_string(),
             messages_inherited,
             message: "Agent forked successfully with full conversation history. Use agent_status to check progress.".to_string(),
+            comms: comms_instructions,
         })
     }
 }

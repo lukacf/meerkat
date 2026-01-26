@@ -19,6 +19,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::sync::RwLock;
 
 // ============================================================================
 // ADAPTERS - Bridge LlmClient/SessionStore to Agent traits
@@ -270,11 +271,15 @@ async fn create_agent_pair(
     let secret_a = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair());
     let secret_b = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair());
 
+    // Create shared trusted peers (allows dynamic updates)
+    let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a));
+    let trusted_b_shared = Arc::new(RwLock::new(trusted_for_b));
+
     // Start TCP listeners
     let handle_a = spawn_tcp_listener(
         &addr_a.to_string(),
         secret_a,
-        Arc::new(trusted_for_a.clone()),
+        trusted_a_shared.clone(),
         comms_manager_a.inbox_sender().clone(),
     )
     .await
@@ -283,7 +288,7 @@ async fn create_agent_pair(
     let handle_b = spawn_tcp_listener(
         &addr_b.to_string(),
         secret_b,
-        Arc::new(trusted_for_b.clone()),
+        trusted_b_shared.clone(),
         comms_manager_b.inbox_sender().clone(),
     )
     .await
@@ -302,12 +307,12 @@ async fn create_agent_pair(
     // Create tool dispatchers
     let tools_a = Arc::new(CommsToolDispatcher::new(
         comms_manager_a.router().clone(),
-        Arc::new(trusted_for_a),
+        trusted_a_shared,
     ));
 
     let tools_b = Arc::new(CommsToolDispatcher::new(
         comms_manager_b.router().clone(),
-        Arc::new(trusted_for_b),
+        trusted_b_shared,
     ));
 
     // Create stores
@@ -627,15 +632,19 @@ mod three_agent_coordination {
             CommsManagerConfig::with_keypair(keypair_c).trusted_peers(trusted_for_c.clone());
         let comms_manager_c = CommsManager::new(config_c);
 
-        // Extract secrets and start listeners
+        // Extract secrets and create shared trusted peers
         let secret_a = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair());
         let secret_b = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair());
         let secret_c = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_c.keypair());
 
+        let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a));
+        let trusted_b_shared = Arc::new(RwLock::new(trusted_for_b));
+        let trusted_c_shared = Arc::new(RwLock::new(trusted_for_c));
+
         let handle_a = spawn_tcp_listener(
             &addr_a.to_string(),
             secret_a,
-            Arc::new(trusted_for_a.clone()),
+            trusted_a_shared.clone(),
             comms_manager_a.inbox_sender().clone(),
         )
         .await
@@ -644,7 +653,7 @@ mod three_agent_coordination {
         let handle_b = spawn_tcp_listener(
             &addr_b.to_string(),
             secret_b,
-            Arc::new(trusted_for_b.clone()),
+            trusted_b_shared.clone(),
             comms_manager_b.inbox_sender().clone(),
         )
         .await
@@ -653,7 +662,7 @@ mod three_agent_coordination {
         let handle_c = spawn_tcp_listener(
             &addr_c.to_string(),
             secret_c,
-            Arc::new(trusted_for_c.clone()),
+            trusted_c_shared.clone(),
             comms_manager_c.inbox_sender().clone(),
         )
         .await
@@ -666,21 +675,21 @@ mod three_agent_coordination {
         let llm_adapter_a = Arc::new(LlmClientAdapter::new(llm_client_a, anthropic_model()));
         let tools_a = Arc::new(CommsToolDispatcher::new(
             comms_manager_a.router().clone(),
-            Arc::new(trusted_for_a),
+            trusted_a_shared,
         ));
 
         let llm_client_b = Arc::new(AnthropicClient::new(api_key.to_string()));
         let llm_adapter_b = Arc::new(LlmClientAdapter::new(llm_client_b, anthropic_model()));
         let tools_b = Arc::new(CommsToolDispatcher::new(
             comms_manager_b.router().clone(),
-            Arc::new(trusted_for_b),
+            trusted_b_shared,
         ));
 
         let llm_client_c = Arc::new(AnthropicClient::new(api_key.to_string()));
         let llm_adapter_c = Arc::new(LlmClientAdapter::new(llm_client_c, anthropic_model()));
         let tools_c = Arc::new(CommsToolDispatcher::new(
             comms_manager_c.router().clone(),
-            Arc::new(trusted_for_c),
+            trusted_c_shared,
         ));
 
         // Create stores
@@ -805,12 +814,11 @@ mod sanity {
                 addr: "tcp://127.0.0.1:4200".to_string(),
             }],
         };
-        let trusted = Arc::new(trusted);
 
-        let config =
-            CommsManagerConfig::with_keypair(keypair).trusted_peers(trusted.as_ref().clone());
+        let config = CommsManagerConfig::with_keypair(keypair).trusted_peers(trusted.clone());
         let manager = CommsManager::new(config);
 
+        let trusted = Arc::new(RwLock::new(trusted));
         let dispatcher = CommsToolDispatcher::new(manager.router().clone(), trusted);
 
         let tools = dispatcher.tools();

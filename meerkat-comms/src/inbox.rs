@@ -2,27 +2,49 @@
 //!
 //! The inbox collects incoming messages from IO tasks and subagent results,
 //! allowing the agent loop to drain them at turn boundaries.
+//!
+//! Includes a `Notify` mechanism to wake waiting tasks when new messages arrive.
 
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Notify};
 
 use crate::types::InboxItem;
 
 /// The receiving end of the inbox, held by the agent loop.
 pub struct Inbox {
     rx: mpsc::UnboundedReceiver<InboxItem>,
+    /// Notifier to wake waiting tasks when messages arrive.
+    notify: Arc<Notify>,
 }
 
 /// The sending end of the inbox, cloned to IO tasks.
 #[derive(Clone)]
 pub struct InboxSender {
     tx: mpsc::UnboundedSender<InboxItem>,
+    /// Notifier to wake waiting tasks when messages arrive.
+    notify: Arc<Notify>,
 }
 
 impl Inbox {
     /// Create a new inbox, returning both the inbox and a sender.
     pub fn new() -> (Self, InboxSender) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Inbox { rx }, InboxSender { tx })
+        let notify = Arc::new(Notify::new());
+        (
+            Inbox {
+                rx,
+                notify: notify.clone(),
+            },
+            InboxSender { tx, notify },
+        )
+    }
+
+    /// Get the notifier for waiting on new messages.
+    ///
+    /// Use this to wake a task when a message arrives, enabling
+    /// interrupt-based wait patterns.
+    pub fn notify(&self) -> Arc<Notify> {
+        self.notify.clone()
     }
 
     /// Receive the next item from the inbox, blocking until one is available.
@@ -43,9 +65,15 @@ impl Inbox {
 impl InboxSender {
     /// Send an item to the inbox.
     ///
+    /// This notifies any waiting tasks that a message has arrived,
+    /// enabling interrupt-based wait patterns.
+    ///
     /// Returns an error if the inbox has been closed.
     pub fn send(&self, item: InboxItem) -> Result<(), InboxError> {
-        self.tx.send(item).map_err(|_| InboxError::Closed)
+        self.tx.send(item).map_err(|_| InboxError::Closed)?;
+        // Notify any waiting tasks
+        self.notify.notify_waiters();
+        Ok(())
     }
 }
 
@@ -167,5 +195,66 @@ mod tests {
             envelope: make_test_envelope(),
         });
         assert!(result.is_err());
+    }
+
+    // Phase 3: Wait interruption tests
+
+    #[test]
+    fn test_inbox_has_notify() {
+        let (inbox, _sender) = Inbox::new();
+        // Inbox should expose a Notify
+        let notify = inbox.notify();
+        // Arc should be clonable
+        let _notify2 = notify.clone();
+    }
+
+    #[tokio::test]
+    async fn test_sender_notifies_on_send() {
+        let (inbox, sender) = Inbox::new();
+        let notify = inbox.notify();
+
+        // Spawn a task that waits for notification
+        let notified = notify.notified();
+
+        // Send a message - this should notify waiters
+        sender
+            .send(InboxItem::External {
+                envelope: make_test_envelope(),
+            })
+            .unwrap();
+
+        // The notification should complete immediately (message was sent before we awaited)
+        // Use timeout to ensure we don't hang if notify doesn't work
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), notified).await;
+
+        assert!(result.is_ok(), "Should have been notified after send");
+    }
+
+    #[tokio::test]
+    async fn test_notify_wakes_waiting_task() {
+        let (inbox, sender) = Inbox::new();
+        let notify = inbox.notify();
+
+        // Spawn a task that waits for notification
+        let handle = tokio::spawn(async move {
+            notify.notified().await;
+            "woken"
+        });
+
+        // Give the task time to start waiting
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Send a message - this should wake the waiting task
+        sender
+            .send(InboxItem::External {
+                envelope: make_test_envelope(),
+            })
+            .unwrap();
+
+        // The task should complete
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), handle).await;
+
+        assert!(result.is_ok(), "Task should have completed");
+        assert_eq!(result.unwrap().unwrap(), "woken");
     }
 }

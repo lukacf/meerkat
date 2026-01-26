@@ -1,7 +1,9 @@
 //! agent_spawn tool - Spawn a new sub-agent with clean context
 
 use super::config::SubAgentError;
-use super::runner::{DynSubAgentSpec, create_spawn_session, spawn_sub_agent_dyn};
+use super::runner::{
+    DynSubAgentSpec, SubAgentCommsConfig, create_spawn_session, spawn_sub_agent_dyn,
+};
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 use async_trait::async_trait;
@@ -12,6 +14,34 @@ use meerkat_core::ops::{OperationId, ToolAccessPolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+/// Allowed models per provider
+/// These are the only models that can be used with agent_spawn
+pub mod allowed_models {
+    /// Allowed Anthropic models
+    pub const ANTHROPIC: &[&str] = &[
+        "claude-sonnet-4-5",
+        "claude-opus-4-5",
+        "claude-sonnet-4-20250514",
+        "claude-opus-4-20250514",
+    ];
+
+    /// Allowed OpenAI models (only latest frontier models)
+    pub const OPENAI: &[&str] = &["gpt-5.2", "gpt-5.2-pro"];
+
+    /// Allowed Gemini models
+    pub const GEMINI: &[&str] = &["gemini-3-flash-preview", "gemini-3-pro-preview"];
+
+    /// Format allowed models as a description string
+    pub fn description() -> String {
+        format!(
+            "Allowed models - Anthropic: {}; OpenAI: {}; Gemini: {}",
+            ANTHROPIC.join(", "),
+            OPENAI.join(", "),
+            GEMINI.join(", ")
+        )
+    }
+}
 
 /// Tool access policy for spawned agents
 #[derive(Debug, Deserialize)]
@@ -87,6 +117,31 @@ struct SpawnResponse {
     state: String,
     /// Additional info
     message: String,
+    /// How to communicate with this child (if comms enabled)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comms: Option<String>,
+}
+
+/// Generate comms context to inject into child agent's prompt
+fn child_comms_context(parent_name: &str) -> String {
+    format!(
+        r#"
+## Parent Communication
+Your parent agent is '{parent_name}'. To report findings or request help:
+  send_message("{parent_name}", "your message here")
+
+Always report important findings to your parent. Follow instructions from your parent.
+"#,
+        parent_name = parent_name
+    )
+}
+
+/// Generate comms instructions for parent about messaging child
+fn parent_comms_instructions(child_name: &str) -> String {
+    format!(
+        "To message this child: send_message(\"{child_name}\", \"your message\")",
+        child_name = child_name
+    )
 }
 
 /// Tool for spawning new sub-agents with clean context
@@ -113,11 +168,30 @@ impl AgentSpawnTool {
         if let Some(ref default) = self.state.config.default_model {
             return default.clone();
         }
-        // Provider-specific defaults
+        // Provider-specific defaults (first model in allowlist)
         match provider {
-            LlmProvider::Anthropic => "claude-sonnet-4-20250514".to_string(),
-            LlmProvider::OpenAi => "gpt-4o".to_string(),
-            LlmProvider::Gemini => "gemini-3-flash-preview".to_string(),
+            LlmProvider::Anthropic => allowed_models::ANTHROPIC[0].to_string(),
+            LlmProvider::OpenAi => allowed_models::OPENAI[0].to_string(),
+            LlmProvider::Gemini => allowed_models::GEMINI[0].to_string(),
+        }
+    }
+
+    /// Validate that a model is in the allowlist for the given provider
+    pub fn validate_model(&self, provider: LlmProvider, model: &str) -> Result<(), SubAgentError> {
+        let allowed = match provider {
+            LlmProvider::Anthropic => allowed_models::ANTHROPIC,
+            LlmProvider::OpenAi => allowed_models::OPENAI,
+            LlmProvider::Gemini => allowed_models::GEMINI,
+        };
+
+        if allowed.contains(&model) {
+            Ok(())
+        } else {
+            Err(SubAgentError::InvalidModel {
+                model: model.to_string(),
+                provider: provider.to_string(),
+                allowed: allowed.iter().map(|s| s.to_string()).collect(),
+            })
         }
     }
 
@@ -165,6 +239,10 @@ impl AgentSpawnTool {
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
         let model = self.resolve_model(provider, params.model.as_deref());
 
+        // Validate model is in allowlist
+        self.validate_model(provider, &model)
+            .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
+
         // Resolve tool access policy
         let _tool_access: ToolAccessPolicy = params
             .tool_access
@@ -184,11 +262,40 @@ impl AgentSpawnTool {
             })?;
 
         // Generate operation ID and name
+        // Use first 12 hex chars (8 + 4 after dash) to avoid collision with UUIDv7
+        // since agents spawned in same millisecond have same first 8 chars
         let op_id = OperationId::new();
-        let name = format!("sub-agent-{}", &op_id.to_string()[..8]);
+        let op_id_str = op_id.to_string();
+        let name = format!("sub-agent-{}{}", &op_id_str[..8], &op_id_str[9..13]);
 
-        // Create session with clean context (just the prompt)
-        let session = create_spawn_session(&params.prompt, params.system_prompt.as_deref());
+        // Build comms config if parent has comms enabled
+        // Also prepare comms context to inject into child's prompt
+        let (comms_config, comms_instructions) =
+            if let Some(parent_comms) = &self.state.parent_comms {
+                let config = SubAgentCommsConfig {
+                    name: name.clone(),
+                    base_dir: parent_comms.comms_base_dir.clone(),
+                    parent_context: parent_comms.clone(),
+                };
+                let instructions = Some(parent_comms_instructions(&name));
+                (Some(config), instructions)
+            } else {
+                (None, None)
+            };
+
+        // Create prompt with comms context injected if parent has comms enabled
+        let enriched_prompt = if let Some(parent_comms) = &self.state.parent_comms {
+            format!(
+                "{}\n{}",
+                child_comms_context(&parent_comms.parent_name),
+                params.prompt
+            )
+        } else {
+            params.prompt.clone()
+        };
+
+        // Create session with clean context (enriched prompt includes comms context)
+        let session = create_spawn_session(&enriched_prompt, params.system_prompt.as_deref());
 
         // Create the sub-agent specification
         let spec = DynSubAgentSpec {
@@ -200,6 +307,8 @@ impl AgentSpawnTool {
             budget: Some(budget),
             depth: self.state.depth() + 1,
             system_prompt: params.system_prompt.clone(),
+            comms_config,
+            parent_trusted_peers: self.state.parent_trusted_peers.clone(),
         };
 
         // Spawn the sub-agent (this registers it and starts execution in a background task)
@@ -222,6 +331,7 @@ impl AgentSpawnTool {
             state: "running".to_string(),
             message: "Sub-agent spawned successfully. Use agent_status to check progress."
                 .to_string(),
+            comms: comms_instructions,
         })
     }
 }
@@ -250,7 +360,10 @@ impl BuiltinTool for AgentSpawnTool {
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model name (provider-specific). Defaults to the provider's recommended model."
+                        "description": format!(
+                            "Model to use (must be from allowlist). {}. Defaults to provider's first allowed model.",
+                            allowed_models::description()
+                        )
                     },
                     "tool_access": {
                         "type": "object",
@@ -644,5 +757,86 @@ mod tests {
             max_tool_calls: None,
         }));
         assert_eq!(budget.max_tokens, Some(5000)); // Should be capped
+    }
+
+    // Model allowlist tests
+    mod model_validation {
+        use super::*;
+
+        #[test]
+        fn test_allowed_model_passes_validation() {
+            let state = create_test_state();
+            let tool = AgentSpawnTool::new(state);
+
+            // These should all pass validation
+            assert!(
+                tool.validate_model(LlmProvider::Anthropic, "claude-sonnet-4-5")
+                    .is_ok()
+            );
+            assert!(
+                tool.validate_model(LlmProvider::Anthropic, "claude-opus-4-5")
+                    .is_ok()
+            );
+            assert!(tool.validate_model(LlmProvider::OpenAi, "gpt-5.2").is_ok());
+            assert!(
+                tool.validate_model(LlmProvider::OpenAi, "gpt-5.2-pro")
+                    .is_ok()
+            );
+            assert!(
+                tool.validate_model(LlmProvider::Gemini, "gemini-3-flash-preview")
+                    .is_ok()
+            );
+            assert!(
+                tool.validate_model(LlmProvider::Gemini, "gemini-3-pro-preview")
+                    .is_ok()
+            );
+        }
+
+        #[test]
+        fn test_disallowed_model_fails_validation() {
+            let state = create_test_state();
+            let tool = AgentSpawnTool::new(state);
+
+            // Old/wrong model names should fail
+            let err = tool
+                .validate_model(LlmProvider::OpenAi, "gpt-4o")
+                .unwrap_err();
+            assert!(err.to_string().contains("not in allowlist"));
+            assert!(err.to_string().contains("gpt-5.2")); // Should suggest allowed models
+
+            let err = tool
+                .validate_model(LlmProvider::Anthropic, "claude-3-5-sonnet-20241022")
+                .unwrap_err();
+            assert!(err.to_string().contains("not in allowlist"));
+
+            let err = tool
+                .validate_model(LlmProvider::Gemini, "gemini-1.5-flash")
+                .unwrap_err();
+            assert!(err.to_string().contains("not in allowlist"));
+        }
+
+        #[test]
+        fn test_tool_def_includes_allowed_models() {
+            let state = create_test_state();
+            let tool = AgentSpawnTool::new(state);
+            let def = tool.def();
+
+            // The description should list allowed models
+            let model_desc = def.input_schema["properties"]["model"]["description"]
+                .as_str()
+                .unwrap();
+            assert!(
+                model_desc.contains("gpt-5.2"),
+                "Should list allowed OpenAI models"
+            );
+            assert!(
+                model_desc.contains("claude-sonnet-4-5"),
+                "Should list allowed Anthropic models"
+            );
+            assert!(
+                model_desc.contains("gemini-3-flash-preview"),
+                "Should list allowed Gemini models"
+            );
+        }
     }
 }

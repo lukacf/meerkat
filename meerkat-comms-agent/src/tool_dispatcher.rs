@@ -13,6 +13,7 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::ToolDef;
 use serde_json::Value;
+use tokio::sync::RwLock;
 
 /// Tool dispatcher that provides comms tools.
 ///
@@ -26,7 +27,7 @@ pub struct CommsToolDispatcher<T: AgentToolDispatcher = NoOpDispatcher> {
 
 impl CommsToolDispatcher<NoOpDispatcher> {
     /// Create a new comms tool dispatcher (comms tools only).
-    pub fn new(router: Arc<Router>, trusted_peers: Arc<TrustedPeers>) -> Self {
+    pub fn new(router: Arc<Router>, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
         let tool_context = ToolContext {
             router,
             trusted_peers,
@@ -44,7 +45,7 @@ impl<T: AgentToolDispatcher> CommsToolDispatcher<T> {
     /// Non-comms tools will be delegated to the inner dispatcher.
     pub fn with_inner(
         router: Arc<Router>,
-        trusted_peers: Arc<TrustedPeers>,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
         inner: Arc<T>,
     ) -> Self {
         let tool_context = ToolContext {
@@ -120,6 +121,68 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
     }
 }
 
+/// Dynamic version of CommsToolDispatcher that works with trait objects.
+///
+/// This is useful when you need to wrap an `Arc<dyn AgentToolDispatcher>` at runtime,
+/// such as when setting up sub-agents with comms tools.
+pub struct DynCommsToolDispatcher {
+    /// Context for handling comms tool calls.
+    tool_context: ToolContext,
+    /// Inner dispatcher for non-comms tools.
+    inner: Arc<dyn AgentToolDispatcher>,
+}
+
+impl DynCommsToolDispatcher {
+    /// Create a new dynamic comms tool dispatcher.
+    pub fn new(
+        router: Arc<Router>,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        inner: Arc<dyn AgentToolDispatcher>,
+    ) -> Self {
+        let tool_context = ToolContext {
+            router,
+            trusted_peers,
+        };
+        Self {
+            tool_context,
+            inner,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentToolDispatcher for DynCommsToolDispatcher {
+    fn tools(&self) -> Vec<ToolDef> {
+        // Convert mcp tool definitions to ToolDef
+        let comms_tools: Vec<ToolDef> = tools_list()
+            .into_iter()
+            .map(|t| ToolDef {
+                name: t["name"].as_str().unwrap_or_default().to_string(),
+                description: t["description"].as_str().unwrap_or_default().to_string(),
+                input_schema: t["inputSchema"].clone(),
+            })
+            .collect();
+
+        // Combine with inner dispatcher tools
+        let mut all_tools = comms_tools;
+        all_tools.extend(self.inner.tools());
+        all_tools
+    }
+
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+        // Check if this is a comms tool
+        if COMMS_TOOL_NAMES.contains(&name) {
+            let result = handle_tools_call(&self.tool_context, name, args)
+                .await
+                .map_err(ToolError::execution_failed)?;
+            Ok(result)
+        } else {
+            // Delegate to inner dispatcher
+            self.inner.dispatch(name, args).await
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,7 +192,7 @@ mod tests {
         Keypair::generate()
     }
 
-    fn make_tool_context() -> (Arc<Router>, Arc<TrustedPeers>) {
+    fn make_tool_context() -> (Arc<Router>, Arc<RwLock<TrustedPeers>>) {
         let keypair = make_keypair();
         let peer_keypair = make_keypair();
         let trusted_peers = TrustedPeers {
@@ -139,10 +202,10 @@ mod tests {
                 addr: "tcp://127.0.0.1:4200".to_string(),
             }],
         };
-        let trusted_peers = Arc::new(trusted_peers.clone());
-        let router = Arc::new(Router::new(
+        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let router = Arc::new(Router::with_shared_peers(
             keypair,
-            trusted_peers.as_ref().clone(),
+            trusted_peers.clone(),
             CommsConfig::default(),
         ));
         (router, trusted_peers)

@@ -308,6 +308,8 @@ pub enum CliToolDispatcher {
     Empty(EmptyToolDispatcher),
     Mcp(Box<McpRouterAdapter>),
     Composite(std::sync::Arc<CompositeDispatcher>),
+    /// Dispatcher wrapped with comms tools (uses Arc to match wrap_with_comms output)
+    WithComms(Arc<dyn AgentToolDispatcher>),
 }
 
 impl CliToolDispatcher {
@@ -318,6 +320,9 @@ impl CliToolDispatcher {
             CliToolDispatcher::Mcp(adapter) => adapter.shutdown().await,
             CliToolDispatcher::Composite(_) => {
                 // CompositeDispatcher doesn't have external connections to shut down
+            }
+            CliToolDispatcher::WithComms(_) => {
+                // Comms connections are managed by CommsRuntime
             }
         }
     }
@@ -330,6 +335,7 @@ impl AgentToolDispatcher for CliToolDispatcher {
             CliToolDispatcher::Empty(d) => d.tools(),
             CliToolDispatcher::Mcp(d) => d.tools(),
             CliToolDispatcher::Composite(d) => d.tools(),
+            CliToolDispatcher::WithComms(d) => d.tools(),
         }
     }
 
@@ -338,6 +344,7 @@ impl AgentToolDispatcher for CliToolDispatcher {
             CliToolDispatcher::Empty(d) => d.dispatch(name, args).await,
             CliToolDispatcher::Mcp(d) => d.dispatch(name, args).await,
             CliToolDispatcher::Composite(d) => d.dispatch(name, args).await,
+            CliToolDispatcher::WithComms(d) => d.dispatch(name, args).await,
         }
     }
 }

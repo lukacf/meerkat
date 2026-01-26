@@ -2,32 +2,16 @@
 
 use super::config::SubAgentConfig;
 use meerkat_client::LlmClientFactory;
+use meerkat_comms::TrustedPeers;
 use meerkat_core::session::Session;
 use meerkat_core::sub_agent::SubAgentManager;
-use meerkat_core::{AgentSessionStore, AgentToolDispatcher};
-use std::path::PathBuf;
+use meerkat_core::{AgentSessionStore, AgentToolDispatcher, ParentCommsContext};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Parent comms context for sub-agent communication
-///
-/// This contains the information a sub-agent needs to communicate
-/// with its parent agent via the meerkat-comms system.
-#[derive(Debug, Clone)]
-pub struct ParentCommsContext {
-    /// Parent's name for identification
-    pub parent_name: String,
-    /// Parent's public key (Ed25519)
-    pub parent_pubkey: [u8; 32],
-    /// Address to reach the parent (e.g., "uds:///tmp/parent.sock")
-    pub parent_addr: String,
-    /// Base directory for sub-agent identity files
-    pub comms_base_dir: PathBuf,
-}
-
 /// Shared state for all sub-agent tools
 ///
-/// This state is shared across all sub-agent tools (spawn, fork, steer, status, cancel, list)
+/// This state is shared across all sub-agent tools (spawn, fork, status, cancel, list)
 /// to provide unified access to the sub-agent manager and required services.
 pub struct SubAgentToolState {
     /// Sub-agent manager for tracking and controlling sub-agents
@@ -53,6 +37,10 @@ pub struct SubAgentToolState {
 
     /// Parent comms context for sub-agent communication (if comms enabled)
     pub parent_comms: Option<ParentCommsContext>,
+
+    /// Parent's trusted peers (for adding sub-agents as trusted)
+    /// This is shared with the parent's CommsRuntime so updates are visible to listeners.
+    pub parent_trusted_peers: Option<Arc<RwLock<TrustedPeers>>>,
 }
 
 impl SubAgentToolState {
@@ -75,10 +63,15 @@ impl SubAgentToolState {
             config,
             current_depth,
             parent_comms: None,
+            parent_trusted_peers: None,
         }
     }
 
     /// Create new sub-agent tool state with comms enabled
+    ///
+    /// The `parent_trusted_peers` is shared with the parent's CommsRuntime.
+    /// When sub-agents are spawned, they are added to this list so the parent
+    /// can accept their connections.
     #[allow(clippy::too_many_arguments)]
     pub fn with_comms(
         manager: Arc<SubAgentManager>,
@@ -89,6 +82,7 @@ impl SubAgentToolState {
         config: SubAgentConfig,
         current_depth: u32,
         parent_comms: ParentCommsContext,
+        parent_trusted_peers: Arc<RwLock<TrustedPeers>>,
     ) -> Self {
         Self {
             manager,
@@ -99,6 +93,7 @@ impl SubAgentToolState {
             config,
             current_depth,
             parent_comms: Some(parent_comms),
+            parent_trusted_peers: Some(parent_trusted_peers),
         }
     }
 
@@ -401,7 +396,6 @@ mod tests {
         let forbidden_tools = [
             "agent_spawn",
             "agent_fork",
-            "agent_steer",
             "agent_status",
             "agent_cancel",
             "agent_list",
@@ -465,5 +459,200 @@ mod tests {
             result.is_err(),
             "Sub-agent should NOT have 'agent_spawn' tool"
         );
+    }
+
+    // === Comms context regression tests ===
+    // These tests verify that sub-agents receive comms context when parent has comms enabled
+
+    #[test]
+    fn test_state_new_has_no_parent_comms() {
+        // When created with `new()`, parent_comms should be None
+        let state = create_test_state();
+        assert!(
+            state.parent_comms.is_none(),
+            "SubAgentToolState::new() should not have parent_comms"
+        );
+    }
+
+    #[test]
+    fn test_state_with_comms_has_parent_comms() {
+        use meerkat_core::ParentCommsContext;
+        use std::path::PathBuf;
+
+        let limits = ConcurrencyLimits::default();
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
+        let client_factory = Arc::new(MockClientFactory);
+        let tool_dispatcher = Arc::new(MockToolDispatcher);
+        let session_store = Arc::new(MockSessionStore);
+        let parent_session = Arc::new(RwLock::new(Session::new()));
+        let config = SubAgentConfig::default();
+
+        let parent_comms = ParentCommsContext {
+            parent_name: "parent-agent".to_string(),
+            parent_pubkey: [42u8; 32],
+            parent_addr: "tcp://127.0.0.1:4200".to_string(),
+            comms_base_dir: PathBuf::from("/tmp/comms"),
+        };
+
+        let parent_trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+
+        let state = SubAgentToolState::with_comms(
+            manager,
+            client_factory,
+            tool_dispatcher,
+            session_store,
+            parent_session,
+            config,
+            0,
+            parent_comms,
+            parent_trusted_peers,
+        );
+
+        // Regression test: sub-agents MUST have parent_comms when created with with_comms()
+        // This enables sub-agents to communicate back to the parent
+        assert!(
+            state.parent_comms.is_some(),
+            "SubAgentToolState::with_comms() MUST set parent_comms"
+        );
+        assert!(
+            state.parent_trusted_peers.is_some(),
+            "SubAgentToolState::with_comms() MUST set parent_trusted_peers"
+        );
+
+        let comms = state.parent_comms.unwrap();
+        assert_eq!(comms.parent_name, "parent-agent");
+        assert_eq!(comms.parent_pubkey, [42u8; 32]);
+        assert_eq!(comms.parent_addr, "tcp://127.0.0.1:4200");
+    }
+
+    #[test]
+    fn test_spawn_tool_uses_parent_comms_for_subagent() {
+        // Verify the spawn tool accesses parent_comms from state
+        // This is a compile-time check that the field is public and accessible
+        use meerkat_core::ParentCommsContext;
+        use std::path::PathBuf;
+
+        let limits = ConcurrencyLimits::default();
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
+        let client_factory = Arc::new(MockClientFactory);
+        let tool_dispatcher = Arc::new(MockToolDispatcher);
+        let session_store = Arc::new(MockSessionStore);
+        let parent_session = Arc::new(RwLock::new(Session::new()));
+        let config = SubAgentConfig::default();
+
+        let parent_comms = ParentCommsContext {
+            parent_name: "orchestrator".to_string(),
+            parent_pubkey: [1u8; 32],
+            parent_addr: "uds:///tmp/orchestrator.sock".to_string(),
+            comms_base_dir: PathBuf::from("/tmp/agents"),
+        };
+
+        let parent_trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+
+        let state = SubAgentToolState::with_comms(
+            manager,
+            client_factory,
+            tool_dispatcher,
+            session_store,
+            parent_session,
+            config,
+            0,
+            parent_comms,
+            parent_trusted_peers,
+        );
+
+        // The spawn tool checks state.parent_comms.as_ref() to decide whether
+        // to set up comms for sub-agents. This test verifies the pattern works.
+        let comms_config = state
+            .parent_comms
+            .as_ref()
+            .map(|pc| (pc.parent_name.clone(), pc.comms_base_dir.clone()));
+
+        assert!(comms_config.is_some());
+        let (name, base_dir) = comms_config.unwrap();
+        assert_eq!(name, "orchestrator");
+        assert_eq!(base_dir, PathBuf::from("/tmp/agents"));
+    }
+
+    #[tokio::test]
+    async fn test_parent_trusted_peers_can_be_updated() {
+        // Regression test: When a sub-agent is spawned, its pubkey should be
+        // added to the parent's trusted peers. This test verifies the shared
+        // trusted peers list can be updated, which is critical for sub-agent
+        // communication to work.
+        use meerkat_comms::{PubKey, TrustedPeer};
+        use meerkat_core::ParentCommsContext;
+        use std::path::PathBuf;
+
+        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+
+        // Initially empty
+        {
+            let peers = trusted_peers.read().await;
+            assert!(!peers.has_peers(), "Initially should have no peers");
+        }
+
+        // Simulate what spawn_sub_agent_dyn does: add child as trusted peer
+        let child_pubkey = PubKey::new([42u8; 32]);
+        let child_peer = TrustedPeer {
+            name: "sub-agent-test".to_string(),
+            pubkey: child_pubkey,
+            addr: "uds:///tmp/sub-agent-test.sock".to_string(),
+        };
+
+        {
+            let mut peers = trusted_peers.write().await;
+            peers.upsert(child_peer);
+        }
+
+        // Now the child should be in the trusted peers
+        {
+            let peers = trusted_peers.read().await;
+            assert!(peers.has_peers(), "Should have the child peer after upsert");
+            assert_eq!(peers.len(), 1);
+
+            let found = peers.get_peer(&child_pubkey);
+            assert!(found.is_some(), "Should find child by pubkey");
+            assert_eq!(found.unwrap().name, "sub-agent-test");
+        }
+
+        // The same Arc can be stored in SubAgentToolState and shared
+        // This verifies the pattern used in the CLI
+        let limits = ConcurrencyLimits::default();
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
+        let client_factory = Arc::new(MockClientFactory);
+        let tool_dispatcher = Arc::new(MockToolDispatcher);
+        let session_store = Arc::new(MockSessionStore);
+        let parent_session = Arc::new(RwLock::new(Session::new()));
+        let config = SubAgentConfig::default();
+
+        let parent_comms = ParentCommsContext {
+            parent_name: "parent".to_string(),
+            parent_pubkey: [1u8; 32],
+            parent_addr: "tcp://127.0.0.1:4200".to_string(),
+            comms_base_dir: PathBuf::from("/tmp/comms"),
+        };
+
+        let state = SubAgentToolState::with_comms(
+            manager,
+            client_factory,
+            tool_dispatcher,
+            session_store,
+            parent_session,
+            config,
+            0,
+            parent_comms,
+            trusted_peers.clone(), // Same Arc as above
+        );
+
+        // Verify the state holds the same Arc and sees the child
+        assert!(state.parent_trusted_peers.is_some());
+        let peers_from_state = state.parent_trusted_peers.unwrap();
+        let peers = peers_from_state.read().await;
+        assert!(
+            peers.has_peers(),
+            "State should see the child added earlier"
+        );
+        assert_eq!(peers.len(), 1);
     }
 }

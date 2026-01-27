@@ -8,11 +8,13 @@ use meerkat_core::ToolDef;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use tracing::{debug, info, instrument, warn};
@@ -164,12 +166,16 @@ async fn join_output(
 pub struct ShellTool {
     /// Configuration for shell execution
     pub config: ShellConfig,
+    resolved_shell_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl ShellTool {
     /// Create a new ShellTool with the given configuration
     pub fn new(config: ShellConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            resolved_shell_path: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Find the shell executable path with fallback detection
@@ -184,55 +190,21 @@ impl ShellTool {
     ///
     /// Returns [`ShellError::ShellNotFound`] if no shell can be found.
     pub fn find_shell(&self) -> Result<std::path::PathBuf, ShellError> {
-        use std::path::PathBuf;
+        self.config.resolve_shell_path()
+    }
 
-        let mut tried = Vec::new();
-
-        // 1. Try explicit shell_path from config if set
-        if let Some(ref path) = self.config.shell_path {
-            if path.exists() {
+    async fn resolved_shell_path(&self) -> Result<PathBuf, ShellError> {
+        {
+            let guard = self.resolved_shell_path.lock().await;
+            if let Some(path) = guard.as_ref() {
                 return Ok(path.clone());
             }
-            tried.push(path.display().to_string());
         }
 
-        // 2. Try configured shell name via which
-        if let Ok(path) = which::which(&self.config.shell) {
-            return Ok(path);
-        }
-        tried.push(self.config.shell.clone());
-
-        // 3. Try SHELL environment variable
-        if let Ok(shell_env) = std::env::var("SHELL") {
-            let path = PathBuf::from(&shell_env);
-            if path.exists() {
-                return Ok(path);
-            }
-            tried.push(shell_env);
-        }
-
-        // 4. Try platform-specific fallbacks
-        let fallbacks: Vec<&str> = if cfg!(windows) {
-            vec!["cmd.exe", "powershell.exe"]
-        } else {
-            vec!["/bin/sh", "/bin/bash", "/bin/busybox", "/usr/bin/sh"]
-        };
-
-        for shell in &fallbacks {
-            let path = PathBuf::from(shell);
-            if path.exists() {
-                return Ok(path);
-            }
-            // Only add to tried if not already tried
-            if !tried.contains(&shell.to_string()) {
-                tried.push(shell.to_string());
-            }
-        }
-
-        Err(ShellError::ShellNotFound {
-            shell: self.config.shell.clone(),
-            tried,
-        })
+        let path = self.config.resolve_shell_path_async().await?;
+        let mut guard = self.resolved_shell_path.lock().await;
+        *guard = Some(path.clone());
+        Ok(path)
     }
 
     /// Execute a command synchronously and return the result
@@ -242,7 +214,7 @@ impl ShellTool {
         working_dir: Option<&Path>,
         timeout_secs: u64,
     ) -> Result<ShellOutput, ShellError> {
-        let shell_path = self.find_shell()?;
+        let shell_path = self.resolved_shell_path().await?;
 
         let start = Instant::now();
 
@@ -433,7 +405,8 @@ impl BuiltinTool for ShellTool {
             let path = std::path::Path::new(dir);
             let resolved = self
                 .config
-                .validate_working_dir(path)
+                .validate_working_dir_async(path)
+                .await
                 .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
             Some(resolved)
         } else {
@@ -487,7 +460,7 @@ mod tests {
     #[test]
     fn test_shell_tool_struct() {
         let config = ShellConfig::default();
-        let tool = ShellTool { config };
+        let tool = ShellTool::new(config);
 
         assert_eq!(tool.config.shell, "nu");
         assert!(!tool.config.enabled);

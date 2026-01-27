@@ -161,6 +161,14 @@ impl Default for ShellConfig {
 }
 
 impl ShellConfig {
+    fn resolve_working_dir_candidate(&self, dir: &Path) -> PathBuf {
+        if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            self.project_root.join(dir)
+        }
+    }
+
     /// Create a new ShellConfig with the given project root
     ///
     /// All other fields use default values.
@@ -182,11 +190,7 @@ impl ShellConfig {
     /// - [`ShellError::WorkingDirEscape`] if the path escapes project root (when restricted)
     pub fn validate_working_dir(&self, dir: &Path) -> Result<PathBuf, ShellError> {
         // Resolve the path: if relative, join with project_root
-        let resolved = if dir.is_absolute() {
-            dir.to_path_buf()
-        } else {
-            self.project_root.join(dir)
-        };
+        let resolved = self.resolve_working_dir_candidate(dir);
 
         // Canonicalize to resolve symlinks and .. components
         let canonical = resolved
@@ -213,6 +217,102 @@ impl ShellConfig {
         }
 
         Ok(canonical)
+    }
+
+    /// Async variant of [`ShellConfig::validate_working_dir`] that avoids blocking the tokio
+    /// executor by using async filesystem operations.
+    pub async fn validate_working_dir_async(&self, dir: &Path) -> Result<PathBuf, ShellError> {
+        let resolved = self.resolve_working_dir_candidate(dir);
+
+        let canonical = tokio::fs::canonicalize(&resolved).await.map_err(|_| {
+            ShellError::WorkingDirNotFound {
+                path: resolved.display().to_string(),
+            }
+        })?;
+
+        if self.restrict_to_project {
+            let canonical_root =
+                tokio::fs::canonicalize(&self.project_root)
+                    .await
+                    .map_err(|_| ShellError::WorkingDirNotFound {
+                        path: self.project_root.display().to_string(),
+                    })?;
+
+            if !canonical.starts_with(&canonical_root) {
+                return Err(ShellError::WorkingDirEscape {
+                    path: dir.display().to_string(),
+                    project_root: self.project_root.display().to_string(),
+                });
+            }
+        }
+
+        Ok(canonical)
+    }
+
+    /// Resolve the shell executable path using config and environment (sync).
+    ///
+    /// Uses the explicit `shell_path` if present, then PATH lookup, then
+    /// the `SHELL` environment variable, then platform-specific fallbacks.
+    pub fn resolve_shell_path(&self) -> Result<PathBuf, ShellError> {
+        let mut tried = Vec::new();
+
+        // 1. Try explicit shell_path from config if set
+        if let Some(ref path) = self.shell_path {
+            if path.exists() {
+                return Ok(path.clone());
+            }
+            tried.push(path.display().to_string());
+        }
+
+        // 2. Try configured shell name via which
+        if let Ok(path) = which::which(&self.shell) {
+            return Ok(path);
+        }
+        tried.push(self.shell.clone());
+
+        // 3. Try SHELL environment variable
+        if let Ok(shell_env) = std::env::var("SHELL") {
+            let path = PathBuf::from(&shell_env);
+            if path.exists() {
+                return Ok(path);
+            }
+            tried.push(shell_env);
+        }
+
+        // 4. Try platform-specific fallbacks
+        let fallbacks: Vec<&str> = if cfg!(windows) {
+            vec!["cmd.exe", "powershell.exe"]
+        } else {
+            vec!["/bin/sh", "/bin/bash", "/bin/busybox", "/usr/bin/sh"]
+        };
+
+        for shell in &fallbacks {
+            let path = PathBuf::from(shell);
+            if path.exists() {
+                return Ok(path);
+            }
+            if !tried.contains(&shell.to_string()) {
+                tried.push(shell.to_string());
+            }
+        }
+
+        Err(ShellError::ShellNotFound {
+            shell: self.shell.clone(),
+            tried,
+        })
+    }
+
+    /// Async variant of [`ShellConfig::resolve_shell_path`] that avoids blocking
+    /// the tokio executor by running in a blocking task.
+    pub async fn resolve_shell_path_async(&self) -> Result<PathBuf, ShellError> {
+        let config = self.clone();
+        tokio::task::spawn_blocking(move || config.resolve_shell_path())
+            .await
+            .map_err(|err| {
+                ShellError::Io(std::io::Error::other(format!(
+                    "Shell path resolution task failed: {err}"
+                )))
+            })?
     }
 }
 

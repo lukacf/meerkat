@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -154,6 +154,7 @@ pub struct JobManager {
     jobs: Arc<Mutex<HashMap<JobId, BackgroundJob>>>,
     /// Configuration for shell execution
     config: ShellConfig,
+    resolved_shell_path: Arc<Mutex<Option<PathBuf>>>,
     /// Optional channel for sending completion events
     event_tx: Option<mpsc::Sender<Value>>,
     /// Map of job ID to task handle (for cancellation)
@@ -170,6 +171,7 @@ impl JobManager {
         Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             config,
+            resolved_shell_path: Arc::new(Mutex::new(None)),
             event_tx: None,
             handles: Arc::new(Mutex::new(HashMap::new())),
             children: Arc::new(Mutex::new(HashMap::new())),
@@ -184,6 +186,20 @@ impl JobManager {
     pub fn with_event_sender(mut self, tx: mpsc::Sender<Value>) -> Self {
         self.event_tx = Some(tx);
         self
+    }
+
+    async fn resolved_shell_path(&self) -> Result<PathBuf, ShellError> {
+        {
+            let guard = self.resolved_shell_path.lock().await;
+            if let Some(path) = guard.as_ref() {
+                return Ok(path.clone());
+            }
+        }
+
+        let path = self.config.resolve_shell_path_async().await?;
+        let mut guard = self.resolved_shell_path.lock().await;
+        *guard = Some(path.clone());
+        Ok(path)
     }
 
     /// Spawn a new background job
@@ -227,19 +243,13 @@ impl JobManager {
         // Validate working directory if provided
         let resolved_dir = if let Some(dir) = working_dir {
             debug!(working_dir = %dir.display(), "Validating working directory");
-            Some(self.config.validate_working_dir(dir)?)
+            Some(self.config.validate_working_dir_async(dir).await?)
         } else {
             None
         };
 
         // Find shell executable (fail fast if not installed)
-        let shell_path = which::which(&self.config.shell).map_err(|_| {
-            warn!(shell = %self.config.shell, "Shell not found on PATH");
-            ShellError::ShellNotFound {
-                shell: self.config.shell.clone(),
-                tried: vec![self.config.shell.clone()],
-            }
-        })?;
+        let shell_path = self.resolved_shell_path().await?;
 
         // Generate job ID and timestamp
         let job_id = JobId::new();

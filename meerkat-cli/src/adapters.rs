@@ -1,5 +1,7 @@
 //! Adapters to bridge existing crate types to agent traits
 
+#![allow(dead_code)]
+
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_client::{LlmClient, LlmEvent, LlmRequest};

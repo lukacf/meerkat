@@ -5,6 +5,7 @@ members = [
     "meerkat-client",
     "meerkat-store",
     "meerkat-tools",
+    "meerkat-agent",
     "meerkat-mcp-client",
     "meerkat-mcp-server",
     "meerkat-cli",
@@ -78,6 +79,7 @@ meerkat-core = { path = "meerkat-core" }
 meerkat-client = { path = "meerkat-client" }
 meerkat-store = { path = "meerkat-store" }
 meerkat-tools = { path = "meerkat-tools" }
+meerkat-agent = { path = "meerkat-agent" }
 meerkat-mcp-client = { path = "meerkat-mcp-client" }
 meerkat-mcp-server = { path = "meerkat-mcp-server" }
 meerkat-cli = { path = "meerkat-cli" }

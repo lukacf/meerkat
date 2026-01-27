@@ -9,11 +9,10 @@
 //! ```
 
 use async_trait::async_trait;
-use meerkat::prelude::*;
 use meerkat::{
-    AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult, Session,
-    ToolDef, ToolError,
+    AgentBuilder, AgentFactory, AgentToolDispatcher, AnthropicClient, ToolDef, ToolError,
 };
+use meerkat_store::{JsonlStore, StoreAdapter};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -119,43 +118,23 @@ impl AgentToolDispatcher for MultiToolDispatcher {
                 let mut state = self.state.lock().unwrap();
                 state.notes.push(note.to_string());
 
-                Ok(json!(format!("Note saved: '{}'", note)))
+                Ok(json!("Note saved"))
             }
             "get_notes" => {
                 let state = self.state.lock().unwrap();
-                if state.notes.is_empty() {
-                    Ok(json!("No notes saved yet."))
-                } else {
-                    Ok(json!(format!(
-                        "Saved notes:\n{}",
-                        state
-                            .notes
-                            .iter()
-                            .enumerate()
-                            .map(|(i, n)| format!("{}. {}", i + 1, n))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    )))
-                }
+                Ok(json!(state.notes))
             }
             "get_calculation_history" => {
                 let state = self.state.lock().unwrap();
-                if state.calculations.is_empty() {
-                    Ok(json!("No calculations performed yet."))
-                } else {
-                    Ok(json!(format!(
-                        "Calculation results: {:?}",
-                        state.calculations
-                    )))
-                }
+                Ok(json!(state.calculations))
             }
             _ => Err(ToolError::not_found(name)),
         }
     }
 }
 
+// Simple expression parser for demo purposes
 fn parse_and_calculate(expr: &str) -> Result<f64, String> {
-    // Very simple expression parser for demo
     let parts: Vec<&str> = expr.split_whitespace().collect();
     if parts.len() != 3 {
         return Err(format!("Invalid expression format: {}", expr));
@@ -179,126 +158,25 @@ fn parse_and_calculate(expr: &str) -> Result<f64, String> {
     }
 }
 
-// LLM adapter
-struct AnthropicLlmAdapter {
-    client: Arc<AnthropicClient>,
-    model: String,
-}
-
-impl AnthropicLlmAdapter {
-    fn new(api_key: String, model: String) -> Self {
-        Self {
-            client: Arc::new(AnthropicClient::new(api_key)),
-            model,
-        }
-    }
-}
-
-#[async_trait]
-impl AgentLlmClient for AnthropicLlmAdapter {
-    async fn stream_response(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        max_tokens: u32,
-        temperature: Option<f32>,
-        provider_params: Option<&serde_json::Value>,
-    ) -> Result<LlmStreamResult, meerkat::AgentError> {
-        use futures::StreamExt;
-        use meerkat::{LlmEvent, LlmRequest, StopReason, ToolCall, Usage};
-
-        let request = LlmRequest {
-            model: self.model.clone(),
-            messages: messages.to_vec(),
-            tools: tools.to_vec(),
-            max_tokens,
-            temperature,
-            stop_sequences: None,
-            provider_params: provider_params.cloned(),
-        };
-
-        let mut stream = self.client.stream(&request);
-
-        let mut content = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = Usage::default();
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => {
-                        content.push_str(&delta);
-                    }
-                    LlmEvent::ToolCallComplete { id, name, args, .. } => {
-                        tool_calls.push(ToolCall::new(id, name, args));
-                    }
-                    LlmEvent::UsageUpdate { usage: u } => {
-                        usage = u;
-                    }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
-                    _ => {}
-                },
-                Err(e) => {
-                    return Err(meerkat::AgentError::LlmError(e.to_string()));
-                }
-            }
-        }
-
-        Ok(LlmStreamResult {
-            content,
-            tool_calls,
-            stop_reason,
-            usage,
-        })
-    }
-
-    fn provider(&self) -> &'static str {
-        "anthropic"
-    }
-}
-
-// In-memory session store
-struct MemoryStore {
-    sessions: std::sync::Mutex<std::collections::HashMap<String, Session>>,
-}
-
-impl MemoryStore {
-    fn new() -> Self {
-        Self {
-            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl AgentSessionStore for MemoryStore {
-    async fn save(&self, session: &Session) -> Result<(), meerkat::AgentError> {
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions.insert(session.id().to_string(), session.clone());
-        Ok(())
-    }
-
-    async fn load(&self, id: &str) -> Result<Option<Session>, meerkat::AgentError> {
-        let sessions = self.sessions.lock().unwrap();
-        Ok(sessions.get(id).cloned())
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .expect("ANTHROPIC_API_KEY environment variable must be set");
 
+    let store_dir = std::env::current_dir()?.join(".rkat").join("sessions");
+    std::fs::create_dir_all(&store_dir)?;
+
+    let factory = AgentFactory::new(store_dir.clone());
+
     // Create components - tools maintain state across turns
-    let llm = Arc::new(AnthropicLlmAdapter::new(
-        api_key,
-        "claude-sonnet-4".to_string(),
-    ));
+    let client = Arc::new(AnthropicClient::new(api_key));
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
+
+    let store = Arc::new(JsonlStore::new(store_dir));
+    store.init().await?;
+    let store = Arc::new(StoreAdapter::new(store));
+
     let tools = Arc::new(MultiToolDispatcher::new());
-    let store = Arc::new(MemoryStore::new());
 
     // Build the agent
     let mut agent = AgentBuilder::new()
@@ -309,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              or save notes, always use the appropriate tool.",
         )
         .max_tokens_per_turn(2048)
-        .build(llm, tools, store);
+        .build(Arc::new(llm), tools, store);
 
     println!("=== Multi-Turn Tool Usage Example ===\n");
 

@@ -1,0 +1,19 @@
+[package]
+name = "meerkat-agent"
+description = "Shared agent factory for Meerkat interfaces"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+meerkat-core = { workspace = true }
+meerkat-client = { workspace = true }
+meerkat-store = { workspace = true }
+meerkat-tools = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

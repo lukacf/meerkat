@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Complete configuration for Meerkat
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub agent: AgentConfig,
@@ -18,35 +18,60 @@ pub struct Config {
     pub budget: BudgetConfig,
     pub retry: RetryConfig,
     pub tools: ToolsConfig,
+    // New schema fields for interface consolidation.
+    pub models: ModelDefaults,
+    pub max_tokens: u32,
+    pub shell: ShellDefaults,
+    pub store: StoreConfig,
+    pub providers: ProviderSettings,
+    pub comms: CommsRuntimeConfig,
+    pub limits: LimitsConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            agent: AgentConfig::default(),
+            provider: ProviderConfig::default(),
+            storage: StorageConfig::default(),
+            budget: BudgetConfig::default(),
+            retry: RetryConfig::default(),
+            tools: ToolsConfig::default(),
+            models: ModelDefaults::default(),
+            max_tokens: AgentConfig::default().max_tokens_per_turn,
+            shell: ShellDefaults::default(),
+            store: StoreConfig::default(),
+            providers: ProviderSettings::default(),
+            comms: CommsRuntimeConfig::default(),
+            limits: LimitsConfig::default(),
+        }
+    }
 }
 
 impl Config {
     /// Load configuration from all sources with proper layering
-    /// Order: defaults → user config → project config → env vars → CLI (CLI applied separately)
+    /// Order: defaults → project config OR global config → env vars → CLI (CLI applied separately)
     pub fn load() -> Result<Self, ConfigError> {
         let mut config = Self::default();
 
-        // 1. Load user config (if exists)
-        if let Some(path) = Self::user_config_path() {
+        // 1. Load project config (if exists). Local config replaces global.
+        if let Some(path) = Self::find_project_config() {
+            config.merge_file(&path)?;
+        } else if let Some(path) = Self::global_config_path() {
             if path.exists() {
                 config.merge_file(&path)?;
             }
         }
 
-        // 2. Load project config (if exists) - overrides user config
-        if let Some(path) = Self::find_project_config() {
-            config.merge_file(&path)?;
-        }
-
-        // 3. Apply environment variable overrides
+        // 2. Apply environment variable overrides (secrets only)
         config.apply_env_overrides()?;
 
         Ok(config)
     }
 
-    /// Get user config path (~/.config/meerkat/config.toml)
-    fn user_config_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".config/meerkat/config.toml"))
+    /// Get global config path (~/.rkat/config.toml)
+    pub fn global_config_path() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".rkat/config.toml"))
     }
 
     /// Find project config by walking up directories (.rkat/config.toml)
@@ -57,13 +82,6 @@ impl Config {
             let project_config = dir.join(".rkat/config.toml");
             if project_config.exists() {
                 return Some(project_config);
-            }
-            // Also check for rkat.toml in current directory
-            if dir == cwd.as_path() {
-                let local = dir.join("rkat.toml");
-                if local.exists() {
-                    return Some(local);
-                }
             }
             match dir.parent() {
                 Some(parent) => dir = parent,
@@ -93,6 +111,9 @@ impl Config {
         if other.agent.system_prompt.is_some() {
             self.agent.system_prompt = other.agent.system_prompt;
         }
+        if other.agent.tool_instructions.is_some() {
+            self.agent.tool_instructions = other.agent.tool_instructions;
+        }
         if other.agent.model != AgentConfig::default().model {
             self.agent.model = other.agent.model;
         }
@@ -118,48 +139,51 @@ impl Config {
         if other.budget.max_tool_calls.is_some() {
             self.budget.max_tool_calls = other.budget.max_tool_calls;
         }
+
+        // New schema fields (replace if non-default)
+        if other.models != ModelDefaults::default() {
+            self.models = other.models;
+        }
+        if other.max_tokens != Config::default().max_tokens {
+            self.max_tokens = other.max_tokens;
+        }
+        if other.shell != ShellDefaults::default() {
+            self.shell = other.shell;
+        }
+        if other.store != StoreConfig::default() {
+            self.store = other.store;
+        }
+        if other.providers != ProviderSettings::default() {
+            self.providers = other.providers;
+        }
+        if other.comms != CommsRuntimeConfig::default() {
+            self.comms = other.comms;
+        }
+        if other.limits != LimitsConfig::default() {
+            self.limits = other.limits;
+        }
     }
 
     /// Apply environment variable overrides
     pub fn apply_env_overrides(&mut self) -> Result<(), ConfigError> {
-        // RKAT_MODEL
-        if let Ok(model) = std::env::var("RKAT_MODEL") {
-            self.agent.model = model;
-        }
-
-        // RKAT_MAX_TOKENS
-        if let Ok(tokens) = std::env::var("RKAT_MAX_TOKENS") {
-            self.budget.max_tokens = Some(
-                tokens
-                    .parse()
-                    .map_err(|_| ConfigError::InvalidValue("RKAT_MAX_TOKENS".to_string()))?,
-            );
-        }
-
-        // RKAT_MAX_DURATION - supports humantime format (e.g., "5m", "1h30m", "300")
-        if let Ok(duration_str) = std::env::var("RKAT_MAX_DURATION") {
-            let duration = parse_duration(&duration_str)
-                .map_err(|_| ConfigError::InvalidValue("RKAT_MAX_DURATION".to_string()))?;
-            self.budget.max_duration = Some(duration);
-        }
-
-        // RKAT_STORAGE_DIR
-        if let Ok(dir) = std::env::var("RKAT_STORAGE_DIR") {
-            self.storage.directory = Some(PathBuf::from(dir));
-        }
-
-        // Provider API keys (fallback if not set in config)
+        // Provider API keys (fallback if not set in config). Only secret env vars are honored.
         match &mut self.provider {
             ProviderConfig::Anthropic { api_key, .. } => {
                 if api_key.is_none() {
-                    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+                    let key = std::env::var("RKAT_ANTHROPIC_API_KEY")
+                        .ok()
+                        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+                    if let Some(key) = key {
                         *api_key = Some(key);
                     }
                 }
             }
             ProviderConfig::OpenAI { api_key, .. } => {
                 if api_key.is_none() {
-                    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+                    let key = std::env::var("RKAT_OPENAI_API_KEY")
+                        .ok()
+                        .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+                    if let Some(key) = key {
                         *api_key = Some(key);
                     }
                 }
@@ -167,9 +191,11 @@ impl Config {
             ProviderConfig::Gemini { api_key } => {
                 if api_key.is_none() {
                     // Try GEMINI_API_KEY first, then GOOGLE_API_KEY
-                    if let Ok(key) =
-                        std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
-                    {
+                    let key = std::env::var("RKAT_GEMINI_API_KEY")
+                        .ok()
+                        .or_else(|| std::env::var("GEMINI_API_KEY").ok())
+                        .or_else(|| std::env::var("GOOGLE_API_KEY").ok());
+                    if let Some(key) = key {
                         *api_key = Some(key);
                     }
                 }
@@ -213,6 +239,8 @@ pub struct AgentConfig {
     pub system_prompt: Option<String>,
     /// Path to system prompt file (alternative to inline system_prompt)
     pub system_prompt_file: Option<PathBuf>,
+    /// Optional tool usage instructions appended to system prompt
+    pub tool_instructions: Option<String>,
     /// Model identifier (provider-specific)
     pub model: String,
     /// Maximum tokens to generate per turn
@@ -239,6 +267,7 @@ impl Default for AgentConfig {
         Self {
             system_prompt: None,
             system_prompt_file: None,
+            tool_instructions: None,
             model: "claude-sonnet-4-20250514".to_string(),
             max_tokens_per_turn: 8192,
             temperature: None,
@@ -247,6 +276,103 @@ impl Default for AgentConfig {
             max_turns: None,
             provider_params: None,
         }
+    }
+}
+
+/// Model defaults by provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ModelDefaults {
+    pub anthropic: String,
+    pub openai: String,
+    pub gemini: String,
+}
+
+impl Default for ModelDefaults {
+    fn default() -> Self {
+        Self {
+            anthropic: "claude-sonnet-4-20250514".to_string(),
+            openai: "gpt-4.1".to_string(),
+            gemini: "gemini-1.5-pro".to_string(),
+        }
+    }
+}
+
+/// Shell defaults configured at the config layer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ShellDefaults {
+    pub program: String,
+    pub timeout_secs: u64,
+    pub allowlist: Vec<String>,
+}
+
+impl Default for ShellDefaults {
+    fn default() -> Self {
+        Self {
+            program: "nu".to_string(),
+            timeout_secs: 30,
+            allowlist: Vec::new(),
+        }
+    }
+}
+
+/// Paths for session and task persistence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct StoreConfig {
+    pub sessions_path: Option<PathBuf>,
+    pub tasks_path: Option<PathBuf>,
+}
+
+/// Provider settings sourced from config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct ProviderSettings {
+    pub base_urls: Option<HashMap<String, String>>,
+    pub api_keys: Option<HashMap<String, String>>,
+}
+
+/// Runtime limits configured at the config layer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct LimitsConfig {
+    pub budget: Option<u64>,
+    #[serde(with = "optional_duration_serde")]
+    pub max_duration: Option<Duration>,
+}
+
+/// Runtime comms configuration (portable across interfaces).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CommsRuntimeConfig {
+    pub mode: CommsRuntimeMode,
+    pub address: Option<String>,
+    pub auto_enable_for_subagents: bool,
+}
+
+impl Default for CommsRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            mode: CommsRuntimeMode::Inproc,
+            address: None,
+            auto_enable_for_subagents: false,
+        }
+    }
+}
+
+/// Transport mode for comms runtime.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommsRuntimeMode {
+    Inproc,
+    Tcp,
+    Uds,
+}
+
+impl Default for CommsRuntimeMode {
+    fn default() -> Self {
+        Self::Inproc
     }
 }
 
@@ -372,6 +498,14 @@ pub struct ToolsConfig {
     pub tool_timeouts: HashMap<String, Duration>,
     /// Maximum concurrent tool executions
     pub max_concurrent: usize,
+    /// Builtin tools enabled
+    pub builtins_enabled: bool,
+    /// Shell tools enabled
+    pub shell_enabled: bool,
+    /// Comms tools enabled
+    pub comms_enabled: bool,
+    /// Sub-agent tools enabled
+    pub subagents_enabled: bool,
 }
 
 impl Default for ToolsConfig {
@@ -381,9 +515,26 @@ impl Default for ToolsConfig {
             default_timeout: Duration::from_secs(600),
             tool_timeouts: HashMap::new(),
             max_concurrent: 10,
+            builtins_enabled: false,
+            shell_enabled: false,
+            comms_enabled: false,
+            subagents_enabled: false,
         }
     }
 }
+
+/// Config scope for persisted settings.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigScope {
+    Global,
+    Project,
+}
+
+/// Config patch payload (merge-patch semantics applied by ConfigStore).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct ConfigDelta(pub serde_json::Value);
 
 /// Configuration errors
 #[derive(Debug, thiserror::Error)]
@@ -394,6 +545,7 @@ pub enum ConfigError {
     #[error("Parse error: {0}")]
     ParseError(String),
 
+    #[allow(dead_code)]
     #[error("Invalid value for {0}")]
     InvalidValue(String),
 
@@ -402,20 +554,6 @@ pub enum ConfigError {
 
     #[error("Missing API key: {0}")]
     MissingApiKey(&'static str),
-}
-
-/// Parse a duration from a human-readable string (e.g., "30s", "5m", "1h30m")
-/// Also accepts plain seconds as a number
-fn parse_duration(s: &str) -> Result<Duration, String> {
-    // First try parsing as humantime
-    if let Ok(d) = humantime_serde::re::humantime::parse_duration(s) {
-        return Ok(d);
-    }
-    // Fall back to parsing as plain seconds
-    if let Ok(secs) = s.parse::<u64>() {
-        return Ok(Duration::from_secs(secs));
-    }
-    Err(format!("Invalid duration: {}", s))
 }
 
 /// Serde helpers for Option<Duration> with humantime format
@@ -493,28 +631,33 @@ mod tests {
 
     #[test]
     fn test_config_layering() {
-        // Test that defaults + env + file + CLI all layer correctly
-        // Precedence: defaults < env < file < CLI
+        // Test that defaults + file + CLI layer correctly; env applies only to secrets.
+        // Precedence for config fields: defaults < file < CLI
 
         // 1. Test defaults
         let config = Config::default();
         assert_eq!(config.agent.model, "claude-sonnet-4-20250514");
         assert_eq!(config.budget.max_tokens, None);
 
-        // 2. Test env override
+        // 2. Test env override (secrets only)
         // SAFETY: Test runs single-threaded, env vars are cleaned up
         unsafe {
             std::env::set_var("RKAT_MODEL", "env-model");
-            std::env::set_var("RKAT_MAX_TOKENS", "10000");
+            std::env::set_var("ANTHROPIC_API_KEY", "secret-key");
         }
         let mut config = Config::default();
         config.apply_env_overrides().unwrap();
-        assert_eq!(config.agent.model, "env-model");
-        assert_eq!(config.budget.max_tokens, Some(10000));
+        assert_eq!(config.agent.model, Config::default().agent.model);
+        match config.provider {
+            ProviderConfig::Anthropic { api_key, .. } => {
+                assert_eq!(api_key.as_deref(), Some("secret-key"));
+            }
+            _ => panic!("expected anthropic provider"),
+        }
         // SAFETY: Test cleanup
         unsafe {
             std::env::remove_var("RKAT_MODEL");
-            std::env::remove_var("RKAT_MAX_TOKENS");
+            std::env::remove_var("ANTHROPIC_API_KEY");
         }
 
         // 3. Test file merge
@@ -531,54 +674,14 @@ mod tests {
 
         // 4. Test CLI override (highest precedence)
         let mut config = Config::default();
-        // SAFETY: Test runs single-threaded
-        unsafe {
-            std::env::set_var("RKAT_MODEL", "env-model");
-        }
-        config.apply_env_overrides().unwrap();
         config.apply_cli_overrides(CliOverrides {
             model: Some("cli-model".to_string()),
             max_tokens: Some(50000),
             ..Default::default()
         });
-        // CLI should win over env
+        // CLI should win over defaults
         assert_eq!(config.agent.model, "cli-model");
         assert_eq!(config.budget.max_tokens, Some(50000));
-        // SAFETY: Test cleanup
-        unsafe {
-            std::env::remove_var("RKAT_MODEL");
-        }
-
-        // 5. Test full layering: defaults → env → file → CLI
-        let mut config = Config::default();
-        // Apply env
-        // SAFETY: Test runs single-threaded
-        unsafe {
-            std::env::set_var("RKAT_MAX_DURATION", "600");
-        }
-        config.apply_env_overrides().unwrap();
-        // SAFETY: Test cleanup
-        unsafe {
-            std::env::remove_var("RKAT_MAX_DURATION");
-        }
-        // Apply file (merge)
-        let file_config = Config {
-            budget: BudgetConfig {
-                max_tool_calls: Some(100),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        config.merge(file_config);
-        // Apply CLI
-        config.apply_cli_overrides(CliOverrides {
-            model: Some("final-model".to_string()),
-            ..Default::default()
-        });
-        // Verify all layers applied
-        assert_eq!(config.agent.model, "final-model"); // CLI
-        assert_eq!(config.budget.max_duration, Some(Duration::from_secs(600))); // env
-        assert_eq!(config.budget.max_tool_calls, Some(100)); // file
     }
 
     #[test]

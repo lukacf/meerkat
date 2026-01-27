@@ -6,16 +6,26 @@
 //!
 //! ```rust,ignore
 //! use meerkat::prelude::*;
+//! use meerkat_agent::AgentFactory;
+//! use meerkat::AnthropicClient;
+//! use meerkat_store::{JsonlStore, StoreAdapter};
+//! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Create an agent with Anthropic
-//!     let result = meerkat::with_anthropic(std::env::var("ANTHROPIC_API_KEY")?)
-//!         .model("claude-sonnet-4")
-//!         .system_prompt("You are a helpful assistant.")
-//!         .run("What is 2 + 2?")
-//!         .await?;
+//!     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+//!     let factory = AgentFactory::new(std::path::PathBuf::from(".rkat/sessions"));
 //!
+//!     let client = Arc::new(AnthropicClient::new(api_key));
+//!     let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
+//!     let store = Arc::new(JsonlStore::new(&factory.store_path)?);
+//!     let store = Arc::new(StoreAdapter::new(store));
+//!     let tools = Arc::new(meerkat_tools::EmptyToolDispatcher::default());
+//!
+//!     let mut agent = AgentBuilder::new()
+//!         .model("claude-sonnet-4")
+//!         .build(Arc::new(llm), tools, store);
+//!     let result = agent.run("What is 2 + 2?".to_string()).await?;
 //!     println!("{}", result.text);
 //!     Ok(())
 //! }
@@ -105,6 +115,9 @@ pub use meerkat_core::{
 // Re-export client types
 pub use meerkat_client::{LlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse};
 
+// AgentFactory
+pub use meerkat_agent::AgentFactory;
+
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;
 
@@ -158,14 +171,4 @@ pub mod prelude {
 
     #[cfg(feature = "gemini")]
     pub use super::GeminiClient;
-
-    // SDK helpers
-    #[cfg(feature = "anthropic")]
-    pub use super::with_anthropic;
-
-    #[cfg(feature = "openai")]
-    pub use super::with_openai;
-
-    #[cfg(feature = "gemini")]
-    pub use super::with_gemini;
 }

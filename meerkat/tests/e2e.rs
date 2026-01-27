@@ -4,10 +4,10 @@
 //! They use real LLM providers and test the full stack.
 //! Per RCT methodology, tests are COMPLETE - they exercise real code paths.
 //!
-//! All E2E tests are marked #[ignore] to avoid running in normal CI
-//! since they require API keys and make real API calls.
+//! These tests require API keys and make real API calls; when keys are missing
+//! they log a skip message and return early.
 //!
-//! Run with: cargo e2e (or cargo test --package meerkat --test e2e -- --ignored)
+//! Run with: cargo e2e (or cargo test --package meerkat --test e2e)
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -299,7 +299,6 @@ mod simple_chat {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_simple_chat_anthropic() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -352,7 +351,6 @@ mod simple_chat {
 
     #[cfg(feature = "openai")]
     #[tokio::test]
-    #[ignore = "Requires OPENAI_API_KEY"]
     async fn test_simple_chat_openai() {
         let Some(api_key) = skip_if_no_openai_key() else {
             eprintln!("Skipping: OPENAI_API_KEY not set");
@@ -385,7 +383,6 @@ mod simple_chat {
 
     #[cfg(feature = "gemini")]
     #[tokio::test]
-    #[ignore = "Requires GOOGLE_API_KEY"]
     async fn test_simple_chat_gemini() {
         let Some(api_key) = skip_if_no_gemini_key() else {
             eprintln!("Skipping: GOOGLE_API_KEY not set");
@@ -470,7 +467,6 @@ mod tool_invocation {
     }
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY and MCP test server"]
     async fn test_tool_invocation_with_mcp() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -554,7 +550,6 @@ mod multi_turn {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_multi_turn_context_maintained() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -639,7 +634,6 @@ mod session_resume {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_session_resume_from_checkpoint() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -723,7 +717,6 @@ mod budget_exhaustion {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_budget_exhaustion_graceful_stop() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -784,7 +777,6 @@ mod budget_exhaustion {
     }
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_tool_call_budget_limit() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -840,7 +832,6 @@ mod parallel_tools {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY and MCP test server"]
     async fn test_parallel_tool_execution() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -1018,7 +1009,6 @@ mod parallel_tools {
     /// E2E test for parallel tool execution with timing verification
     /// Verifies that multiple tools execute concurrently, not serially
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_parallel_tools_with_timing_verification() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -1098,7 +1088,6 @@ mod parallel_tools {
     /// E2E test for multi-turn conversation with parallel tools
     /// Turn 1: Multiple tools → Turn 2: Follow-up question
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_parallel_tools_multiturn() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -1163,7 +1152,6 @@ mod parallel_tools {
     /// E2E test for partial tool failure in parallel execution
     /// One tool fails, others should still complete and LLM should handle gracefully
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_parallel_tools_partial_failure() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -1278,7 +1266,6 @@ mod sub_agent_fork {
     use meerkat::{ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, SpawnSpec, SubAgentManager};
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_sub_agent_fork_and_return() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -1330,7 +1317,6 @@ mod sub_agent_fork {
     }
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_sub_agent_spawn() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -1440,7 +1426,6 @@ mod sub_agent_fork {
     }
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_depth_limit_enforced() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");

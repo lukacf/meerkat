@@ -2,6 +2,7 @@
 //!
 //! This crate provides storage backends for persisting conversation sessions.
 
+pub mod adapter;
 mod error;
 
 #[cfg(feature = "jsonl")]
@@ -10,6 +11,7 @@ pub mod jsonl;
 #[cfg(feature = "memory")]
 pub mod memory;
 
+pub use adapter::StoreAdapter;
 pub use error::StoreError;
 
 use async_trait::async_trait;

@@ -16,6 +16,9 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
+const MAX_TASKS: usize = 10_000;
+const MAX_COMPLETED_TASKS: usize = 5_000;
+
 /// File-based task store with atomic writes
 ///
 /// Stores tasks in a JSON file with the following features:
@@ -69,7 +72,10 @@ impl FileTaskStore {
 
     /// Load the store data from disk, creating default data if the file doesn't exist
     async fn load(&self) -> Result<TaskStoreData, TaskError> {
-        if !self.path.exists() {
+        let exists = fs::try_exists(&self.path)
+            .await
+            .map_err(|e| TaskError::StorageError(format!("Failed to check file: {}", e)))?;
+        if !exists {
             return Ok(TaskStoreData {
                 meta: TaskStoreMeta {
                     version: 1,
@@ -128,6 +134,68 @@ impl FileTaskStore {
 
         Ok(())
     }
+
+    fn enforce_retention(tasks: &mut Vec<Task>) -> usize {
+        let total = tasks.len();
+        if total <= MAX_TASKS {
+            let completed = tasks
+                .iter()
+                .filter(|task| task.status == TaskStatus::Completed)
+                .count();
+            if completed <= MAX_COMPLETED_TASKS {
+                return 0;
+            }
+        }
+
+        let mut remove = vec![false; total];
+
+        let mut completed_indices: Vec<usize> = tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| task.status == TaskStatus::Completed)
+            .map(|(idx, _)| idx)
+            .collect();
+        completed_indices.sort_by(|a, b| tasks[*a].updated_at.cmp(&tasks[*b].updated_at));
+
+        let completed_count = completed_indices.len();
+        let mut excess_completed = completed_count.saturating_sub(MAX_COMPLETED_TASKS);
+        for idx in completed_indices {
+            if excess_completed == 0 {
+                break;
+            }
+            remove[idx] = true;
+            excess_completed -= 1;
+        }
+
+        let mut removed = remove.iter().filter(|&&flag| flag).count();
+        let remaining = total.saturating_sub(removed);
+        let mut excess_total = remaining.saturating_sub(MAX_TASKS);
+        if excess_total > 0 {
+            let mut all_indices: Vec<usize> = (0..total).collect();
+            all_indices.sort_by(|a, b| tasks[*a].updated_at.cmp(&tasks[*b].updated_at));
+            for idx in all_indices {
+                if excess_total == 0 {
+                    break;
+                }
+                if !remove[idx] {
+                    remove[idx] = true;
+                    removed += 1;
+                    excess_total -= 1;
+                }
+            }
+        }
+
+        if removed > 0 {
+            let mut idx = 0usize;
+            tasks.retain(|_| {
+                let keep = !remove[idx];
+                idx += 1;
+                keep
+            });
+        }
+
+        removed
+    }
 }
 
 #[async_trait]
@@ -167,6 +235,7 @@ impl TaskStore for FileTaskStore {
         };
 
         data.tasks.push(task.clone());
+        Self::enforce_retention(&mut data.tasks);
         self.save(&mut data).await?;
 
         Ok(task)

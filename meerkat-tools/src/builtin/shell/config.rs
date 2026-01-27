@@ -3,6 +3,7 @@
 //! This module defines [`ShellConfig`] which controls shell tool behavior,
 //! and [`ShellError`] for shell-related errors.
 
+use meerkat_core::ShellDefaults;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -144,11 +145,12 @@ fn default_max_concurrent_processes() -> usize {
 
 impl Default for ShellConfig {
     fn default() -> Self {
+        let defaults = ShellDefaults::default();
         Self {
             enabled: false,
-            default_timeout_secs: 30,
+            default_timeout_secs: defaults.timeout_secs,
             restrict_to_project: true,
-            shell: "nu".to_string(),
+            shell: defaults.program,
             shell_path: None,
             project_root: PathBuf::new(),
             max_completed_jobs: default_max_completed_jobs(),
@@ -299,7 +301,9 @@ mod tests {
         assert!(json.contains("\"default_timeout_secs\":120"));
         assert!(json.contains("\"restrict_to_project\":false"));
         assert!(json.contains("\"shell\":\"bash\""));
+        assert!(json.contains("\"shell_path\":\"/usr/bin/bash\""));
         assert!(json.contains("\"project_root\":\"/tmp/test\""));
+        assert!(json.contains("\"max_concurrent_processes\":15"));
 
         // Deserialize back
         let parsed: ShellConfig = serde_json::from_str(&json).unwrap();
@@ -308,9 +312,14 @@ mod tests {
         assert_eq!(parsed.default_timeout_secs, config.default_timeout_secs);
         assert_eq!(parsed.restrict_to_project, config.restrict_to_project);
         assert_eq!(parsed.shell, config.shell);
+        assert_eq!(parsed.shell_path, config.shell_path);
         assert_eq!(parsed.project_root, config.project_root);
         assert_eq!(parsed.max_completed_jobs, config.max_completed_jobs);
         assert_eq!(parsed.completed_job_ttl_secs, config.completed_job_ttl_secs);
+        assert_eq!(
+            parsed.max_concurrent_processes,
+            config.max_concurrent_processes
+        );
     }
 
     #[test]
@@ -324,7 +333,12 @@ mod tests {
         assert_eq!(parsed.default_timeout_secs, config.default_timeout_secs);
         assert_eq!(parsed.restrict_to_project, config.restrict_to_project);
         assert_eq!(parsed.shell, config.shell);
+        assert_eq!(parsed.shell_path, config.shell_path);
         assert_eq!(parsed.project_root, config.project_root);
+        assert_eq!(
+            parsed.max_concurrent_processes,
+            config.max_concurrent_processes
+        );
     }
 
     // ==================== with_project_root Test ====================

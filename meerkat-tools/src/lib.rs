@@ -19,17 +19,23 @@
 //! let dispatcher = CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None)?;
 //! ```
 
+pub mod builder;
 pub mod builtin;
 pub mod dispatcher;
 pub mod error;
 pub mod registry;
 
+pub use builder::{
+    BuiltinDispatcherConfig, CommsDispatcherConfig, DispatcherBuildError, McpDispatcherConfig,
+    ToolDispatcherBuilder, build_builtin_dispatcher,
+};
 pub use builtin::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CommsToolSurface,
     CompositeDispatcher, CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore,
     MemoryTaskStore, ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
     find_project_root,
 };
+pub use dispatcher::EmptyToolDispatcher;
 pub use dispatcher::{FilteredToolDispatcher, ToolDispatcher};
 pub use error::{DispatchError, ToolError, ToolValidationError};
 pub use registry::ToolRegistry;

@@ -4,10 +4,8 @@ mod adapters;
 pub mod config;
 mod mcp;
 
-use adapters::{
-    CliToolDispatcher, DynLlmClientAdapter, EmptyToolDispatcher, McpRouterAdapter,
-    SessionStoreAdapter,
-};
+use adapters::{CliToolDispatcher, EmptyToolDispatcher, McpRouterAdapter};
+use meerkat::AgentFactory;
 use meerkat_client::{DefaultClientFactory, LlmClientFactory};
 use meerkat_core::AgentEvent;
 use meerkat_core::AgentToolDispatcher;
@@ -15,23 +13,22 @@ use meerkat_core::ParentCommsContext;
 use meerkat_core::ToolGatewayBuilder;
 use meerkat_core::ops::ConcurrencyLimits;
 use meerkat_core::sub_agent::SubAgentManager;
+use meerkat_store::SessionStore;
 use meerkat_tools::builtin::{
-    BuiltinToolConfig, CommsToolSurface, CompositeDispatcher, MemoryTaskStore, ToolMode,
-    ToolPolicyLayer,
+    BuiltinToolConfig, CommsToolSurface, MemoryTaskStore, ToolMode, ToolPolicyLayer,
     shell::ShellConfig,
     sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState},
 };
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use meerkat_client::{AnthropicClient, GeminiClient, OpenAiClient};
 use meerkat_core::SessionId;
 use meerkat_core::SystemPromptConfig;
 use meerkat_core::agent::AgentBuilder;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
-use meerkat_store::{JsonlStore, SessionFilter, SessionStore};
+use meerkat_store::{JsonlStore, SessionFilter};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -140,6 +137,47 @@ fn spawn_verbose_event_handler(
     })
 }
 
+fn init_project_config() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let rkat_dir = cwd.join(".rkat");
+    std::fs::create_dir_all(&rkat_dir)?;
+
+    let global_path = meerkat_core::Config::global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("Unable to resolve global config path (~/.rkat/config.toml)")
+    })?;
+
+    if !global_path.exists() {
+        let _ = meerkat_core::FileConfigStore::global()?;
+    }
+
+    let project_config = rkat_dir.join("config.toml");
+    if project_config.exists() {
+        return Err(anyhow::anyhow!(
+            "Project config already exists at {}",
+            project_config.display()
+        ));
+    }
+
+    let content = std::fs::read_to_string(&global_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read global config at {}: {}",
+            global_path.display(),
+            e
+        )
+    })?;
+
+    std::fs::write(&project_config, content).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to write project config at {}: {}",
+            project_config.display(),
+            e
+        )
+    })?;
+
+    println!("Initialized {}", project_config.display());
+    Ok(())
+}
+
 #[derive(Parser)]
 #[command(name = "meerkat")]
 #[command(about = "Meerkat - Rust Agentic Interface Kit")]
@@ -150,6 +188,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize local project config from the global template
+    Init,
     /// Run an agent with a prompt
     Run {
         /// The prompt to execute
@@ -380,6 +420,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
+        Commands::Init => init_project_config(),
         Commands::Run {
             prompt,
             model,
@@ -598,6 +639,9 @@ async fn run_agent(
     use std::io::Write;
     use tokio::sync::mpsc;
 
+    let config = meerkat_core::Config::load()
+        .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+
     // Get API key from environment
     let env_var = provider.api_key_env_var();
     let api_key = std::env::var(env_var).map_err(|_| {
@@ -609,26 +653,29 @@ async fn run_agent(
         )
     })?;
 
+    let base_factory = AgentFactory::new(get_session_store_dir());
+    let base_url = config
+        .providers
+        .base_urls
+        .as_ref()
+        .and_then(|map| map.get(provider.as_str()))
+        .cloned();
+
     // Create the LLM client based on provider
-    let llm_client: Arc<dyn meerkat_client::LlmClient> = match provider {
-        Provider::Anthropic => Arc::new(AnthropicClient::new(api_key)),
-        Provider::Openai => Arc::new(OpenAiClient::new(api_key)),
-        Provider::Gemini => Arc::new(GeminiClient::new(api_key)),
-    };
+    let llm_client = base_factory
+        .build_llm_client(provider.as_core(), Some(api_key), base_url)
+        .map_err(|e| anyhow::anyhow!("Failed to create LLM client: {}", e))?;
 
     // Create LLM adapter - with event channel if streaming is enabled
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
-    let llm_adapter = if stream {
-        Arc::new(
-            DynLlmClientAdapter::with_event_channel(llm_client, model.to_string(), event_tx)
-                .with_provider_params(provider_params),
+    let llm_adapter = base_factory
+        .build_llm_adapter_with_events(
+            llm_client,
+            model.to_string(),
+            if stream { Some(event_tx) } else { None },
         )
-    } else {
-        Arc::new(
-            DynLlmClientAdapter::new(llm_client, model.to_string())
-                .with_provider_params(provider_params),
-        )
-    };
+        .with_provider_params(provider_params);
+    let llm_adapter = Arc::new(llm_adapter);
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
 
@@ -758,17 +805,18 @@ async fn run_agent(
             enforced: Default::default(),
         };
 
+        let project_root =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
         // Create shell config if shell is enabled
         let shell_config = if enable_shell {
-            let project_root =
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             Some(ShellConfig {
                 enabled: true,
-                default_timeout_secs: 300,
+                default_timeout_secs: config.shell.timeout_secs,
                 restrict_to_project: true,
-                shell: "bash".to_string(),
+                shell: config.shell.program.clone(),
                 shell_path: None,
-                project_root,
+                project_root: project_root.clone(),
                 max_completed_jobs: 100,
                 completed_job_ttl_secs: 300,
                 max_concurrent_processes: 10,
@@ -783,18 +831,23 @@ async fn run_agent(
         // Clone shell_config for sub-agents before it's moved
         let shell_config_for_subagents = shell_config.clone();
 
-        // Create composite dispatcher - enable wait interrupt if subagents or comms are enabled
-        // so wait can be interrupted when a sub-agent completes or a comms message arrives
-        let enable_wait_interrupt = enable_subagents || comms_runtime.is_some();
-        let mut composite = CompositeDispatcher::new_with_interrupt(
-            Arc::new(task_store),
-            &builtin_config,
-            shell_config,
-            mcp_adapter.clone(),
-            None, // session_id - will be set later
-            enable_wait_interrupt,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create composite dispatcher: {}", e))?;
+        let factory = base_factory
+            .clone()
+            .project_root(project_root)
+            .builtins(enable_builtins)
+            .shell(enable_shell)
+            .subagents(enable_subagents)
+            .comms(comms_runtime.is_some());
+
+        let mut composite = factory
+            .build_composite_dispatcher(
+                Arc::new(task_store),
+                &builtin_config,
+                shell_config,
+                mcp_adapter.clone(),
+                None, // session_id - will be set later
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create composite dispatcher: {}", e))?;
 
         // Get wait interrupt sender before registering sub-agents
         let wait_interrupt_tx = composite.wait_interrupt_sender();
@@ -843,21 +896,23 @@ async fn run_agent(
             // Comms tools are added later in spawn_sub_agent_dyn via CommsBootstrap,
             // ensuring uniform comms setup for all agents.
             let sub_agent_task_store = MemoryTaskStore::new();
-            let sub_agent_dispatcher = CompositeDispatcher::new(
-                Arc::new(sub_agent_task_store),
-                &builtin_config, // Same config as parent - inherits all builtin tools
-                shell_config_for_subagents,
-                mcp_adapter.clone(),
-                None,
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create sub-agent dispatcher: {}", e))?;
+            let sub_agent_factory = factory.clone().subagents(false).comms(false);
+            let sub_agent_dispatcher = sub_agent_factory
+                .build_composite_dispatcher(
+                    Arc::new(sub_agent_task_store),
+                    &builtin_config, // Same config as parent - inherits all builtin tools
+                    shell_config_for_subagents,
+                    mcp_adapter.clone(),
+                    None,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to create sub-agent dispatcher: {}", e))?;
 
             let sub_agent_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
                 Arc::new(sub_agent_dispatcher);
 
             // Use a memory store for sub-agent sessions (wrapped in adapter)
             let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-                SessionStoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
+                sub_agent_factory.build_store_adapter(Arc::new(meerkat_store::MemoryStore::new())),
             );
 
             let parent_session = Arc::new(RwLock::new(Session::new()));
@@ -971,7 +1026,7 @@ async fn run_agent(
 
     // Create persistent session store
     let store = create_session_store();
-    let store_adapter = Arc::new(SessionStoreAdapter::new(store));
+    let store_adapter = Arc::new(base_factory.build_store_adapter(store));
 
     // Compose system prompt (with AGENTS.md and tool usage instructions)
     let mut system_prompt = SystemPromptConfig::new().compose();
@@ -1172,13 +1227,13 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         )
     })?;
 
+    let base_factory = AgentFactory::new(get_session_store_dir());
+
     // Create the LLM client based on restored provider
-    let llm_client: Arc<dyn meerkat_client::LlmClient> = match provider {
-        Provider::Anthropic => Arc::new(AnthropicClient::new(api_key)),
-        Provider::Openai => Arc::new(OpenAiClient::new(api_key)),
-        Provider::Gemini => Arc::new(GeminiClient::new(api_key)),
-    };
-    let llm_adapter = Arc::new(DynLlmClientAdapter::new(llm_client, model.clone()));
+    let llm_client = base_factory
+        .build_llm_client(provider.as_core(), Some(api_key), None)
+        .map_err(|e| anyhow::anyhow!("Failed to create LLM client: {}", e))?;
+    let llm_adapter = Arc::new(base_factory.build_llm_adapter(llm_client, model.clone()));
 
     // Load MCP config and create tool dispatcher
     let tools: Arc<CliToolDispatcher> = match create_mcp_tools().await {
@@ -1191,7 +1246,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     };
 
     // Create session store adapter
-    let store_adapter = Arc::new(SessionStoreAdapter::new(store));
+    let store_adapter = Arc::new(base_factory.build_store_adapter(store));
 
     // Compose system prompt (with AGENTS.md if present)
     let system_prompt = SystemPromptConfig::new().compose();
@@ -1464,6 +1519,15 @@ impl Provider {
             Provider::Anthropic => "anthropic",
             Provider::Openai => "openai",
             Provider::Gemini => "gemini",
+        }
+    }
+
+    /// Convert to the core Provider enum.
+    pub fn as_core(self) -> meerkat_core::Provider {
+        match self {
+            Provider::Anthropic => meerkat_core::Provider::Anthropic,
+            Provider::Openai => meerkat_core::Provider::OpenAI,
+            Provider::Gemini => meerkat_core::Provider::Gemini,
         }
     }
 

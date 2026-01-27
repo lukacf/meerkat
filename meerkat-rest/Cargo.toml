@@ -16,6 +16,7 @@ path = "src/main.rs"
 meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
 meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
+meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

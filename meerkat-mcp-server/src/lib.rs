@@ -94,6 +94,18 @@ pub struct MeerkatResumeInput {
     /// Configuration for built-in tools (only used when enable_builtins is true)
     #[serde(default)]
     pub builtin_config: Option<BuiltinConfigInput>,
+    /// Run in host mode: process prompt then stay alive listening for comms messages.
+    #[serde(default)]
+    pub host_mode: bool,
+    /// Agent name for inter-agent communication. Required for host_mode.
+    #[serde(default)]
+    pub comms_name: Option<String>,
+    /// Optional model override for resume.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional max_tokens override for resume.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 /// Tool result provided by the MCP client
@@ -215,6 +227,22 @@ pub fn tools_list() -> Vec<Value> {
                         "type": "array",
                         "description": "Results for pending tool calls from a previous response",
                         "items": tool_result_schema
+                    },
+                    "host_mode": {
+                        "type": "boolean",
+                        "description": "Run in host mode: process prompt then stay alive listening for comms messages. Requires comms_name."
+                    },
+                    "comms_name": {
+                        "type": "string",
+                        "description": "Agent name for inter-agent communication. Required for host_mode."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional model override for resume"
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Optional max tokens override for resume"
                     }
                 },
                 "required": ["session_id", "prompt"]

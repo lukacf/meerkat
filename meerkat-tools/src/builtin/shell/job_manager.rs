@@ -9,6 +9,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
@@ -67,7 +68,6 @@ const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 ///
 /// This function is designed for incremental/streaming output capture where data arrives
 /// in chunks. For one-shot truncation, use [`truncate_output_tail`] instead.
-#[cfg(test)] // Currently only used in tests; will be used for streaming capture in the future
 fn append_with_truncation(buffer: &mut Vec<u8>, data: &[u8], max_bytes: usize) {
     buffer.extend_from_slice(data);
 
@@ -114,6 +114,24 @@ fn truncate_output_tail(data: &[u8], max_bytes: usize) -> String {
         .unwrap_or(data.len());
 
     String::from_utf8_lossy(&data[safe_keep_from..]).to_string()
+}
+
+async fn read_stream_with_limit<R>(mut reader: R, max_bytes: usize) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        append_with_truncation(&mut buffer, &chunk[..n], max_bytes);
+    }
+
+    Ok(buffer)
 }
 
 use super::config::{ShellConfig, ShellError};
@@ -288,37 +306,86 @@ impl JobManager {
                 children_guard.remove(&job_id_for_child)
             };
 
-            let final_status = if let Some(child) = child {
-                // Wait for the child with timeout
-                let result = tokio::time::timeout(timeout_duration, child.wait_with_output()).await;
+            let final_status = if let Some(mut child) = child {
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
 
+                let stdout_handle = tokio::spawn(async move {
+                    if let Some(out) = stdout {
+                        read_stream_with_limit(out, DEFAULT_MAX_OUTPUT_BYTES).await
+                    } else {
+                        Ok(Vec::new())
+                    }
+                });
+
+                let stderr_handle = tokio::spawn(async move {
+                    if let Some(err) = stderr {
+                        read_stream_with_limit(err, DEFAULT_MAX_OUTPUT_BYTES).await
+                    } else {
+                        Ok(Vec::new())
+                    }
+                });
+
+                let wait_result = tokio::time::timeout(timeout_duration, child.wait()).await;
                 let duration_secs = start.elapsed().as_secs_f64();
 
-                match result {
-                    Ok(Ok(output)) => {
-                        // Truncate output to prevent unbounded memory growth for long-running jobs.
-                        // We keep the tail of the output (most recent) when truncating.
-                        let stdout = truncate_output_tail(&output.stdout, DEFAULT_MAX_OUTPUT_BYTES);
-                        let stderr = truncate_output_tail(&output.stderr, DEFAULT_MAX_OUTPUT_BYTES);
-
-                        JobStatus::Completed {
-                            exit_code: output.status.code(),
-                            stdout,
-                            stderr,
-                            duration_secs,
-                        }
+                let mut wait_error: Option<std::io::Error> = None;
+                let (exit_code, timed_out) = match wait_result {
+                    Ok(Ok(status)) => (status.code(), false),
+                    Ok(Err(e)) => {
+                        wait_error = Some(e);
+                        (None, false)
                     }
-                    Ok(Err(e)) => JobStatus::Failed {
-                        error: e.to_string(),
-                        duration_secs,
-                    },
                     Err(_) => {
-                        // Timeout occurred - child was consumed by wait_with_output
-                        JobStatus::TimedOut {
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            duration_secs,
-                        }
+                        let _ = graceful_kill(&mut child).await;
+                        (None, true)
+                    }
+                };
+
+                let stdout_bytes = match stdout_handle.await {
+                    Ok(Ok(buf)) => buf,
+                    Ok(Err(err)) => {
+                        warn!("Failed to read job stdout: {}", err);
+                        Vec::new()
+                    }
+                    Err(err) => {
+                        warn!("Job stdout reader task failed: {}", err);
+                        Vec::new()
+                    }
+                };
+
+                let stderr_bytes = match stderr_handle.await {
+                    Ok(Ok(buf)) => buf,
+                    Ok(Err(err)) => {
+                        warn!("Failed to read job stderr: {}", err);
+                        Vec::new()
+                    }
+                    Err(err) => {
+                        warn!("Job stderr reader task failed: {}", err);
+                        Vec::new()
+                    }
+                };
+
+                let stdout = truncate_output_tail(&stdout_bytes, DEFAULT_MAX_OUTPUT_BYTES);
+                let stderr = truncate_output_tail(&stderr_bytes, DEFAULT_MAX_OUTPUT_BYTES);
+
+                if let Some(err) = wait_error {
+                    JobStatus::Failed {
+                        error: err.to_string(),
+                        duration_secs,
+                    }
+                } else if timed_out {
+                    JobStatus::TimedOut {
+                        stdout,
+                        stderr,
+                        duration_secs,
+                    }
+                } else {
+                    JobStatus::Completed {
+                        exit_code,
+                        stdout,
+                        stderr,
+                        duration_secs,
                     }
                 }
             } else {

@@ -1,7 +1,7 @@
 //! Configuration loading for the Meerkat CLI.
 //!
 //! This module handles loading comms configuration from:
-//! 1. User config: `~/.config/rkat/config.toml`
+//! 1. User config: `~/.rkat/config.toml`
 //! 2. Project config: `.rkat/config.toml`
 //!
 //! Project config overrides user config. CLI flags override both.
@@ -125,14 +125,9 @@ impl CommsOverrides {
     }
 }
 
-/// Get the user config directory path.
-fn user_config_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|p| p.join("rkat"))
-}
-
 /// Get the user config file path.
 fn user_config_path() -> Option<PathBuf> {
-    user_config_dir().map(|p| p.join("config.toml"))
+    dirs::home_dir().map(|p| p.join(".rkat").join("config.toml"))
 }
 
 /// Get the project config file path (relative to current directory).
@@ -188,7 +183,7 @@ fn merge_comms_section(
 /// Priority (highest to lowest):
 /// 1. CLI flag overrides
 /// 2. Project config (.rkat/config.toml)
-/// 3. User config (~/.config/rkat/config.toml)
+/// 3. User config (~/.rkat/config.toml)
 /// 4. Defaults
 ///
 /// Returns (config, base_dir) where base_dir is the directory to resolve
@@ -263,7 +258,7 @@ mod tests {
     #[test]
     fn test_cli_loads_comms_from_toml() {
         let tmp = TempDir::new().unwrap();
-        let config_dir = tmp.path().join(".config/rkat");
+        let config_dir = tmp.path().join(".rkat");
         std::fs::create_dir_all(&config_dir).unwrap();
 
         let config_path = config_dir.join("config.toml");

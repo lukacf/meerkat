@@ -6,10 +6,51 @@ use async_trait::async_trait;
 use meerkat_core::error::ToolError;
 use meerkat_core::{AgentToolDispatcher, ToolCall, ToolDef, ToolResult};
 use meerkat_mcp_client::McpRouter;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Dispatcher configuration for selecting the shared dispatcher flavor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolDispatcherConfig {
+    pub kind: ToolDispatcherKind,
+}
+
+/// Supported dispatcher kinds.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDispatcherKind {
+    Empty,
+    Mcp,
+    Composite,
+    WithComms,
+}
+
+impl Default for ToolDispatcherConfig {
+    fn default() -> Self {
+        Self {
+            kind: ToolDispatcherKind::Composite,
+        }
+    }
+}
+
+/// Empty dispatcher with no tools.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EmptyToolDispatcher;
+
+#[async_trait]
+impl AgentToolDispatcher for EmptyToolDispatcher {
+    fn tools(&self) -> Vec<ToolDef> {
+        Vec::new()
+    }
+
+    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+        Err(ToolError::not_found(name))
+    }
+}
 
 /// Dispatcher for tool calls with timeout support
 pub struct ToolDispatcher {

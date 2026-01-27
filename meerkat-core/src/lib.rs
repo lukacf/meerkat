@@ -9,12 +9,14 @@ pub mod comms_bootstrap;
 pub mod comms_config;
 pub mod comms_runtime;
 pub mod config;
+pub mod config_store;
 pub mod error;
 pub mod event;
 pub mod gateway;
 pub mod mcp_config;
 pub mod ops;
 pub mod prompt;
+pub mod provider;
 pub mod retry;
 pub mod session;
 pub mod state;
@@ -32,7 +34,12 @@ pub use comms_bootstrap::{
 };
 pub use comms_config::{CoreCommsConfig, ResolvedCommsConfig};
 pub use comms_runtime::{CommsContent, CommsMessage, CommsRuntime, CommsRuntimeError, CommsStatus};
-pub use config::{AgentConfig, BudgetConfig, Config, ProviderConfig, RetryConfig, StorageConfig};
+pub use config::{
+    AgentConfig, BudgetConfig, CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta,
+    ConfigScope, LimitsConfig, ModelDefaults, ProviderConfig, ProviderSettings, RetryConfig,
+    ShellDefaults, StorageConfig, StoreConfig, ToolsConfig,
+};
+pub use config_store::{ConfigStore, FileConfigStore, MemoryConfigStore};
 pub use error::{AgentError, ToolError};
 pub use event::{AgentEvent, BudgetType};
 pub use gateway::{Availability, AvailabilityCheck, ToolGateway, ToolGatewayBuilder};
@@ -43,8 +50,9 @@ pub use ops::{
     SteeringMessage, SteeringStatus, SubAgentState, ToolAccessPolicy, WorkKind,
 };
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
+pub use provider::Provider;
 pub use retry::RetryPolicy;
-pub use session::{SESSION_VERSION, Session, SessionMeta};
+pub use session::{SESSION_VERSION, Session, SessionMeta, SessionMetadata, SessionTooling};
 pub use state::LoopState;
 pub use sub_agent::{SubAgentCommsInfo, SubAgentCompletion, SubAgentInfo, SubAgentManager};
 pub use types::*;

@@ -7,9 +7,11 @@ use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -22,6 +24,7 @@ use crate::builtin::{BuiltinTool, BuiltinToolError};
 /// Maximum number of characters to keep in output before truncation.
 /// This is measured in Unicode characters, not bytes.
 const MAX_OUTPUT_CHARS: usize = 100_000;
+const MAX_OUTPUT_BYTES: usize = MAX_OUTPUT_CHARS * 4;
 
 /// Truncate output to keep the tail (most recent output).
 ///
@@ -51,6 +54,106 @@ fn truncate_to_tail(s: &str, max_chars: usize) -> String {
     let tail: String = s.chars().skip(skip_count).collect();
 
     format!("[truncated {} chars]...{}", skip_count, tail)
+}
+
+#[cfg(unix)]
+async fn graceful_kill(child: &mut tokio::process::Child) -> std::io::Result<()> {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    if let Some(pid) = child.id() {
+        let pgid = Pid::from_raw(pid as i32);
+
+        let _ = killpg(pgid, Signal::SIGTERM);
+
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                let _ = killpg(pgid, Signal::SIGKILL);
+                let _ = child.wait().await;
+            }
+            result = child.wait() => {
+                return result.map(|_| ());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn graceful_kill(child: &mut tokio::process::Child) -> std::io::Result<()> {
+    child.kill().await
+}
+
+struct TailBuffer {
+    buffer: VecDeque<u8>,
+    max_bytes: usize,
+}
+
+impl TailBuffer {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            buffer: VecDeque::new(),
+            max_bytes,
+        }
+    }
+
+    fn extend(&mut self, data: &[u8]) {
+        if self.max_bytes == 0 {
+            return;
+        }
+
+        if data.len() >= self.max_bytes {
+            self.buffer.clear();
+            self.buffer
+                .extend(data[data.len() - self.max_bytes..].iter().copied());
+            return;
+        }
+
+        let overflow = self.buffer.len() + data.len().saturating_sub(self.max_bytes);
+        for _ in 0..overflow {
+            self.buffer.pop_front();
+        }
+        self.buffer.extend(data.iter().copied());
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.buffer.into_iter().collect()
+    }
+}
+
+async fn read_stream_tail<R>(mut reader: R, max_bytes: usize) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buffer = TailBuffer::new(max_bytes);
+    let mut chunk = [0u8; 8192];
+
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        buffer.extend(&chunk[..n]);
+    }
+
+    Ok(buffer.into_vec())
+}
+
+async fn join_output(
+    handle: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+    label: &str,
+) -> Vec<u8> {
+    match handle.await {
+        Ok(Ok(buf)) => buf,
+        Ok(Err(err)) => {
+            warn!("Failed to read {}: {}", label, err);
+            Vec::new()
+        }
+        Err(err) => {
+            warn!("{} reader task failed: {}", label, err);
+            Vec::new()
+        }
+    }
 }
 
 /// Shell tool for executing shell commands
@@ -167,44 +270,65 @@ impl ShellTool {
 
         // Spawn the process with timeout
         let timeout_duration = Duration::from_secs(timeout_secs);
+        let mut child = cmd.spawn().map_err(ShellError::Io)?;
 
-        match timeout(timeout_duration, cmd.output()).await {
-            Ok(Ok(output)) => {
-                let duration_secs = start.elapsed().as_secs_f64();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
 
-                // Check if UTF-8 conversion will be lossy
-                let stdout_lossy = String::from_utf8(output.stdout.clone()).is_err();
-                let stderr_lossy = String::from_utf8(output.stderr.clone()).is_err();
-
-                // Convert to string with lossy UTF-8 handling, then truncate to tail
-                let stdout_raw = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr_raw = String::from_utf8_lossy(&output.stderr).into_owned();
-
-                Ok(ShellOutput {
-                    exit_code: output.status.code(),
-                    stdout: truncate_to_tail(&stdout_raw, MAX_OUTPUT_CHARS),
-                    stderr: truncate_to_tail(&stderr_raw, MAX_OUTPUT_CHARS),
-                    timed_out: false,
-                    duration_secs,
-                    stdout_lossy,
-                    stderr_lossy,
-                })
+        let stdout_handle = tokio::spawn(async move {
+            if let Some(out) = stdout {
+                read_stream_tail(out, MAX_OUTPUT_BYTES).await
+            } else {
+                Ok(Vec::new())
             }
-            Ok(Err(e)) => Err(ShellError::Io(e)),
+        });
+
+        let stderr_handle = tokio::spawn(async move {
+            if let Some(err) = stderr {
+                read_stream_tail(err, MAX_OUTPUT_BYTES).await
+            } else {
+                Ok(Vec::new())
+            }
+        });
+
+        let wait_result = timeout(timeout_duration, child.wait()).await;
+        let duration_secs = start.elapsed().as_secs_f64();
+
+        let mut wait_error: Option<std::io::Error> = None;
+        let (exit_code, timed_out) = match wait_result {
+            Ok(Ok(status)) => (status.code(), false),
+            Ok(Err(e)) => {
+                wait_error = Some(e);
+                (None, false)
+            }
             Err(_) => {
-                // Timeout occurred
-                let duration_secs = start.elapsed().as_secs_f64();
-                Ok(ShellOutput {
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    timed_out: true,
-                    duration_secs,
-                    stdout_lossy: false,
-                    stderr_lossy: false,
-                })
+                let _ = graceful_kill(&mut child).await;
+                (None, true)
             }
+        };
+
+        let stdout_bytes = join_output(stdout_handle, "stdout").await;
+        let stderr_bytes = join_output(stderr_handle, "stderr").await;
+
+        if let Some(err) = wait_error {
+            return Err(ShellError::Io(err));
         }
+
+        let stdout_lossy = String::from_utf8(stdout_bytes.clone()).is_err();
+        let stderr_lossy = String::from_utf8(stderr_bytes.clone()).is_err();
+
+        let stdout_raw = String::from_utf8_lossy(&stdout_bytes).into_owned();
+        let stderr_raw = String::from_utf8_lossy(&stderr_bytes).into_owned();
+
+        Ok(ShellOutput {
+            exit_code,
+            stdout: truncate_to_tail(&stdout_raw, MAX_OUTPUT_CHARS),
+            stderr: truncate_to_tail(&stderr_raw, MAX_OUTPUT_CHARS),
+            timed_out,
+            duration_secs,
+            stdout_lossy,
+            stderr_lossy,
+        })
     }
 }
 

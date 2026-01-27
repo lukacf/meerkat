@@ -12,6 +12,7 @@
 //!
 //! Shell tools require explicit enable: `RKAT_ENABLE_SHELL=true`
 
+use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -25,10 +26,11 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
-    AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    AnthropicClient, CommsRuntime, JsonlStore, LlmClient, LlmStreamResult, Message, Session,
+    AgentBuilder, AgentToolDispatcher, AnthropicClient, CommsRuntime, JsonlStore, Message,
     SessionId, SessionMeta, SessionStore, ToolDef, ToolError,
 };
+use meerkat_client::LlmClientAdapter;
+use meerkat_store::StoreAdapter;
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, FileTaskStore, ToolPolicyLayer, ensure_rkat_dir,
     find_project_root, shell::ShellConfig,
@@ -119,7 +121,18 @@ pub struct CreateSessionRequest {
 /// Continue session request
 #[derive(Debug, Deserialize)]
 pub struct ContinueSessionRequest {
+    pub session_id: String,
     pub prompt: String,
+    /// Run in host mode: process prompt then stay alive listening for comms messages.
+    #[serde(default)]
+    pub host_mode: bool,
+    /// Agent name for inter-agent communication. Required for host_mode.
+    #[serde(default)]
+    pub comms_name: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 /// Session response
@@ -251,7 +264,7 @@ async fn create_session(
     let llm_client = Arc::new(AnthropicClient::new(api_key));
     let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.clone()));
     let tools = create_tool_dispatcher(&state)?;
-    let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
+    let store_adapter = Arc::new(StoreAdapter::new(Arc::new(store)));
 
     // Create comms runtime if host_mode is enabled
     // Note: inproc_only() already registers in InprocRegistry, no need to start listeners
@@ -347,7 +360,14 @@ async fn continue_session(
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| ApiError::Configuration("ANTHROPIC_API_KEY not set".to_string()))?;
 
-    let session_id = SessionId::parse(&id)
+    if req.session_id != id {
+        return Err(ApiError::BadRequest(format!(
+            "Session ID mismatch: path={} body={}",
+            id, req.session_id
+        )));
+    }
+
+    let session_id = SessionId::parse(&req.session_id)
         .map_err(|e| ApiError::BadRequest(format!("Invalid session ID: {}", e)))?;
 
     let store = JsonlStore::new(state.store_path.clone());
@@ -366,7 +386,7 @@ async fn continue_session(
     let llm_client = Arc::new(AnthropicClient::new(api_key));
     let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.clone()));
     let tools = create_tool_dispatcher(&state)?;
-    let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
+    let store_adapter = Arc::new(StoreAdapter::new(Arc::new(store)));
 
     let mut agent = AgentBuilder::new()
         .model(&model)
@@ -498,88 +518,6 @@ impl IntoResponse for ApiError {
     }
 }
 
-// Adapter types needed for the REST server
-
-use async_trait::async_trait;
-use meerkat::{LlmEvent, LlmRequest, StopReason, ToolCall, Usage};
-
-/// LLM client adapter
-pub struct LlmClientAdapter<C: LlmClient> {
-    client: Arc<C>,
-    model: String,
-}
-
-impl<C: LlmClient> LlmClientAdapter<C> {
-    pub fn new(client: Arc<C>, model: String) -> Self {
-        Self { client, model }
-    }
-}
-
-#[async_trait]
-impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
-    async fn stream_response(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        max_tokens: u32,
-        temperature: Option<f32>,
-        provider_params: Option<&serde_json::Value>,
-    ) -> Result<LlmStreamResult, AgentError> {
-        use futures::StreamExt;
-
-        let request = LlmRequest {
-            model: self.model.clone(),
-            messages: messages.to_vec(),
-            tools: tools.to_vec(),
-            max_tokens,
-            temperature,
-            stop_sequences: None,
-            provider_params: provider_params.cloned(),
-        };
-
-        let mut stream = self.client.stream(&request);
-
-        let mut content = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = Usage::default();
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => {
-                        content.push_str(&delta);
-                    }
-                    LlmEvent::ToolCallComplete { id, name, args, .. } => {
-                        tool_calls.push(ToolCall::new(id, name, args));
-                    }
-                    LlmEvent::UsageUpdate { usage: u } => {
-                        usage = u;
-                    }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
-                    _ => {}
-                },
-                Err(e) => {
-                    return Err(AgentError::LlmError(e.to_string()));
-                }
-            }
-        }
-
-        Ok(LlmStreamResult {
-            content,
-            tool_calls,
-            stop_reason,
-            usage,
-        })
-    }
-
-    fn provider(&self) -> &'static str {
-        self.client.provider()
-    }
-}
-
 /// Empty tool dispatcher
 #[derive(Debug)]
 pub struct EmptyToolDispatcher;
@@ -627,37 +565,6 @@ impl AgentToolDispatcher for RestToolDispatcher {
             RestToolDispatcher::Empty(d) => d.dispatch(name, args).await,
             RestToolDispatcher::Composite(d) => d.dispatch(name, args).await,
         }
-    }
-}
-
-/// Session store adapter
-pub struct SessionStoreAdapter<S: SessionStore> {
-    store: Arc<S>,
-}
-
-impl<S: SessionStore> SessionStoreAdapter<S> {
-    pub fn new(store: Arc<S>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait]
-impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
-    async fn save(&self, session: &Session) -> Result<(), AgentError> {
-        self.store
-            .save(session)
-            .await
-            .map_err(|e| AgentError::StoreError(e.to_string()))
-    }
-
-    async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
-        let session_id = meerkat::SessionId::parse(id)
-            .map_err(|e| AgentError::StoreError(format!("Invalid session ID: {}", e)))?;
-
-        self.store
-            .load(&session_id)
-            .await
-            .map_err(|e| AgentError::StoreError(e.to_string()))
     }
 }
 

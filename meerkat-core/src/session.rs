@@ -9,6 +9,7 @@
 //! - Mutation (push) triggers CoW only when refcount > 1
 //! - `push_batch()` adds multiple messages with a single timestamp update
 
+use crate::Provider;
 use crate::types::{Message, SessionId, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
@@ -289,6 +290,28 @@ pub struct SessionMeta {
     pub total_tokens: u64,
     #[serde(default)]
     pub metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Metadata required to reliably resume a session across interfaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionMetadata {
+    pub model: String,
+    pub max_tokens: u32,
+    pub provider: Provider,
+    pub tooling: SessionTooling,
+    pub host_mode: bool,
+    pub comms_name: Option<String>,
+}
+
+/// Tooling flags captured at session creation time.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionTooling {
+    pub builtins: bool,
+    pub shell: bool,
+    pub comms: bool,
+    pub subagents: bool,
 }
 
 impl From<&Session> for SessionMeta {

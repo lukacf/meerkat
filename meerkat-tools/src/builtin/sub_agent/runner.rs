@@ -410,6 +410,8 @@ pub struct DynSubAgentSpec {
     /// When set, the sub-agent will be added to this list after comms setup
     /// so the parent can accept connections from the sub-agent.
     pub parent_trusted_peers: Option<Arc<RwLock<TrustedPeers>>>,
+    /// Host mode - agent stays alive processing comms messages after initial prompt
+    pub host_mode: bool,
 }
 
 /// Spawn and run a sub-agent in a background task (trait object version)
@@ -522,13 +524,22 @@ pub async fn spawn_sub_agent_dyn(
     let id_for_task = id.clone();
     let _name_for_task = name.clone();
     let manager_for_task = manager.clone();
+    let host_mode = spec.host_mode;
 
     // Spawn the agent execution task
     tokio::spawn(async move {
         // The session already has the user prompt, so we use an empty string
         // to avoid adding a duplicate. The agent will see the existing message
         // and respond to it.
-        let result = agent.run(String::new()).await;
+        //
+        // If host_mode is enabled, the agent stays alive processing comms messages
+        // after completing the initial prompt. This is the DRY approach - sub-agents
+        // use the same run_host_mode() as the main agent.
+        let result = if host_mode {
+            agent.run_host_mode(String::new()).await
+        } else {
+            agent.run(String::new()).await
+        };
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
 

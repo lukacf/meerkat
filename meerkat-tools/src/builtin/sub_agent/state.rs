@@ -41,6 +41,11 @@ pub struct SubAgentToolState {
     /// Parent's trusted peers (for adding sub-agents as trusted)
     /// This is shared with the parent's CommsRuntime so updates are visible to listeners.
     pub parent_trusted_peers: Option<Arc<RwLock<TrustedPeers>>>,
+
+    /// Tool usage instructions from parent (for inheriting system prompt)
+    /// These explain how to use shell, task, and other tools.
+    /// Uses std::sync::RwLock since this is set once at setup and read when spawning.
+    pub tool_usage_instructions: std::sync::RwLock<Option<String>>,
 }
 
 impl SubAgentToolState {
@@ -64,7 +69,30 @@ impl SubAgentToolState {
             current_depth,
             parent_comms: None,
             parent_trusted_peers: None,
+            tool_usage_instructions: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Set tool usage instructions (for inheriting system prompt)
+    /// Can be called after Arc is shared since it uses interior mutability.
+    /// This is typically called once at setup time by CompositeDispatcher::register_sub_agent_tools.
+    pub fn set_tool_usage_instructions(&self, instructions: String) {
+        if !instructions.is_empty() {
+            let mut guard = self
+                .tool_usage_instructions
+                .write()
+                .expect("tool_usage_instructions lock poisoned");
+            *guard = Some(instructions);
+        }
+    }
+
+    /// Get tool usage instructions
+    pub fn get_tool_usage_instructions(&self) -> Option<String> {
+        let guard = self
+            .tool_usage_instructions
+            .read()
+            .expect("tool_usage_instructions lock poisoned");
+        guard.clone()
     }
 
     /// Create new sub-agent tool state with comms enabled
@@ -94,6 +122,7 @@ impl SubAgentToolState {
             current_depth,
             parent_comms: Some(parent_comms),
             parent_trusted_peers: Some(parent_trusted_peers),
+            tool_usage_instructions: std::sync::RwLock::new(None),
         }
     }
 

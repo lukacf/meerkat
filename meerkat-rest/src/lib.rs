@@ -26,8 +26,8 @@ use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
     AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    AnthropicClient, JsonlStore, LlmClient, LlmStreamResult, Message, Session, SessionId,
-    SessionMeta, SessionStore, ToolDef, ToolError,
+    AnthropicClient, CommsRuntime, JsonlStore, LlmClient, LlmStreamResult, Message, Session,
+    SessionId, SessionMeta, SessionStore, ToolDef, ToolError,
 };
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, FileTaskStore, ToolPolicyLayer, ensure_rkat_dir,
@@ -107,6 +107,13 @@ pub struct CreateSessionRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Run in host mode: process prompt then stay alive listening for comms messages.
+    /// Requires comms_name to be set.
+    #[serde(default)]
+    pub host_mode: bool,
+    /// Agent name for inter-agent communication. Required for host_mode.
+    #[serde(default)]
+    pub comms_name: Option<String>,
 }
 
 /// Continue session request
@@ -222,6 +229,13 @@ async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
+    // Validate host mode requirements
+    if req.host_mode && req.comms_name.is_none() {
+        return Err(ApiError::BadRequest(
+            "host_mode requires comms_name to be set".to_string(),
+        ));
+    }
+
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| ApiError::Configuration("ANTHROPIC_API_KEY not set".to_string()))?;
 
@@ -239,6 +253,17 @@ async fn create_session(
     let tools = create_tool_dispatcher(&state)?;
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
 
+    // Create comms runtime if host_mode is enabled
+    // Note: inproc_only() already registers in InprocRegistry, no need to start listeners
+    let comms_runtime = if req.host_mode {
+        let comms_name = req.comms_name.as_ref().expect("validated above");
+        let runtime = CommsRuntime::inproc_only(comms_name)
+            .map_err(|e| ApiError::Internal(format!("Failed to create comms runtime: {}", e)))?;
+        Some(runtime)
+    } else {
+        None
+    };
+
     let mut builder = AgentBuilder::new()
         .model(&model)
         .max_tokens_per_turn(max_tokens);
@@ -247,12 +272,25 @@ async fn create_session(
         builder = builder.system_prompt(sys_prompt);
     }
 
+    // Add comms runtime if enabled
+    if let Some(runtime) = comms_runtime {
+        builder = builder.with_comms_runtime(runtime);
+    }
+
     let mut agent = builder.build(llm_adapter, tools, store_adapter);
 
-    let result = agent
-        .run(req.prompt)
-        .await
-        .map_err(|e| ApiError::Agent(format!("{}", e)))?;
+    // Run agent based on mode
+    let result = if req.host_mode {
+        agent
+            .run_host_mode(req.prompt)
+            .await
+            .map_err(|e| ApiError::Agent(format!("{}", e)))?
+    } else {
+        agent
+            .run(req.prompt)
+            .await
+            .map_err(|e| ApiError::Agent(format!("{}", e)))?
+    };
 
     Ok(Json(SessionResponse {
         session_id: result.session_id.to_string(),
@@ -728,5 +766,30 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, ApiError::Configuration(_)));
+    }
+
+    #[test]
+    fn test_create_session_request_parsing_with_host_mode() {
+        let req_json = serde_json::json!({
+            "prompt": "Hello",
+            "host_mode": true,
+            "comms_name": "test-agent"
+        });
+
+        let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
+        assert_eq!(req.prompt, "Hello");
+        assert!(req.host_mode);
+        assert_eq!(req.comms_name, Some("test-agent".to_string()));
+    }
+
+    #[test]
+    fn test_create_session_request_host_mode_defaults_to_false() {
+        let req_json = serde_json::json!({
+            "prompt": "Hello"
+        });
+
+        let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
+        assert!(!req.host_mode);
+        assert!(req.comms_name.is_none());
     }
 }

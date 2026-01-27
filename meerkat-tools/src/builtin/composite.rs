@@ -297,6 +297,10 @@ impl CompositeDispatcher {
     /// that isn't available at dispatcher construction time. Call this method after
     /// creating the dispatcher to add sub-agent tool support.
     ///
+    /// This method also automatically sets the tool usage instructions on the sub-agent
+    /// state, so spawned sub-agents inherit knowledge of how to use shell, task, and
+    /// other tools. This works across all interfaces (CLI, MCP, SDK, REST).
+    ///
     /// # Arguments
     /// * `tool_set` - The SubAgentToolSet containing all sub-agent tools
     /// * `config` - Tool configuration to determine which tools are enabled
@@ -324,6 +328,10 @@ impl CompositeDispatcher {
                 }
             }
         }
+
+        // Get state reference before consuming tool_set
+        // We'll use this to set tool usage instructions after registration
+        let state = tool_set.state().clone();
 
         // Register spawn tool
         if resolved.is_enabled(tool_set.spawn.name(), tool_set.spawn.default_enabled()) {
@@ -375,6 +383,13 @@ impl CompositeDispatcher {
             || self.builtins.contains_key("agent_status")
             || self.builtins.contains_key("agent_cancel")
             || self.builtins.contains_key("agent_list");
+
+        // Set tool usage instructions on sub-agent state so spawned sub-agents
+        // know how to use shell, task, and other tools.
+        // We call usage_instructions() AFTER setting has_sub_agent_tools so the
+        // instructions include sub-agent tool usage if they were enabled.
+        let instructions = self.usage_instructions();
+        state.set_tool_usage_instructions(instructions);
 
         Ok(())
     }
@@ -1150,6 +1165,68 @@ mod tests {
                 result,
                 Err(CompositeDispatcherError::NameCollision(_))
             ));
+        }
+
+        #[test]
+        fn test_register_sub_agent_tools_sets_usage_instructions() {
+            // Create a dispatcher with task tools enabled (they have usage instructions)
+            let store = Arc::new(MemoryTaskStore::new());
+            let mut dispatcher = CompositeDispatcher::builtins_only(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+            )
+            .unwrap();
+
+            // Create tool set and capture state reference before registration
+            let limits = ConcurrencyLimits::default();
+            let manager = Arc::new(SubAgentManager::new(limits, 0));
+            let client_factory = Arc::new(MockClientFactory);
+            let tool_dispatcher = Arc::new(MockToolDispatcher);
+            let session_store = Arc::new(MockSessionStore);
+            let parent_session = Arc::new(RwLock::new(Session::new()));
+            let config = SubAgentConfig::default();
+
+            let state = Arc::new(SubAgentToolState::new(
+                manager,
+                client_factory,
+                tool_dispatcher,
+                session_store,
+                parent_session,
+                config,
+                0,
+            ));
+
+            // Verify instructions are initially empty
+            assert!(
+                state.get_tool_usage_instructions().is_none(),
+                "Tool usage instructions should be None before registration"
+            );
+
+            // Keep a reference to state for verification
+            let state_for_verification = state.clone();
+            let tool_set = SubAgentToolSet::new(state);
+
+            // Register tools - this should automatically set usage instructions
+            dispatcher
+                .register_sub_agent_tools(tool_set, &config_with_sub_agent_enabled())
+                .unwrap();
+
+            // Verify instructions were set
+            let instructions = state_for_verification.get_tool_usage_instructions();
+            assert!(
+                instructions.is_some(),
+                "Tool usage instructions should be set after registration"
+            );
+
+            let instructions = instructions.unwrap();
+            // Should contain task tool instructions (since task tools are enabled)
+            assert!(
+                instructions.contains("task_create") || instructions.contains("Task Tools"),
+                "Instructions should contain task tool guidance: {}",
+                &instructions[..instructions.len().min(200)]
+            );
         }
     }
 }

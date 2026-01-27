@@ -100,6 +100,9 @@ struct SpawnParams {
     /// Override system prompt
     #[serde(default)]
     system_prompt: Option<String>,
+    /// Host mode - agent stays alive processing comms messages after initial prompt
+    #[serde(default)]
+    host_mode: bool,
 }
 
 /// Response from agent_spawn tool
@@ -294,8 +297,19 @@ impl AgentSpawnTool {
             params.prompt.clone()
         };
 
+        // Resolve system prompt: explicit override > inherited tool usage instructions > none
+        let effective_system_prompt = if params.system_prompt.is_some() {
+            // Explicit override takes precedence
+            params.system_prompt.clone()
+        } else if self.state.config.inherit_system_prompt {
+            // Inherit tool usage instructions from parent if configured
+            self.state.get_tool_usage_instructions()
+        } else {
+            None
+        };
+
         // Create session with clean context (enriched prompt includes comms context)
-        let session = create_spawn_session(&enriched_prompt, params.system_prompt.as_deref());
+        let session = create_spawn_session(&enriched_prompt, effective_system_prompt.as_deref());
 
         // Create the sub-agent specification
         let spec = DynSubAgentSpec {
@@ -306,9 +320,10 @@ impl AgentSpawnTool {
             session,
             budget: Some(budget),
             depth: self.state.depth() + 1,
-            system_prompt: params.system_prompt.clone(),
+            system_prompt: effective_system_prompt,
             comms_config,
             parent_trusted_peers: self.state.parent_trusted_peers.clone(),
+            host_mode: params.host_mode,
         };
 
         // Spawn the sub-agent (this registers it and starts execution in a background task)
@@ -402,6 +417,11 @@ impl BuiltinTool for AgentSpawnTool {
                     "system_prompt": {
                         "type": "string",
                         "description": "Override the system prompt for the sub-agent"
+                    },
+                    "host_mode": {
+                        "type": "boolean",
+                        "description": "If true, the sub-agent stays alive after completing the initial prompt, processing incoming comms messages. Requires comms to be enabled. Use this for long-running sub-agents that need to receive instructions or report findings over time.",
+                        "default": false
                     }
                 },
                 "required": ["prompt"]
@@ -836,6 +856,56 @@ mod tests {
             assert!(
                 model_desc.contains("gemini-3-flash-preview"),
                 "Should list allowed Gemini models"
+            );
+        }
+    }
+
+    // Host mode tests
+    mod host_mode {
+        use super::*;
+
+        #[test]
+        fn test_spawn_params_host_mode_default_false() {
+            // When host_mode is not specified, it should default to false
+            let params: SpawnParams = serde_json::from_value(json!({"prompt": "test"})).unwrap();
+            assert!(!params.host_mode);
+        }
+
+        #[test]
+        fn test_spawn_params_host_mode_explicit_true() {
+            let params: SpawnParams =
+                serde_json::from_value(json!({"prompt": "test", "host_mode": true})).unwrap();
+            assert!(params.host_mode);
+        }
+
+        #[test]
+        fn test_spawn_params_host_mode_explicit_false() {
+            let params: SpawnParams =
+                serde_json::from_value(json!({"prompt": "test", "host_mode": false})).unwrap();
+            assert!(!params.host_mode);
+        }
+
+        #[test]
+        fn test_tool_def_includes_host_mode() {
+            let state = create_test_state();
+            let tool = AgentSpawnTool::new(state);
+            let def = tool.def();
+
+            let schema = &def.input_schema;
+            assert!(
+                schema["properties"]["host_mode"].is_object(),
+                "Schema should include host_mode property"
+            );
+            assert_eq!(
+                schema["properties"]["host_mode"]["type"], "boolean",
+                "host_mode should be boolean"
+            );
+            assert!(
+                schema["properties"]["host_mode"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("stays alive"),
+                "Description should explain host_mode behavior"
             );
         }
     }

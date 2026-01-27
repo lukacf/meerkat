@@ -5,8 +5,8 @@
 
 use crate::{
     AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, BudgetLimits,
-    LlmClient, LlmEvent, LlmRequest, LlmStreamResult, Message, RetryPolicy, RunResult, Session,
-    StopReason, ToolCall, ToolDef, ToolError, Usage,
+    CommsRuntime, LlmClient, LlmEvent, LlmRequest, LlmStreamResult, Message, RetryPolicy,
+    RunResult, Session, StopReason, ToolCall, ToolDef, ToolError, Usage,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -45,6 +45,8 @@ pub struct QuickBuilder<C: LlmClient + 'static> {
     retry_policy: Option<RetryPolicy>,
     store_path: Option<PathBuf>,
     tools: Vec<ToolDef>,
+    /// Agent name for inter-agent communication. Required for host_mode.
+    comms_name: Option<String>,
 }
 
 impl<C: LlmClient + 'static> QuickBuilder<C> {
@@ -59,6 +61,7 @@ impl<C: LlmClient + 'static> QuickBuilder<C> {
             retry_policy: None,
             store_path: None,
             tools: Vec::new(),
+            comms_name: None,
         }
     }
 
@@ -130,6 +133,15 @@ impl<C: LlmClient + 'static> QuickBuilder<C> {
         self
     }
 
+    /// Enable inter-agent communication with the given name.
+    ///
+    /// This is required for `run_host_mode()`. The comms name identifies this agent
+    /// in the communication network.
+    pub fn with_comms(mut self, name: impl Into<String>) -> Self {
+        self.comms_name = Some(name.into());
+        self
+    }
+
     /// Run the agent with the given prompt
     pub async fn run(self, prompt: impl Into<String>) -> Result<RunResult, AgentError> {
         let llm_adapter = Arc::new(QuickLlmAdapter::new(self.client, self.model.clone()));
@@ -154,6 +166,64 @@ impl<C: LlmClient + 'static> QuickBuilder<C> {
 
         let mut agent = builder.build(llm_adapter, tool_adapter, store_adapter);
         agent.run(prompt.into()).await
+    }
+
+    /// Run the agent in host mode: process the initial prompt, then stay alive
+    /// listening for comms messages until budget is exhausted.
+    ///
+    /// Requires `with_comms()` to be called first to set the agent name.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use meerkat::prelude::*;
+    ///
+    /// let result = meerkat::with_anthropic(api_key)
+    ///     .model("claude-sonnet-4")
+    ///     .with_comms("my-agent")
+    ///     .budget(BudgetLimits {
+    ///         max_duration: Some(std::time::Duration::from_secs(300)),
+    ///         ..Default::default()
+    ///     })
+    ///     .run_host_mode("Process incoming messages")
+    ///     .await?;
+    /// ```
+    pub async fn run_host_mode(self, prompt: impl Into<String>) -> Result<RunResult, AgentError> {
+        // Validate that comms is configured
+        let comms_name = self.comms_name.ok_or_else(|| {
+            AgentError::ConfigError(
+                "Host mode requires comms to be enabled. Call with_comms() first.".to_string(),
+            )
+        })?;
+
+        let llm_adapter = Arc::new(QuickLlmAdapter::new(self.client, self.model.clone()));
+        let tool_adapter = Arc::new(QuickToolDispatcher::new(self.tools));
+        let store_adapter = Arc::new(MemorySessionStore::new());
+
+        // Create comms runtime
+        // Note: inproc_only() already registers in InprocRegistry, no need to start listeners
+        let comms_runtime = CommsRuntime::inproc_only(&comms_name).map_err(|e| {
+            AgentError::ConfigError(format!("Failed to create comms runtime: {}", e))
+        })?;
+
+        let mut builder = AgentBuilder::new()
+            .model(&self.model)
+            .max_tokens_per_turn(self.max_tokens)
+            .with_comms_runtime(comms_runtime);
+
+        if let Some(sys_prompt) = &self.system_prompt {
+            builder = builder.system_prompt(sys_prompt);
+        }
+
+        if let Some(budget) = self.budget {
+            builder = builder.budget(budget);
+        }
+
+        if let Some(retry) = self.retry_policy {
+            builder = builder.retry_policy(retry);
+        }
+
+        let mut agent = builder.build(llm_adapter, tool_adapter, store_adapter);
+        agent.run_host_mode(prompt.into()).await
     }
 }
 

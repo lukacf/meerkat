@@ -45,10 +45,17 @@ pub use meerkat_core::{
     BudgetLimits,
     BudgetPool,
     BudgetType,
+    // Comms
+    CommsContent,
+    CommsMessage,
+    CommsRuntime,
+    CommsRuntimeError,
+    CommsStatus,
     ConcurrencyLimits,
     // Config
     Config,
     ContextStrategy,
+    CoreCommsConfig,
     ForkBranch,
     ForkBudgetPolicy,
     LlmStreamResult,

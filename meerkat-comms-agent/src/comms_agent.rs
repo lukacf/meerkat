@@ -11,6 +11,7 @@ use meerkat_core::retry::RetryPolicy;
 use meerkat_core::session::Session;
 use meerkat_core::types::RunResult;
 use meerkat_core::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
+use tokio::sync::watch;
 
 use crate::manager::CommsManager;
 use crate::types::CommsMessage;
@@ -93,6 +94,66 @@ where
         self.agent.run(combined_input).await
     }
 
+    /// Run the agent once, then stay alive processing incoming messages.
+    ///
+    /// This method:
+    /// 1. Runs the initial prompt (if any)
+    /// 2. Waits for incoming inbox messages
+    /// 3. Processes each message as a new turn
+    /// 4. Exits on a special "DISMISS" message or cancellation
+    ///
+    /// If `cancel_rx` is provided, any change to `true` triggers shutdown.
+    pub async fn run_stay_alive(
+        &mut self,
+        initial_prompt: String,
+        mut cancel_rx: Option<watch::Receiver<bool>>,
+    ) -> Result<RunResult, AgentError> {
+        let mut last_result = self.run(initial_prompt).await?;
+
+        loop {
+            // If cancellation already requested, exit cleanly.
+            if let Some(ref rx) = cancel_rx {
+                if *rx.borrow() {
+                    return Err(AgentError::Cancelled);
+                }
+            }
+
+            // Wait for a message or cancellation.
+            let first_msg = if let Some(ref mut rx) = cancel_rx {
+                tokio::select! {
+                    _ = rx.changed() => {
+                        if *rx.borrow() {
+                            return Err(AgentError::Cancelled);
+                        }
+                        // If changed to false, continue waiting for messages.
+                        continue;
+                    }
+                    msg = self.comms_manager.recv_message() => {
+                        msg.ok_or_else(|| AgentError::ToolError("Inbox closed".to_string()))?
+                    }
+                }
+            } else {
+                self.comms_manager
+                    .recv_message()
+                    .await
+                    .ok_or_else(|| AgentError::ToolError("Inbox closed".to_string()))?
+            };
+
+            // Drain any additional messages that arrived.
+            let mut messages = vec![first_msg];
+            messages.extend(self.comms_manager.drain_messages());
+
+            // Exit if a DISMISS message is received.
+            if contains_dismiss(&messages) {
+                return Ok(last_result);
+            }
+
+            // Process messages as a new turn.
+            let comms_text = format_inbox_messages(&messages);
+            last_result = self.agent.run(comms_text).await?;
+        }
+    }
+
     /// Run the agent with only inbox messages (no user input).
     ///
     /// Useful for agent-to-agent communication where the agent is
@@ -128,6 +189,14 @@ where
         let comms_text = format_inbox_messages(&messages);
         self.agent.run(comms_text).await
     }
+}
+
+/// Return true if any message is a "DISMISS" command.
+fn contains_dismiss(messages: &[CommsMessage]) -> bool {
+    messages.iter().any(|m| match &m.content {
+        crate::types::CommsContent::Message { body } => body.trim().eq_ignore_ascii_case("DISMISS"),
+        _ => false,
+    })
 }
 
 /// Format inbox messages for injection into the agent prompt.

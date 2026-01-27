@@ -4,8 +4,8 @@
 //! as MCP tools: meerkat_run and meerkat_resume.
 
 use meerkat::{
-    AgentBuilder, AgentError, AnthropicClient, JsonlStore, LlmClient, Session, SessionStore,
-    ToolError,
+    AgentBuilder, AgentError, AnthropicClient, CommsRuntime, JsonlStore, LlmClient, Session,
+    SessionStore, ToolError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -49,6 +49,13 @@ pub struct MeerkatRunInput {
     /// Configuration for built-in tools (only used when enable_builtins is true)
     #[serde(default)]
     pub builtin_config: Option<BuiltinConfigInput>,
+    /// Run in host mode: process prompt then stay alive listening for comms messages.
+    /// Requires comms_name to be set.
+    #[serde(default)]
+    pub host_mode: bool,
+    /// Agent name for inter-agent communication. Required for host_mode.
+    #[serde(default)]
+    pub comms_name: Option<String>,
 }
 
 /// Configuration options for built-in tools
@@ -172,6 +179,14 @@ pub fn tools_list() -> Vec<Value> {
                         "type": "array",
                         "description": "Tool definitions for the agent to use. Tools with handler='callback' will pause execution and return pending_tool_calls.",
                         "items": tool_def_schema.clone()
+                    },
+                    "host_mode": {
+                        "type": "boolean",
+                        "description": "Run in host mode: process prompt then stay alive listening for comms messages. Requires comms_name."
+                    },
+                    "comms_name": {
+                        "type": "string",
+                        "description": "Agent name for inter-agent communication. Required for host_mode."
                     }
                 },
                 "required": ["prompt"]
@@ -226,6 +241,11 @@ pub async fn handle_tools_call(tool_name: &str, arguments: &Value) -> Result<Val
 }
 
 async fn handle_meerkat_run(input: MeerkatRunInput) -> Result<Value, String> {
+    // Validate host mode requirements
+    if input.host_mode && input.comms_name.is_none() {
+        return Err("host_mode requires comms_name to be set".to_string());
+    }
+
     // Branch based on whether builtins are enabled
     if input.enable_builtins {
         handle_meerkat_run_with_builtins(input).await
@@ -263,6 +283,20 @@ async fn handle_meerkat_run_simple(input: MeerkatRunInput) -> Result<Value, Stri
     let tools = Arc::new(MpcToolDispatcher::new(&input.tools));
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
 
+    // Create comms runtime if host_mode is enabled
+    // Note: inproc_only() already registers in InprocRegistry, no need to start listeners
+    let comms_runtime = if input.host_mode {
+        let comms_name = input
+            .comms_name
+            .as_ref()
+            .expect("validated in handle_meerkat_run");
+        let runtime = CommsRuntime::inproc_only(comms_name)
+            .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
+        Some(runtime)
+    } else {
+        None
+    };
+
     // Build agent
     let mut builder = AgentBuilder::new()
         .model(&input.model)
@@ -272,10 +306,19 @@ async fn handle_meerkat_run_simple(input: MeerkatRunInput) -> Result<Value, Stri
         builder = builder.system_prompt(sys_prompt);
     }
 
+    // Add comms runtime if enabled
+    if let Some(runtime) = comms_runtime {
+        builder = builder.with_comms_runtime(runtime);
+    }
+
     let mut agent = builder.build(llm_adapter, tools, store_adapter);
 
-    // Run agent
-    let result = agent.run(input.prompt).await;
+    // Run agent based on mode
+    let result = if input.host_mode {
+        agent.run_host_mode(input.prompt).await
+    } else {
+        agent.run(input.prompt).await
+    };
 
     match result {
         Ok(result) => Ok(json!({
@@ -404,6 +447,20 @@ async fn handle_meerkat_run_with_builtins(input: MeerkatRunInput) -> Result<Valu
 
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(session_store)));
 
+    // Create comms runtime if host_mode is enabled
+    // Note: inproc_only() already registers in InprocRegistry, no need to start listeners
+    let comms_runtime = if input.host_mode {
+        let comms_name = input
+            .comms_name
+            .as_ref()
+            .expect("validated in handle_meerkat_run");
+        let runtime = CommsRuntime::inproc_only(comms_name)
+            .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
+        Some(runtime)
+    } else {
+        None
+    };
+
     // Build agent
     let mut builder = AgentBuilder::new()
         .model(&input.model)
@@ -413,10 +470,19 @@ async fn handle_meerkat_run_with_builtins(input: MeerkatRunInput) -> Result<Valu
         builder = builder.system_prompt(sys_prompt);
     }
 
+    // Add comms runtime if enabled
+    if let Some(runtime) = comms_runtime {
+        builder = builder.with_comms_runtime(runtime);
+    }
+
     let mut agent = builder.build(llm_adapter, tools, store_adapter);
 
-    // Run agent
-    let result = agent.run(input.prompt).await;
+    // Run agent based on mode
+    let result = if input.host_mode {
+        agent.run_host_mode(input.prompt).await
+    } else {
+        agent.run(input.prompt).await
+    };
 
     match result {
         Ok(result) => Ok(json!({
@@ -1051,6 +1117,71 @@ mod tests {
         assert_eq!(
             resume_tool["inputSchema"]["properties"]["tool_results"]["type"],
             "array"
+        );
+    }
+
+    #[test]
+    fn test_meerkat_run_input_with_host_mode() {
+        let input_json = json!({
+            "prompt": "Hello",
+            "host_mode": true,
+            "comms_name": "test-agent"
+        });
+
+        let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
+        assert_eq!(input.prompt, "Hello");
+        assert!(input.host_mode);
+        assert_eq!(input.comms_name, Some("test-agent".to_string()));
+    }
+
+    #[test]
+    fn test_meerkat_run_input_host_mode_defaults_to_false() {
+        let input_json = json!({
+            "prompt": "Hello"
+        });
+
+        let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
+        assert!(!input.host_mode);
+        assert!(input.comms_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_meerkat_run_host_mode_requires_comms_name() {
+        let result = handle_meerkat_run(MeerkatRunInput {
+            prompt: "test".to_string(),
+            system_prompt: None,
+            model: "claude-opus-4-5".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+            enable_builtins: false,
+            builtin_config: None,
+            host_mode: true,
+            comms_name: None, // Missing!
+        })
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("comms_name"));
+    }
+
+    #[test]
+    fn test_tools_list_has_host_mode_parameter() {
+        let tools = tools_list();
+        let run_tool = &tools[0];
+
+        // Verify host_mode parameter exists in the schema
+        assert!(run_tool["inputSchema"]["properties"]["host_mode"].is_object());
+        assert_eq!(
+            run_tool["inputSchema"]["properties"]["host_mode"]["type"],
+            "boolean"
+        );
+
+        // Verify comms_name parameter exists in the schema
+        assert!(run_tool["inputSchema"]["properties"]["comms_name"].is_object());
+        assert_eq!(
+            run_tool["inputSchema"]["properties"]["comms_name"]["type"],
+            "string"
         );
     }
 }

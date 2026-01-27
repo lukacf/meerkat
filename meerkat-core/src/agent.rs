@@ -844,6 +844,239 @@ where
         self.run_loop(Some(event_tx)).await
     }
 
+    /// Run the agent in host mode: process initial prompt, then stay alive for comms messages.
+    ///
+    /// Host mode:
+    /// 1. Runs the initial prompt (if non-empty)
+    /// 2. Waits for incoming comms messages
+    /// 3. Processes each batch of messages as a new turn
+    /// 4. Continues until budget exhaustion, error, or process termination
+    ///
+    /// Requires comms to be enabled. Returns error if comms is not configured.
+    ///
+    /// # Arguments
+    /// * `initial_prompt` - Initial prompt to run before entering host loop. If empty,
+    ///   skips the initial LLM call and immediately waits for comms messages.
+    ///
+    /// # Returns
+    /// The result from the last successful run. In practice, this usually means
+    /// the run that exhausted the budget or encountered an error.
+    pub async fn run_host_mode(&mut self, initial_prompt: String) -> Result<RunResult, AgentError> {
+        use std::time::Duration;
+
+        // Verify comms is enabled
+        if self.comms_runtime.is_none() {
+            return Err(AgentError::ConfigError(
+                "Host mode requires comms to be enabled".to_string(),
+            ));
+        }
+
+        // Run initial prompt if non-empty, OR if session has pending user message
+        // (sub-agents pre-load the prompt into session, so initial_prompt may be empty)
+        let has_pending_user_message = self
+            .session
+            .messages()
+            .last()
+            .is_some_and(|m| matches!(m, crate::types::Message::User(_)));
+
+        let mut last_result = if !initial_prompt.trim().is_empty() {
+            // Non-empty prompt - run normally (will push user message)
+            self.run(initial_prompt).await?
+        } else if has_pending_user_message {
+            // Session already has a user message - run the loop directly without pushing
+            self.run_loop(None).await?
+        } else {
+            // No prompt and no pending messages - create minimal result
+            RunResult {
+                text: String::new(),
+                session_id: self.session.id().clone(),
+                turns: 0,
+                tool_calls: 0,
+                usage: Usage::default(),
+            }
+        };
+
+        // Get inbox notify for waiting
+        let inbox_notify = self
+            .comms_runtime
+            .as_ref()
+            .expect("comms verified above")
+            .inbox_notify();
+
+        // Polling interval for budget checks when no duration limit
+        const POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+        loop {
+            // Check budget before waiting
+            if self.budget.is_exhausted() {
+                tracing::info!("Host mode: budget exhausted, exiting");
+                return Ok(last_result);
+            }
+
+            // Determine timeout: use remaining budget duration if set, otherwise poll interval
+            let timeout = self.budget.remaining_duration().unwrap_or(POLL_INTERVAL);
+
+            // IMPORTANT: Register the notified future BEFORE draining to avoid race condition.
+            // If we drain first, a message could arrive between drain and await, and we'd
+            // miss the notification (Notify is non-latched).
+            let notified = inbox_notify.notified();
+
+            // Try to drain any already-queued messages first
+            let messages = if let Some(ref mut comms) = self.comms_runtime {
+                comms.drain_messages().await
+            } else {
+                Vec::new()
+            };
+
+            // If we have messages, process them immediately (don't wait)
+            if !messages.is_empty() {
+                let combined_input = messages
+                    .iter()
+                    .map(|m| m.to_user_message_text())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+
+                tracing::debug!("Host mode: processing {} comms message(s)", messages.len());
+
+                match self.run(combined_input).await {
+                    Ok(result) => {
+                        last_result = result;
+                    }
+                    Err(e) => {
+                        if e.is_graceful() {
+                            tracing::info!("Host mode: graceful exit - {}", e);
+                            return Ok(last_result);
+                        }
+                        return Err(e);
+                    }
+                }
+                continue;
+            }
+
+            // No messages queued - wait for notification or timeout
+            tokio::select! {
+                _ = notified => {
+                    // Message arrived, loop back to drain and process
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    // Timeout: check budget again (for duration-based limits)
+                    tracing::trace!("Host mode: timeout, checking budget");
+                }
+            }
+        }
+    }
+
+    /// Run in host mode with event streaming for verbose output
+    ///
+    /// Same as `run_host_mode` but emits events for monitoring the agent's progress.
+    pub async fn run_host_mode_with_events(
+        &mut self,
+        initial_prompt: String,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, AgentError> {
+        use std::time::Duration;
+
+        // Verify comms is enabled
+        if self.comms_runtime.is_none() {
+            return Err(AgentError::ConfigError(
+                "Host mode requires comms to be enabled".to_string(),
+            ));
+        }
+
+        // Run initial prompt if non-empty, OR if session has pending user message
+        // (sub-agents pre-load the prompt into session, so initial_prompt may be empty)
+        let has_pending_user_message = self
+            .session
+            .messages()
+            .last()
+            .is_some_and(|m| matches!(m, crate::types::Message::User(_)));
+
+        let mut last_result = if !initial_prompt.trim().is_empty() {
+            // Non-empty prompt - run normally (will push user message)
+            self.run_with_events(initial_prompt, event_tx.clone())
+                .await?
+        } else if has_pending_user_message {
+            // Session already has a user message - run the loop directly without pushing
+            self.run_loop(Some(event_tx.clone())).await?
+        } else {
+            // No prompt and no pending messages - create minimal result
+            RunResult {
+                text: String::new(),
+                session_id: self.session.id().clone(),
+                turns: 0,
+                tool_calls: 0,
+                usage: Usage::default(),
+            }
+        };
+
+        // Get inbox notify for waiting
+        let inbox_notify = self
+            .comms_runtime
+            .as_ref()
+            .expect("comms verified above")
+            .inbox_notify();
+
+        // Polling interval for budget checks when no duration limit
+        const POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+        loop {
+            // Check budget before waiting
+            if self.budget.is_exhausted() {
+                tracing::info!("Host mode: budget exhausted, exiting");
+                return Ok(last_result);
+            }
+
+            // Determine timeout: use remaining budget duration if set, otherwise poll interval
+            let timeout = self.budget.remaining_duration().unwrap_or(POLL_INTERVAL);
+
+            // IMPORTANT: Register the notified future BEFORE draining to avoid race condition.
+            let notified = inbox_notify.notified();
+
+            // Try to drain any already-queued messages first
+            let messages = if let Some(ref mut comms) = self.comms_runtime {
+                comms.drain_messages().await
+            } else {
+                Vec::new()
+            };
+
+            // If we have messages, process them immediately (don't wait)
+            if !messages.is_empty() {
+                let combined_input = messages
+                    .iter()
+                    .map(|m| m.to_user_message_text())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+
+                tracing::debug!("Host mode: processing {} comms message(s)", messages.len());
+
+                match self.run_with_events(combined_input, event_tx.clone()).await {
+                    Ok(result) => {
+                        last_result = result;
+                    }
+                    Err(e) => {
+                        if e.is_graceful() {
+                            tracing::info!("Host mode: graceful exit - {}", e);
+                            return Ok(last_result);
+                        }
+                        return Err(e);
+                    }
+                }
+                continue;
+            }
+
+            // No messages queued - wait for notification or timeout
+            tokio::select! {
+                _ = notified => {
+                    // Message arrived, loop back to drain and process
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    // Timeout: check budget again (for duration-based limits)
+                    tracing::trace!("Host mode: timeout, checking budget");
+                }
+            }
+        }
+    }
+
     /// The main agent loop
     async fn run_loop(
         &mut self,
@@ -2433,5 +2666,172 @@ mod tests {
             assert!(results[0].is_error);
             assert!(results[1].is_error);
         }
+    }
+
+    // =========================================================================
+    // Host Mode Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_run_host_mode_requires_comms() {
+        // Host mode should fail if comms is not enabled
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        let mut agent = AgentBuilder::new().build(client, tools, store);
+
+        // Verify comms is not enabled
+        assert!(agent.comms().is_none());
+
+        // run_host_mode should return ConfigError
+        let result = agent.run_host_mode("Test".to_string()).await;
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            AgentError::ConfigError(msg) => {
+                assert!(msg.contains("comms"));
+            }
+            other => panic!("Expected ConfigError, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_host_mode_runs_initial_prompt() {
+        use crate::comms_config::CoreCommsConfig;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let mut config = CoreCommsConfig::with_name("test-agent");
+        config.identity_dir = tmp.path().join("identity");
+        config.trusted_peers_path = tmp.path().join("trusted.json");
+        config.listen_uds = None;
+        config.listen_tcp = None;
+
+        // Create client that responds then exhausts budget
+        let client = Arc::new(MockLlmClient::new(vec![LlmStreamResult {
+            content: "Initial response".to_string(),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 100,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+            },
+        }]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        // Set a very small budget so we exit after initial prompt
+        let mut agent = AgentBuilder::new()
+            .comms(config)
+            .comms_base_dir(tmp.path().to_path_buf())
+            .budget(BudgetLimits {
+                max_tokens: Some(1), // Exhaust after first run
+                max_duration: None,
+                max_tool_calls: None,
+            })
+            .build(client, tools, store);
+
+        // Verify comms is enabled
+        assert!(agent.comms().is_some());
+
+        // run_host_mode should run the initial prompt then exit due to budget
+        let result = agent.run_host_mode("Hello".to_string()).await;
+
+        // Should succeed with the initial response
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.text, "Initial response");
+    }
+
+    #[tokio::test]
+    async fn test_run_host_mode_empty_prompt_skips_llm() {
+        use crate::comms_config::CoreCommsConfig;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let mut config = CoreCommsConfig::with_name("test-agent");
+        config.identity_dir = tmp.path().join("identity");
+        config.trusted_peers_path = tmp.path().join("trusted.json");
+        config.listen_uds = None;
+        config.listen_tcp = None;
+
+        // Create client that tracks call count (via responses consumed)
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        // Set very small budget - if LLM is called, it will be exhausted
+        let mut agent = AgentBuilder::new()
+            .comms(config)
+            .comms_base_dir(tmp.path().to_path_buf())
+            .budget(BudgetLimits {
+                max_tokens: Some(1), // Would be exhausted if LLM called
+                max_duration: Some(std::time::Duration::from_millis(50)),
+                max_tool_calls: None,
+            })
+            .build(client, tools, store);
+
+        // Empty prompt - should skip LLM, wait briefly, then exit on duration timeout
+        let result = agent.run_host_mode("".to_string()).await;
+
+        // Should succeed with empty result (no LLM call made)
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert!(
+            result.text.is_empty(),
+            "Empty prompt should result in empty text"
+        );
+        assert_eq!(result.turns, 0, "No turns should have been run");
+    }
+
+    #[tokio::test]
+    async fn test_run_host_mode_duration_timeout() {
+        use crate::comms_config::CoreCommsConfig;
+        use std::time::{Duration, Instant};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let mut config = CoreCommsConfig::with_name("test-agent");
+        config.identity_dir = tmp.path().join("identity");
+        config.trusted_peers_path = tmp.path().join("trusted.json");
+        config.listen_uds = None;
+        config.listen_tcp = None;
+
+        let client = Arc::new(MockLlmClient::new(vec![]));
+        let tools = Arc::new(MockToolDispatcher::new(vec![]));
+        let store = Arc::new(MockSessionStore);
+
+        // Set a short duration limit
+        let mut agent = AgentBuilder::new()
+            .comms(config)
+            .comms_base_dir(tmp.path().to_path_buf())
+            .budget(BudgetLimits {
+                max_tokens: None,
+                max_duration: Some(Duration::from_millis(100)),
+                max_tool_calls: None,
+            })
+            .build(client, tools, store);
+
+        let start = Instant::now();
+        let result = agent.run_host_mode("".to_string()).await;
+        let elapsed = start.elapsed();
+
+        // Should exit due to duration timeout
+        assert!(result.is_ok());
+        // Should have waited at least close to the duration
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "Should have waited for timeout, but only waited {:?}",
+            elapsed
+        );
+        // Should not have waited too long (well over the 100ms limit)
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "Should have exited on timeout, but waited {:?}",
+            elapsed
+        );
     }
 }

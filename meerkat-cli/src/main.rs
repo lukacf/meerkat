@@ -9,6 +9,7 @@ use adapters::{
     SessionStoreAdapter,
 };
 use meerkat_client::{DefaultClientFactory, LlmClientFactory};
+use meerkat_core::AgentEvent;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ParentCommsContext;
 use meerkat_core::ToolGatewayBuilder;
@@ -20,6 +21,7 @@ use meerkat_tools::builtin::{
     shell::ShellConfig,
     sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState},
 };
+use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use meerkat_client::{AnthropicClient, GeminiClient, OpenAiClient};
@@ -52,6 +54,90 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
     &s[..truncate_at]
+}
+
+/// Spawn a task that handles verbose event output
+fn spawn_verbose_event_handler(
+    mut agent_event_rx: mpsc::Receiver<AgentEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = agent_event_rx.recv().await {
+            match event {
+                AgentEvent::TurnStarted { turn_number } => {
+                    eprintln!("\n━━━ Turn {} ━━━", turn_number + 1);
+                }
+                AgentEvent::ToolCallRequested { name, args, .. } => {
+                    let args_str = serde_json::to_string(&args).unwrap_or_default();
+                    let args_preview = if args_str.len() > 100 {
+                        format!("{}...", truncate_str(&args_str, 100))
+                    } else {
+                        args_str
+                    };
+                    eprintln!("  → Calling tool: {} {}", name, args_preview);
+                }
+                AgentEvent::ToolExecutionCompleted {
+                    name,
+                    result,
+                    is_error,
+                    duration_ms,
+                    ..
+                } => {
+                    let status = if is_error { "✗" } else { "✓" };
+                    let result_preview = if result.len() > 200 {
+                        format!("{}...", truncate_str(&result, 200))
+                    } else {
+                        result
+                    };
+                    eprintln!(
+                        "  {} {} ({}ms): {}",
+                        status, name, duration_ms, result_preview
+                    );
+                }
+                AgentEvent::TurnCompleted { stop_reason, usage } => {
+                    eprintln!(
+                        "  ── Turn complete: {:?} ({} in / {} out tokens)",
+                        stop_reason, usage.input_tokens, usage.output_tokens
+                    );
+                }
+                AgentEvent::TextComplete { content } => {
+                    if !content.is_empty() {
+                        let preview = if content.len() > 500 {
+                            format!("{}...", truncate_str(&content, 500))
+                        } else {
+                            content
+                        };
+                        eprintln!("  💬 Response: {}", preview);
+                    }
+                }
+                AgentEvent::Retrying {
+                    attempt,
+                    max_attempts,
+                    error,
+                    delay_ms,
+                } => {
+                    eprintln!(
+                        "  ⟳ Retry {}/{}: {} (waiting {}ms)",
+                        attempt, max_attempts, error, delay_ms
+                    );
+                }
+                AgentEvent::BudgetWarning {
+                    budget_type,
+                    used,
+                    limit,
+                    percent,
+                } => {
+                    eprintln!(
+                        "  ⚠ Budget warning: {:?} at {:.0}% ({}/{})",
+                        budget_type,
+                        percent * 100.0,
+                        used,
+                        limit
+                    );
+                }
+                _ => {} // Ignore other events
+            }
+        }
+    })
 }
 
 #[derive(Parser)]
@@ -135,6 +221,12 @@ enum Commands {
         /// Verbose output: show each turn, tool calls, and results as they happen
         #[arg(long, short = 'v')]
         verbose: bool,
+
+        // === Host mode ===
+        /// Run as a host: process initial prompt, then stay alive listening for comms messages.
+        /// Requires comms to be enabled (--comms-name or auto-enabled). Exit with DISMISS message.
+        #[arg(long)]
+        host: bool,
     },
 
     /// Resume a previous session
@@ -306,6 +398,7 @@ async fn main() -> ExitCode {
             enable_shell,
             no_subagents,
             verbose,
+            host,
         } => {
             // Resolve provider: explicit flag > infer from model > default
             let resolved_provider = provider
@@ -346,6 +439,7 @@ async fn main() -> ExitCode {
                         enable_shell,
                         !no_subagents, // sub-agents enabled by default
                         verbose,
+                        host,
                     )
                     .await
                 }
@@ -498,6 +592,7 @@ async fn run_agent(
     enable_shell: bool,
     enable_subagents: bool,
     verbose: bool,
+    host_mode: bool,
 ) -> anyhow::Result<()> {
     use meerkat_core::event::AgentEvent;
     use std::io::Write;
@@ -806,6 +901,9 @@ async fn run_agent(
                 ))
             };
 
+            // Register sub-agent tools with composite dispatcher
+            // This also automatically sets tool_usage_instructions on the state
+            // so spawned sub-agents know how to use shell, task, and other tools
             let tool_set = SubAgentToolSet::new(state);
             composite
                 .register_sub_agent_tools(tool_set, &builtin_config)
@@ -818,6 +916,8 @@ async fn run_agent(
         }
 
         // Get tool usage instructions before wrapping
+        // Note: Sub-agent tool state already has usage instructions set by
+        // register_sub_agent_tools(), so we don't need to set them again here.
         let tool_usage_instructions = composite.usage_instructions();
 
         (
@@ -922,6 +1022,13 @@ async fn run_agent(
         }
     }
 
+    // Validate host mode requirements
+    if host_mode && agent.comms().is_none() {
+        return Err(anyhow::anyhow!(
+            "--host mode requires comms to be enabled. Use --comms-name to enable."
+        ));
+    }
+
     // Run the agent
     tracing::info!("Running agent with model: {}", model);
 
@@ -941,98 +1048,38 @@ async fn run_agent(
         None
     };
 
-    // Run with or without verbose agent events
-    let result = if verbose {
-        // Create channel for agent events
-        let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
-
-        // Spawn task to display verbose events
-        let verbose_task = tokio::spawn(async move {
-            while let Some(event) = agent_event_rx.recv().await {
-                match event {
-                    AgentEvent::TurnStarted { turn_number } => {
-                        eprintln!("\n━━━ Turn {} ━━━", turn_number + 1);
-                    }
-                    AgentEvent::ToolCallRequested { name, args, .. } => {
-                        let args_str = serde_json::to_string(&args).unwrap_or_default();
-                        let args_preview = if args_str.len() > 100 {
-                            format!("{}...", truncate_str(&args_str, 100))
-                        } else {
-                            args_str
-                        };
-                        eprintln!("  → Calling tool: {} {}", name, args_preview);
-                    }
-                    AgentEvent::ToolExecutionCompleted {
-                        name,
-                        result,
-                        is_error,
-                        duration_ms,
-                        ..
-                    } => {
-                        let status = if is_error { "✗" } else { "✓" };
-                        let result_preview = if result.len() > 200 {
-                            format!("{}...", truncate_str(&result, 200))
-                        } else {
-                            result
-                        };
-                        eprintln!(
-                            "  {} {} ({}ms): {}",
-                            status, name, duration_ms, result_preview
-                        );
-                    }
-                    AgentEvent::TurnCompleted { stop_reason, usage } => {
-                        eprintln!(
-                            "  ── Turn complete: {:?} ({} in / {} out tokens)",
-                            stop_reason, usage.input_tokens, usage.output_tokens
-                        );
-                    }
-                    AgentEvent::TextComplete { content } => {
-                        if !content.is_empty() {
-                            let preview = if content.len() > 500 {
-                                format!("{}...", truncate_str(&content, 500))
-                            } else {
-                                content
-                            };
-                            eprintln!("  💬 Response: {}", preview);
-                        }
-                    }
-                    AgentEvent::Retrying {
-                        attempt,
-                        max_attempts,
-                        error,
-                        delay_ms,
-                    } => {
-                        eprintln!(
-                            "  ⟳ Retry {}/{}: {} (waiting {}ms)",
-                            attempt, max_attempts, error, delay_ms
-                        );
-                    }
-                    AgentEvent::BudgetWarning {
-                        budget_type,
-                        used,
-                        limit,
-                        percent,
-                    } => {
-                        eprintln!(
-                            "  ⚠ Budget warning: {:?} at {:.0}% ({}/{})",
-                            budget_type,
-                            percent * 100.0,
-                            used,
-                            limit
-                        );
-                    }
-                    _ => {} // Ignore other events
-                }
-            }
-        });
-
-        let result = agent
-            .run_with_events(prompt.to_string(), agent_event_tx)
-            .await?;
-        let _ = verbose_task.await;
-        result
-    } else {
-        agent.run(prompt.to_string()).await?
+    // Run the agent based on mode
+    let result = match (host_mode, verbose) {
+        (true, true) => {
+            // Host mode + verbose: run with events and stay alive for comms
+            eprintln!("Running in host mode with verbose output (Ctrl+C to exit)...");
+            let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(100);
+            let verbose_task = spawn_verbose_event_handler(agent_event_rx);
+            let result = agent
+                .run_host_mode_with_events(prompt.to_string(), agent_event_tx)
+                .await?;
+            let _ = verbose_task.await;
+            result
+        }
+        (true, false) => {
+            // Host mode only: run initial prompt then stay alive for comms messages
+            eprintln!("Running in host mode (Ctrl+C to exit)...");
+            agent.run_host_mode(prompt.to_string()).await?
+        }
+        (false, true) => {
+            // Verbose mode only: run with event streaming
+            let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(100);
+            let verbose_task = spawn_verbose_event_handler(agent_event_rx);
+            let result = agent
+                .run_with_events(prompt.to_string(), agent_event_tx)
+                .await?;
+            let _ = verbose_task.await;
+            result
+        }
+        (false, false) => {
+            // Normal mode: single run
+            agent.run(prompt.to_string()).await?
+        }
     };
 
     // Wait for streaming task to complete (it will end when sender is dropped)

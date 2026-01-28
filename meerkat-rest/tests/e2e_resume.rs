@@ -1,5 +1,154 @@
-#[test]
-#[ignore = "e2e: implement REST resume metadata preservation test"]
-fn e2e_rest_resume_metadata() {
-    panic!("E2E skeleton: implement REST resume metadata preservation test");
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use meerkat::{Config, JsonlStore, SessionId, SessionStore};
+use meerkat_core::MemoryConfigStore;
+use meerkat_rest::{AppState, router};
+use serde_json::{Value, json};
+use tempfile::TempDir;
+use tokio::time::{Duration, timeout};
+use tower::ServiceExt;
+
+fn skip_if_no_prereqs() -> bool {
+    false
+}
+
+#[tokio::test]
+async fn e2e_rest_resume_metadata() {
+    if skip_if_no_prereqs() {
+        return;
+    }
+    unsafe {
+        std::env::set_var("RKAT_TEST_CLIENT", "1");
+    }
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let project_root = temp_dir.path().join("project");
+    std::fs::create_dir_all(project_root.join(".rkat")).expect("create .rkat");
+
+    let mut config = Config::default();
+    config.agent.max_tokens_per_turn = 128;
+    let config_store = MemoryConfigStore::new(config.clone());
+
+    let store_path = temp_dir.path().join("sessions");
+    let (event_tx, _) = tokio::sync::broadcast::channel(16);
+
+    let state_run = AppState {
+        store_path: store_path.clone(),
+        default_model: config.agent.model.clone(),
+        max_tokens: config.agent.max_tokens_per_turn,
+        rest_host: config.rest.host.clone(),
+        rest_port: config.rest.port,
+        enable_builtins: true,
+        enable_shell: true,
+        project_root: Some(project_root.clone()),
+        config_store: std::sync::Arc::new(config_store),
+        event_tx,
+    };
+
+    let app = router(state_run);
+    let run_payload = json!({
+        "prompt": "Say the word 'ok' and nothing else.",
+        "model": config.agent.model,
+        "max_tokens": config.agent.max_tokens_per_turn
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/sessions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&run_payload).expect("serialize payload"),
+        ))
+        .expect("build request");
+
+    let response = timeout(Duration::from_secs(120), app.oneshot(request))
+        .await
+        .expect("run request timed out")
+        .expect("run request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
+    let run_json: Value = serde_json::from_slice(&body).expect("parse response");
+    let session_id = run_json["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_string();
+
+    let store = JsonlStore::new(store_path.clone());
+    store.init().await.expect("init store");
+    let session = store
+        .load(&SessionId::parse(&session_id).expect("session id"))
+        .await
+        .expect("load session")
+        .expect("session exists");
+    let metadata = session.session_metadata().expect("metadata");
+
+    let original_model = metadata.model.clone();
+    let original_max_tokens = metadata.max_tokens;
+    let original_tooling = metadata.tooling.clone();
+    let original_provider = metadata.provider;
+
+    let state_resume = AppState {
+        store_path: store_path.clone(),
+        default_model: "gpt-4o-mini".to_string(),
+        max_tokens: 7,
+        rest_host: config.rest.host.clone(),
+        rest_port: config.rest.port,
+        enable_builtins: false,
+        enable_shell: false,
+        project_root: Some(project_root.clone()),
+        config_store: std::sync::Arc::new(MemoryConfigStore::new(config)),
+        event_tx: tokio::sync::broadcast::channel(16).0,
+    };
+
+    let app = router(state_resume);
+    let resume_payload = json!({
+        "session_id": session_id,
+        "prompt": "Continue.",
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/sessions/{}/messages",
+            run_json["session_id"].as_str().unwrap()
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&resume_payload).expect("serialize payload"),
+        ))
+        .expect("build request");
+
+    let response = timeout(Duration::from_secs(120), app.oneshot(request))
+        .await
+        .expect("resume request timed out")
+        .expect("resume request");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let session = store
+        .load(&SessionId::parse(run_json["session_id"].as_str().unwrap()).expect("session id"))
+        .await
+        .expect("load session")
+        .expect("session exists");
+    let metadata = session.session_metadata().expect("metadata");
+
+    assert_eq!(metadata.model, original_model, "model should persist");
+    assert_eq!(
+        metadata.max_tokens, original_max_tokens,
+        "max_tokens should persist"
+    );
+    assert_eq!(
+        metadata.provider, original_provider,
+        "provider should persist"
+    );
+    assert_eq!(metadata.tooling.builtins, original_tooling.builtins);
+    assert_eq!(metadata.tooling.shell, original_tooling.shell);
+    assert_eq!(metadata.tooling.comms, original_tooling.comms);
+    assert_eq!(metadata.tooling.subagents, original_tooling.subagents);
+    unsafe {
+        std::env::remove_var("RKAT_TEST_CLIENT");
+    }
 }

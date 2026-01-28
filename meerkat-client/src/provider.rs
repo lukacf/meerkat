@@ -2,6 +2,7 @@
 
 use crate::error::LlmError;
 use crate::factory::{DefaultClientFactory, DefaultFactoryConfig, LlmClientFactory, LlmProvider};
+use crate::test_client::TestClient;
 use crate::types::{LlmClient, LlmEvent, LlmRequest};
 use async_trait::async_trait;
 use futures::Stream;
@@ -29,6 +30,9 @@ impl ProviderResolver {
 
     /// Resolve API key for a provider using env vars with RKAT_* precedence.
     pub fn api_key_for(provider: Provider) -> Option<String> {
+        if test_client_enabled() {
+            return Some("test-key".to_string());
+        }
         match provider {
             Provider::Anthropic => {
                 env_preferring_rkat("RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")
@@ -42,6 +46,9 @@ impl ProviderResolver {
 
     /// Create an LLM client for the provider, optionally overriding base URL.
     pub fn client_for(provider: Provider, base_url: Option<String>) -> Arc<dyn LlmClient> {
+        if test_client_enabled() {
+            return Arc::new(TestClient::default());
+        }
         let Some(mapped) = map_provider(provider) else {
             return Arc::new(UnsupportedClient::new("unsupported provider"));
         };
@@ -67,6 +74,10 @@ fn env_preferring_rkat(rkat_key: &str, provider_key: &str) -> Option<String> {
     std::env::var(rkat_key)
         .ok()
         .or_else(|| std::env::var(provider_key).ok())
+}
+
+fn test_client_enabled() -> bool {
+    std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1")
 }
 
 fn map_provider(provider: Provider) -> Option<LlmProvider> {

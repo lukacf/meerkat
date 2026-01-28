@@ -1,6 +1,7 @@
 //! Wait tool for pausing execution
 
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use serde::Deserialize;
@@ -71,18 +72,18 @@ impl BuiltinTool for WaitTool {
         ToolDef {
             name: "wait".to_string(),
             description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like sub-agents. Maximum wait time is 300 seconds (5 minutes).".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "seconds": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "seconds",
+                    json!({
                         "type": "number",
                         "description": "Number of seconds to wait (0.1 to 300)",
                         "minimum": 0.1,
                         "maximum": 300
-                    }
-                },
-                "required": ["seconds"]
-            }),
+                    }),
+                )
+                .required("seconds")
+                .build(),
         }
     }
 

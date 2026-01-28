@@ -155,13 +155,11 @@ MCP protocol implementation:
 
 ### meerkat (facade)
 
-The main entry point. Re-exports types and provides SDK helpers:
+The main entry point. Re-exports types and provides the AgentFactory facade:
 
 ```rust
-// SDK helpers
-pub fn with_anthropic(api_key: impl Into<String>) -> QuickBuilder<AnthropicClient>;
-pub fn with_openai(api_key: impl Into<String>) -> QuickBuilder<OpenAiClient>;
-pub fn with_gemini(api_key: impl Into<String>) -> QuickBuilder<GeminiClient>;
+// SDK factory
+pub use meerkat_agent::AgentFactory;
 
 // Re-exports all public types
 pub use meerkat_core::{Agent, AgentBuilder, Session, Message, ...};
@@ -783,7 +781,7 @@ See [DESIGN.md §15](../DESIGN.md#15-security-considerations) for full security 
 Configuration supports layered loading with precedence:
 
 ```
-defaults < user config < project config < env vars < CLI args
+defaults < user config < project config < CLI args
 ```
 
 **Configuration Files:**
@@ -791,11 +789,7 @@ defaults < user config < project config < env vars < CLI args
 - Project: `.rkat/config.toml` (searched up from cwd)
 - Local: `rkat.toml` (current directory)
 
-**Environment Variables:**
-- `RKAT_MODEL` - Default model
-- `RKAT_MAX_TOKENS` - Token budget
-- `RKAT_MAX_DURATION` - Time budget (humantime format: "5m", "1h30m")
-- `RKAT_STORAGE_DIR` - Storage directory
+**Environment Variables (secrets only):**
 - `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` - Provider keys
 
 **Example Config (TOML):**

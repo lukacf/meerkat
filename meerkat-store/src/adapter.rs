@@ -1,7 +1,10 @@
 //! Adapter from SessionStore to AgentSessionStore.
 
 use async_trait::async_trait;
-use meerkat_core::{AgentError, AgentSessionStore, Session, SessionId};
+use meerkat_core::{
+    AgentError, AgentSessionStore, Session, SessionId,
+    error::{invalid_session_id, store_error},
+};
 use std::sync::Arc;
 
 use crate::SessionStore;
@@ -20,19 +23,12 @@ impl<S: SessionStore> StoreAdapter<S> {
 #[async_trait]
 impl<S: SessionStore + 'static> AgentSessionStore for StoreAdapter<S> {
     async fn save(&self, session: &Session) -> Result<(), AgentError> {
-        self.store
-            .save(session)
-            .await
-            .map_err(|e| AgentError::StoreError(e.to_string()))
+        self.store.save(session).await.map_err(store_error)
     }
 
     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
-        let session_id = SessionId::parse(id)
-            .map_err(|e| AgentError::StoreError(format!("Invalid session ID: {}", e)))?;
+        let session_id = SessionId::parse(id).map_err(invalid_session_id)?;
 
-        self.store
-            .load(&session_id)
-            .await
-            .map_err(|e| AgentError::StoreError(e.to_string()))
+        self.store.load(&session_id).await.map_err(store_error)
     }
 }

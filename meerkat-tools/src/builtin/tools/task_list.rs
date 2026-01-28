@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::TaskStatus;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::SchemaBuilder;
 
 /// Parameters for the task_list tool
 #[derive(Debug, Default, Deserialize)]
@@ -65,21 +66,24 @@ impl BuiltinTool for TaskListTool {
             name: "task_list".to_string(),
             description: "List tasks in the project, optionally filtered by status or labels"
                 .to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "status": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "status",
+                    serde_json::json!({
                         "type": "string",
                         "enum": ["pending", "in_progress", "completed"],
                         "description": "Filter by task status"
-                    },
-                    "labels": {
+                    }),
+                )
+                .property(
+                    "labels",
+                    serde_json::json!({
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Filter by labels (returns tasks with any matching label)"
-                    }
-                }
-            }),
+                    }),
+                )
+                .build(),
         }
     }
 

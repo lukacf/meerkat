@@ -3,6 +3,7 @@
 //! This module provides the [`ShellTool`] which executes shell commands
 //! using Nushell as the backend.
 
+use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use serde::{Deserialize, Serialize};
@@ -111,9 +112,9 @@ impl TailBuffer {
             return;
         }
 
-        let overflow = self.buffer.len() + data.len().saturating_sub(self.max_bytes);
-        for _ in 0..overflow {
-            self.buffer.pop_front();
+        let overflow = (self.buffer.len() + data.len()).saturating_sub(self.max_bytes);
+        if overflow > 0 {
+            self.buffer.drain(0..overflow);
         }
         self.buffer.extend(data.iter().copied());
     }
@@ -178,17 +179,15 @@ impl ShellTool {
         }
     }
 
-    /// Find the shell executable path with fallback detection
+    /// Find the shell executable path.
     ///
     /// Tries the following in order:
     /// 1. Explicit shell_path from config (if set)
     /// 2. Configured shell name via `which`
-    /// 3. SHELL environment variable
-    /// 4. Platform-specific fallbacks (/bin/sh, /bin/bash, etc.)
     ///
     /// # Errors
     ///
-    /// Returns [`ShellError::ShellNotFound`] if no shell can be found.
+    /// Returns [`ShellError::ShellNotInstalled`] if no shell can be found.
     pub fn find_shell(&self) -> Result<std::path::PathBuf, ShellError> {
         self.config.resolve_shell_path()
     }
@@ -353,29 +352,38 @@ impl BuiltinTool for ShellTool {
         ToolDef {
             name: "shell".to_string(),
             description: "Execute a shell command using Nushell".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "command": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "command",
+                    json!({
                         "type": "string",
                         "description": "The command to execute (Nushell syntax)"
-                    },
-                    "working_dir": {
+                    }),
+                )
+                .property(
+                    "working_dir",
+                    json!({
                         "type": "string",
                         "description": "Working directory (relative to project root)"
-                    },
-                    "timeout_secs": {
+                    }),
+                )
+                .property(
+                    "timeout_secs",
+                    json!({
                         "type": "integer",
                         "description": "Timeout in seconds (uses config default if not specified)"
-                    },
-                    "background": {
+                    }),
+                )
+                .property(
+                    "background",
+                    json!({
                         "type": "boolean",
                         "description": "If true, run in background and return job ID immediately",
                         "default": false
-                    }
-                },
-                "required": ["command"]
-            }),
+                    }),
+                )
+                .required("command")
+                .build(),
         }
     }
 
@@ -454,6 +462,32 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    fn nu_available() -> bool {
+        std::process::Command::new("nu")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    fn skip_if_no_nu() -> bool {
+        if nu_available() {
+            return false;
+        }
+
+        eprintln!("Skipping: Nushell not installed (install `nu` to run this test)");
+        true
+    }
+
+    fn skip_if_shell_e2e_disabled() -> bool {
+        if std::env::var_os("RKAT_SHELL_E2E").is_some() {
+            return false;
+        }
+
+        eprintln!("Skipping: set RKAT_SHELL_E2E=1 to run shell E2E tests");
+        true
+    }
 
     // ==================== ShellTool Struct Tests ====================
 
@@ -548,27 +582,18 @@ mod tests {
         let config = ShellConfig::default();
         let tool = ShellTool::new(config);
 
-        // With fallback detection, a shell should almost always be found
-        // (e.g., /bin/sh on Unix systems). This test verifies either nu is
-        // found or a fallback shell is used.
+        // If nu is installed, it should be found. Otherwise return ShellNotInstalled.
         match tool.find_shell() {
             Ok(path) => {
-                // A shell was found (either nu or a fallback)
                 let path_str = path.to_string_lossy();
                 assert!(
-                    path_str.contains("nu")
-                        || path_str.contains("sh")
-                        || path_str.contains("bash")
-                        || path_str.contains("cmd")
-                        || path_str.contains("powershell"),
-                    "Expected a shell path, got: {}",
+                    path_str.contains("nu"),
+                    "Expected nushell, got: {}",
                     path_str
                 );
             }
-            Err(ShellError::ShellNotFound { shell, tried }) => {
-                // This is very unlikely on most systems but valid
-                assert_eq!(shell, "nu");
-                assert!(!tried.is_empty(), "Should have tried at least one path");
+            Err(ShellError::ShellNotInstalled(details)) => {
+                assert!(details.contains("nu"));
             }
             Err(e) => panic!("Unexpected error: {}", e),
         }
@@ -607,39 +632,89 @@ mod tests {
 
         let tool = ShellTool::new(config);
 
-        // On most systems, this will find a fallback shell like /bin/sh
-        // Only on very unusual systems would it fail
+        let prev_path = std::env::var_os("PATH");
+        let prev_shell = std::env::var_os("SHELL");
+
+        unsafe {
+            std::env::set_var("PATH", "");
+            std::env::set_var("SHELL", "/bin/sh");
+        }
+
         let result = tool.find_shell();
 
-        // On Unix, /bin/sh almost always exists, so we expect success with fallback
-        #[cfg(unix)]
-        {
-            if let Ok(path) = result {
-                let path_str = path.to_string_lossy();
-                // Should be a fallback, not the requested shell
-                assert!(
-                    !path_str.contains("definitely_not_a_real_shell"),
-                    "Should have used fallback, not nonexistent shell"
-                );
+        match result {
+            Err(ShellError::ShellNotInstalled(details)) => {
+                assert!(details.contains("definitely_not_a_real_shell_xyz123"));
             }
-            // If it fails (very unlikely), ensure error has context
-            else if let Err(ShellError::ShellNotFound { shell, tried }) = result {
-                assert_eq!(shell, "definitely_not_a_real_shell_xyz123");
-                assert!(tried.len() > 1, "Should have tried fallbacks");
+            Ok(path) => panic!("Expected ShellNotInstalled, got Ok({:?})", path),
+            Err(e) => panic!("Unexpected error: {}", e),
+        }
+
+        if let Some(path) = prev_path {
+            unsafe {
+                std::env::set_var("PATH", path);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("PATH");
             }
         }
 
-        // On Windows without common shells, it may fail
-        #[cfg(windows)]
-        {
-            // Either finds cmd.exe/powershell or fails with context
-            match result {
-                Ok(_) => {} // Found a fallback
-                Err(ShellError::ShellNotFound { shell, tried }) => {
-                    assert_eq!(shell, "definitely_not_a_real_shell_xyz123");
-                    assert!(!tried.is_empty());
-                }
-                Err(e) => panic!("Unexpected error: {}", e),
+        if let Some(shell) = prev_shell {
+            unsafe {
+                std::env::set_var("SHELL", shell);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SHELL");
+            }
+        }
+    }
+
+    #[test]
+    fn test_shell_tool_not_installed_error() {
+        let config = ShellConfig {
+            shell: "definitely_not_a_real_shell_xyz123".to_string(),
+            shell_path: Some(PathBuf::from("/nonexistent/path/to/shell")),
+            ..Default::default()
+        };
+
+        let prev_path = std::env::var_os("PATH");
+        let prev_shell = std::env::var_os("SHELL");
+
+        unsafe {
+            std::env::set_var("PATH", "");
+            std::env::set_var("SHELL", "/definitely/not/here");
+        }
+
+        let tool = ShellTool::new(config);
+        let result = tool.config.resolve_shell_path_with_fallbacks(&[]);
+
+        match result {
+            Err(ShellError::ShellNotInstalled(details)) => {
+                assert!(details.contains("definitely_not_a_real_shell_xyz123"));
+            }
+            Ok(path) => panic!("Expected ShellNotInstalled, got Ok({:?})", path),
+            Err(other) => panic!("Unexpected error: {}", other),
+        }
+
+        if let Some(path) = prev_path {
+            unsafe {
+                std::env::set_var("PATH", path);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("PATH");
+            }
+        }
+
+        if let Some(shell) = prev_shell {
+            unsafe {
+                std::env::set_var("SHELL", shell);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SHELL");
             }
         }
     }
@@ -647,8 +722,11 @@ mod tests {
     // ==================== Synchronous Execution Tests ====================
 
     #[tokio::test]
-    #[ignore = "requires nu to be installed"]
     async fn test_shell_tool_sync_execute() {
+        if skip_if_no_nu() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
 
@@ -664,8 +742,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires nu to be installed"]
     async fn test_shell_tool_timeout() {
+        if skip_if_no_nu() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
 
@@ -675,12 +756,16 @@ mod tests {
         let output = tool.execute_command("sleep 10sec", None, 1).await.unwrap();
 
         assert!(output.timed_out);
+        assert!(output.exit_code.is_none());
         assert!(output.duration_secs >= 1.0);
     }
 
     #[tokio::test]
-    #[ignore = "requires nu to be installed"]
     async fn test_shell_tool_output_format() {
+        if skip_if_no_nu() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
 
@@ -700,8 +785,11 @@ mod tests {
     // ==================== Environment Tests ====================
 
     #[tokio::test]
-    #[ignore = "requires nu to be installed"]
     async fn test_shell_tool_env_inheritance() {
+        if skip_if_no_nu() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
 
@@ -717,8 +805,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires nu to be installed"]
     async fn test_shell_tool_pwd_override() {
+        if skip_if_no_nu() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let subdir = temp_dir.path().join("subdir");
         std::fs::create_dir(&subdir).unwrap();
@@ -772,8 +863,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires nu to be installed"]
     async fn test_shell_tool_call_success() {
+        if skip_if_no_nu() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         let tool = ShellTool::new(config);
@@ -793,8 +887,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires nu to be installed"]
     async fn test_shell_tool_call_with_working_dir() {
+        if skip_if_no_nu() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let subdir = temp_dir.path().join("mydir");
         std::fs::create_dir(&subdir).unwrap();
@@ -875,43 +972,6 @@ mod tests {
         assert!(json_value["exit_code"].is_null());
     }
 
-    #[test]
-    fn test_shell_output_lossy_flags() {
-        // Test with lossy flags set
-        let output = ShellOutput {
-            exit_code: Some(0),
-            stdout: "valid utf-8".to_string(),
-            stderr: "contains \u{FFFD} replacement".to_string(),
-            timed_out: false,
-            duration_secs: 0.5,
-            stdout_lossy: false,
-            stderr_lossy: true,
-        };
-
-        let json = serde_json::to_string(&output).unwrap();
-        let parsed: ShellOutput = serde_json::from_str(&json).unwrap();
-
-        assert!(!parsed.stdout_lossy);
-        assert!(parsed.stderr_lossy);
-    }
-
-    #[test]
-    fn test_shell_output_lossy_defaults() {
-        // Test that lossy fields default to false when not present in JSON
-        // This ensures backwards compatibility with older serialized data
-        let json = r#"{
-            "exit_code": 0,
-            "stdout": "hello",
-            "stderr": "",
-            "timed_out": false,
-            "duration_secs": 1.0
-        }"#;
-
-        let parsed: ShellOutput = serde_json::from_str(json).unwrap();
-        assert!(!parsed.stdout_lossy);
-        assert!(!parsed.stderr_lossy);
-    }
-
     // ==================== Regression Tests ====================
 
     /// Regression test: timeout should be enforced for sync execution
@@ -919,8 +979,11 @@ mod tests {
     /// Commands that run longer than the specified timeout should be
     /// terminated and return timed_out: true in the output.
     #[tokio::test]
-    #[ignore = "requires nu"]
     async fn test_timeout_enforced_sync() {
+        if skip_if_no_nu() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
 
@@ -956,10 +1019,13 @@ mod tests {
     /// Regression test: non-UTF-8 output should be handled gracefully
     ///
     /// Commands that produce non-UTF-8 bytes should not crash and should
-    /// use lossy UTF-8 conversion with the lossy flag set.
+    /// use lossy UTF-8 conversion.
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_non_utf8_output() {
+        if skip_if_shell_e2e_disabled() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
@@ -984,16 +1050,18 @@ mod tests {
         let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
 
         assert!(!output.timed_out, "Should not timeout");
-        // The stdout_lossy flag should be set when lossy conversion occurred
-        // Note: depending on printf behavior, the actual flag may vary
+        assert_eq!(output.exit_code, Some(0), "Exit code should be 0");
     }
 
     /// Regression test: long output should be captured completely
     ///
     /// Commands with large output should capture all of it (within reason).
     #[tokio::test]
-    #[ignore = "requires nu"]
     async fn test_long_output_captured() {
+        if skip_if_no_nu() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
 
@@ -1025,8 +1093,11 @@ mod tests {
     ///
     /// Multiple sync tool calls should be able to run concurrently via tokio.
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_sync_parallel_execution() {
+        if skip_if_shell_e2e_disabled() {
+            return;
+        }
+
         use std::time::Instant;
 
         let temp_dir = TempDir::new().unwrap();
@@ -1228,44 +1299,60 @@ mod tests {
         assert_eq!(result.unwrap(), fake_shell);
     }
 
-    /// Regression test for Task #11: Shell detection falls through to env var
+    /// Regression test for Task #11: Shell detection does not fall back to env var
     ///
-    /// Verifies that when configured shell is not found, the SHELL env var is tried.
+    /// Verifies that when configured shell is not found, the SHELL env var is ignored.
     #[test]
     fn test_shell_detection_env_fallback() {
-        let config = ShellConfig::default();
+        let config = ShellConfig {
+            shell: "definitely_not_a_real_shell_xyz123".to_string(),
+            ..Default::default()
+        };
         let tool = ShellTool::new(config);
+
+        let prev_path = std::env::var_os("PATH");
+        let prev_shell = std::env::var_os("SHELL");
+
+        unsafe {
+            std::env::set_var("PATH", "");
+            std::env::set_var("SHELL", "/bin/sh");
+        }
 
         let result = tool.find_shell();
 
-        // On Unix, /bin/sh almost always exists, so we expect success with fallback
-        #[cfg(unix)]
-        {
-            assert!(
-                result.is_ok(),
-                "Should find shell via fallbacks on Unix: {:?}",
-                result
-            );
+        match result {
+            Err(ShellError::ShellNotInstalled(details)) => {
+                assert!(details.contains("definitely_not_a_real_shell_xyz123"));
+            }
+            Ok(path) => panic!("Expected ShellNotInstalled, got Ok({:?})", path),
+            Err(e) => panic!("Unexpected error: {:?}", e),
         }
 
-        // On Windows or if no shell found, we just verify no panic occurred
-        #[cfg(not(unix))]
-        {
-            // Result is either Ok (found a shell) or Err (ShellNotFound with tried list)
-            match &result {
-                Ok(_) => {}
-                Err(ShellError::ShellNotFound { tried, .. }) => {
-                    assert!(!tried.is_empty(), "Should have tried some shells");
-                }
-                Err(e) => panic!("Unexpected error: {:?}", e),
+        if let Some(path) = prev_path {
+            unsafe {
+                std::env::set_var("PATH", path);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("PATH");
+            }
+        }
+
+        if let Some(shell) = prev_shell {
+            unsafe {
+                std::env::set_var("SHELL", shell);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SHELL");
             }
         }
     }
 
-    /// Regression test for Task #11: Shell detection tries platform fallbacks
+    /// Regression test for Task #11: Shell detection does not use platform fallbacks
     ///
-    /// Verifies that platform-specific fallback shells (/bin/sh, /bin/bash, etc.)
-    /// are tried when configured shell is not found.
+    /// Verifies that platform-specific fallback shells are not used when configured
+    /// shell is not found.
     #[test]
     fn test_shell_detection_platform_fallbacks() {
         // Use a shell that definitely doesn't exist
@@ -1277,28 +1364,16 @@ mod tests {
         let tool = ShellTool::new(config);
         let result = tool.find_shell();
 
-        // On Unix, /bin/sh should be found as fallback
-        #[cfg(unix)]
-        {
-            assert!(
-                result.is_ok(),
-                "Should fall back to /bin/sh on Unix: {:?}",
-                result
-            );
-            let path = result.unwrap();
-            // Should be one of the Unix fallbacks
-            let path_str = path.to_string_lossy();
-            assert!(
-                path_str.contains("sh")
-                    || path_str.contains("bash")
-                    || path_str.contains("busybox"),
-                "Should be a Unix fallback shell: {}",
-                path_str
-            );
+        match result {
+            Err(ShellError::ShellNotInstalled(details)) => {
+                assert!(details.contains("nonexistent_shell_xyz123"));
+            }
+            Ok(path) => panic!("Expected ShellNotInstalled, got Ok({:?})", path),
+            Err(e) => panic!("Unexpected error: {:?}", e),
         }
     }
 
-    /// Regression test for Task #11: ShellNotFound error includes tried paths
+    /// Regression test for Task #11: ShellNotInstalled error includes details
     ///
     /// Verifies that when no shell is found, the error includes all paths that were tried.
     #[test]
@@ -1313,27 +1388,20 @@ mod tests {
         let tool = ShellTool::new(config);
         let result = tool.find_shell();
 
-        // On Unix, a fallback will likely succeed, so only check error case on other platforms
-        // or when mocking. For now, just verify the function doesn't panic.
         match result {
-            Ok(_) => {
-                // A fallback shell was found (e.g., /bin/sh on Unix)
-            }
-            Err(ShellError::ShellNotFound { shell, tried }) => {
-                // The error should include what we were looking for
-                assert_eq!(shell, "completely_fake_shell_abc");
-                // Should have tried multiple paths
+            Err(ShellError::ShellNotInstalled(details)) => {
                 assert!(
-                    !tried.is_empty(),
-                    "Should have a non-empty list of tried paths"
+                    details.contains("completely_fake_shell_abc"),
+                    "Should include requested shell in details: {:?}",
+                    details
                 );
-                // Should include the explicit path that was set
                 assert!(
-                    tried.iter().any(|t| t.contains("nonexistent")),
-                    "Should include the explicit path in tried: {:?}",
-                    tried
+                    details.contains("nonexistent"),
+                    "Should include explicit path in details: {:?}",
+                    details
                 );
             }
+            Ok(path) => panic!("Expected ShellNotInstalled, got Ok({:?})", path),
             Err(e) => panic!("Unexpected error type: {:?}", e),
         }
     }
@@ -1362,70 +1430,35 @@ mod tests {
         );
     }
 
-    /// Test that command substitution (backtick) is blocked
+    /// Test that rm -rf ~ is blocked at the tool level
     #[tokio::test]
-    async fn test_shell_tool_blocks_command_substitution() {
+    async fn test_shell_tool_blocks_rm_rf_home() {
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         let tool = ShellTool::new(config);
 
         let result = tool
             .call(json!({
-                "command": "echo `whoami`"
+                "command": "rm -rf ~"
             }))
             .await;
 
-        assert!(result.is_err(), "Command substitution should be blocked");
+        assert!(result.is_err(), "rm -rf ~ should be blocked");
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("dangerous") || err.contains("`"),
-            "Error should mention dangerous character: {}",
+            err.contains("blocked"),
+            "Error should mention blocked: {}",
             err
         );
-    }
-
-    /// Test that variable expansion ($) is blocked
-    #[tokio::test]
-    async fn test_shell_tool_blocks_variable_expansion() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        let tool = ShellTool::new(config);
-
-        let result = tool
-            .call(json!({
-                "command": "echo $HOME"
-            }))
-            .await;
-
-        assert!(result.is_err(), "Variable expansion should be blocked");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("dangerous") || err.contains("$"),
-            "Error should mention dangerous character: {}",
-            err
-        );
-    }
-
-    /// Test that fork bomb is blocked
-    #[tokio::test]
-    async fn test_shell_tool_blocks_fork_bomb() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        let tool = ShellTool::new(config);
-
-        let result = tool
-            .call(json!({
-                "command": ":(){ :|:& };:"
-            }))
-            .await;
-
-        assert!(result.is_err(), "Fork bomb should be blocked");
     }
 
     /// Test that safe commands pass validation
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_shell_tool_allows_safe_commands() {
+        if skip_if_shell_e2e_disabled() {
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string(); // Use sh for broad compatibility

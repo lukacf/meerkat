@@ -1,6 +1,7 @@
 //! Individual comms tool implementations
 
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::empty_object_schema;
 use async_trait::async_trait;
 use meerkat_comms::{Router, TrustedPeers};
 use meerkat_comms_mcp::tools::{ToolContext, handle_tools_call, tools_list};
@@ -39,7 +40,7 @@ fn get_tool_def(name: &str) -> ToolDef {
         .unwrap_or_else(|| ToolDef {
             name: name.to_string(),
             description: String::new(),
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema: empty_object_schema(),
         })
 }
 

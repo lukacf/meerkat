@@ -1168,17 +1168,17 @@ mod parallel_tools {
                     ToolDef {
                         name: "working_tool".to_string(),
                         description: "A tool that works correctly".to_string(),
-                        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                        input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                     },
                     ToolDef {
                         name: "broken_tool".to_string(),
                         description: "A tool that always fails".to_string(),
-                        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                        input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                     },
                     ToolDef {
                         name: "another_working_tool".to_string(),
                         description: "Another tool that works correctly".to_string(),
-                        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                        input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                     },
                 ]
             }

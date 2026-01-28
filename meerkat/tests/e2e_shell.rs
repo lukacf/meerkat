@@ -472,9 +472,8 @@ async fn test_e2e_shell_job_not_found() {
 
     assert!(result.is_err(), "Cancelling non-existent job should fail");
 
-    if let Err(ShellError::JobNotFound { job_id, operation }) = result {
+    if let Err(ShellError::JobNotFound(job_id)) = result {
         assert_eq!(job_id, "job_nonexistent123");
-        assert_eq!(operation, "cancel");
     } else {
         panic!("Expected JobNotFound error, got {:?}", result);
     }

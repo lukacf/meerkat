@@ -19,12 +19,14 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 futures = { workspace = true }
 futures-util = "0.3"
 dirs = "5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

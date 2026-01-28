@@ -1,9 +1,9 @@
 //! Tool dispatch with timeouts
 
+use crate::ToolError;
 use crate::error::DispatchError;
 use crate::registry::ToolRegistry;
 use async_trait::async_trait;
-use meerkat_core::error::ToolError;
 use meerkat_core::{AgentToolDispatcher, ToolCall, ToolDef, ToolResult};
 use meerkat_mcp_client::McpRouter;
 use serde::{Deserialize, Serialize};
@@ -240,7 +240,8 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "message": {"type": "string"}
-                }
+                },
+                "required": []
             }),
         });
 

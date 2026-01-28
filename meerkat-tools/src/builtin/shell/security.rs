@@ -6,12 +6,6 @@
 
 use super::config::ShellError;
 
-/// Dangerous shell metacharacters that could enable command injection
-const DANGEROUS_CHARS: &[char] = &[
-    '`', // Command substitution (backticks)
-    '$', // Variable expansion (could leak env vars)
-];
-
 /// Patterns that indicate shell chaining/piping (allowed but logged)
 const CHAINING_CHARS: &[char] = &[
     '|', // Pipe
@@ -20,17 +14,7 @@ const CHAINING_CHARS: &[char] = &[
 ];
 
 /// Dangerous command patterns that are always blocked
-const BLOCKED_PATTERNS: &[&str] = &[
-    "rm -rf /",
-    "rm -rf /*",
-    ":(){ :|:& };:", // Fork bomb
-    "> /dev/sda",
-    "dd if=/dev/zero of=/dev/sd",
-    "mkfs.",
-    "chmod -R 777 /",
-    "chown -R",
-    ":(){:|:&};:", // Compact fork bomb
-];
+const BLOCKED_PATTERNS: &[&str] = &["rm -rf /", "rm -rf ~", "> /dev/sd", "dd if="];
 
 /// Security validation result
 #[derive(Debug, Clone, PartialEq)]
@@ -60,18 +44,6 @@ pub fn validate_command(command: &str) -> ValidationResult {
         }
     }
 
-    // Check for dangerous characters
-    for ch in DANGEROUS_CHARS {
-        if command.contains(*ch) {
-            return ValidationResult::Blocked {
-                reason: format!(
-                    "Command contains dangerous character '{}' which could enable injection",
-                    ch
-                ),
-            };
-        }
-    }
-
     // Check for chaining (allowed but warned)
     for ch in CHAINING_CHARS {
         if command.contains(*ch) {
@@ -90,7 +62,7 @@ pub fn validate_command(command: &str) -> ValidationResult {
 /// Validate command and return error if blocked
 pub fn validate_command_or_error(command: &str) -> Result<ValidationResult, ShellError> {
     match validate_command(command) {
-        ValidationResult::Blocked { reason } => Err(ShellError::BlockedCommand { pattern: reason }),
+        ValidationResult::Blocked { reason } => Err(ShellError::BlockedCommand(reason)),
         other => Ok(other),
     }
 }
@@ -141,16 +113,12 @@ mod tests {
 
     #[test]
     fn test_blocked_dangerous_patterns() {
-        // Fork bomb
-        let result = validate_command(":(){ :|:& };:");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
-
         // rm -rf /
         let result = validate_command("rm -rf /");
         assert!(matches!(result, ValidationResult::Blocked { .. }));
 
-        // rm -rf /*
-        let result = validate_command("rm -rf /*");
+        // rm -rf ~
+        let result = validate_command("rm -rf ~");
         assert!(matches!(result, ValidationResult::Blocked { .. }));
 
         // Overwrite disk
@@ -160,23 +128,6 @@ mod tests {
         // dd to disk
         let result = validate_command("dd if=/dev/zero of=/dev/sda");
         assert!(matches!(result, ValidationResult::Blocked { .. }));
-    }
-
-    #[test]
-    fn test_blocked_dangerous_chars() {
-        // Backtick command substitution
-        let result = validate_command("echo `whoami`");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
-        if let ValidationResult::Blocked { reason } = result {
-            assert!(reason.contains('`'));
-        }
-
-        // Dollar sign (variable expansion)
-        let result = validate_command("echo $HOME");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
-        if let ValidationResult::Blocked { reason } = result {
-            assert!(reason.contains('$'));
-        }
     }
 
     #[test]
@@ -201,10 +152,10 @@ mod tests {
         assert!(result.is_ok());
 
         // Blocked command
-        let result = validate_command_or_error("echo `whoami`");
+        let result = validate_command_or_error("rm -rf /");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, ShellError::BlockedCommand { .. }));
+        assert!(matches!(err, ShellError::BlockedCommand(_)));
     }
 
     #[test]
@@ -238,13 +189,6 @@ mod tests {
     #[test]
     fn test_whitespace_command() {
         assert_eq!(validate_command("   "), ValidationResult::Safe);
-    }
-
-    #[test]
-    fn test_path_with_dollar_blocked() {
-        // Even legitimate-looking paths with $ are blocked for safety
-        let result = validate_command("cd $HOME/projects");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
     }
 
     #[test]

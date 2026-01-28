@@ -43,6 +43,25 @@ pub enum ToolError {
 }
 
 impl ToolError {
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            Self::NotFound { .. } => "tool_not_found",
+            Self::Unavailable { .. } => "tool_unavailable",
+            Self::InvalidArguments { .. } => "invalid_arguments",
+            Self::ExecutionFailed { .. } => "execution_failed",
+            Self::Timeout { .. } => "timeout",
+            Self::AccessDenied { .. } => "access_denied",
+            Self::Other(_) => "tool_error",
+        }
+    }
+
+    pub fn to_error_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "error": self.error_code(),
+            "message": self.to_string(),
+        })
+    }
+
     /// Create a new "not found" error
     pub fn not_found(name: impl Into<String>) -> Self {
         Self::NotFound { name: name.into() }
@@ -188,6 +207,22 @@ impl AgentError {
     pub fn is_recoverable(&self) -> bool {
         matches!(self, Self::LlmError(_))
     }
+}
+
+pub fn store_error(err: impl std::fmt::Display) -> AgentError {
+    AgentError::StoreError(store_error_message(err))
+}
+
+pub fn invalid_session_id(err: impl std::fmt::Display) -> AgentError {
+    AgentError::StoreError(invalid_session_id_message(err))
+}
+
+pub fn store_error_message(err: impl std::fmt::Display) -> String {
+    err.to_string()
+}
+
+pub fn invalid_session_id_message(err: impl std::fmt::Display) -> String {
+    format!("Invalid session ID: {}", err)
 }
 
 #[cfg(test)]

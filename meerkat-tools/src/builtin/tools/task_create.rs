@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::{NewTask, TaskId, TaskPriority};
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::SchemaBuilder;
 
 /// Parameters for the task_create tool
 #[derive(Debug, Deserialize)]
@@ -104,49 +105,71 @@ impl BuiltinTool for TaskCreateTool {
         ToolDef {
             name: "task_create".to_string(),
             description: "Create a new task in the project task list".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "subject": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "subject",
+                    serde_json::json!({
                         "type": "string",
                         "description": "Brief title for the task"
-                    },
-                    "description": {
+                    }),
+                )
+                .property(
+                    "description",
+                    serde_json::json!({
                         "type": "string",
                         "description": "Detailed description of what needs to be done"
-                    },
-                    "priority": {
+                    }),
+                )
+                .property(
+                    "priority",
+                    serde_json::json!({
                         "type": "string",
                         "enum": ["low", "medium", "high"],
                         "description": "Task priority level"
-                    },
-                    "labels": {
+                    }),
+                )
+                .property(
+                    "labels",
+                    serde_json::json!({
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Labels/tags for categorization"
-                    },
-                    "blocks": {
+                    }),
+                )
+                .property(
+                    "blocks",
+                    serde_json::json!({
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "IDs of tasks that this task blocks"
-                    },
-                    "owner": {
+                    }),
+                )
+                .property(
+                    "owner",
+                    serde_json::json!({
                         "type": "string",
                         "description": "Owner/assignee of the task"
-                    },
-                    "metadata": {
+                    }),
+                )
+                .property(
+                    "metadata",
+                    serde_json::json!({
                         "type": "object",
                         "additionalProperties": true,
                         "description": "Arbitrary key-value metadata"
-                    },
-                    "blocked_by": {
+                    }),
+                )
+                .property(
+                    "blocked_by",
+                    serde_json::json!({
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "IDs of tasks that block THIS task"
-                    }
-                },
-                "required": ["subject", "description"]
-            }),
+                    }),
+                )
+                .required("subject")
+                .required("description")
+                .build(),
         }
     }
 

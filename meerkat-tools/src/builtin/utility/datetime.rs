@@ -1,6 +1,7 @@
 //! DateTime tool for getting current date and time
 
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::empty_object_schema;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use serde_json::{Value, json};
@@ -34,11 +35,7 @@ impl BuiltinTool for DateTimeTool {
         ToolDef {
             name: "datetime".to_string(),
             description: "Get the current date and time. Returns ISO 8601 formatted datetime and Unix timestamp.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
+            input_schema: empty_object_schema(),
         }
     }
 

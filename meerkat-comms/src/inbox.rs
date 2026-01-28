@@ -10,9 +10,11 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::types::InboxItem;
 
+const DEFAULT_INBOX_CAPACITY: usize = 1024;
+
 /// The receiving end of the inbox, held by the agent loop.
 pub struct Inbox {
-    rx: mpsc::UnboundedReceiver<InboxItem>,
+    rx: mpsc::Receiver<InboxItem>,
     /// Notifier to wake waiting tasks when messages arrive.
     notify: Arc<Notify>,
 }
@@ -20,7 +22,7 @@ pub struct Inbox {
 /// The sending end of the inbox, cloned to IO tasks.
 #[derive(Clone)]
 pub struct InboxSender {
-    tx: mpsc::UnboundedSender<InboxItem>,
+    tx: mpsc::Sender<InboxItem>,
     /// Notifier to wake waiting tasks when messages arrive.
     notify: Arc<Notify>,
 }
@@ -28,7 +30,12 @@ pub struct InboxSender {
 impl Inbox {
     /// Create a new inbox, returning both the inbox and a sender.
     pub fn new() -> (Self, InboxSender) {
-        let (tx, rx) = mpsc::unbounded_channel();
+        Self::new_with_capacity(DEFAULT_INBOX_CAPACITY)
+    }
+
+    /// Create a new inbox with a bounded capacity.
+    pub fn new_with_capacity(capacity: usize) -> (Self, InboxSender) {
+        let (tx, rx) = mpsc::channel(capacity);
         let notify = Arc::new(Notify::new());
         (
             Inbox {
@@ -70,7 +77,10 @@ impl InboxSender {
     ///
     /// Returns an error if the inbox has been closed.
     pub fn send(&self, item: InboxItem) -> Result<(), InboxError> {
-        self.tx.send(item).map_err(|_| InboxError::Closed)?;
+        self.tx.try_send(item).map_err(|err| match err {
+            mpsc::error::TrySendError::Closed(_) => InboxError::Closed,
+            mpsc::error::TrySendError::Full(_) => InboxError::Full,
+        })?;
         // Notify any waiting tasks
         self.notify.notify_waiters();
         Ok(())
@@ -82,6 +92,8 @@ impl InboxSender {
 pub enum InboxError {
     #[error("Inbox has been closed")]
     Closed,
+    #[error("Inbox is full")]
+    Full,
 }
 
 #[cfg(test)]

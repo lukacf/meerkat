@@ -141,7 +141,8 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "count": {"type": "integer"}
-                }
+                },
+                "required": []
             }),
         });
 
@@ -169,7 +170,11 @@ mod tests {
         let tool = ToolDef {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
         };
         registry.register(tool);
 

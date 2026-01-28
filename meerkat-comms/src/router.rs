@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::identity::{Keypair, Signature};
+use crate::inbox::InboxError;
 use crate::inproc::InprocRegistry;
 use crate::transport::{PeerAddr, TransportError, MAX_PAYLOAD_SIZE};
 use crate::trust::{TrustedPeer, TrustedPeers};
@@ -59,6 +60,8 @@ pub enum SendError {
     InvalidAddress(String),
     #[error("CBOR encoding error: {0}")]
     Cbor(String),
+    #[error("Peer inbox is full")]
+    InboxFull,
 }
 
 /// Router for sending messages to peers.
@@ -191,7 +194,10 @@ impl Router {
                 if let Some(sender) = registry.get_by_pubkey(&peer_pubkey) {
                     sender
                         .send(crate::types::InboxItem::External { envelope })
-                        .map_err(|_| SendError::PeerOffline)?;
+                        .map_err(|err| match err {
+                            InboxError::Closed => SendError::PeerOffline,
+                            InboxError::Full => SendError::InboxFull,
+                        })?;
                     // No ack needed for inproc - delivery is synchronous
                 } else {
                     return Err(SendError::PeerNotFound(format!(

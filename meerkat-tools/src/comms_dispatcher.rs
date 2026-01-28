@@ -9,11 +9,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meerkat_comms::{Router, TrustedPeers};
 use meerkat_comms_mcp::tools::{ToolContext, handle_tools_call, tools_list};
-use meerkat_core::AgentToolDispatcher;
-use meerkat_core::error::ToolError;
 use meerkat_core::types::ToolDef;
+use meerkat_core::{AgentToolDispatcher, CommsRuntime};
 use serde_json::Value;
 use tokio::sync::RwLock;
+
+use crate::ToolError;
 
 /// Tool dispatcher that provides comms tools.
 ///
@@ -183,6 +184,24 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
     }
 }
 
+/// Wrap a tool dispatcher with comms tools.
+///
+/// This is the preferred way to add comms capabilities to any agent. It works
+/// uniformly for both main agents and sub-agents, treating comms as core
+/// infrastructure rather than an optional feature.
+///
+/// The resulting dispatcher:
+/// - Provides comms tools: send_message, send_request, send_response, list_peers
+/// - Delegates all other tools to the inner dispatcher
+pub fn wrap_with_comms(
+    tools: Arc<dyn AgentToolDispatcher>,
+    runtime: &CommsRuntime,
+) -> Arc<dyn AgentToolDispatcher> {
+    let router = runtime.router_arc();
+    let trusted_peers = runtime.trusted_peers_shared();
+    Arc::new(DynCommsToolDispatcher::new(router, trusted_peers, tools))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,7 +297,11 @@ mod tests {
                 tools: vec![ToolDef {
                     name: "inner_tool".to_string(),
                     description: "A tool from inner dispatcher".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }),
                 }],
             }
         }

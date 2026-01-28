@@ -25,7 +25,7 @@ use parking_lot::RwLock;
 use uuid::Uuid;
 
 use crate::identity::{Keypair, PubKey, Signature};
-use crate::inbox::InboxSender;
+use crate::inbox::{InboxError, InboxSender};
 use crate::types::{Envelope, InboxItem, MessageKind};
 
 /// Global inproc registry instance.
@@ -213,7 +213,10 @@ impl InprocRegistry {
         // Deliver directly to inbox
         sender
             .send(InboxItem::External { envelope })
-            .map_err(|_| InprocSendError::InboxClosed)?;
+            .map_err(|err| match err {
+                InboxError::Closed => InprocSendError::InboxClosed,
+                InboxError::Full => InprocSendError::InboxFull,
+            })?;
 
         Ok(())
     }
@@ -237,6 +240,8 @@ pub enum InprocSendError {
     PeerNotFound(String),
     #[error("Peer inbox has been closed")]
     InboxClosed,
+    #[error("Peer inbox is full")]
+    InboxFull,
 }
 
 #[cfg(test)]

@@ -64,6 +64,7 @@ pub use meerkat_core::{
     ConcurrencyLimits,
     // Config
     Config,
+    ConfigDelta,
     ContextStrategy,
     CoreCommsConfig,
     ForkBranch,
@@ -102,7 +103,6 @@ pub use meerkat_core::{
     ToolAccessPolicy,
     ToolCall,
     ToolDef,
-    ToolError,
     ToolGateway,
     ToolGatewayBuilder,
     ToolResult,
@@ -114,6 +114,7 @@ pub use meerkat_core::{
 
 // Re-export client types
 pub use meerkat_client::{LlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse};
+pub use meerkat_tools::ToolError;
 
 // AgentFactory
 pub use meerkat_agent::AgentFactory;
@@ -153,6 +154,8 @@ pub use meerkat_mcp_client::{McpConnection, McpError, McpRouter, McpServerConfig
 // SDK module
 mod sdk;
 pub use sdk::*;
+mod sdk_config;
+pub use sdk_config::SdkConfigStore;
 
 /// Prelude module for convenient imports
 pub mod prelude {

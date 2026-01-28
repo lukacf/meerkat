@@ -8,54 +8,37 @@ The main entry point. Re-exports types from all sub-crates.
 
 ### SDK Helpers
 
-Quick builder functions for common use cases:
+AgentFactory is the shared entry point for SDK construction:
 
 ```rust
-/// Create a quick builder with Anthropic Claude
-pub fn with_anthropic(api_key: impl Into<String>) -> QuickBuilder<AnthropicClient>
+// Shared wiring for SDK, CLI, MCP, REST, and tests.
+pub struct AgentFactory { /* fields omitted */ }
 
-/// Create a quick builder with OpenAI GPT
-pub fn with_openai(api_key: impl Into<String>) -> QuickBuilder<OpenAiClient>
+impl AgentFactory {
+    /// Create a new factory with the required session store path.
+    pub fn new(store_path: impl Into<PathBuf>) -> Self
 
-/// Create a quick builder with Google Gemini
-pub fn with_gemini(api_key: impl Into<String>) -> QuickBuilder<GeminiClient>
-```
+    /// Build an LLM client for a provider with optional base URL override.
+    pub fn build_llm_client(
+        &self,
+        provider: Provider,
+        api_key: Option<String>,
+        base_url: Option<String>,
+    ) -> Result<Arc<dyn LlmClient>, FactoryError>
 
-### QuickBuilder
+    /// Build an LLM adapter for the provided client/model.
+    pub fn build_llm_adapter(&self, client: Arc<dyn LlmClient>, model: impl Into<String>)
+        -> LlmClientAdapter
 
-Fluent builder for simple agent creation:
-
-```rust
-impl<C: LlmClient> QuickBuilder<C> {
-    /// Set the model to use
-    pub fn model(self, model: impl Into<String>) -> Self
-
-    /// Alias for `model`
-    pub fn with_model(self, model: impl Into<String>) -> Self
-
-    /// Set the system prompt
-    pub fn system_prompt(self, prompt: impl Into<String>) -> Self
-
-    /// Alias for `system_prompt`
-    pub fn with_system_prompt(self, prompt: impl Into<String>) -> Self
-
-    /// Set maximum tokens per turn
-    pub fn max_tokens(self, max: u32) -> Self
-
-    /// Set budget limits
-    pub fn budget(self, limits: BudgetLimits) -> Self
-
-    /// Alias for `budget`
-    pub fn with_budget(self, limits: BudgetLimits) -> Self
-
-    /// Set retry policy
-    pub fn retry_policy(self, policy: RetryPolicy) -> Self
-
-    /// Alias for `retry_policy`
-    pub fn with_retry_policy(self, policy: RetryPolicy) -> Self
-
-    /// Run the agent with a prompt
-    pub async fn run(self, prompt: impl Into<String>) -> Result<RunResult, AgentError>
+    /// Build a shared builtin dispatcher using the provided config.
+    pub fn build_builtin_dispatcher(
+        &self,
+        store: Arc<dyn TaskStore>,
+        config: BuiltinToolConfig,
+        shell_config: Option<ShellConfig>,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
+        session_id: Option<String>,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError>
 }
 ```
 

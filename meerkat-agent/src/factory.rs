@@ -7,12 +7,17 @@ use meerkat_client::{
     DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClient, LlmClientAdapter,
     LlmClientFactory, LlmProvider,
 };
-use meerkat_core::{AgentEvent, AgentToolDispatcher, Provider};
+use meerkat_core::{
+    AgentEvent, AgentToolDispatcher, ConcurrencyLimits, Provider, Session, SubAgentManager,
+};
+use meerkat_store::MemoryStore;
 use meerkat_store::{SessionStore, StoreAdapter};
 use meerkat_tools::builtin::shell::ShellConfig;
-use meerkat_tools::builtin::{BuiltinToolConfig, CompositeDispatcher, TaskStore};
+use meerkat_tools::builtin::sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState};
+use meerkat_tools::builtin::utility::WaitInterrupt;
+use meerkat_tools::builtin::{BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, TaskStore};
 use meerkat_tools::{BuiltinDispatcherConfig, CompositeDispatcherError, build_builtin_dispatcher};
-use tokio::sync::mpsc;
+use tokio::sync::{RwLock, mpsc};
 
 /// Factory for creating agents with standard configuration.
 #[derive(Debug, Clone)]
@@ -162,6 +167,85 @@ impl AgentFactory {
             session_id,
             enable_wait_interrupt: self.enable_subagents || self.enable_comms,
         };
-        build_builtin_dispatcher(builder)
+        if !self.enable_subagents {
+            return build_builtin_dispatcher(builder);
+        }
+
+        let BuiltinDispatcherConfig {
+            store,
+            config,
+            shell_config,
+            external,
+            session_id,
+            enable_wait_interrupt: _,
+        } = builder;
+
+        let shell_config_for_subagents = shell_config.clone();
+        let mut composite = self.build_composite_dispatcher(
+            store,
+            &config,
+            shell_config,
+            external.clone(),
+            session_id,
+        )?;
+
+        let wait_interrupt_tx = composite.wait_interrupt_sender();
+
+        let limits = ConcurrencyLimits::default();
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
+        let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
+
+        if let Some(interrupt_tx) = wait_interrupt_tx {
+            let completion_rx = manager.completion_receiver();
+            tokio::spawn(async move {
+                let mut rx = completion_rx;
+                while rx.changed().await.is_ok() {
+                    if let Some(completion) = rx.borrow().clone() {
+                        let reason = format!(
+                            "Sub-agent '{}' {} with: {}",
+                            completion.agent_name,
+                            if completion.is_error {
+                                "failed"
+                            } else {
+                                "completed"
+                            },
+                            completion.summary
+                        );
+                        let _ = interrupt_tx.send(Some(WaitInterrupt { reason }));
+                    }
+                }
+            });
+        }
+
+        let sub_agent_task_store = MemoryTaskStore::new();
+        let sub_agent_factory = self.clone().subagents(false).comms(false);
+        let sub_agent_dispatcher = sub_agent_factory.build_composite_dispatcher(
+            Arc::new(sub_agent_task_store),
+            &config,
+            shell_config_for_subagents,
+            external,
+            None,
+        )?;
+        let sub_agent_tools: Arc<dyn AgentToolDispatcher> = Arc::new(sub_agent_dispatcher);
+
+        let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> =
+            Arc::new(sub_agent_factory.build_store_adapter(Arc::new(MemoryStore::new())));
+
+        let parent_session = Arc::new(RwLock::new(Session::new()));
+        let sub_agent_config = SubAgentConfig::default();
+        let state = Arc::new(SubAgentToolState::new(
+            manager,
+            client_factory,
+            sub_agent_tools,
+            sub_agent_store,
+            parent_session,
+            sub_agent_config,
+            0,
+        ));
+
+        let tool_set = SubAgentToolSet::new(state);
+        composite.register_sub_agent_tools(tool_set, &config)?;
+
+        Ok(Arc::new(composite))
     }
 }

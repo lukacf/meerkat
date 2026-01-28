@@ -3,9 +3,10 @@
 //! This module provides the [`ShellJobsListTool`] which lists all background
 //! shell jobs and their status.
 
+use crate::schema::empty_object_schema;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 
 use super::job_manager::JobManager;
@@ -37,10 +38,7 @@ impl BuiltinTool for ShellJobsListTool {
         ToolDef {
             name: "shell_jobs".to_string(),
             description: "List all background shell jobs".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {}
-            }),
+            input_schema: empty_object_schema(),
         }
     }
 
@@ -59,6 +57,7 @@ impl BuiltinTool for ShellJobsListTool {
 mod tests {
     use super::*;
     use crate::builtin::shell::config::ShellConfig;
+    use serde_json::json;
     use tempfile::TempDir;
 
     // ==================== ShellJobsListTool Struct Tests ====================
@@ -110,8 +109,8 @@ mod tests {
         let props = schema.get("properties").unwrap();
         assert!(props.as_object().is_none_or(|o| o.is_empty()));
 
-        // Should have no required fields
-        assert!(schema.get("required").is_none());
+        // Should have empty required fields array
+        assert_eq!(schema["required"], serde_json::json!([]));
     }
 
     // ==================== Output Tests ====================

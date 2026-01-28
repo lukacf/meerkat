@@ -82,7 +82,7 @@ default_timeout_secs = 30
 restrict_to_project = true
 
 # Shell to use (default: "nu" on all platforms)
-# Falls back to /bin/sh if nu not found
+# Errors if nu is not found on PATH
 shell = "nu"
 ```
 

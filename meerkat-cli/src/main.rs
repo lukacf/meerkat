@@ -1,24 +1,29 @@
 //! meerkat-cli - Headless CLI for Meerkat
 
 mod adapters;
-pub mod config;
 mod mcp;
 
 use adapters::{CliToolDispatcher, EmptyToolDispatcher, McpRouterAdapter};
 use meerkat::AgentFactory;
 use meerkat_client::{DefaultClientFactory, LlmClientFactory};
-use meerkat_core::AgentEvent;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ParentCommsContext;
 use meerkat_core::ToolGatewayBuilder;
 use meerkat_core::ops::ConcurrencyLimits;
 use meerkat_core::sub_agent::SubAgentManager;
+use meerkat_core::{AgentEvent, format_verbose_event};
+use meerkat_core::{
+    CommsRuntimeMode, Config, ConfigDelta, ConfigStore, CoreCommsConfig, FileConfigStore,
+    SessionMetadata, SessionTooling,
+};
 use meerkat_store::SessionStore;
 use meerkat_tools::builtin::{
-    BuiltinToolConfig, CommsToolSurface, MemoryTaskStore, ToolMode, ToolPolicyLayer,
+    BuiltinToolConfig, CommsToolSurface, FileTaskStore, MemoryTaskStore, TaskStore, ToolMode,
+    ToolPolicyLayer,
     shell::ShellConfig,
     sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState},
 };
+use meerkat_tools::{ensure_rkat_dir, find_project_root};
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -29,6 +34,7 @@ use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_store::{JsonlStore, SessionFilter};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,84 +60,28 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 }
 
 /// Spawn a task that handles verbose event output
-fn spawn_verbose_event_handler(
+fn spawn_event_handler(
     mut agent_event_rx: mpsc::Receiver<AgentEvent>,
+    verbose: bool,
+    stream: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        use std::io::Write;
+
         while let Some(event) = agent_event_rx.recv().await {
-            match event {
-                AgentEvent::TurnStarted { turn_number } => {
-                    eprintln!("\n━━━ Turn {} ━━━", turn_number + 1);
+            if stream {
+                if let AgentEvent::TextDelta { delta } = &event {
+                    print!("{}", delta);
+                    let _ = std::io::stdout().flush();
                 }
-                AgentEvent::ToolCallRequested { name, args, .. } => {
-                    let args_str = serde_json::to_string(&args).unwrap_or_default();
-                    let args_preview = if args_str.len() > 100 {
-                        format!("{}...", truncate_str(&args_str, 100))
-                    } else {
-                        args_str
-                    };
-                    eprintln!("  → Calling tool: {} {}", name, args_preview);
-                }
-                AgentEvent::ToolExecutionCompleted {
-                    name,
-                    result,
-                    is_error,
-                    duration_ms,
-                    ..
-                } => {
-                    let status = if is_error { "✗" } else { "✓" };
-                    let result_preview = if result.len() > 200 {
-                        format!("{}...", truncate_str(&result, 200))
-                    } else {
-                        result
-                    };
-                    eprintln!(
-                        "  {} {} ({}ms): {}",
-                        status, name, duration_ms, result_preview
-                    );
-                }
-                AgentEvent::TurnCompleted { stop_reason, usage } => {
-                    eprintln!(
-                        "  ── Turn complete: {:?} ({} in / {} out tokens)",
-                        stop_reason, usage.input_tokens, usage.output_tokens
-                    );
-                }
-                AgentEvent::TextComplete { content } => {
-                    if !content.is_empty() {
-                        let preview = if content.len() > 500 {
-                            format!("{}...", truncate_str(&content, 500))
-                        } else {
-                            content
-                        };
-                        eprintln!("  💬 Response: {}", preview);
-                    }
-                }
-                AgentEvent::Retrying {
-                    attempt,
-                    max_attempts,
-                    error,
-                    delay_ms,
-                } => {
-                    eprintln!(
-                        "  ⟳ Retry {}/{}: {} (waiting {}ms)",
-                        attempt, max_attempts, error, delay_ms
-                    );
-                }
-                AgentEvent::BudgetWarning {
-                    budget_type,
-                    used,
-                    limit,
-                    percent,
-                } => {
-                    eprintln!(
-                        "  ⚠ Budget warning: {:?} at {:.0}% ({}/{})",
-                        budget_type,
-                        percent * 100.0,
-                        used,
-                        limit
-                    );
-                }
-                _ => {} // Ignore other events
+            }
+
+            if !verbose {
+                continue;
+            }
+
+            if let Some(line) = format_verbose_event(&event) {
+                eprintln!("{}", line);
             }
         }
     })
@@ -195,17 +145,17 @@ enum Commands {
         /// The prompt to execute
         prompt: String,
 
-        /// Model to use (default: claude-sonnet-4-20250514)
-        #[arg(long, default_value = "claude-sonnet-4-20250514")]
-        model: String,
+        /// Model to use (defaults to config when omitted)
+        #[arg(long)]
+        model: Option<String>,
 
         /// LLM provider (anthropic, openai, gemini). Inferred from model name if not specified.
         #[arg(long, short = 'p', value_enum)]
         provider: Option<Provider>,
 
-        /// Maximum tokens per turn
-        #[arg(long, default_value = "4096")]
-        max_tokens: u32,
+        /// Maximum tokens per turn (defaults to config when omitted)
+        #[arg(long)]
+        max_tokens: Option<u32>,
 
         /// Maximum total tokens for the run
         #[arg(long)]
@@ -289,6 +239,48 @@ enum Commands {
         #[command(subcommand)]
         command: McpCommands,
     },
+
+    /// Config management
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Print the current config
+    Get {
+        #[arg(long, default_value = "toml")]
+        format: ConfigFormat,
+    },
+    /// Replace the config with the provided content
+    Set {
+        /// Path to a TOML or JSON config file
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Raw JSON config payload
+        #[arg(long)]
+        json: Option<String>,
+        /// Raw TOML config payload
+        #[arg(long)]
+        toml: Option<String>,
+    },
+    /// Apply a JSON merge patch to the config
+    Patch {
+        /// Path to a JSON patch file
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Raw JSON patch payload
+        #[arg(long)]
+        json: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ConfigFormat {
+    Toml,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -413,7 +405,7 @@ impl From<CliMcpScope> for Option<McpScope> {
 }
 
 #[tokio::main]
-async fn main() -> ExitCode {
+async fn main() -> anyhow::Result<ExitCode> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
@@ -441,6 +433,11 @@ async fn main() -> ExitCode {
             verbose,
             host,
         } => {
+            let (config, config_base_dir) = load_config()?;
+
+            let model = model.unwrap_or_else(|| config.agent.model.clone());
+            let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
+
             // Resolve provider: explicit flag > infer from model > default
             let resolved_provider = provider
                 .or_else(|| Provider::infer_from_model(&model))
@@ -453,7 +450,7 @@ async fn main() -> ExitCode {
             let provider_params = parse_provider_params(&params);
 
             // Build comms overrides from CLI flags
-            let comms_overrides = config::CommsOverrides {
+            let comms_overrides = CommsOverrides {
                 name: comms_name,
                 listen_tcp: comms_listen_tcp.and_then(|s| s.parse().ok()),
                 disabled: no_comms,
@@ -461,11 +458,16 @@ async fn main() -> ExitCode {
 
             match (duration, provider_params) {
                 (Ok(dur), Ok(parsed_params)) => {
-                    let limits = BudgetLimits {
-                        max_tokens: max_total_tokens,
-                        max_duration: dur,
-                        max_tool_calls,
-                    };
+                    let mut limits = config.budget_limits();
+                    if let Some(max_tokens) = max_total_tokens {
+                        limits.max_tokens = Some(max_tokens);
+                    }
+                    if let Some(max_duration) = dur {
+                        limits.max_duration = Some(max_duration);
+                    }
+                    if let Some(max_tool_calls) = max_tool_calls {
+                        limits.max_tool_calls = Some(max_tool_calls);
+                    }
                     run_agent(
                         &prompt,
                         &model,
@@ -481,6 +483,8 @@ async fn main() -> ExitCode {
                         !no_subagents, // sub-agents enabled by default
                         verbose,
                         host,
+                        &config,
+                        config_base_dir,
                     )
                     .await
                 }
@@ -495,10 +499,15 @@ async fn main() -> ExitCode {
             SessionCommands::Delete { session_id } => delete_session(&session_id).await,
         },
         Commands::Mcp { command } => handle_mcp_command(command),
+        Commands::Config { command } => match command {
+            ConfigCommands::Get { format } => handle_config_get(format),
+            ConfigCommands::Set { file, json, toml } => handle_config_set(file, json, toml),
+            ConfigCommands::Patch { file, json } => handle_config_patch(file, json),
+        },
     };
 
     // Map result to exit code
-    match result {
+    Ok(match result {
         Ok(()) => ExitCode::from(EXIT_SUCCESS),
         Err(e) => {
             // Check if it's a budget exhaustion error
@@ -506,13 +515,13 @@ async fn main() -> ExitCode {
                 if agent_err.is_graceful() {
                     // Budget exhausted - this is a graceful termination
                     eprintln!("Budget exhausted: {}", agent_err);
-                    return ExitCode::from(EXIT_BUDGET_EXHAUSTED);
+                    return Ok(ExitCode::from(EXIT_BUDGET_EXHAUSTED));
                 }
             }
             eprintln!("Error: {}", e);
             ExitCode::from(EXIT_ERROR)
         }
-    }
+    })
 }
 
 /// Parse a duration string like "5m", "1h30m", "30s"
@@ -541,6 +550,156 @@ fn parse_provider_params(params: &[String]) -> anyhow::Result<Option<serde_json:
     }
 
     Ok(Some(serde_json::Value::Object(map)))
+}
+
+#[derive(Debug, Clone, Default)]
+struct CommsOverrides {
+    name: Option<String>,
+    listen_tcp: Option<std::net::SocketAddr>,
+    disabled: bool,
+}
+
+fn resolve_config_store() -> anyhow::Result<(Box<dyn ConfigStore>, PathBuf)> {
+    let cwd = std::env::current_dir()?;
+    if let Some(project_root) = meerkat_tools::builtin::find_project_root(&cwd) {
+        Ok((
+            Box::new(FileConfigStore::project(&project_root)),
+            project_root,
+        ))
+    } else {
+        let store = FileConfigStore::global()
+            .map_err(|e| anyhow::anyhow!("Failed to open global config store: {e}"))?;
+        Ok((Box::new(store), cwd))
+    }
+}
+
+fn load_config() -> anyhow::Result<(Config, PathBuf)> {
+    let (store, base_dir) = resolve_config_store()?;
+    let mut config = store
+        .get()
+        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    config
+        .apply_env_overrides()
+        .map_err(|e| anyhow::anyhow!("Failed to apply env overrides: {e}"))?;
+    Ok((config, base_dir))
+}
+
+fn handle_config_get(format: ConfigFormat) -> anyhow::Result<()> {
+    let (store, _) = resolve_config_store()?;
+    let config = store
+        .get()
+        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    match format {
+        ConfigFormat::Toml => {
+            let rendered = toml::to_string_pretty(&config)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
+            println!("{}", rendered);
+        }
+        ConfigFormat::Json => {
+            let rendered = serde_json::to_string_pretty(&config)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
+            println!("{}", rendered);
+        }
+    }
+    Ok(())
+}
+
+fn handle_config_set(
+    file: Option<PathBuf>,
+    json: Option<String>,
+    toml_payload: Option<String>,
+) -> anyhow::Result<()> {
+    let config = if let Some(path) = file {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to read config file: {e}"))?;
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some("json") => serde_json::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?,
+            _ => toml::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?,
+        }
+    } else if let Some(payload) = json {
+        serde_json::from_str(&payload)
+            .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?
+    } else if let Some(payload) = toml_payload {
+        toml::from_str(&payload).map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?
+    } else {
+        return Err(anyhow::anyhow!(
+            "Provide --file, --json, or --toml to set config"
+        ));
+    };
+
+    let (store, _) = resolve_config_store()?;
+    store
+        .set(config)
+        .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
+    Ok(())
+}
+
+fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> anyhow::Result<()> {
+    let patch_value: serde_json::Value = if let Some(path) = file {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to read patch file: {e}"))?;
+        serde_json::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse JSON patch: {e}"))?
+    } else if let Some(payload) = json {
+        serde_json::from_str(&payload)
+            .map_err(|e| anyhow::anyhow!("Failed to parse JSON patch: {e}"))?
+    } else {
+        return Err(anyhow::anyhow!("Provide --file or --json to patch config"));
+    };
+
+    let (store, _) = resolve_config_store()?;
+    store
+        .patch(ConfigDelta(patch_value))
+        .map_err(|e| anyhow::anyhow!("Failed to patch config: {e}"))?;
+    Ok(())
+}
+
+fn build_comms_config(config: &Config, overrides: &CommsOverrides) -> Option<CoreCommsConfig> {
+    if overrides.disabled {
+        return None;
+    }
+
+    let mut comms = CoreCommsConfig::default();
+    if let Some(name) = &overrides.name {
+        comms.name = name.clone();
+    }
+
+    let mut enabled = false;
+
+    match config.comms.mode {
+        CommsRuntimeMode::Inproc => {}
+        CommsRuntimeMode::Tcp => {
+            enabled = true;
+            if let Some(addr) = overrides.listen_tcp {
+                comms.listen_tcp = Some(addr);
+            } else if let Some(addr) = &config.comms.address {
+                if let Ok(parsed) = addr.parse() {
+                    comms.listen_tcp = Some(parsed);
+                }
+            }
+        }
+        CommsRuntimeMode::Uds => {
+            enabled = true;
+            if let Some(addr) = &config.comms.address {
+                comms.listen_uds = Some(PathBuf::from(addr));
+            }
+        }
+    }
+
+    if let Some(addr) = overrides.listen_tcp {
+        comms.listen_tcp = Some(addr);
+        enabled = true;
+    }
+
+    if overrides.name.is_some() {
+        enabled = true;
+    }
+
+    comms.enabled = enabled;
+
+    if comms.enabled { Some(comms) } else { None }
 }
 
 /// Get the default session store directory
@@ -618,69 +777,26 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
     Ok(Some(adapter))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_agent(
-    prompt: &str,
-    model: &str,
-    provider: Provider,
-    max_tokens: u32,
-    limits: BudgetLimits,
-    output: &str,
-    stream: bool,
-    provider_params: Option<serde_json::Value>,
-    comms_overrides: config::CommsOverrides,
+struct ToolingSetup {
+    tools: Arc<CliToolDispatcher>,
+    tool_usage_instructions: String,
+    comms_runtime: Option<meerkat_core::CommsRuntime>,
+    comms_config: Option<CoreCommsConfig>,
+    comms_base_dir: PathBuf,
+}
+
+async fn build_tooling(
+    base_factory: &AgentFactory,
+    config: &Config,
+    config_base_dir: PathBuf,
+    comms_overrides: &CommsOverrides,
     enable_builtins: bool,
     enable_shell: bool,
     enable_subagents: bool,
-    verbose: bool,
-    host_mode: bool,
-) -> anyhow::Result<()> {
-    use meerkat_core::event::AgentEvent;
-    use std::io::Write;
-    use tokio::sync::mpsc;
-
-    let config = meerkat_core::Config::load()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
-
-    // Get API key from environment
-    let env_var = provider.api_key_env_var();
-    let api_key = std::env::var(env_var).map_err(|_| {
-        anyhow::anyhow!(
-            "{} environment variable not set.\n\
-             Please set it with: export {}=your-api-key",
-            env_var,
-            env_var
-        )
-    })?;
-
-    let base_factory = AgentFactory::new(get_session_store_dir());
-    let base_url = config
-        .providers
-        .base_urls
-        .as_ref()
-        .and_then(|map| map.get(provider.as_str()))
-        .cloned();
-
-    // Create the LLM client based on provider
-    let llm_client = base_factory
-        .build_llm_client(provider.as_core(), Some(api_key), base_url)
-        .map_err(|e| anyhow::anyhow!("Failed to create LLM client: {}", e))?;
-
-    // Create LLM adapter - with event channel if streaming is enabled
-    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
-    let llm_adapter = base_factory
-        .build_llm_adapter_with_events(
-            llm_client,
-            model.to_string(),
-            if stream { Some(event_tx) } else { None },
-        )
-        .with_provider_params(provider_params);
-    let llm_adapter = Arc::new(llm_adapter);
-
-    tracing::info!("Using provider: {:?}, model: {}", provider, model);
-
+) -> anyhow::Result<ToolingSetup> {
     // Load comms configuration early (needed for CommsToolDispatcher)
-    let (mut comms_config, comms_base_dir) = config::load_comms_config(&comms_overrides);
+    let comms_base_dir = config_base_dir;
+    let mut comms_config = build_comms_config(config, comms_overrides);
 
     // Create CommsRuntime early if enabled (so we can share router/trusted_peers with tools)
     let mut comms_runtime = if let Some(ref config) = comms_config {
@@ -805,8 +921,8 @@ async fn run_agent(
             enforced: Default::default(),
         };
 
-        let project_root =
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let project_root = find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
 
         // Create shell config if shell is enabled
         let shell_config = if enable_shell {
@@ -825,8 +941,14 @@ async fn run_agent(
             None
         };
 
-        // Create in-memory task store
-        let task_store = MemoryTaskStore::new();
+        // Use file-backed task store when builtins are enabled; otherwise fall back to memory.
+        let task_store: Arc<dyn TaskStore> = if enable_builtins {
+            ensure_rkat_dir(&project_root)
+                .map_err(|e| anyhow::anyhow!("Failed to create .rkat directory: {}", e))?;
+            Arc::new(FileTaskStore::in_project(&project_root))
+        } else {
+            Arc::new(MemoryTaskStore::new())
+        };
 
         // Clone shell_config for sub-agents before it's moved
         let shell_config_for_subagents = shell_config.clone();
@@ -841,7 +963,7 @@ async fn run_agent(
 
         let mut composite = factory
             .build_composite_dispatcher(
-                Arc::new(task_store),
+                task_store,
                 &builtin_config,
                 shell_config,
                 mcp_adapter.clone(),
@@ -1024,6 +1146,86 @@ async fn run_agent(
         (tools, tool_usage_instructions, None)
     };
 
+    Ok(ToolingSetup {
+        tools,
+        tool_usage_instructions,
+        comms_runtime,
+        comms_config,
+        comms_base_dir,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agent(
+    prompt: &str,
+    model: &str,
+    provider: Provider,
+    max_tokens: u32,
+    limits: BudgetLimits,
+    output: &str,
+    stream: bool,
+    provider_params: Option<serde_json::Value>,
+    comms_overrides: CommsOverrides,
+    enable_builtins: bool,
+    enable_shell: bool,
+    enable_subagents: bool,
+    verbose: bool,
+    host_mode: bool,
+    config: &Config,
+    config_base_dir: PathBuf,
+) -> anyhow::Result<()> {
+    use meerkat_core::event::AgentEvent;
+    use tokio::sync::mpsc;
+
+    let api_key = resolve_api_key(provider)?;
+
+    let base_factory = AgentFactory::new(get_session_store_dir());
+    let base_url = config
+        .providers
+        .base_urls
+        .as_ref()
+        .and_then(|map| map.get(provider.as_str()))
+        .cloned();
+
+    // Create event channel if streaming or verbose output is enabled
+    let (event_tx, event_task) = if stream || verbose {
+        let (tx, rx) = mpsc::channel::<AgentEvent>(100);
+        let task = spawn_event_handler(rx, verbose, stream);
+        (Some(tx), Some(task))
+    } else {
+        (None, None)
+    };
+
+    // Create the LLM client based on provider
+    let llm_client = base_factory
+        .build_llm_client(provider.as_core(), Some(api_key), base_url)
+        .map_err(|e| anyhow::anyhow!("Failed to create LLM client: {}", e))?;
+
+    // Create LLM adapter - with event channel if streaming/verbose is enabled
+    let llm_adapter = base_factory
+        .build_llm_adapter_with_events(llm_client, model.to_string(), event_tx.clone())
+        .with_provider_params(provider_params);
+    let llm_adapter = Arc::new(llm_adapter);
+
+    tracing::info!("Using provider: {:?}, model: {}", provider, model);
+    let tooling = build_tooling(
+        &base_factory,
+        config,
+        config_base_dir.clone(),
+        &comms_overrides,
+        enable_builtins,
+        enable_shell,
+        enable_subagents,
+    )
+    .await?;
+    let ToolingSetup {
+        tools,
+        tool_usage_instructions,
+        comms_runtime,
+        comms_config,
+        comms_base_dir,
+    } = tooling;
+
     // Create persistent session store
     let store = create_session_store();
     let store_adapter = Arc::new(base_factory.build_store_adapter(store));
@@ -1043,6 +1245,9 @@ async fn run_agent(
         .system_prompt(system_prompt)
         .budget(limits);
 
+    let comms_enabled = comms_runtime.is_some();
+    let comms_name = comms_config.as_ref().map(|config| config.name.clone());
+
     // Add pre-created comms runtime if present
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(runtime);
@@ -1050,13 +1255,24 @@ async fn run_agent(
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter);
 
-    // Store provider and model in session metadata for resume
+    let metadata = SessionMetadata {
+        model: model.to_string(),
+        max_tokens,
+        provider: provider.as_core(),
+        tooling: SessionTooling {
+            builtins: enable_builtins,
+            shell: enable_shell,
+            comms: comms_enabled,
+            subagents: enable_subagents,
+        },
+        host_mode,
+        comms_name,
+    };
+
     agent
         .session_mut()
-        .set_metadata("provider", serde_json::json!(provider.as_str()));
-    agent
-        .session_mut()
-        .set_metadata("model", serde_json::json!(model));
+        .set_session_metadata(metadata)
+        .map_err(|e| anyhow::anyhow!("Failed to store session metadata: {e}"))?;
 
     // Display comms status if enabled
     if let Some(comms_runtime) = agent.comms() {
@@ -1087,61 +1303,32 @@ async fn run_agent(
     // Run the agent
     tracing::info!("Running agent with model: {}", model);
 
-    // Spawn streaming output task if enabled (for LLM text deltas)
-    let stream_task = if stream {
-        Some(tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                if let AgentEvent::TextDelta { delta } = event {
-                    print!("{}", delta);
-                    let _ = std::io::stdout().flush();
-                }
-            }
-        }))
-    } else {
-        // Drop the receiver to avoid blocking the sender
-        drop(event_rx);
-        None
-    };
-
     // Run the agent based on mode
-    let result = match (host_mode, verbose) {
-        (true, true) => {
-            // Host mode + verbose: run with events and stay alive for comms
-            eprintln!("Running in host mode with verbose output (Ctrl+C to exit)...");
-            let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(100);
-            let verbose_task = spawn_verbose_event_handler(agent_event_rx);
-            let result = agent
-                .run_host_mode_with_events(prompt.to_string(), agent_event_tx)
-                .await?;
-            let _ = verbose_task.await;
-            result
-        }
-        (true, false) => {
-            // Host mode only: run initial prompt then stay alive for comms messages
-            eprintln!("Running in host mode (Ctrl+C to exit)...");
+    let result = if host_mode {
+        eprintln!(
+            "Running in host mode{} (Ctrl+C to exit)...",
+            if verbose { " with verbose output" } else { "" }
+        );
+        if let Some(tx) = event_tx.clone() {
+            agent
+                .run_host_mode_with_events(prompt.to_string(), tx)
+                .await?
+        } else {
             agent.run_host_mode(prompt.to_string()).await?
         }
-        (false, true) => {
-            // Verbose mode only: run with event streaming
-            let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(100);
-            let verbose_task = spawn_verbose_event_handler(agent_event_rx);
-            let result = agent
-                .run_with_events(prompt.to_string(), agent_event_tx)
-                .await?;
-            let _ = verbose_task.await;
-            result
-        }
-        (false, false) => {
-            // Normal mode: single run
-            agent.run(prompt.to_string()).await?
-        }
+    } else if let Some(tx) = event_tx.clone() {
+        agent.run_with_events(prompt.to_string(), tx).await?
+    } else {
+        agent.run(prompt.to_string()).await?
     };
 
     // Wait for streaming task to complete (it will end when sender is dropped)
-    if let Some(task) = stream_task {
+    if let Some(task) = event_task {
         let _ = task.await;
         // Add newline after streaming output
-        println!();
+        if stream {
+            println!();
+        }
     }
 
     // Shutdown MCP connections gracefully
@@ -1180,6 +1367,27 @@ async fn run_agent(
     Ok(())
 }
 
+fn resolve_api_key(provider: Provider) -> anyhow::Result<String> {
+    let key = meerkat_client::ProviderResolver::api_key_for(provider.as_core());
+    if let Some(key) = key {
+        return Ok(key);
+    }
+
+    const ANTHROPIC_ENV: &[&str] = &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"];
+    const OPENAI_ENV: &[&str] = &["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"];
+    const GEMINI_ENV: &[&str] = &["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"];
+    let candidates = match provider {
+        Provider::Anthropic => ANTHROPIC_ENV,
+        Provider::Openai => OPENAI_ENV,
+        Provider::Gemini => GEMINI_ENV,
+    };
+
+    Err(anyhow::anyhow!(
+        "Missing API key environment variable. Set one of: {}",
+        candidates.join(", ")
+    ))
+}
+
 async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     // Parse session ID
     let session_id = SessionId::parse(session_id)
@@ -1193,20 +1401,43 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
 
-    // Restore provider and model from session metadata, with defaults
-    let provider = session
-        .metadata()
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .and_then(Provider::parse)
-        .unwrap_or_default();
+    let (config, config_base_dir) = load_config()?;
+    let stored_metadata = session.session_metadata();
+    let tooling = stored_metadata
+        .as_ref()
+        .map(|meta| meta.tooling.clone())
+        .unwrap_or(SessionTooling {
+            builtins: config.tools.builtins_enabled,
+            shell: config.tools.shell_enabled,
+            comms: config.tools.comms_enabled,
+            subagents: config.tools.subagents_enabled,
+        });
+    let host_mode = stored_metadata
+        .as_ref()
+        .map(|meta| meta.host_mode)
+        .unwrap_or(false);
+    let comms_name = stored_metadata
+        .as_ref()
+        .and_then(|meta| meta.comms_name.clone());
 
-    let model = session
-        .metadata()
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+    let model = stored_metadata
+        .as_ref()
+        .map(|meta| meta.model.clone())
+        .unwrap_or_else(|| config.agent.model.clone());
+    let max_tokens = stored_metadata
+        .as_ref()
+        .map(|meta| meta.max_tokens)
+        .unwrap_or(config.agent.max_tokens_per_turn);
+
+    let provider_core = stored_metadata
+        .as_ref()
+        .map(|meta| meta.provider)
+        .unwrap_or_else(|| {
+            Provider::infer_from_model(&model)
+                .unwrap_or_default()
+                .as_core()
+        });
+    let provider = Provider::from_core(provider_core).unwrap_or_default();
 
     tracing::info!(
         "Resuming session {} with {} messages (provider: {:?}, model: {})",
@@ -1216,53 +1447,93 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         model
     );
 
-    // Get API key from environment based on restored provider
-    let env_var = provider.api_key_env_var();
-    let api_key = std::env::var(env_var).map_err(|_| {
-        anyhow::anyhow!(
-            "{} environment variable not set.\n\
-             Please set it with: export {}=your-api-key",
-            env_var,
-            env_var
-        )
-    })?;
+    let api_key = resolve_api_key(provider)?;
 
     let base_factory = AgentFactory::new(get_session_store_dir());
 
+    let base_url = config
+        .providers
+        .base_urls
+        .as_ref()
+        .and_then(|map| map.get(provider.as_str()))
+        .cloned();
+
     // Create the LLM client based on restored provider
     let llm_client = base_factory
-        .build_llm_client(provider.as_core(), Some(api_key), None)
+        .build_llm_client(provider.as_core(), Some(api_key), base_url)
         .map_err(|e| anyhow::anyhow!("Failed to create LLM client: {}", e))?;
     let llm_adapter = Arc::new(base_factory.build_llm_adapter(llm_client, model.clone()));
 
-    // Load MCP config and create tool dispatcher
-    let tools: Arc<CliToolDispatcher> = match create_mcp_tools().await {
-        Ok(Some(adapter)) => Arc::new(CliToolDispatcher::Mcp(Box::new(adapter))),
-        Ok(None) => Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher)),
-        Err(e) => {
-            tracing::warn!("Failed to load MCP tools: {}", e);
-            Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher))
-        }
+    let comms_requested = tooling.comms || host_mode;
+    let comms_overrides = CommsOverrides {
+        name: comms_name.clone(),
+        listen_tcp: None,
+        disabled: !comms_requested,
     };
+
+    let tooling_setup = build_tooling(
+        &base_factory,
+        &config,
+        config_base_dir,
+        &comms_overrides,
+        tooling.builtins,
+        tooling.shell,
+        tooling.subagents,
+    )
+    .await?;
+    let ToolingSetup {
+        tools,
+        tool_usage_instructions,
+        comms_runtime,
+        comms_config: _,
+        comms_base_dir: _,
+    } = tooling_setup;
 
     // Create session store adapter
     let store_adapter = Arc::new(base_factory.build_store_adapter(store));
 
-    // Compose system prompt (with AGENTS.md if present)
-    let system_prompt = SystemPromptConfig::new().compose();
+    // Compose system prompt (with AGENTS.md and tool usage instructions)
+    let mut system_prompt = SystemPromptConfig::new().compose();
+    if !tool_usage_instructions.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&tool_usage_instructions);
+    }
 
-    // Build the agent with the existing session and unlimited budget for resume
+    // Build the agent with the existing session and config-derived budget limits
     let tools_for_shutdown = tools.clone();
-    let mut agent = AgentBuilder::new()
+    let limits = config.budget_limits();
+    let mut builder = AgentBuilder::new()
         .model(&model)
-        .max_tokens_per_turn(4096)
+        .max_tokens_per_turn(max_tokens)
         .system_prompt(system_prompt)
-        .budget(BudgetLimits::unlimited())
-        .resume_session(session)
-        .build(llm_adapter, tools, store_adapter);
+        .budget(limits)
+        .resume_session(session);
+
+    if let Some(runtime) = comms_runtime {
+        builder = builder.with_comms_runtime(runtime);
+    }
+
+    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+
+    let metadata = SessionMetadata {
+        model: model.clone(),
+        max_tokens,
+        provider: provider.as_core(),
+        tooling,
+        host_mode,
+        comms_name,
+    };
+    agent
+        .session_mut()
+        .set_session_metadata(metadata)
+        .map_err(|e| anyhow::anyhow!("Failed to store session metadata: {e}"))?;
 
     // Run the agent with the new prompt
-    let result = agent.run(prompt.to_string()).await?;
+    let result = if host_mode {
+        agent.run_host_mode(prompt.to_string()).await?
+    } else {
+        agent.run(prompt.to_string()).await?
+    };
 
     // Shutdown MCP connections gracefully
     tools_for_shutdown.shutdown().await;
@@ -1504,15 +1775,6 @@ impl Provider {
         None
     }
 
-    /// Get the environment variable name for the API key
-    pub fn api_key_env_var(&self) -> &'static str {
-        match self {
-            Provider::Anthropic => "ANTHROPIC_API_KEY",
-            Provider::Openai => "OPENAI_API_KEY",
-            Provider::Gemini => "GEMINI_API_KEY",
-        }
-    }
-
     /// Convert to string for storage in session metadata
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -1528,6 +1790,16 @@ impl Provider {
             Provider::Anthropic => meerkat_core::Provider::Anthropic,
             Provider::Openai => meerkat_core::Provider::OpenAI,
             Provider::Gemini => meerkat_core::Provider::Gemini,
+        }
+    }
+
+    /// Convert from the core Provider enum.
+    pub fn from_core(provider: meerkat_core::Provider) -> Option<Self> {
+        match provider {
+            meerkat_core::Provider::Anthropic => Some(Provider::Anthropic),
+            meerkat_core::Provider::OpenAI => Some(Provider::Openai),
+            meerkat_core::Provider::Gemini => Some(Provider::Gemini),
+            meerkat_core::Provider::Other => None,
         }
     }
 
@@ -1698,13 +1970,6 @@ mod tests {
         assert_eq!(Provider::infer_from_model("mistral-7b"), None);
         assert_eq!(Provider::infer_from_model("custom-model"), None);
         assert_eq!(Provider::infer_from_model(""), None);
-    }
-
-    #[test]
-    fn test_api_key_env_var() {
-        assert_eq!(Provider::Anthropic.api_key_env_var(), "ANTHROPIC_API_KEY");
-        assert_eq!(Provider::Openai.api_key_env_var(), "OPENAI_API_KEY");
-        assert_eq!(Provider::Gemini.api_key_env_var(), "GEMINI_API_KEY");
     }
 
     #[test]

@@ -25,7 +25,8 @@
 //!     find_project_root, ensure_rkat_dir,
 //! };
 //!
-//! let project_root = find_project_root(&std::env::current_dir().unwrap());
+//! let project_root = find_project_root(&std::env::current_dir().unwrap())
+//!     .expect("no .rkat directory found");
 //! ensure_rkat_dir(&project_root).unwrap();
 //! let store = Arc::new(FileTaskStore::in_project(&project_root));
 //! let dispatcher = CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None)?;
@@ -206,6 +207,7 @@ mod tests {
     // Test that BuiltinToolEntry works correctly
     mod entry_tests {
         use super::*;
+        use crate::schema::empty_object_schema;
         use serde_json::json;
 
         struct MockTool {
@@ -222,10 +224,7 @@ mod tests {
                 ToolDef {
                     name: "mock_tool".to_string(),
                     description: "A mock tool for testing".to_string(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {}
-                    }),
+                    input_schema: empty_object_schema(),
                 }
             }
 

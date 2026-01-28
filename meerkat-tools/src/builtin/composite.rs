@@ -15,8 +15,8 @@ use super::tools::{
 };
 use super::utility::{UtilityToolSet, WaitInterrupt};
 use super::{BuiltinTool, BuiltinToolError};
+use crate::ToolError;
 use async_trait::async_trait;
-use meerkat_core::error::ToolError;
 use meerkat_core::{AgentToolDispatcher, ToolDef};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -574,6 +574,7 @@ mod tests {
 
     mod with_external {
         use super::*;
+        use crate::schema::empty_object_schema;
         use serde_json::json;
 
         struct MockExternalDispatcher {
@@ -586,7 +587,7 @@ mod tests {
                     tools: vec![ToolDef {
                         name: "external_tool".to_string(),
                         description: "An external tool".to_string(),
-                        input_schema: json!({"type": "object", "properties": {}}),
+                        input_schema: empty_object_schema(),
                     }],
                 }
             }
@@ -650,7 +651,7 @@ mod tests {
                     vec![ToolDef {
                         name: "task_list".to_string(),
                         description: "External".to_string(),
-                        input_schema: json!({"type": "object"}),
+                        input_schema: empty_object_schema(),
                     }]
                 }
                 async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -685,7 +686,7 @@ mod tests {
                     vec![ToolDef {
                         name: "task_list".to_string(),
                         description: "External".to_string(),
-                        input_schema: json!({"type": "object"}),
+                        input_schema: empty_object_schema(),
                     }]
                 }
                 async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -940,6 +941,7 @@ mod tests {
     mod sub_agent_tools_tests {
         use super::*;
         use crate::builtin::sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState};
+        use crate::schema::empty_object_schema;
         use meerkat_client::{FactoryError, LlmClient, LlmClientFactory, LlmProvider};
         use meerkat_core::AgentSessionStore;
         use meerkat_core::error::AgentError;
@@ -1140,7 +1142,7 @@ mod tests {
                     vec![ToolDef {
                         name: "agent_spawn".to_string(),
                         description: "Conflicting tool".to_string(),
-                        input_schema: json!({"type": "object"}),
+                        input_schema: empty_object_schema(),
                     }]
                 }
                 async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {

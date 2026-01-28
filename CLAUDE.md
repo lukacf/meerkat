@@ -11,7 +11,7 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 - CLI binary: **rkat**
 - Crate names: `meerkat`, `meerkat-core`, `meerkat-client`, etc.
 - Config directory: `.rkat/`
-- Environment variables: `RKAT_MODEL`, `RKAT_MAX_TOKENS`, etc.
+- Environment variables: API keys only (RKAT_* secrets and provider-native keys)
 
 ## Build and Test Commands
 

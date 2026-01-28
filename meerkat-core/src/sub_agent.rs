@@ -15,6 +15,9 @@ use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use uuid::Uuid;
 
+const MAX_STEERING_QUEUE: usize = 256;
+const MAX_COMPLETED_AGENTS: usize = 256;
+
 /// Notification sent when a sub-agent completes
 #[derive(Debug, Clone)]
 pub struct SubAgentCompletion {
@@ -97,6 +100,9 @@ impl SubAgentHandle {
             sent_at: std::time::SystemTime::now(),
         };
 
+        if self.steering_queue.len() >= MAX_STEERING_QUEUE {
+            self.steering_queue.pop_front();
+        }
         self.steering_queue.push_back(msg);
 
         SteeringHandle {
@@ -117,6 +123,8 @@ pub struct SubAgentManager {
     current_depth: u32,
     /// Completed results waiting to be collected
     completed_results: Mutex<Vec<OperationResult>>,
+    /// Recently completed sub-agents (bounded to avoid unbounded growth)
+    completed_agents: Mutex<VecDeque<SubAgentInfo>>,
     /// Notification sender for sub-agent completions
     completion_tx: watch::Sender<Option<SubAgentCompletion>>,
     /// Notification receiver (clone this for listeners)
@@ -132,6 +140,7 @@ impl SubAgentManager {
             limits,
             current_depth,
             completed_results: Mutex::new(Vec::new()),
+            completed_agents: Mutex::new(VecDeque::new()),
             completion_tx,
             completion_rx,
         }
@@ -372,15 +381,20 @@ impl SubAgentManager {
     /// Mark a sub-agent as completed
     pub async fn complete(&self, id: &OperationId, result: OperationResult) {
         let agent_name;
-        {
+        let mut handle = {
             let mut agents = self.agents.write().await;
-            if let Some(handle) = agents.get_mut(id) {
-                handle.state = SubAgentState::Completed;
-                handle.result = Some(result.clone());
-                agent_name = handle.name.clone();
-            } else {
-                agent_name = "unknown".to_string();
-            }
+            agents.remove(id)
+        };
+        if let Some(ref mut handle) = handle {
+            handle.state = SubAgentState::Completed;
+            handle.result = Some(result.clone());
+            agent_name = handle.name.clone();
+        } else {
+            agent_name = "unknown".to_string();
+        }
+        if let Some(handle) = handle {
+            self.record_completed(handle, Some(result.duration_ms))
+                .await;
         }
 
         // Add to completed results for collection
@@ -406,21 +420,28 @@ impl SubAgentManager {
     /// Mark a sub-agent as failed
     pub async fn fail(&self, id: &OperationId, error: String) {
         let agent_name;
-        {
+        let mut handle = {
             let mut agents = self.agents.write().await;
-            if let Some(handle) = agents.get_mut(id) {
-                handle.state = SubAgentState::Failed;
-                handle.result = Some(OperationResult {
-                    id: id.clone(),
-                    content: error.clone(),
-                    is_error: true,
-                    duration_ms: handle.started_at.elapsed().as_millis() as u64,
-                    tokens_used: 0,
-                });
-                agent_name = handle.name.clone();
-            } else {
-                agent_name = "unknown".to_string();
-            }
+            agents.remove(id)
+        };
+        let duration_ms = handle
+            .as_ref()
+            .map(|h| h.started_at.elapsed().as_millis() as u64);
+        if let Some(ref mut handle) = handle {
+            handle.state = SubAgentState::Failed;
+            handle.result = Some(OperationResult {
+                id: id.clone(),
+                content: error.clone(),
+                is_error: true,
+                duration_ms: duration_ms.unwrap_or_default(),
+                tokens_used: 0,
+            });
+            agent_name = handle.name.clone();
+        } else {
+            agent_name = "unknown".to_string();
+        }
+        if let Some(handle) = handle {
+            self.record_completed(handle, duration_ms).await;
         }
 
         // Notify listeners
@@ -434,9 +455,18 @@ impl SubAgentManager {
 
     /// Cancel a sub-agent
     pub async fn cancel(&self, id: &OperationId) {
-        let mut agents = self.agents.write().await;
-        if let Some(handle) = agents.get_mut(id) {
+        let mut handle = {
+            let mut agents = self.agents.write().await;
+            agents.remove(id)
+        };
+        let duration_ms = handle
+            .as_ref()
+            .map(|h| h.started_at.elapsed().as_millis() as u64);
+        if let Some(ref mut handle) = handle {
             handle.state = SubAgentState::Cancelled;
+        }
+        if let Some(handle) = handle {
+            self.record_completed(handle, duration_ms).await;
         }
     }
 
@@ -448,41 +478,65 @@ impl SubAgentManager {
 
     /// Get the state of a sub-agent
     pub async fn get_state(&self, id: &OperationId) -> Option<SubAgentState> {
-        let agents = self.agents.read().await;
-        agents.get(id).map(|h| h.state.clone())
+        let state = {
+            let agents = self.agents.read().await;
+            agents.get(id).map(|h| h.state.clone())
+        };
+        if state.is_some() {
+            return state;
+        }
+        let completed = self.completed_agents.lock().await;
+        completed
+            .iter()
+            .find(|info| &info.id == id)
+            .map(|info| info.state.clone())
     }
 
     /// Get detailed information about a sub-agent (for status queries)
     pub async fn get_agent_info(&self, id: &OperationId) -> Option<SubAgentInfo> {
-        let agents = self.agents.read().await;
-        agents.get(id).map(|h| SubAgentInfo {
-            id: h.id.clone(),
-            name: h.name.clone(),
-            state: h.state.clone(),
-            depth: h.depth,
-            running_ms: h.started_at.elapsed().as_millis() as u64,
-            pending_steering: h.steering_queue.len(),
-            result: h.result.clone(),
-            comms: h.comms.clone(),
-        })
+        let info = {
+            let agents = self.agents.read().await;
+            agents.get(id).map(|handle| SubAgentInfo {
+                id: handle.id.clone(),
+                name: handle.name.clone(),
+                state: handle.state.clone(),
+                depth: handle.depth,
+                running_ms: handle.started_at.elapsed().as_millis() as u64,
+                pending_steering: handle.steering_queue.len(),
+                result: handle.result.clone(),
+                comms: handle.comms.clone(),
+            })
+        };
+        if info.is_some() {
+            return info;
+        }
+
+        let completed = self.completed_agents.lock().await;
+        completed.iter().find(|info| &info.id == id).cloned()
     }
 
     /// Get all agent infos (for list queries)
     pub async fn list_agents(&self) -> Vec<SubAgentInfo> {
-        let agents = self.agents.read().await;
-        agents
-            .values()
-            .map(|h| SubAgentInfo {
-                id: h.id.clone(),
-                name: h.name.clone(),
-                state: h.state.clone(),
-                depth: h.depth,
-                running_ms: h.started_at.elapsed().as_millis() as u64,
-                pending_steering: h.steering_queue.len(),
-                result: h.result.clone(),
-                comms: h.comms.clone(),
-            })
-            .collect()
+        let mut infos: Vec<SubAgentInfo> = {
+            let agents = self.agents.read().await;
+            agents
+                .values()
+                .map(|h| SubAgentInfo {
+                    id: h.id.clone(),
+                    name: h.name.clone(),
+                    state: h.state.clone(),
+                    depth: h.depth,
+                    running_ms: h.started_at.elapsed().as_millis() as u64,
+                    pending_steering: h.steering_queue.len(),
+                    result: h.result.clone(),
+                    comms: h.comms.clone(),
+                })
+                .collect()
+        };
+
+        let completed = self.completed_agents.lock().await;
+        infos.extend(completed.iter().cloned());
+        infos
     }
 
     /// Get all running sub-agent IDs
@@ -499,6 +553,27 @@ impl SubAgentManager {
     pub async fn has_running(&self) -> bool {
         let agents = self.agents.read().await;
         agents.values().any(|h| h.state == SubAgentState::Running)
+    }
+
+    async fn record_completed(&self, handle: SubAgentHandle, duration_override: Option<u64>) {
+        let running_ms =
+            duration_override.unwrap_or_else(|| handle.started_at.elapsed().as_millis() as u64);
+        let info = SubAgentInfo {
+            id: handle.id,
+            name: handle.name,
+            state: handle.state,
+            depth: handle.depth,
+            running_ms,
+            pending_steering: handle.steering_queue.len(),
+            result: handle.result,
+            comms: handle.comms,
+        };
+
+        let mut completed = self.completed_agents.lock().await;
+        if completed.len() >= MAX_COMPLETED_AGENTS {
+            completed.pop_front();
+        }
+        completed.push_back(info);
     }
 
     /// Wait for all sub-agents to complete
@@ -567,12 +642,12 @@ mod tests {
             ToolDef {
                 name: "tool1".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
             ToolDef {
                 name: "tool2".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
         ];
 
@@ -587,12 +662,12 @@ mod tests {
             ToolDef {
                 name: "tool1".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
             ToolDef {
                 name: "tool2".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
         ];
 
@@ -611,12 +686,12 @@ mod tests {
             ToolDef {
                 name: "tool1".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
             ToolDef {
                 name: "tool2".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
         ];
 

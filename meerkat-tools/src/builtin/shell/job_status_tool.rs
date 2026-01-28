@@ -3,6 +3,7 @@
 //! This module provides the [`ShellJobStatusTool`] which checks the status
 //! of a background shell job.
 
+use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use serde::Deserialize;
@@ -47,16 +48,16 @@ impl BuiltinTool for ShellJobStatusTool {
         ToolDef {
             name: "shell_job_status".to_string(),
             description: "Check status of a background shell job".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "job_id": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "job_id",
+                    json!({
                         "type": "string",
                         "description": "The job ID to check"
-                    }
-                },
-                "required": ["job_id"]
-            }),
+                    }),
+                )
+                .required("job_id")
+                .build(),
         }
     }
 
@@ -72,11 +73,7 @@ impl BuiltinTool for ShellJobStatusTool {
 
         let job = self.job_manager.get_status(&job_id).await.ok_or_else(|| {
             BuiltinToolError::execution_failed(
-                ShellError::JobNotFound {
-                    job_id: input.job_id.clone(),
-                    operation: "get_status",
-                }
-                .to_string(),
+                ShellError::JobNotFound(input.job_id.clone()).to_string(),
             )
         })?;
 

@@ -3,8 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::comms_dispatcher::DynCommsToolDispatcher;
 use meerkat_comms::{Router, TrustedPeers};
-use meerkat_comms_agent::DynCommsToolDispatcher;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_mcp_client::McpRouter;
 use tokio::sync::RwLock;

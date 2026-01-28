@@ -1,45 +1,22 @@
 //! Project root detection utilities
 //!
 //! This module provides functions to detect the project root directory
-//! for Meerkat agents, following a precedence-based search strategy.
+//! for Meerkat agents, following a `.rkat`-only search strategy.
 
-use std::env;
 use std::path::{Path, PathBuf};
 
 /// Find the project root directory.
 ///
 /// Search order:
-/// 1. `RKAT_PROJECT_ROOT` environment variable
-/// 2. Walk up from `start_dir` looking for `.rkat/`
-/// 3. Walk up from `start_dir` looking for `.git/`
-/// 4. Fall back to `start_dir`
+/// 1. Walk up from `start_dir` looking for `.rkat/`
 ///
 /// # Arguments
 /// * `start_dir` - The directory to start searching from (typically current working directory)
 ///
 /// # Returns
-/// The detected project root directory
-pub fn find_project_root(start_dir: &Path) -> PathBuf {
-    // Check env var first
-    if let Ok(root) = env::var("RKAT_PROJECT_ROOT") {
-        let path = PathBuf::from(root);
-        if path.is_dir() {
-            return path;
-        }
-    }
-
-    // Walk up looking for .rkat/
-    if let Some(root) = find_ancestor_with(start_dir, ".rkat") {
-        return root;
-    }
-
-    // Walk up looking for .git/
-    if let Some(root) = find_ancestor_with(start_dir, ".git") {
-        return root;
-    }
-
-    // Fall back to start_dir
-    start_dir.to_path_buf()
+/// The detected project root directory, or None if no `.rkat` ancestor exists.
+pub fn find_project_root(start_dir: &Path) -> Option<PathBuf> {
+    find_ancestor_with(start_dir, ".rkat")
 }
 
 /// Find an ancestor directory containing the specified marker directory.
@@ -81,29 +58,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_find_project_root_with_env_var() {
-        let temp_dir = TempDir::new().unwrap();
-        let env_root = temp_dir.path().join("env_project");
-        fs::create_dir_all(&env_root).unwrap();
-
-        // Set env var to point to a valid directory
-        unsafe {
-            env::set_var("RKAT_PROJECT_ROOT", &env_root);
-        }
-
-        let start_dir = temp_dir.path().join("some/nested/dir");
-        fs::create_dir_all(&start_dir).unwrap();
-
-        let result = find_project_root(&start_dir);
-        assert_eq!(result, env_root);
-
-        // Clean up env var
-        unsafe {
-            env::remove_var("RKAT_PROJECT_ROOT");
-        }
-    }
-
-    #[test]
     fn test_find_project_root_with_rkat_dir() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -115,51 +69,20 @@ mod tests {
         fs::create_dir_all(&rkat_dir).unwrap();
         fs::create_dir_all(&nested_dir).unwrap();
 
-        // Ensure no env var interference
-        unsafe {
-            env::remove_var("RKAT_PROJECT_ROOT");
-        }
-
         let result = find_project_root(&nested_dir);
-        assert_eq!(result, project_root);
+        assert_eq!(result, Some(project_root));
     }
 
     #[test]
-    fn test_find_project_root_with_git_dir() {
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create a project structure with .git/ but no .rkat/
-        let project_root = temp_dir.path().join("git_project");
-        let git_dir = project_root.join(".git");
-        let nested_dir = project_root.join("src/module");
-
-        fs::create_dir_all(&git_dir).unwrap();
-        fs::create_dir_all(&nested_dir).unwrap();
-
-        // Ensure no env var interference
-        unsafe {
-            env::remove_var("RKAT_PROJECT_ROOT");
-        }
-
-        let result = find_project_root(&nested_dir);
-        assert_eq!(result, project_root);
-    }
-
-    #[test]
-    fn test_find_project_root_fallback_to_start() {
+    fn test_find_project_root_without_rkat_returns_none() {
         let temp_dir = TempDir::new().unwrap();
 
         // Create a directory with no markers
         let orphan_dir = temp_dir.path().join("orphan/nested");
         fs::create_dir_all(&orphan_dir).unwrap();
 
-        // Ensure no env var interference
-        unsafe {
-            env::remove_var("RKAT_PROJECT_ROOT");
-        }
-
         let result = find_project_root(&orphan_dir);
-        assert_eq!(result, orphan_dir);
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -182,14 +105,9 @@ mod tests {
         fs::create_dir_all(&rkat_dir).unwrap();
         fs::create_dir_all(&src_dir).unwrap();
 
-        // Ensure no env var interference
-        unsafe {
-            env::remove_var("RKAT_PROJECT_ROOT");
-        }
-
         // Starting from src/, should find .rkat in subproject/ (not .git in git_root/)
         let result = find_project_root(&src_dir);
-        assert_eq!(result, subproject);
+        assert_eq!(result, Some(subproject));
     }
 
     #[test]
@@ -233,31 +151,6 @@ mod tests {
     }
 
     #[test]
-    fn test_env_var_invalid_path_falls_through() {
-        let temp_dir = TempDir::new().unwrap();
-
-        // Set env var to a non-existent directory
-        unsafe {
-            env::set_var("RKAT_PROJECT_ROOT", "/nonexistent/path/that/does/not/exist");
-        }
-
-        // Create a project with .rkat/
-        let project_root = temp_dir.path().join("project");
-        let rkat_dir = project_root.join(".rkat");
-        fs::create_dir_all(&rkat_dir).unwrap();
-
-        let result = find_project_root(&project_root);
-
-        // Should fall through to .rkat detection since env path doesn't exist
-        assert_eq!(result, project_root);
-
-        // Clean up
-        unsafe {
-            env::remove_var("RKAT_PROJECT_ROOT");
-        }
-    }
-
-    #[test]
     fn test_find_ancestor_with_at_start_dir() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -266,13 +159,8 @@ mod tests {
         let rkat_dir = project_root.join(".rkat");
         fs::create_dir_all(&rkat_dir).unwrap();
 
-        // Ensure no env var interference
-        unsafe {
-            env::remove_var("RKAT_PROJECT_ROOT");
-        }
-
         // Starting from project root should find it immediately
         let result = find_project_root(&project_root);
-        assert_eq!(result, project_root);
+        assert_eq!(result, Some(project_root));
     }
 }

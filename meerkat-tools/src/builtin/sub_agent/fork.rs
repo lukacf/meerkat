@@ -3,6 +3,7 @@
 use super::config::SubAgentError;
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_client::LlmProvider;
 use meerkat_core::ToolDef;
@@ -235,23 +236,32 @@ impl BuiltinTool for AgentForkTool {
         ToolDef {
             name: "agent_fork".to_string(),
             description: "Fork the current agent with continued context. The forked agent inherits the full conversation history and continues from the same state. Useful for exploring alternative approaches or parallel execution.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "prompt": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "prompt",
+                    json!({
                         "type": "string",
                         "description": "Additional prompt/instruction for the forked agent. This is appended to the inherited conversation history."
-                    },
-                    "provider": {
+                    }),
+                )
+                .property(
+                    "provider",
+                    json!({
                         "type": "string",
                         "description": "LLM provider to use for the fork: 'anthropic', 'openai', or 'gemini'. Defaults to same provider as parent.",
                         "enum": ["anthropic", "openai", "gemini"]
-                    },
-                    "model": {
+                    }),
+                )
+                .property(
+                    "model",
+                    json!({
                         "type": "string",
                         "description": "Model name (provider-specific). Defaults to same model as parent."
-                    },
-                    "tool_access": {
+                    }),
+                )
+                .property(
+                    "tool_access",
+                    json!({
                         "type": "object",
                         "description": "Tool access policy for the forked agent",
                         "properties": {
@@ -266,15 +276,18 @@ impl BuiltinTool for AgentForkTool {
                                 "description": "Tool names for allow_list or deny_list policies"
                             }
                         }
-                    },
-                    "budget_policy": {
+                    }),
+                )
+                .property(
+                    "budget_policy",
+                    json!({
                         "type": "string",
                         "description": "How to allocate budget to the fork: 'equal' (split remaining equally), 'remaining' (give all remaining), 'fixed:N' (fixed N tokens)",
                         "enum": ["equal", "remaining", "fixed:10000", "fixed:50000"]
-                    }
-                },
-                "required": ["prompt"]
-            }),
+                    }),
+                )
+                .required("prompt")
+                .build(),
         }
     }
 

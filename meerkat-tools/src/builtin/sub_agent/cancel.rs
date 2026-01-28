@@ -2,6 +2,7 @@
 
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::ops::{OperationId, SubAgentState};
@@ -97,16 +98,16 @@ impl BuiltinTool for AgentCancelTool {
         ToolDef {
             name: "agent_cancel".to_string(),
             description: "Cancel a running sub-agent. Only agents in the 'running' state can be cancelled. Completed, failed, or already cancelled agents will return an error.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "agent_id": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "agent_id",
+                    json!({
                         "type": "string",
                         "description": "The unique identifier of the sub-agent to cancel (UUID format)"
-                    }
-                },
-                "required": ["agent_id"]
-            }),
+                    }),
+                )
+                .required("agent_id")
+                .build(),
         }
     }
 

@@ -4,13 +4,21 @@
 //! as MCP tools: meerkat_run and meerkat_resume.
 
 use meerkat::{
-    AgentBuilder, AgentError, AnthropicClient, CommsRuntime, JsonlStore, LlmClient, Session,
-    SessionStore, ToolError,
+    AgentBuilder, AgentError, JsonlStore, Session, SessionStore, ToolError,
+    build_comms_runtime_from_config, compose_tools_with_comms,
 };
+use meerkat_client::{LlmClientAdapter, ProviderResolver};
+use meerkat_core::error::{invalid_session_id, invalid_session_id_message, store_error};
+use meerkat_core::{
+    AgentEvent, CALLBACK_TOOL_PREFIX, Config, ConfigDelta, ConfigStore, FileConfigStore, Provider,
+    SessionMetadata, SessionTooling, SystemPromptConfig, format_verbose_event,
+};
+use meerkat_tools::find_project_root;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Tool definition provided by the MCP client
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,10 +44,18 @@ pub struct MeerkatRunInput {
     pub prompt: String,
     #[serde(default)]
     pub system_prompt: Option<String>,
-    #[serde(default = "default_model")]
-    pub model: String,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub provider: Option<Provider>,
+    /// Stream agent events to the MCP client via notifications.
+    #[serde(default)]
+    pub stream: bool,
+    /// Enable verbose event logging (server-side).
+    #[serde(default)]
+    pub verbose: bool,
     /// Tool definitions for the agent to use
     #[serde(default)]
     pub tools: Vec<McpToolDef>,
@@ -69,12 +85,76 @@ pub struct BuiltinConfigInput {
     pub shell_timeout_secs: Option<u64>,
 }
 
-fn default_model() -> String {
-    "claude-opus-4-5".to_string()
+/// Actions supported by the config tool.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigAction {
+    Get,
+    Set,
+    Patch,
 }
 
-fn default_max_tokens() -> u32 {
-    4096
+/// Input schema for meerkat_config tool
+#[derive(Debug, Deserialize)]
+pub struct MeerkatConfigInput {
+    pub action: ConfigAction,
+    #[serde(default)]
+    pub config: Option<Config>,
+    #[serde(default)]
+    pub patch: Option<Value>,
+}
+
+fn resolve_project_root() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    find_project_root(&cwd).unwrap_or(cwd)
+}
+
+async fn load_config_async() -> Config {
+    tokio::task::spawn_blocking(|| {
+        let project_root = resolve_project_root();
+        let store = FileConfigStore::project(&project_root);
+        let mut config = store.get().unwrap_or_else(|_| Config::default());
+        let _ = config.apply_env_overrides();
+        config
+    })
+    .await
+    .unwrap_or_else(|err| {
+        tracing::warn!("Config load task failed: {}", err);
+        Config::default()
+    })
+}
+
+fn resolve_provider(input: Option<Provider>, model: &str) -> Provider {
+    match input {
+        Some(provider) => provider,
+        None => match ProviderResolver::infer_from_model(model) {
+            Provider::Other => Provider::Anthropic,
+            provider => provider,
+        },
+    }
+}
+
+fn provider_key(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Anthropic => "anthropic",
+        Provider::OpenAI => "openai",
+        Provider::Gemini => "gemini",
+        Provider::Other => "other",
+    }
+}
+
+fn resolve_store_path(config: &Config) -> PathBuf {
+    config
+        .store
+        .sessions_path
+        .clone()
+        .or_else(|| config.storage.directory.clone())
+        .unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("meerkat")
+                .join("sessions")
+        })
 }
 
 /// Input schema for meerkat_resume tool
@@ -82,6 +162,12 @@ fn default_max_tokens() -> u32 {
 pub struct MeerkatResumeInput {
     pub session_id: String,
     pub prompt: String,
+    /// Stream agent events to the MCP client via notifications.
+    #[serde(default)]
+    pub stream: bool,
+    /// Enable verbose event logging (server-side).
+    #[serde(default)]
+    pub verbose: bool,
     /// Tool definitions for the agent to use (should match the original run)
     #[serde(default)]
     pub tools: Vec<McpToolDef>,
@@ -106,6 +192,9 @@ pub struct MeerkatResumeInput {
     /// Optional max_tokens override for resume.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Optional provider override for resume.
+    #[serde(default)]
+    pub provider: Option<Provider>,
 }
 
 /// Tool result provided by the MCP client
@@ -118,6 +207,45 @@ pub struct ToolResultInput {
     /// Whether this is an error result
     #[serde(default)]
     pub is_error: bool,
+}
+
+pub type EventNotifier = Arc<dyn Fn(&str, &AgentEvent) + Send + Sync>;
+
+fn spawn_event_forwarder(
+    mut rx: mpsc::Receiver<AgentEvent>,
+    session_id: String,
+    verbose: bool,
+    notifier: Option<EventNotifier>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let Some(ref notify) = notifier {
+                notify(&session_id, &event);
+            }
+
+            if !verbose {
+                continue;
+            }
+
+            if let Some(line) = format_verbose_event(&event) {
+                tracing::info!("{}", line);
+            }
+        }
+    })
+}
+
+fn maybe_event_channel(
+    verbose: bool,
+    stream: bool,
+) -> (
+    Option<mpsc::Sender<AgentEvent>>,
+    Option<mpsc::Receiver<AgentEvent>>,
+) {
+    if !verbose && !stream {
+        return (None, None);
+    }
+    let (tx, rx) = mpsc::channel(100);
+    (Some(tx), Some(rx))
 }
 
 /// Returns the list of tools exposed by this MCP server
@@ -187,6 +315,14 @@ pub fn tools_list() -> Vec<Value> {
                         "type": "integer",
                         "description": "Maximum tokens per turn (default: 4096)"
                     },
+                    "stream": {
+                        "type": "boolean",
+                        "description": "Stream agent events via MCP notifications"
+                    },
+                    "verbose": {
+                        "type": "boolean",
+                        "description": "Enable verbose event logging (server-side)"
+                    },
                     "tools": {
                         "type": "array",
                         "description": "Tool definitions for the agent to use. Tools with handler='callback' will pause execution and return pending_tool_calls.",
@@ -218,6 +354,14 @@ pub fn tools_list() -> Vec<Value> {
                         "type": "string",
                         "description": "The prompt to continue the conversation (can be empty if only providing tool results)"
                     },
+                    "stream": {
+                        "type": "boolean",
+                        "description": "Stream agent events via MCP notifications"
+                    },
+                    "verbose": {
+                        "type": "boolean",
+                        "description": "Enable verbose event logging (server-side)"
+                    },
                     "tools": {
                         "type": "array",
                         "description": "Tool definitions (should match the original run)",
@@ -248,27 +392,102 @@ pub fn tools_list() -> Vec<Value> {
                 "required": ["session_id", "prompt"]
             }
         }),
+        json!({
+            "name": "meerkat_config",
+            "description": "Get or update Meerkat config for this MCP server instance.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["get", "set", "patch"]
+                    },
+                    "config": {
+                        "type": "object",
+                        "description": "Full config payload (required for action=set)."
+                    },
+                    "patch": {
+                        "type": "object",
+                        "description": "JSON merge patch (required for action=patch)."
+                    }
+                },
+                "required": ["action"]
+            }
+        }),
     ]
 }
 
 /// Handle a tools/call request
 pub async fn handle_tools_call(tool_name: &str, arguments: &Value) -> Result<Value, String> {
+    handle_tools_call_with_notifier(tool_name, arguments, None).await
+}
+
+/// Handle a tools/call request with optional event notifications.
+pub async fn handle_tools_call_with_notifier(
+    tool_name: &str,
+    arguments: &Value,
+    notifier: Option<EventNotifier>,
+) -> Result<Value, String> {
     match tool_name {
         "meerkat_run" => {
             let input: MeerkatRunInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| format!("Invalid arguments: {}", e))?;
-            handle_meerkat_run(input).await
+            handle_meerkat_run(input, notifier).await
         }
         "meerkat_resume" => {
             let input: MeerkatResumeInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| format!("Invalid arguments: {}", e))?;
-            handle_meerkat_resume(input).await
+            handle_meerkat_resume(input, notifier).await
+        }
+        "meerkat_config" => {
+            let input: MeerkatConfigInput = serde_json::from_value(arguments.clone())
+                .map_err(|e| format!("Invalid arguments: {}", e))?;
+            handle_meerkat_config(input).await
         }
         _ => Err(format!("Unknown tool: {}", tool_name)),
     }
 }
 
-async fn handle_meerkat_run(input: MeerkatRunInput) -> Result<Value, String> {
+async fn handle_meerkat_config(input: MeerkatConfigInput) -> Result<Value, String> {
+    match input.action {
+        ConfigAction::Get => {
+            let store = FileConfigStore::project(resolve_project_root());
+            let config = tokio::task::spawn_blocking(move || store.get())
+                .await
+                .map_err(|e| format!("Config load task failed: {}", e))?
+                .map_err(|e| e.to_string())?;
+            Ok(json!({ "config": config }))
+        }
+        ConfigAction::Set => {
+            let config = input
+                .config
+                .ok_or_else(|| "config is required for action=set".to_string())?;
+            let store = FileConfigStore::project(resolve_project_root());
+            let config_clone = config.clone();
+            tokio::task::spawn_blocking(move || store.set(config_clone))
+                .await
+                .map_err(|e| format!("Config save task failed: {}", e))?
+                .map_err(|e| e.to_string())?;
+            Ok(json!({ "config": config }))
+        }
+        ConfigAction::Patch => {
+            let patch = input
+                .patch
+                .ok_or_else(|| "patch is required for action=patch".to_string())?;
+            let store = FileConfigStore::project(resolve_project_root());
+            let updated = tokio::task::spawn_blocking(move || store.patch(ConfigDelta(patch)))
+                .await
+                .map_err(|e| format!("Config patch task failed: {}", e))?
+                .map_err(|e| e.to_string())?;
+            Ok(json!({ "config": updated }))
+        }
+    }
+}
+
+async fn handle_meerkat_run(
+    input: MeerkatRunInput,
+    notifier: Option<EventNotifier>,
+) -> Result<Value, String> {
     // Validate host mode requirements
     if input.host_mode && input.comms_name.is_none() {
         return Err("host_mode requires comms_name to be set".to_string());
@@ -276,26 +495,31 @@ async fn handle_meerkat_run(input: MeerkatRunInput) -> Result<Value, String> {
 
     // Branch based on whether builtins are enabled
     if input.enable_builtins {
-        handle_meerkat_run_with_builtins(input).await
+        handle_meerkat_run_with_builtins(input, notifier).await
     } else {
-        handle_meerkat_run_simple(input).await
+        handle_meerkat_run_simple(input, notifier).await
     }
 }
 
-async fn handle_meerkat_run_simple(input: MeerkatRunInput) -> Result<Value, String> {
-    // Get API key from environment
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
-
+async fn handle_meerkat_run_simple(
+    input: MeerkatRunInput,
+    notifier: Option<EventNotifier>,
+) -> Result<Value, String> {
+    let config = load_config_async().await;
+    let model = input
+        .model
+        .clone()
+        .unwrap_or_else(|| config.agent.model.clone());
+    let max_tokens = input.max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
+    let provider = resolve_provider(input.provider, &model);
+    if ProviderResolver::api_key_for(provider).is_none() {
+        return Err(format!(
+            "API key not set for provider '{}'",
+            provider_key(provider)
+        ));
+    }
     // Create session store
-    let store_path = std::env::var("RKAT_STORE_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("meerkat")
-                .join("sessions")
-        });
+    let store_path = resolve_store_path(&config);
 
     let store = JsonlStore::new(store_path);
     store
@@ -303,36 +527,66 @@ async fn handle_meerkat_run_simple(input: MeerkatRunInput) -> Result<Value, Stri
         .await
         .map_err(|e| format!("Store init failed: {}", e))?;
 
+    let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
+
     // Create LLM client
-    let llm_client = Arc::new(AnthropicClient::new(api_key));
-    let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, input.model.clone()));
+    let base_url = config
+        .providers
+        .base_urls
+        .as_ref()
+        .and_then(|map| map.get(provider_key(provider)).cloned());
+    let llm_client = ProviderResolver::client_for(provider, base_url);
+    let llm_adapter = match event_tx.clone() {
+        Some(tx) => Arc::new(LlmClientAdapter::with_event_channel(
+            llm_client,
+            model.clone(),
+            tx,
+        )),
+        None => Arc::new(LlmClientAdapter::new(llm_client, model.clone())),
+    };
 
     // Create tool dispatcher based on provided tools
-    let tools = Arc::new(MpcToolDispatcher::new(&input.tools));
+    let mut tools: Arc<dyn AgentToolDispatcher> = Arc::new(MpcToolDispatcher::new(&input.tools));
+    let mut tool_usage_instructions = String::new();
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
 
     // Create comms runtime if host_mode is enabled
-    // Note: inproc_only() already registers in InprocRegistry, no need to start listeners
     let comms_runtime = if input.host_mode {
         let comms_name = input
             .comms_name
             .as_ref()
             .expect("validated in handle_meerkat_run");
-        let runtime = CommsRuntime::inproc_only(comms_name)
+        let base_dir = resolve_project_root();
+        let runtime = build_comms_runtime_from_config(&config, base_dir, comms_name)
+            .await
             .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
         Some(runtime)
     } else {
         None
     };
 
+    if let Some(ref runtime) = comms_runtime {
+        let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
+            .map_err(|e| format!("Failed to compose comms tools: {}", e))?;
+        tools = composed.0;
+        tool_usage_instructions = composed.1;
+    }
+
     // Build agent
     let mut builder = AgentBuilder::new()
-        .model(&input.model)
-        .max_tokens_per_turn(input.max_tokens);
+        .model(&model)
+        .max_tokens_per_turn(max_tokens)
+        .budget(config.budget_limits());
 
-    if let Some(sys_prompt) = &input.system_prompt {
-        builder = builder.system_prompt(sys_prompt);
+    let mut system_prompt = input
+        .system_prompt
+        .clone()
+        .unwrap_or_else(|| SystemPromptConfig::new().compose());
+    if !tool_usage_instructions.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&tool_usage_instructions);
     }
+    builder = builder.system_prompt(system_prompt);
 
     // Add comms runtime if enabled
     if let Some(runtime) = comms_runtime {
@@ -340,24 +594,65 @@ async fn handle_meerkat_run_simple(input: MeerkatRunInput) -> Result<Value, Stri
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter);
+    let metadata = SessionMetadata {
+        model: model.clone(),
+        max_tokens,
+        provider,
+        tooling: SessionTooling {
+            builtins: false,
+            shell: false,
+            comms: input.host_mode,
+            subagents: false,
+        },
+        host_mode: input.host_mode,
+        comms_name: input.comms_name.clone(),
+    };
+    if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
+        tracing::warn!("Failed to store session metadata: {}", err);
+    }
+
+    let event_task = event_rx.map(|rx| {
+        let stream_notifier = if input.stream { notifier.clone() } else { None };
+        spawn_event_forwarder(
+            rx,
+            agent.session().id().to_string(),
+            input.verbose,
+            stream_notifier,
+        )
+    });
 
     // Run agent based on mode
     let result = if input.host_mode {
-        agent.run_host_mode(input.prompt).await
+        if let Some(ref tx) = event_tx {
+            agent
+                .run_host_mode_with_events(input.prompt, tx.clone())
+                .await
+        } else {
+            agent.run_host_mode(input.prompt).await
+        }
+    } else if let Some(ref tx) = event_tx {
+        agent.run_with_events(input.prompt, tx.clone()).await
     } else {
         agent.run(input.prompt).await
     };
+    drop(event_tx);
+    if let Some(task) = event_task {
+        let _ = task.await;
+    }
 
     match result {
-        Ok(result) => Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": result.text
-            }],
-            "session_id": result.session_id.to_string(),
-            "turns": result.turns,
-            "tool_calls": result.tool_calls
-        })),
+        Ok(result) => {
+            let payload = json!({
+                "content": [{
+                    "type": "text",
+                    "text": result.text
+                }],
+                "session_id": result.session_id.to_string(),
+                "turns": result.turns,
+                "tool_calls": result.tool_calls
+            });
+            Ok(wrap_tool_payload(payload))
+        }
         Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
             // Extract pending tool call info from the error
             let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
@@ -366,7 +661,7 @@ async fn handle_meerkat_run_simple(input: MeerkatRunInput) -> Result<Value, Stri
             // Get session ID from agent state
             let session_id = agent.session().id();
 
-            Ok(json!({
+            let payload = json!({
                 "content": [{
                     "type": "text",
                     "text": "Agent is waiting for tool results"
@@ -374,31 +669,37 @@ async fn handle_meerkat_run_simple(input: MeerkatRunInput) -> Result<Value, Stri
                 "session_id": session_id.to_string(),
                 "status": "pending_tool_call",
                 "pending_tool_calls": [pending]
-            }))
+            });
+            Ok(wrap_tool_payload(payload))
         }
         Err(e) => Err(format!("Agent error: {}", e)),
     }
 }
 
-async fn handle_meerkat_run_with_builtins(input: MeerkatRunInput) -> Result<Value, String> {
+async fn handle_meerkat_run_with_builtins(
+    input: MeerkatRunInput,
+    notifier: Option<EventNotifier>,
+) -> Result<Value, String> {
     use meerkat_tools::{
         BuiltinToolConfig, CompositeDispatcher, EnforcedToolPolicy, FileTaskStore, ToolMode,
         ToolPolicyLayer, builtin::shell::ShellConfig, ensure_rkat_dir, find_project_root,
     };
 
-    // Get API key from environment
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
-
+    let config = load_config_async().await;
+    let model = input
+        .model
+        .clone()
+        .unwrap_or_else(|| config.agent.model.clone());
+    let max_tokens = input.max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
+    let provider = resolve_provider(input.provider, &model);
+    if ProviderResolver::api_key_for(provider).is_none() {
+        return Err(format!(
+            "API key not set for provider '{}'",
+            provider_key(provider)
+        ));
+    }
     // Create session store
-    let store_path = std::env::var("RKAT_STORE_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("meerkat")
-                .join("sessions")
-        });
+    let store_path = resolve_store_path(&config);
 
     let session_store = JsonlStore::new(store_path);
     session_store
@@ -406,16 +707,31 @@ async fn handle_meerkat_run_with_builtins(input: MeerkatRunInput) -> Result<Valu
         .await
         .map_err(|e| format!("Store init failed: {}", e))?;
 
+    let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
+
     // Create LLM client
-    let llm_client = Arc::new(AnthropicClient::new(api_key));
-    let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, input.model.clone()));
+    let base_url = config
+        .providers
+        .base_urls
+        .as_ref()
+        .and_then(|map| map.get(provider_key(provider)).cloned());
+    let llm_client = ProviderResolver::client_for(provider, base_url);
+    let llm_adapter = match event_tx.clone() {
+        Some(tx) => Arc::new(LlmClientAdapter::with_event_channel(
+            llm_client,
+            model.clone(),
+            tx,
+        )),
+        None => Arc::new(LlmClientAdapter::new(llm_client, model.clone())),
+    };
 
     // Generate session ID upfront for task tracking
     let meerkat_session_id = meerkat::SessionId::new();
 
     // Set up built-in tools
     let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current dir: {}", e))?;
-    let project_root = find_project_root(&cwd);
+    let project_root = find_project_root(&cwd)
+        .ok_or_else(|| "No .rkat directory found in current or parent directories".to_string())?;
     ensure_rkat_dir(&project_root).map_err(|e| format!("Failed to create .rkat dir: {}", e))?;
     let task_store = Arc::new(FileTaskStore::in_project(&project_root));
 
@@ -433,7 +749,7 @@ async fn handle_meerkat_run_with_builtins(input: MeerkatRunInput) -> Result<Valu
             .enable_tool("shell_job_cancel");
     }
 
-    let config = BuiltinToolConfig {
+    let builtin_config = BuiltinToolConfig {
         policy,
         enforced: EnforcedToolPolicy::default(),
     };
@@ -462,41 +778,56 @@ async fn handle_meerkat_run_with_builtins(input: MeerkatRunInput) -> Result<Valu
     };
 
     // Create composite dispatcher
-    let tools = Arc::new(
-        CompositeDispatcher::new(
-            task_store,
-            &config,
-            shell_config,
-            external,
-            Some(meerkat_session_id.to_string()),
-        )
-        .map_err(|e| format!("Failed to create dispatcher: {}", e))?,
-    );
+    let composite = CompositeDispatcher::new(
+        task_store,
+        &builtin_config,
+        shell_config,
+        external,
+        Some(meerkat_session_id.to_string()),
+    )
+    .map_err(|e| format!("Failed to create dispatcher: {}", e))?;
+    let mut tool_usage_instructions = composite.usage_instructions();
+    let mut tools: Arc<dyn AgentToolDispatcher> = Arc::new(composite);
 
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(session_store)));
 
     // Create comms runtime if host_mode is enabled
-    // Note: inproc_only() already registers in InprocRegistry, no need to start listeners
     let comms_runtime = if input.host_mode {
         let comms_name = input
             .comms_name
             .as_ref()
             .expect("validated in handle_meerkat_run");
-        let runtime = CommsRuntime::inproc_only(comms_name)
+        let base_dir = resolve_project_root();
+        let runtime = build_comms_runtime_from_config(&config, base_dir, comms_name)
+            .await
             .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
         Some(runtime)
     } else {
         None
     };
 
+    if let Some(ref runtime) = comms_runtime {
+        let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
+            .map_err(|e| format!("Failed to compose comms tools: {}", e))?;
+        tools = composed.0;
+        tool_usage_instructions = composed.1;
+    }
+
     // Build agent
     let mut builder = AgentBuilder::new()
-        .model(&input.model)
-        .max_tokens_per_turn(input.max_tokens);
+        .model(&model)
+        .max_tokens_per_turn(max_tokens)
+        .budget(config.budget_limits());
 
-    if let Some(sys_prompt) = &input.system_prompt {
-        builder = builder.system_prompt(sys_prompt);
+    let mut system_prompt = input
+        .system_prompt
+        .clone()
+        .unwrap_or_else(|| SystemPromptConfig::new().compose());
+    if !tool_usage_instructions.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&tool_usage_instructions);
     }
+    builder = builder.system_prompt(system_prompt);
 
     // Add comms runtime if enabled
     if let Some(runtime) = comms_runtime {
@@ -505,29 +836,54 @@ async fn handle_meerkat_run_with_builtins(input: MeerkatRunInput) -> Result<Valu
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter);
 
+    let event_task = event_rx.map(|rx| {
+        let stream_notifier = if input.stream { notifier.clone() } else { None };
+        spawn_event_forwarder(
+            rx,
+            agent.session().id().to_string(),
+            input.verbose,
+            stream_notifier,
+        )
+    });
+
     // Run agent based on mode
     let result = if input.host_mode {
-        agent.run_host_mode(input.prompt).await
+        if let Some(ref tx) = event_tx {
+            agent
+                .run_host_mode_with_events(input.prompt, tx.clone())
+                .await
+        } else {
+            agent.run_host_mode(input.prompt).await
+        }
+    } else if let Some(ref tx) = event_tx {
+        agent.run_with_events(input.prompt, tx.clone()).await
     } else {
         agent.run(input.prompt).await
     };
+    drop(event_tx);
+    if let Some(task) = event_task {
+        let _ = task.await;
+    }
 
     match result {
-        Ok(result) => Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": result.text
-            }],
-            "session_id": result.session_id.to_string(),
-            "turns": result.turns,
-            "tool_calls": result.tool_calls
-        })),
+        Ok(result) => {
+            let payload = json!({
+                "content": [{
+                    "type": "text",
+                    "text": result.text
+                }],
+                "session_id": result.session_id.to_string(),
+                "turns": result.turns,
+                "tool_calls": result.tool_calls
+            });
+            Ok(wrap_tool_payload(payload))
+        }
         Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
             let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
             let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
             let session_id = agent.session().id();
 
-            Ok(json!({
+            let payload = json!({
                 "content": [{
                     "type": "text",
                     "text": "Agent is waiting for tool results"
@@ -535,53 +891,33 @@ async fn handle_meerkat_run_with_builtins(input: MeerkatRunInput) -> Result<Valu
                 "session_id": session_id.to_string(),
                 "status": "pending_tool_call",
                 "pending_tool_calls": [pending]
-            }))
+            });
+            Ok(wrap_tool_payload(payload))
         }
         Err(e) => Err(format!("Agent error: {}", e)),
     }
 }
 
-async fn handle_meerkat_resume(input: MeerkatResumeInput) -> Result<Value, String> {
-    // Branch based on whether builtins are enabled
-    if input.enable_builtins {
-        handle_meerkat_resume_with_builtins(input).await
-    } else {
-        handle_meerkat_resume_simple(input).await
-    }
-}
-
-async fn handle_meerkat_resume_simple(input: MeerkatResumeInput) -> Result<Value, String> {
-    // Get API key from environment
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
-
-    // Create store
-    let store_path = std::env::var("RKAT_STORE_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("meerkat")
-                .join("sessions")
-        });
-
-    let store = JsonlStore::new(store_path);
-    store
+async fn handle_meerkat_resume(
+    input: MeerkatResumeInput,
+    notifier: Option<EventNotifier>,
+) -> Result<Value, String> {
+    let config = load_config_async().await;
+    let store_path = resolve_store_path(&config);
+    let session_store = Arc::new(JsonlStore::new(store_path));
+    session_store
         .init()
         .await
         .map_err(|e| format!("Store init failed: {}", e))?;
 
-    // Load existing session
-    let session_id = meerkat::SessionId::parse(&input.session_id)
-        .map_err(|e| format!("Invalid session ID: {}", e))?;
-
-    let mut session = store
+    let session_id =
+        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
+    let mut session = session_store
         .load(&session_id)
         .await
         .map_err(|e| format!("Failed to load session: {}", e))?
         .ok_or_else(|| format!("Session not found: {}", input.session_id))?;
 
-    // If tool results are provided, inject them into the session
     if !input.tool_results.is_empty() {
         use meerkat::ToolResult;
         let results: Vec<ToolResult> = input
@@ -592,21 +928,167 @@ async fn handle_meerkat_resume_simple(input: MeerkatResumeInput) -> Result<Value
         session.push(Message::ToolResults { results });
     }
 
+    let stored_metadata = session.session_metadata();
+    let enable_builtins = input.enable_builtins
+        || stored_metadata
+            .as_ref()
+            .map(|meta| meta.tooling.builtins)
+            .unwrap_or(false);
+
+    if enable_builtins {
+        handle_meerkat_resume_with_builtins(
+            input,
+            session_store,
+            session,
+            stored_metadata,
+            config,
+            notifier,
+        )
+        .await
+    } else {
+        handle_meerkat_resume_simple(
+            input,
+            session_store,
+            session,
+            stored_metadata,
+            config,
+            notifier,
+        )
+        .await
+    }
+}
+
+async fn handle_meerkat_resume_simple(
+    input: MeerkatResumeInput,
+    session_store: Arc<JsonlStore>,
+    session: Session,
+    stored_metadata: Option<SessionMetadata>,
+    config: Config,
+    notifier: Option<EventNotifier>,
+) -> Result<Value, String> {
+    let model = input
+        .model
+        .clone()
+        .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
+        .unwrap_or_else(|| config.agent.model.clone());
+    let max_tokens = input
+        .max_tokens
+        .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
+        .unwrap_or(config.agent.max_tokens_per_turn);
+    let host_mode = input.host_mode
+        || stored_metadata
+            .as_ref()
+            .map(|meta| meta.host_mode)
+            .unwrap_or(false);
+    let comms_name = input.comms_name.clone().or_else(|| {
+        stored_metadata
+            .as_ref()
+            .and_then(|meta| meta.comms_name.clone())
+    });
+    if host_mode && comms_name.is_none() {
+        return Err("host_mode requires comms_name to be set".to_string());
+    }
+    if host_mode && comms_name.is_none() {
+        return Err("host_mode requires comms_name to be set".to_string());
+    }
+    let provider = input
+        .provider
+        .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider))
+        .unwrap_or_else(|| resolve_provider(None, &model));
+    if ProviderResolver::api_key_for(provider).is_none() {
+        return Err(format!(
+            "API key not set for provider '{}'",
+            provider_key(provider)
+        ));
+    }
+
+    let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
+
     // Create LLM client
-    let llm_client = Arc::new(AnthropicClient::new(api_key));
-    let model = "claude-opus-4-5".to_string();
-    let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.clone()));
+    let base_url = config
+        .providers
+        .base_urls
+        .as_ref()
+        .and_then(|map| map.get(provider_key(provider)).cloned());
+    let llm_client = ProviderResolver::client_for(provider, base_url);
+    let llm_adapter = match event_tx.clone() {
+        Some(tx) => Arc::new(LlmClientAdapter::with_event_channel(
+            llm_client,
+            model.clone(),
+            tx,
+        )),
+        None => Arc::new(LlmClientAdapter::new(llm_client, model.clone())),
+    };
 
     // Create tool dispatcher
-    let tools = Arc::new(MpcToolDispatcher::new(&input.tools));
-    let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
+    let mut tools: Arc<dyn AgentToolDispatcher> = Arc::new(MpcToolDispatcher::new(&input.tools));
+    let mut tool_usage_instructions = String::new();
+    let store_adapter = Arc::new(SessionStoreAdapter::new(session_store));
+
+    let comms_runtime = if host_mode {
+        let comms_name = comms_name.as_ref().expect("validated above");
+        let base_dir = resolve_project_root();
+        let runtime = build_comms_runtime_from_config(&config, base_dir, comms_name)
+            .await
+            .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
+        Some(runtime)
+    } else {
+        None
+    };
+
+    if let Some(ref runtime) = comms_runtime {
+        let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
+            .map_err(|e| format!("Failed to compose comms tools: {}", e))?;
+        tools = composed.0;
+        tool_usage_instructions = composed.1;
+    }
 
     // Build agent with resumed session
-    let mut agent = AgentBuilder::new()
+    let mut builder = AgentBuilder::new()
         .model(&model)
-        .max_tokens_per_turn(4096)
-        .resume_session(session)
-        .build(llm_adapter, tools, store_adapter);
+        .max_tokens_per_turn(max_tokens)
+        .budget(config.budget_limits())
+        .resume_session(session);
+
+    let mut system_prompt = SystemPromptConfig::new().compose();
+    if !tool_usage_instructions.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&tool_usage_instructions);
+    }
+    builder = builder.system_prompt(system_prompt);
+
+    if let Some(runtime) = comms_runtime {
+        builder = builder.with_comms_runtime(runtime);
+    }
+
+    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+
+    let metadata = SessionMetadata {
+        model: model.clone(),
+        max_tokens,
+        provider,
+        tooling: SessionTooling {
+            builtins: false,
+            shell: false,
+            comms: host_mode,
+            subagents: false,
+        },
+        host_mode,
+        comms_name,
+    };
+    if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
+        tracing::warn!("Failed to store session metadata: {}", err);
+    }
+
+    let event_task = event_rx.map(|rx| {
+        let stream_notifier = if input.stream { notifier.clone() } else { None };
+        spawn_event_forwarder(
+            rx,
+            agent.session().id().to_string(),
+            input.verbose,
+            stream_notifier,
+        )
+    });
 
     // Run agent - use empty prompt if only providing tool results
     let prompt = if input.prompt.is_empty() && !input.tool_results.is_empty() {
@@ -616,18 +1098,35 @@ async fn handle_meerkat_resume_simple(input: MeerkatResumeInput) -> Result<Value
         input.prompt
     };
 
-    let result = agent.run(prompt).await;
+    let result = if host_mode {
+        if let Some(ref tx) = event_tx {
+            agent.run_host_mode_with_events(prompt, tx.clone()).await
+        } else {
+            agent.run_host_mode(prompt).await
+        }
+    } else if let Some(ref tx) = event_tx {
+        agent.run_with_events(prompt, tx.clone()).await
+    } else {
+        agent.run(prompt).await
+    };
+    drop(event_tx);
+    if let Some(task) = event_task {
+        let _ = task.await;
+    }
 
     match result {
-        Ok(result) => Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": result.text
-            }],
-            "session_id": result.session_id.to_string(),
-            "turns": result.turns,
-            "tool_calls": result.tool_calls
-        })),
+        Ok(result) => {
+            let payload = json!({
+                "content": [{
+                    "type": "text",
+                    "text": result.text
+                }],
+                "session_id": result.session_id.to_string(),
+                "turns": result.turns,
+                "tool_calls": result.tool_calls
+            });
+            Ok(wrap_tool_payload(payload))
+        }
         Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
             // Extract pending tool call info from the error
             let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
@@ -636,7 +1135,7 @@ async fn handle_meerkat_resume_simple(input: MeerkatResumeInput) -> Result<Value
             // Get session ID from agent state
             let session_id = agent.session().id();
 
-            Ok(json!({
+            let payload = json!({
                 "content": [{
                     "type": "text",
                     "text": "Agent is waiting for tool results"
@@ -644,47 +1143,25 @@ async fn handle_meerkat_resume_simple(input: MeerkatResumeInput) -> Result<Value
                 "session_id": session_id.to_string(),
                 "status": "pending_tool_call",
                 "pending_tool_calls": [pending]
-            }))
+            });
+            Ok(wrap_tool_payload(payload))
         }
         Err(e) => Err(format!("Agent error: {}", e)),
     }
 }
 
-async fn handle_meerkat_resume_with_builtins(input: MeerkatResumeInput) -> Result<Value, String> {
+async fn handle_meerkat_resume_with_builtins(
+    input: MeerkatResumeInput,
+    session_store: Arc<JsonlStore>,
+    mut session: Session,
+    stored_metadata: Option<SessionMetadata>,
+    config: Config,
+    notifier: Option<EventNotifier>,
+) -> Result<Value, String> {
     use meerkat_tools::{
         BuiltinToolConfig, CompositeDispatcher, EnforcedToolPolicy, FileTaskStore, ToolMode,
         ToolPolicyLayer, builtin::shell::ShellConfig, ensure_rkat_dir, find_project_root,
     };
-
-    // Get API key from environment
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY environment variable not set")?;
-
-    // Create store
-    let store_path = std::env::var("RKAT_STORE_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("meerkat")
-                .join("sessions")
-        });
-
-    let session_store = JsonlStore::new(store_path);
-    session_store
-        .init()
-        .await
-        .map_err(|e| format!("Store init failed: {}", e))?;
-
-    // Load existing session
-    let session_id = meerkat::SessionId::parse(&input.session_id)
-        .map_err(|e| format!("Invalid session ID: {}", e))?;
-
-    let mut session = session_store
-        .load(&session_id)
-        .await
-        .map_err(|e| format!("Failed to load session: {}", e))?
-        .ok_or_else(|| format!("Session not found: {}", input.session_id))?;
 
     // If tool results are provided, inject them into the session
     if !input.tool_results.is_empty() {
@@ -697,14 +1174,59 @@ async fn handle_meerkat_resume_with_builtins(input: MeerkatResumeInput) -> Resul
         session.push(Message::ToolResults { results });
     }
 
+    let model = input
+        .model
+        .clone()
+        .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
+        .unwrap_or_else(|| config.agent.model.clone());
+    let max_tokens = input
+        .max_tokens
+        .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
+        .unwrap_or(config.agent.max_tokens_per_turn);
+    let host_mode = input.host_mode
+        || stored_metadata
+            .as_ref()
+            .map(|meta| meta.host_mode)
+            .unwrap_or(false);
+    let comms_name = input.comms_name.clone().or_else(|| {
+        stored_metadata
+            .as_ref()
+            .and_then(|meta| meta.comms_name.clone())
+    });
+
+    let provider = input
+        .provider
+        .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider))
+        .unwrap_or_else(|| resolve_provider(None, &model));
+    if ProviderResolver::api_key_for(provider).is_none() {
+        return Err(format!(
+            "API key not set for provider '{}'",
+            provider_key(provider)
+        ));
+    }
+
+    let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
+
     // Create LLM client
-    let llm_client = Arc::new(AnthropicClient::new(api_key));
-    let model = "claude-opus-4-5".to_string();
-    let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, model.clone()));
+    let base_url = config
+        .providers
+        .base_urls
+        .as_ref()
+        .and_then(|map| map.get(provider_key(provider)).cloned());
+    let llm_client = ProviderResolver::client_for(provider, base_url);
+    let llm_adapter = match event_tx.clone() {
+        Some(tx) => Arc::new(LlmClientAdapter::with_event_channel(
+            llm_client,
+            model.clone(),
+            tx,
+        )),
+        None => Arc::new(LlmClientAdapter::new(llm_client, model.clone())),
+    };
 
     // Set up built-in tools
     let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current dir: {}", e))?;
-    let project_root = find_project_root(&cwd);
+    let project_root = find_project_root(&cwd)
+        .ok_or_else(|| "No .rkat directory found in current or parent directories".to_string())?;
     ensure_rkat_dir(&project_root).map_err(|e| format!("Failed to create .rkat dir: {}", e))?;
     let task_store = Arc::new(FileTaskStore::in_project(&project_root));
 
@@ -713,7 +1235,13 @@ async fn handle_meerkat_resume_with_builtins(input: MeerkatResumeInput) -> Resul
     let enable_shell = input
         .builtin_config
         .as_ref()
-        .is_some_and(|c| c.enable_shell);
+        .map(|c| c.enable_shell)
+        .unwrap_or_else(|| {
+            stored_metadata
+                .as_ref()
+                .map(|meta| meta.tooling.shell)
+                .unwrap_or(false)
+        });
     if enable_shell {
         policy = policy
             .enable_tool("shell")
@@ -722,7 +1250,7 @@ async fn handle_meerkat_resume_with_builtins(input: MeerkatResumeInput) -> Resul
             .enable_tool("shell_job_cancel");
     }
 
-    let config = BuiltinToolConfig {
+    let builtin_config = BuiltinToolConfig {
         policy,
         enforced: EnforcedToolPolicy::default(),
     };
@@ -751,25 +1279,83 @@ async fn handle_meerkat_resume_with_builtins(input: MeerkatResumeInput) -> Resul
     };
 
     // Create composite dispatcher
-    let tools = Arc::new(
-        CompositeDispatcher::new(
-            task_store,
-            &config,
-            shell_config,
-            external,
-            Some(session_id.to_string()),
-        )
-        .map_err(|e| format!("Failed to create dispatcher: {}", e))?,
-    );
+    let composite = CompositeDispatcher::new(
+        task_store,
+        &builtin_config,
+        shell_config,
+        external,
+        Some(session.id().to_string()),
+    )
+    .map_err(|e| format!("Failed to create dispatcher: {}", e))?;
+    let mut tool_usage_instructions = composite.usage_instructions();
+    let mut tools: Arc<dyn AgentToolDispatcher> = Arc::new(composite);
 
-    let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(session_store)));
+    let store_adapter = Arc::new(SessionStoreAdapter::new(session_store));
+
+    let comms_runtime = if host_mode {
+        let comms_name = comms_name.as_ref().expect("validated above");
+        let base_dir = resolve_project_root();
+        let runtime = build_comms_runtime_from_config(&config, base_dir, comms_name)
+            .await
+            .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
+        Some(runtime)
+    } else {
+        None
+    };
+
+    if let Some(ref runtime) = comms_runtime {
+        let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
+            .map_err(|e| format!("Failed to compose comms tools: {}", e))?;
+        tools = composed.0;
+        tool_usage_instructions = composed.1;
+    }
 
     // Build agent with resumed session
-    let mut agent = AgentBuilder::new()
+    let mut system_prompt = SystemPromptConfig::new().compose();
+    if !tool_usage_instructions.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&tool_usage_instructions);
+    }
+
+    let mut builder = AgentBuilder::new()
         .model(&model)
-        .max_tokens_per_turn(4096)
-        .resume_session(session)
-        .build(llm_adapter, tools, store_adapter);
+        .max_tokens_per_turn(max_tokens)
+        .system_prompt(system_prompt)
+        .budget(config.budget_limits())
+        .resume_session(session);
+
+    if let Some(runtime) = comms_runtime {
+        builder = builder.with_comms_runtime(runtime);
+    }
+
+    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+
+    let metadata = SessionMetadata {
+        model: model.clone(),
+        max_tokens,
+        provider,
+        tooling: SessionTooling {
+            builtins: true,
+            shell: enable_shell,
+            comms: host_mode,
+            subagents: false,
+        },
+        host_mode,
+        comms_name,
+    };
+    if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
+        tracing::warn!("Failed to store session metadata: {}", err);
+    }
+
+    let event_task = event_rx.map(|rx| {
+        let stream_notifier = if input.stream { notifier.clone() } else { None };
+        spawn_event_forwarder(
+            rx,
+            agent.session().id().to_string(),
+            input.verbose,
+            stream_notifier,
+        )
+    });
 
     // Run agent - use empty prompt if only providing tool results
     let prompt = if input.prompt.is_empty() && !input.tool_results.is_empty() {
@@ -778,24 +1364,41 @@ async fn handle_meerkat_resume_with_builtins(input: MeerkatResumeInput) -> Resul
         input.prompt
     };
 
-    let result = agent.run(prompt).await;
+    let result = if host_mode {
+        if let Some(ref tx) = event_tx {
+            agent.run_host_mode_with_events(prompt, tx.clone()).await
+        } else {
+            agent.run_host_mode(prompt).await
+        }
+    } else if let Some(ref tx) = event_tx {
+        agent.run_with_events(prompt, tx.clone()).await
+    } else {
+        agent.run(prompt).await
+    };
+    drop(event_tx);
+    if let Some(task) = event_task {
+        let _ = task.await;
+    }
 
     match result {
-        Ok(result) => Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": result.text
-            }],
-            "session_id": result.session_id.to_string(),
-            "turns": result.turns,
-            "tool_calls": result.tool_calls
-        })),
+        Ok(result) => {
+            let payload = json!({
+                "content": [{
+                    "type": "text",
+                    "text": result.text
+                }],
+                "session_id": result.session_id.to_string(),
+                "turns": result.turns,
+                "tool_calls": result.tool_calls
+            });
+            Ok(wrap_tool_payload(payload))
+        }
         Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
             let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
             let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
             let session_id = agent.session().id();
 
-            Ok(json!({
+            let payload = json!({
                 "content": [{
                     "type": "text",
                     "text": "Agent is waiting for tool results"
@@ -803,99 +1406,27 @@ async fn handle_meerkat_resume_with_builtins(input: MeerkatResumeInput) -> Resul
                 "session_id": session_id.to_string(),
                 "status": "pending_tool_call",
                 "pending_tool_calls": [pending]
-            }))
+            });
+            Ok(wrap_tool_payload(payload))
         }
         Err(e) => Err(format!("Agent error: {}", e)),
     }
 }
 
+fn wrap_tool_payload(payload: Value) -> Value {
+    let text = serde_json::to_string(&payload).unwrap_or_default();
+    json!({
+        "content": [{
+            "type": "text",
+            "text": text
+        }]
+    })
+}
+
 // Adapter types needed for the MCP server
 
 use async_trait::async_trait;
-use meerkat::{
-    AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult, Message, ToolDef,
-};
-
-/// LLM client adapter
-pub struct LlmClientAdapter<C: LlmClient> {
-    client: Arc<C>,
-    model: String,
-}
-
-impl<C: LlmClient> LlmClientAdapter<C> {
-    pub fn new(client: Arc<C>, model: String) -> Self {
-        Self { client, model }
-    }
-}
-
-#[async_trait]
-impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
-    async fn stream_response(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        max_tokens: u32,
-        temperature: Option<f32>,
-        provider_params: Option<&serde_json::Value>,
-    ) -> Result<LlmStreamResult, AgentError> {
-        use futures_util::StreamExt;
-        use meerkat::{LlmEvent, LlmRequest, StopReason, ToolCall, Usage};
-
-        let request = LlmRequest {
-            model: self.model.clone(),
-            messages: messages.to_vec(),
-            tools: tools.to_vec(),
-            max_tokens,
-            temperature,
-            stop_sequences: None,
-            provider_params: provider_params.cloned(),
-        };
-
-        let mut stream = self.client.stream(&request);
-
-        let mut content = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = Usage::default();
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => {
-                        content.push_str(&delta);
-                    }
-                    LlmEvent::ToolCallComplete { id, name, args, .. } => {
-                        tool_calls.push(ToolCall::new(id, name, args));
-                    }
-                    LlmEvent::UsageUpdate { usage: u } => {
-                        usage = u;
-                    }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
-                    _ => {}
-                },
-                Err(e) => {
-                    return Err(AgentError::LlmError(e.to_string()));
-                }
-            }
-        }
-
-        Ok(LlmStreamResult {
-            content,
-            tool_calls,
-            stop_reason,
-            usage,
-        })
-    }
-
-    fn provider(&self) -> &'static str {
-        self.client.provider()
-    }
-}
-
-/// Special error prefix to signal that a callback tool was invoked
-pub const CALLBACK_TOOL_PREFIX: &str = "CALLBACK_TOOL_PENDING:";
+use meerkat::{AgentSessionStore, AgentToolDispatcher, Message, ToolDef};
 
 /// MCP tool dispatcher - exposes tools to the LLM and handles callback tools
 /// by returning a special error that signals the MCP client needs to handle the tool call
@@ -969,20 +1500,13 @@ impl<S: SessionStore> SessionStoreAdapter<S> {
 #[async_trait]
 impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
     async fn save(&self, session: &Session) -> Result<(), AgentError> {
-        self.store
-            .save(session)
-            .await
-            .map_err(|e| AgentError::StoreError(e.to_string()))
+        self.store.save(session).await.map_err(store_error)
     }
 
     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
-        let session_id = meerkat::SessionId::parse(id)
-            .map_err(|e| AgentError::StoreError(format!("Invalid session ID: {}", e)))?;
+        let session_id = meerkat::SessionId::parse(id).map_err(invalid_session_id)?;
 
-        self.store
-            .load(&session_id)
-            .await
-            .map_err(|e| AgentError::StoreError(e.to_string()))
+        self.store.load(&session_id).await.map_err(store_error)
     }
 }
 
@@ -993,15 +1517,21 @@ mod tests {
     #[test]
     fn test_tools_list_schema() {
         let tools = tools_list();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 3);
 
         let run_tool = &tools[0];
         assert_eq!(run_tool["name"], "meerkat_run");
         assert!(run_tool["inputSchema"]["properties"]["prompt"].is_object());
+        assert!(run_tool["inputSchema"]["properties"]["verbose"].is_object());
 
         let resume_tool = &tools[1];
         assert_eq!(resume_tool["name"], "meerkat_resume");
         assert!(resume_tool["inputSchema"]["properties"]["session_id"].is_object());
+        assert!(resume_tool["inputSchema"]["properties"]["verbose"].is_object());
+
+        let config_tool = &tools[2];
+        assert_eq!(config_tool["name"], "meerkat_config");
+        assert!(config_tool["inputSchema"]["properties"]["action"].is_object());
     }
 
     #[test]
@@ -1013,8 +1543,9 @@ mod tests {
 
         let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.prompt, "Hello");
-        assert_eq!(input.model, "claude-sonnet-4");
-        assert_eq!(input.max_tokens, 4096); // default
+        assert_eq!(input.model, Some("claude-sonnet-4".to_string()));
+        assert_eq!(input.max_tokens, None);
+        assert!(!input.verbose);
     }
 
     #[test]
@@ -1027,6 +1558,7 @@ mod tests {
         let input: MeerkatResumeInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.session_id, "01234567-89ab-cdef-0123-456789abcdef");
         assert_eq!(input.prompt, "Continue");
+        assert!(!input.verbose);
     }
 
     #[test]
@@ -1082,13 +1614,13 @@ mod tests {
             McpToolDef {
                 name: "get_weather".to_string(),
                 description: "Get weather".to_string(),
-                input_schema: json!({"type": "object"}),
+                input_schema: json!({"type": "object", "properties": {}, "required": []}),
                 handler: "callback".to_string(),
             },
             McpToolDef {
                 name: "search".to_string(),
                 description: "Search".to_string(),
-                input_schema: json!({"type": "object"}),
+                input_schema: json!({"type": "object", "properties": {}, "required": []}),
                 handler: "callback".to_string(),
             },
         ];
@@ -1106,7 +1638,7 @@ mod tests {
         let mcp_tools = vec![McpToolDef {
             name: "get_weather".to_string(),
             description: "Get weather".to_string(),
-            input_schema: json!({"type": "object"}),
+            input_schema: json!({"type": "object", "properties": {}, "required": []}),
             handler: "callback".to_string(),
         }];
 
@@ -1175,17 +1707,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_meerkat_run_host_mode_requires_comms_name() {
-        let result = handle_meerkat_run(MeerkatRunInput {
-            prompt: "test".to_string(),
-            system_prompt: None,
-            model: "claude-opus-4-5".to_string(),
-            max_tokens: 4096,
-            tools: vec![],
-            enable_builtins: false,
-            builtin_config: None,
-            host_mode: true,
-            comms_name: None, // Missing!
-        })
+        let result = handle_meerkat_run(
+            MeerkatRunInput {
+                prompt: "test".to_string(),
+                system_prompt: None,
+                model: Some("claude-opus-4-5".to_string()),
+                max_tokens: Some(4096),
+                provider: None,
+                stream: false,
+                verbose: false,
+                tools: vec![],
+                enable_builtins: false,
+                builtin_config: None,
+                host_mode: true,
+                comms_name: None, // Missing!
+            },
+            None,
+        )
         .await;
 
         assert!(result.is_err());

@@ -1,11 +1,12 @@
 //! Configuration for Meerkat
 //!
-//! Supports layered configuration: defaults → env → file → CLI
+//! Supports layered configuration: defaults → file → env (secrets only) → CLI
 
-use crate::{mcp_config::McpServerConfig, retry::RetryPolicy};
+use crate::{budget::BudgetLimits, mcp_config::McpServerConfig, retry::RetryPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Complete configuration for Meerkat
@@ -26,31 +27,50 @@ pub struct Config {
     pub providers: ProviderSettings,
     pub comms: CommsRuntimeConfig,
     pub limits: LimitsConfig,
+    pub rest: RestServerConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
+        let defaults = template_defaults();
+        let agent = AgentConfig::default();
+        let max_tokens = defaults
+            .max_tokens
+            .filter(|value| *value > 0)
+            .unwrap_or(agent.max_tokens_per_turn);
         Self {
-            agent: AgentConfig::default(),
+            agent,
             provider: ProviderConfig::default(),
             storage: StorageConfig::default(),
             budget: BudgetConfig::default(),
             retry: RetryConfig::default(),
             tools: ToolsConfig::default(),
             models: ModelDefaults::default(),
-            max_tokens: AgentConfig::default().max_tokens_per_turn,
+            max_tokens,
             shell: ShellDefaults::default(),
             store: StoreConfig::default(),
             providers: ProviderSettings::default(),
             comms: CommsRuntimeConfig::default(),
             limits: LimitsConfig::default(),
+            rest: RestServerConfig::default(),
         }
     }
 }
 
 impl Config {
+    /// Return the config template as TOML.
+    pub fn template_toml() -> &'static str {
+        CONFIG_TEMPLATE_TOML
+    }
+
+    /// Parse the config template into a Config value.
+    pub fn template() -> Result<Self, ConfigError> {
+        toml::from_str(CONFIG_TEMPLATE_TOML).map_err(|e| ConfigError::ParseError(e.to_string()))
+    }
+
     /// Load configuration from all sources with proper layering
-    /// Order: defaults → project config OR global config → env vars → CLI (CLI applied separately)
+    /// Order: defaults → project config OR global config → env vars (secrets only)
+    /// → CLI (CLI applied separately)
     pub fn load() -> Result<Self, ConfigError> {
         let mut config = Self::default();
 
@@ -67,6 +87,11 @@ impl Config {
         config.apply_env_overrides()?;
 
         Ok(config)
+    }
+
+    /// Convert config limits into runtime budget limits.
+    pub fn budget_limits(&self) -> BudgetLimits {
+        self.limits.to_budget_limits()
     }
 
     /// Get global config path (~/.rkat/config.toml)
@@ -161,6 +186,9 @@ impl Config {
         }
         if other.limits != LimitsConfig::default() {
             self.limits = other.limits;
+        }
+        if other.rest != RestServerConfig::default() {
+            self.rest = other.rest;
         }
     }
 
@@ -264,15 +292,21 @@ pub struct AgentConfig {
 
 impl Default for AgentConfig {
     fn default() -> Self {
+        let defaults = template_defaults();
+        let agent = defaults.agent.as_ref();
         Self {
             system_prompt: None,
             system_prompt_file: None,
             tool_instructions: None,
-            model: "claude-sonnet-4-20250514".to_string(),
-            max_tokens_per_turn: 8192,
+            model: agent.and_then(|cfg| cfg.model.clone()).unwrap_or_default(),
+            max_tokens_per_turn: agent
+                .and_then(|cfg| cfg.max_tokens_per_turn)
+                .unwrap_or_default(),
             temperature: None,
-            checkpoint_interval: Some(5),
-            budget_warning_threshold: 0.8,
+            checkpoint_interval: agent.and_then(|cfg| cfg.checkpoint_interval),
+            budget_warning_threshold: agent
+                .and_then(|cfg| cfg.budget_warning_threshold)
+                .unwrap_or_default(),
             max_turns: None,
             provider_params: None,
         }
@@ -290,10 +324,18 @@ pub struct ModelDefaults {
 
 impl Default for ModelDefaults {
     fn default() -> Self {
+        let defaults = template_defaults();
+        let models = defaults.models.as_ref();
         Self {
-            anthropic: "claude-sonnet-4-20250514".to_string(),
-            openai: "gpt-4.1".to_string(),
-            gemini: "gemini-1.5-pro".to_string(),
+            anthropic: models
+                .and_then(|cfg| cfg.anthropic.clone())
+                .unwrap_or_default(),
+            openai: models
+                .and_then(|cfg| cfg.openai.clone())
+                .unwrap_or_default(),
+            gemini: models
+                .and_then(|cfg| cfg.gemini.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -309,12 +351,58 @@ pub struct ShellDefaults {
 
 impl Default for ShellDefaults {
     fn default() -> Self {
+        let defaults = template_defaults();
+        let shell = defaults.shell.as_ref();
         Self {
-            program: "nu".to_string(),
-            timeout_secs: 30,
-            allowlist: Vec::new(),
+            program: shell
+                .and_then(|cfg| cfg.program.clone())
+                .unwrap_or_default(),
+            timeout_secs: shell.and_then(|cfg| cfg.timeout_secs).unwrap_or_default(),
+            allowlist: shell
+                .and_then(|cfg| cfg.allowlist.clone())
+                .unwrap_or_default(),
         }
     }
+}
+
+const CONFIG_TEMPLATE_TOML: &str = include_str!("config_template.toml");
+
+#[derive(Debug, Deserialize)]
+struct TemplateAgentDefaults {
+    model: Option<String>,
+    max_tokens_per_turn: Option<u32>,
+    checkpoint_interval: Option<u32>,
+    budget_warning_threshold: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateModelDefaults {
+    anthropic: Option<String>,
+    openai: Option<String>,
+    gemini: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateShellDefaults {
+    program: Option<String>,
+    timeout_secs: Option<u64>,
+    allowlist: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateDefaults {
+    agent: Option<TemplateAgentDefaults>,
+    models: Option<TemplateModelDefaults>,
+    shell: Option<TemplateShellDefaults>,
+    max_tokens: Option<u32>,
+}
+
+fn template_defaults() -> &'static TemplateDefaults {
+    static DEFAULTS: OnceLock<TemplateDefaults> = OnceLock::new();
+    DEFAULTS.get_or_init(|| {
+        toml::from_str(CONFIG_TEMPLATE_TOML)
+            .unwrap_or_else(|e| panic!("Invalid config template defaults: {}", e))
+    })
 }
 
 /// Paths for session and task persistence.
@@ -340,6 +428,33 @@ pub struct LimitsConfig {
     pub budget: Option<u64>,
     #[serde(with = "optional_duration_serde")]
     pub max_duration: Option<Duration>,
+}
+
+impl LimitsConfig {
+    pub fn to_budget_limits(&self) -> BudgetLimits {
+        BudgetLimits {
+            max_tokens: self.budget,
+            max_duration: self.max_duration,
+            max_tool_calls: None,
+        }
+    }
+}
+
+/// REST server configuration sourced from config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RestServerConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for RestServerConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+        }
+    }
 }
 
 /// Runtime comms configuration (portable across interfaces).

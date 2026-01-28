@@ -97,8 +97,7 @@ impl FileConfigStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| ConfigError::IoError(e.to_string()))?;
         }
-        let content = toml::to_string_pretty(&Config::default())
-            .map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        let content = Config::template_toml();
         std::fs::write(&self.path, content).map_err(|e| ConfigError::IoError(e.to_string()))?;
         Ok(())
     }

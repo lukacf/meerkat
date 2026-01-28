@@ -239,6 +239,23 @@ impl Session {
         self.updated_at = SystemTime::now();
     }
 
+    /// Store SessionMetadata in the session metadata map.
+    pub fn set_session_metadata(
+        &mut self,
+        metadata: SessionMetadata,
+    ) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(metadata)?;
+        self.set_metadata(SESSION_METADATA_KEY, value);
+        Ok(())
+    }
+
+    /// Load SessionMetadata from the session metadata map.
+    pub fn session_metadata(&self) -> Option<SessionMetadata> {
+        self.metadata
+            .get(SESSION_METADATA_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
     /// Fork the session at a specific message index
     ///
     /// Creates a new session with a subset of messages. The messages are copied
@@ -303,6 +320,9 @@ pub struct SessionMetadata {
     pub host_mode: bool,
     pub comms_name: Option<String>,
 }
+
+/// Key used to store SessionMetadata in Session metadata map.
+pub const SESSION_METADATA_KEY: &str = "session_metadata";
 
 /// Tooling flags captured at session creation time.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

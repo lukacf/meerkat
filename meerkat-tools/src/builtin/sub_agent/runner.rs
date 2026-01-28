@@ -6,12 +6,12 @@
 //! - Running the agent loop in a background task
 //! - Reporting results back to the parent
 
+use crate::comms_dispatcher::wrap_with_comms;
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_client::LlmClient;
 use meerkat_client::{LlmEvent, LlmRequest};
 use meerkat_comms::{PubKey, TrustedPeer, TrustedPeers};
-use meerkat_comms_agent::wrap_with_comms;
 use meerkat_core::comms_bootstrap::CommsBootstrap;
 use meerkat_core::comms_config::CoreCommsConfig;
 use meerkat_core::comms_runtime::CommsRuntime;
@@ -303,19 +303,26 @@ pub async fn setup_child_comms(
     let comms_config = create_child_comms_config(&config.name, &config.base_dir);
     let resolved_config = comms_config.resolve_paths(&config.base_dir);
 
-    // Ensure directories exist
-    std::fs::create_dir_all(&resolved_config.identity_dir).map_err(|e| {
-        SubAgentRunnerError::CommsSetup(format!("Failed to create identity dir: {}", e))
-    })?;
+    // Ensure directories exist without blocking the async runtime.
+    tokio::fs::create_dir_all(&resolved_config.identity_dir)
+        .await
+        .map_err(|e| {
+            SubAgentRunnerError::CommsSetup(format!("Failed to create identity dir: {}", e))
+        })?;
 
     if let Some(parent) = resolved_config.trusted_peers_path.parent() {
-        std::fs::create_dir_all(parent)
+        tokio::fs::create_dir_all(parent)
+            .await
             .map_err(|e| SubAgentRunnerError::CommsSetup(format!("Failed to create dir: {}", e)))?;
     }
 
-    // Save trusted peers
-    trusted_peers
-        .save(&resolved_config.trusted_peers_path)
+    // Save trusted peers in a blocking task since it performs filesystem writes.
+    let trusted_peers_path = resolved_config.trusted_peers_path.clone();
+    tokio::task::spawn_blocking(move || trusted_peers.save(&trusted_peers_path))
+        .await
+        .map_err(|e| {
+            SubAgentRunnerError::CommsSetup(format!("Failed to save trusted peers: {}", e))
+        })?
         .map_err(|e| {
             SubAgentRunnerError::CommsSetup(format!("Failed to save trusted peers: {}", e))
         })?;

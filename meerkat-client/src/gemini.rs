@@ -30,7 +30,8 @@ impl GeminiClient {
 
     /// Create from environment variable GEMINI_API_KEY (or GOOGLE_API_KEY for backwards compatibility)
     pub fn from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("GEMINI_API_KEY")
+        let api_key = std::env::var("RKAT_GEMINI_API_KEY")
+            .or_else(|_| std::env::var("GEMINI_API_KEY"))
             .or_else(|_| std::env::var("GOOGLE_API_KEY"))
             .map_err(|_| LlmError::InvalidApiKey)?;
         Ok(Self::new(api_key))

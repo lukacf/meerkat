@@ -1,19 +1,6 @@
 //! Tool errors
 
-#[derive(Debug, thiserror::Error)]
-pub enum ToolError {
-    #[error("Tool not found: {0}")]
-    NotFound(String),
-
-    #[error("Validation error: {0}")]
-    Validation(String),
-
-    #[error("Execution error: {0}")]
-    Execution(String),
-
-    #[error("Timeout: {0}")]
-    Timeout(String),
-}
+pub type ToolError = meerkat_core::error::ToolError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolValidationError {

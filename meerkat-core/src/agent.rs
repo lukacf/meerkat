@@ -12,6 +12,7 @@ use crate::ops::{
     ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, OperationId, OperationResult, SpawnSpec,
     SteeringHandle, ToolAccessPolicy,
 };
+use crate::prompt::SystemPromptConfig;
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
@@ -25,6 +26,9 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+/// Special error prefix to signal tool calls that must be routed externally.
+pub const CALLBACK_TOOL_PREFIX: &str = "CALLBACK_TOOL_PENDING:";
 
 /// Trait for LLM clients that can be used with the agent
 #[async_trait]
@@ -279,9 +283,10 @@ impl AgentBuilder {
     {
         let session = self.session.unwrap_or_else(|| {
             let mut s = Session::new();
-            if let Some(prompt) = &self.system_prompt {
-                s.set_system_prompt(prompt.clone());
-            }
+            let prompt = self
+                .system_prompt
+                .unwrap_or_else(|| SystemPromptConfig::new().compose());
+            s.set_system_prompt(prompt);
             s
         });
 
@@ -836,12 +841,33 @@ where
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
 
+        let session_id = self.session.id().clone();
+        let run_prompt = user_input.clone();
+
         // Add user message
         self.session.push(Message::User(crate::types::UserMessage {
             content: user_input,
         }));
 
-        self.run_loop(Some(event_tx)).await
+        let _ = event_tx
+            .send(AgentEvent::RunStarted {
+                session_id,
+                prompt: run_prompt,
+            })
+            .await;
+
+        match self.run_loop(Some(event_tx.clone())).await {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                let _ = event_tx
+                    .send(AgentEvent::RunFailed {
+                        session_id: self.session.id().clone(),
+                        error: err.to_string(),
+                    })
+                    .await;
+                Err(err)
+            }
+        }
     }
 
     /// Run the agent in host mode: process initial prompt, then stay alive for comms messages.
@@ -997,6 +1023,21 @@ where
                 .await?
         } else if has_pending_user_message {
             // Session already has a user message - run the loop directly without pushing
+            let run_prompt = self
+                .session
+                .messages()
+                .last()
+                .and_then(|msg| match msg {
+                    Message::User(user) => Some(user.content.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let _ = event_tx
+                .send(AgentEvent::RunStarted {
+                    session_id: self.session.id().clone(),
+                    prompt: run_prompt,
+                })
+                .await;
             self.run_loop(Some(event_tx.clone())).await?
         } else {
             // No prompt and no pending messages - create minimal result
@@ -1136,6 +1177,12 @@ where
                     // Update budget
                     self.budget.record_usage(&result.usage);
 
+                    if !result.content.is_empty() {
+                        emit_event!(AgentEvent::TextComplete {
+                            content: result.content.clone(),
+                        });
+                    }
+
                     // Check if we have tool calls
                     if !result.tool_calls.is_empty() {
                         // Add assistant message with tool calls
@@ -1183,7 +1230,14 @@ where
                                     let start = std::time::Instant::now();
                                     let dispatch_result = tools_ref.dispatch(&name, &args).await;
                                     let duration_ms = start.elapsed().as_millis() as u64;
-                                    (id, name, dispatch_result, duration_ms, thought_signature)
+                                    (
+                                        id,
+                                        name,
+                                        args,
+                                        dispatch_result,
+                                        duration_ms,
+                                        thought_signature,
+                                    )
                                 }
                             })
                             .collect();
@@ -1192,7 +1246,7 @@ where
 
                         // Process results and emit events
                         let mut tool_results = Vec::with_capacity(num_tool_calls);
-                        for (id, name, dispatch_result, duration_ms, thought_signature) in
+                        for (id, name, args, dispatch_result, duration_ms, thought_signature) in
                             dispatch_results
                         {
                             let (content, is_error) = match dispatch_result {
@@ -1204,7 +1258,40 @@ where
                                     };
                                     (s, false)
                                 }
-                                Err(e) => (e.to_string(), true),
+                                Err(crate::error::ToolError::Other(msg))
+                                    if msg.starts_with(CALLBACK_TOOL_PREFIX) =>
+                                {
+                                    let payload = msg
+                                        .strip_prefix(CALLBACK_TOOL_PREFIX)
+                                        .and_then(|suffix| {
+                                            serde_json::from_str::<Value>(suffix).ok()
+                                        })
+                                        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                                    let mut payload =
+                                        payload.as_object().cloned().unwrap_or_default();
+                                    payload
+                                        .entry("tool_use_id".to_string())
+                                        .or_insert(Value::String(id.clone()));
+                                    payload
+                                        .entry("tool_name".to_string())
+                                        .or_insert(Value::String(name.clone()));
+                                    payload.entry("args".to_string()).or_insert(args.clone());
+                                    let serialized = serde_json::to_string(&Value::Object(payload))
+                                        .unwrap_or_default();
+                                    return Err(AgentError::ToolError(format!(
+                                        "{}{}",
+                                        CALLBACK_TOOL_PREFIX, serialized
+                                    )));
+                                }
+                                Err(e) => {
+                                    let payload = e.to_error_payload();
+                                    let serialized = serde_json::to_string(&payload)
+                                        .unwrap_or_else(|_| {
+                                            "{\"error\":\"tool_error\",\"message\":\"tool error\"}"
+                                                .to_string()
+                                        });
+                                    (serialized, true)
+                                }
                             };
 
                             // Emit execution complete
@@ -1743,7 +1830,7 @@ mod tests {
         let tools = Arc::new(MockToolDispatcher::new(vec![ToolDef {
             name: "my_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
         }]));
         let store = Arc::new(MockSessionStore);
 
@@ -1876,7 +1963,7 @@ mod tests {
         let tools = Arc::new(MockToolDispatcher::new(vec![ToolDef {
             name: "test_tool".to_string(),
             description: "Test".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
         }]));
         let store = Arc::new(MockSessionStore);
 
@@ -2091,7 +2178,7 @@ mod tests {
             tools.push(ToolDef {
                 name: format!("tool_{}", i),
                 description: format!("Tool {}", i),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             });
         }
         let inner = Arc::new(MockToolDispatcher::new(tools));
@@ -2118,12 +2205,12 @@ mod tests {
             ToolDef {
                 name: "allowed_tool".to_string(),
                 description: "Allowed".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
             ToolDef {
                 name: "blocked_tool".to_string(),
                 description: "Blocked".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
         ];
         let inner = Arc::new(MockToolDispatcher::new(tools));
@@ -2184,17 +2271,17 @@ mod tests {
             ToolDef {
                 name: "tool_a".to_string(),
                 description: "A".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
             ToolDef {
                 name: "tool_b".to_string(),
                 description: "B".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
             ToolDef {
                 name: "tool_c".to_string(),
                 description: "C".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
             },
         ]));
         let store = Arc::new(MockSessionStore);
@@ -2298,17 +2385,17 @@ mod tests {
                 ToolDef {
                     name: "slow_tool_1".to_string(),
                     description: "Slow 1".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
                 ToolDef {
                     name: "slow_tool_2".to_string(),
                     description: "Slow 2".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
                 ToolDef {
                     name: "slow_tool_3".to_string(),
                     description: "Slow 3".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
             ],
             tool_delay_ms,
@@ -2447,17 +2534,17 @@ mod tests {
                 ToolDef {
                     name: "tool_a".to_string(),
                     description: "Tool A".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
                 ToolDef {
                     name: "tool_b".to_string(),
                     description: "Tool B".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
                 ToolDef {
                     name: "tool_c".to_string(),
                     description: "Tool C".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
             ],
             vec![], // No failures
@@ -2537,17 +2624,17 @@ mod tests {
                 ToolDef {
                     name: "good_tool".to_string(),
                     description: "Good Tool".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
                 ToolDef {
                     name: "bad_tool".to_string(),
                     description: "Bad Tool".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
                 ToolDef {
                     name: "another_good_tool".to_string(),
                     description: "Another Good Tool".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
             ],
             vec!["bad_tool"], // Only bad_tool fails
@@ -2631,12 +2718,12 @@ mod tests {
                 ToolDef {
                     name: "fail1".to_string(),
                     description: "Fail 1".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
                 ToolDef {
                     name: "fail2".to_string(),
                     description: "Fail 2".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
             ],
             vec!["fail1", "fail2"], // Both fail

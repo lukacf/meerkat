@@ -25,7 +25,8 @@ pub mod types;
 
 // Re-export main types at crate root
 pub use agent::{
-    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult,
+    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
+    CALLBACK_TOOL_PREFIX, LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use comms_bootstrap::{
@@ -41,7 +42,10 @@ pub use config::{
 };
 pub use config_store::{ConfigStore, FileConfigStore, MemoryConfigStore};
 pub use error::{AgentError, ToolError};
-pub use event::{AgentEvent, BudgetType};
+pub use event::{
+    AgentEvent, BudgetType, VerboseEventConfig, format_verbose_event,
+    format_verbose_event_with_config,
+};
 pub use gateway::{Availability, AvailabilityCheck, ToolGateway, ToolGatewayBuilder};
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use ops::{

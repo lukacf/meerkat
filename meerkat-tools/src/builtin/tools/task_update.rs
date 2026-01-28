@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::{TaskId, TaskPriority, TaskStatus, TaskUpdate};
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::SchemaBuilder;
 
 /// Parameters for the task_update tool
 #[derive(Debug, Deserialize)]
@@ -94,68 +95,101 @@ impl BuiltinTool for TaskUpdateTool {
         ToolDef {
             name: "task_update".to_string(),
             description: "Update an existing task".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "id",
+                    serde_json::json!({
                         "type": "string",
                         "description": "The task ID to update"
-                    },
-                    "subject": {
+                    }),
+                )
+                .property(
+                    "subject",
+                    serde_json::json!({
                         "type": "string",
                         "description": "New subject/title"
-                    },
-                    "description": {
+                    }),
+                )
+                .property(
+                    "description",
+                    serde_json::json!({
                         "type": "string",
                         "description": "New description"
-                    },
-                    "status": {
+                    }),
+                )
+                .property(
+                    "status",
+                    serde_json::json!({
                         "type": "string",
                         "enum": ["pending", "in_progress", "completed"],
                         "description": "New status"
-                    },
-                    "priority": {
+                    }),
+                )
+                .property(
+                    "priority",
+                    serde_json::json!({
                         "type": "string",
                         "enum": ["low", "medium", "high"],
                         "description": "New priority"
-                    },
-                    "labels": {
+                    }),
+                )
+                .property(
+                    "labels",
+                    serde_json::json!({
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Replace all labels"
-                    },
-                    "add_blocks": {
+                    }),
+                )
+                .property(
+                    "add_blocks",
+                    serde_json::json!({
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Task IDs to add to blocks list"
-                    },
-                    "remove_blocks": {
+                    }),
+                )
+                .property(
+                    "remove_blocks",
+                    serde_json::json!({
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Task IDs to remove from blocks list"
-                    },
-                    "owner": {
+                    }),
+                )
+                .property(
+                    "owner",
+                    serde_json::json!({
                         "type": "string",
                         "description": "New owner/assignee"
-                    },
-                    "metadata": {
+                    }),
+                )
+                .property(
+                    "metadata",
+                    serde_json::json!({
                         "type": "object",
                         "additionalProperties": true,
                         "description": "Metadata key-value pairs to merge (null value deletes key)"
-                    },
-                    "add_blocked_by": {
+                    }),
+                )
+                .property(
+                    "add_blocked_by",
+                    serde_json::json!({
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Task IDs to add to blocked_by list"
-                    },
-                    "remove_blocked_by": {
+                    }),
+                )
+                .property(
+                    "remove_blocked_by",
+                    serde_json::json!({
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Task IDs to remove from blocked_by list"
-                    }
-                },
-                "required": ["id"]
-            }),
+                    }),
+                )
+                .required("id")
+                .build(),
         }
     }
 

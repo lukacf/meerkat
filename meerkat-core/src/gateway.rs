@@ -339,7 +339,7 @@ mod tests {
                 .map(|name| ToolDef {
                     name: name.to_string(),
                     description: format!("{prefix} tool: {name}"),
-                    input_schema: json!({"type": "object"}),
+                    input_schema: json!({"type": "object", "properties": {}, "required": []}),
                 })
                 .collect();
             Self {

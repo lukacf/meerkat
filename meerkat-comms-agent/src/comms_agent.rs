@@ -396,7 +396,7 @@ mod tests {
             &self,
             _name: &str,
             _args: &serde_json::Value,
-        ) -> Result<serde_json::Value, meerkat_core::error::ToolError> {
+        ) -> Result<serde_json::Value, meerkat_tools::ToolError> {
             Ok(serde_json::Value::String("mock result".to_string()))
         }
     }

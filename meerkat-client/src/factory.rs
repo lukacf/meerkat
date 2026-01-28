@@ -3,6 +3,7 @@
 //! This module provides the [`LlmClientFactory`] trait and a default implementation
 //! that can create LLM clients for different providers (Anthropic, OpenAI, Gemini).
 
+use crate::test_client::TestClient;
 use crate::types::LlmClient;
 use std::sync::Arc;
 
@@ -149,21 +150,21 @@ impl DefaultFactoryConfig {
         self
     }
 
-    /// Get API key for provider (config override, then env var)
+    /// Get API key for provider (config override, then env var with RKAT_* precedence)
     fn get_api_key(&self, provider: LlmProvider) -> Option<String> {
         match provider {
             LlmProvider::Anthropic => self
                 .anthropic_api_key
                 .clone()
-                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok()),
+                .or_else(|| env_preferring_rkat("RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")),
             LlmProvider::OpenAi => self
                 .openai_api_key
                 .clone()
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok()),
+                .or_else(|| env_preferring_rkat("RKAT_OPENAI_API_KEY", "OPENAI_API_KEY")),
             LlmProvider::Gemini => self
                 .gemini_api_key
                 .clone()
-                .or_else(|| std::env::var("GEMINI_API_KEY").ok())
+                .or_else(|| env_preferring_rkat("RKAT_GEMINI_API_KEY", "GEMINI_API_KEY"))
                 .or_else(|| std::env::var("GOOGLE_API_KEY").ok()),
         }
     }
@@ -212,6 +213,9 @@ impl LlmClientFactory for DefaultClientFactory {
         provider: LlmProvider,
         api_key: Option<String>,
     ) -> Result<Arc<dyn LlmClient>, FactoryError> {
+        if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
+            return Ok(Arc::new(TestClient::default()));
+        }
         // Use provided key, or fall back to config/env
         let key = api_key.or_else(|| self.config.get_api_key(provider));
 
@@ -277,6 +281,12 @@ impl LlmClientFactory for DefaultClientFactory {
 
         providers
     }
+}
+
+fn env_preferring_rkat(rkat_key: &str, provider_key: &str) -> Option<String> {
+    std::env::var(rkat_key)
+        .ok()
+        .or_else(|| std::env::var(provider_key).ok())
 }
 
 #[cfg(test)]

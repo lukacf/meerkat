@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::TaskId;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::SchemaBuilder;
 
 /// Parameters for the task_get tool
 #[derive(Debug, Deserialize)]
@@ -45,16 +46,16 @@ impl BuiltinTool for TaskGetTool {
         ToolDef {
             name: "task_get".to_string(),
             description: "Get a task by its ID".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "id",
+                    serde_json::json!({
                         "type": "string",
                         "description": "The task ID"
-                    }
-                },
-                "required": ["id"]
-            }),
+                    }),
+                )
+                .required("id")
+                .build(),
         }
     }
 

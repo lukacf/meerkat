@@ -2,6 +2,7 @@
 
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::ops::{OperationId, SubAgentState};
@@ -125,16 +126,16 @@ impl BuiltinTool for AgentStatusTool {
         ToolDef {
             name: "agent_status".to_string(),
             description: "Get status and output of a sub-agent by ID. Returns the current state (running, completed, failed, cancelled) and output when available.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "agent_id": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "agent_id",
+                    json!({
                         "type": "string",
                         "description": "The unique identifier of the sub-agent (UUID format)"
-                    }
-                },
-                "required": ["agent_id"]
-            }),
+                    }),
+                )
+                .required("agent_id")
+                .build(),
         }
     }
 

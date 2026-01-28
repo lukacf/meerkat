@@ -6,6 +6,7 @@ use super::runner::{
 };
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_client::LlmProvider;
 use meerkat_core::ToolDef;
@@ -361,26 +362,35 @@ impl BuiltinTool for AgentSpawnTool {
         ToolDef {
             name: "agent_spawn".to_string(),
             description: "Spawn a new sub-agent with clean context. The sub-agent starts fresh with only the provided prompt - it does not inherit conversation history. Useful for delegating independent tasks.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "prompt": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "prompt",
+                    json!({
                         "type": "string",
                         "description": "Initial prompt/task for the sub-agent. This is the only context the sub-agent will have."
-                    },
-                    "provider": {
+                    }),
+                )
+                .property(
+                    "provider",
+                    json!({
                         "type": "string",
                         "description": "LLM provider to use: 'anthropic', 'openai', or 'gemini'. Defaults to the configured default provider.",
                         "enum": ["anthropic", "openai", "gemini"]
-                    },
-                    "model": {
+                    }),
+                )
+                .property(
+                    "model",
+                    json!({
                         "type": "string",
                         "description": format!(
                             "Model to use (must be from allowlist). {}. Defaults to provider's first allowed model.",
                             allowed_models::description()
                         )
-                    },
-                    "tool_access": {
+                    }),
+                )
+                .property(
+                    "tool_access",
+                    json!({
                         "type": "object",
                         "description": "Tool access policy for the sub-agent",
                         "properties": {
@@ -395,8 +405,11 @@ impl BuiltinTool for AgentSpawnTool {
                                 "description": "Tool names for allow_list or deny_list policies"
                             }
                         }
-                    },
-                    "budget": {
+                    }),
+                )
+                .property(
+                    "budget",
+                    json!({
                         "type": "object",
                         "description": "Budget limits for the sub-agent",
                         "properties": {
@@ -413,19 +426,25 @@ impl BuiltinTool for AgentSpawnTool {
                                 "description": "Maximum tool calls"
                             }
                         }
-                    },
-                    "system_prompt": {
+                    }),
+                )
+                .property(
+                    "system_prompt",
+                    json!({
                         "type": "string",
                         "description": "Override the system prompt for the sub-agent"
-                    },
-                    "host_mode": {
+                    }),
+                )
+                .property(
+                    "host_mode",
+                    json!({
                         "type": "boolean",
                         "description": "If true, the sub-agent stays alive after completing the initial prompt, processing incoming comms messages. Requires comms to be enabled. Use this for long-running sub-agents that need to receive instructions or report findings over time.",
                         "default": false
-                    }
-                },
-                "required": ["prompt"]
-            }),
+                    }),
+                )
+                .required("prompt")
+                .build(),
         }
     }
 

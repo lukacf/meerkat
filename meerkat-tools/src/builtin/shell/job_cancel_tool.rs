@@ -3,6 +3,7 @@
 //! This module provides the [`ShellJobCancelTool`] which cancels a running
 //! background shell job.
 
+use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use serde::Deserialize;
@@ -47,16 +48,16 @@ impl BuiltinTool for ShellJobCancelTool {
         ToolDef {
             name: "shell_job_cancel".to_string(),
             description: "Cancel a running background shell job".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "job_id": {
+            input_schema: SchemaBuilder::new()
+                .property(
+                    "job_id",
+                    json!({
                         "type": "string",
                         "description": "The job ID to cancel"
-                    }
-                },
-                "required": ["job_id"]
-            }),
+                    }),
+                )
+                .required("job_id")
+                .build(),
         }
     }
 

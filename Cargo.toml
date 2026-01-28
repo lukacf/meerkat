@@ -15,6 +15,7 @@ members = [
     "meerkat-comms-mcp",
     "meerkat-comms-agent",
     "test-fixtures/mcp-test-server",
+    "tests/integration",
 ]
 
 [workspace.package]
@@ -65,6 +66,8 @@ dirs = "5.0"
 
 # Web framework
 axum = { version = "0.8", features = ["json"] }
+hyper = "1.6"
+http-body-util = "0.1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 

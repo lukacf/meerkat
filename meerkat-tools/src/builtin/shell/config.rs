@@ -12,69 +12,32 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ShellError {
     /// Shell executable not found on system
-    #[error("Shell '{shell}' not found at path, tried fallbacks: {tried:?}")]
-    ShellNotFound {
-        /// The requested shell name
-        shell: String,
-        /// List of paths that were tried
-        tried: Vec<String>,
-    },
+    #[error("Shell not installed: {0}. Install from https://nushell.sh")]
+    ShellNotInstalled(String),
 
     /// Command matches a blocked pattern
-    #[error("Command blocked: contains '{pattern}'")]
-    BlockedCommand {
-        /// The blocked pattern that was matched
-        pattern: String,
-    },
+    #[error("Command blocked: contains '{0}'")]
+    BlockedCommand(String),
 
     /// Working directory escapes project root
-    #[error("Working directory '{path}' is outside project root '{project_root}'")]
-    WorkingDirEscape {
-        /// The path that was attempted
-        path: String,
-        /// The project root directory
-        project_root: String,
-    },
+    #[error("Working directory '{0}' is outside project root")]
+    WorkingDirEscape(String),
 
     /// Working directory does not exist
-    #[error("Working directory not found: {path}")]
-    WorkingDirNotFound {
-        /// The path that was not found
-        path: String,
-    },
+    #[error("Working directory not found: {0}")]
+    WorkingDirNotFound(String),
 
     /// Job not found in job manager
-    #[error("Job {job_id} not found while attempting {operation}")]
-    JobNotFound {
-        /// The job ID that was not found
-        job_id: String,
-        /// The operation that was attempted
-        operation: &'static str,
-    },
+    #[error("Job not found: {0}")]
+    JobNotFound(String),
 
     /// Job is not in running state
-    #[error("Job {job_id} already completed (status: {status}) while attempting {operation}")]
-    JobAlreadyCompleted {
-        /// The job ID
-        job_id: String,
-        /// The current status of the job
-        status: String,
-        /// The operation that was attempted
-        operation: &'static str,
-    },
+    #[error("Job is not running")]
+    JobNotRunning,
 
     /// Background execution not configured
     #[error("Background execution not configured")]
     BackgroundNotConfigured,
-
-    /// Concurrency limit exceeded
-    #[error("Concurrency limit exceeded: {current} running jobs, limit is {limit}")]
-    ConcurrencyLimitExceeded {
-        /// Current number of running jobs
-        current: usize,
-        /// Configured limit
-        limit: usize,
-    },
 
     /// IO error during shell operations
     #[error("IO error: {0}")]
@@ -125,8 +88,8 @@ pub struct ShellConfig {
 
     /// Maximum number of concurrent running processes (default: 10)
     ///
-    /// When this limit is reached, new job spawn requests will be rejected
-    /// with a ConcurrencyLimitExceeded error. Set to 0 for unlimited.
+    /// When this limit is reached, new job spawn requests will be rejected.
+    /// Set to 0 for unlimited.
     #[serde(default = "default_max_concurrent_processes")]
     pub max_concurrent_processes: usize,
 }
@@ -195,24 +158,16 @@ impl ShellConfig {
         // Canonicalize to resolve symlinks and .. components
         let canonical = resolved
             .canonicalize()
-            .map_err(|_| ShellError::WorkingDirNotFound {
-                path: resolved.display().to_string(),
-            })?;
+            .map_err(|_| ShellError::WorkingDirNotFound(resolved.display().to_string()))?;
 
         // Check if path is within project root when restricted
         if self.restrict_to_project {
-            let canonical_root =
-                self.project_root
-                    .canonicalize()
-                    .map_err(|_| ShellError::WorkingDirNotFound {
-                        path: self.project_root.display().to_string(),
-                    })?;
+            let canonical_root = self.project_root.canonicalize().map_err(|_| {
+                ShellError::WorkingDirNotFound(self.project_root.display().to_string())
+            })?;
 
             if !canonical.starts_with(&canonical_root) {
-                return Err(ShellError::WorkingDirEscape {
-                    path: dir.display().to_string(),
-                    project_root: self.project_root.display().to_string(),
-                });
+                return Err(ShellError::WorkingDirEscape(dir.display().to_string()));
             }
         }
 
@@ -224,25 +179,20 @@ impl ShellConfig {
     pub async fn validate_working_dir_async(&self, dir: &Path) -> Result<PathBuf, ShellError> {
         let resolved = self.resolve_working_dir_candidate(dir);
 
-        let canonical = tokio::fs::canonicalize(&resolved).await.map_err(|_| {
-            ShellError::WorkingDirNotFound {
-                path: resolved.display().to_string(),
-            }
-        })?;
+        let canonical = tokio::fs::canonicalize(&resolved)
+            .await
+            .map_err(|_| ShellError::WorkingDirNotFound(resolved.display().to_string()))?;
 
         if self.restrict_to_project {
             let canonical_root =
                 tokio::fs::canonicalize(&self.project_root)
                     .await
-                    .map_err(|_| ShellError::WorkingDirNotFound {
-                        path: self.project_root.display().to_string(),
+                    .map_err(|_| {
+                        ShellError::WorkingDirNotFound(self.project_root.display().to_string())
                     })?;
 
             if !canonical.starts_with(&canonical_root) {
-                return Err(ShellError::WorkingDirEscape {
-                    path: dir.display().to_string(),
-                    project_root: self.project_root.display().to_string(),
-                });
+                return Err(ShellError::WorkingDirEscape(dir.display().to_string()));
             }
         }
 
@@ -251,10 +201,36 @@ impl ShellConfig {
 
     /// Resolve the shell executable path using config and environment (sync).
     ///
-    /// Uses the explicit `shell_path` if present, then PATH lookup, then
-    /// the `SHELL` environment variable, then platform-specific fallbacks.
+    /// Uses the explicit `shell_path` if present, then PATH lookup.
     pub fn resolve_shell_path(&self) -> Result<PathBuf, ShellError> {
+        self.resolve_shell_path_with_fallbacks(&[])
+    }
+
+    pub(crate) fn resolve_shell_path_with_fallbacks(
+        &self,
+        fallbacks: &[&str],
+    ) -> Result<PathBuf, ShellError> {
         let mut tried = Vec::new();
+
+        let try_candidate = |candidate: &str, tried: &mut Vec<String>| -> Option<PathBuf> {
+            if candidate.is_empty() {
+                return None;
+            }
+
+            let path = PathBuf::from(candidate);
+            if path.is_absolute() {
+                if path.exists() {
+                    return Some(path);
+                }
+            } else if let Ok(found) = which::which(candidate) {
+                return Some(found);
+            }
+
+            if !tried.iter().any(|entry| entry == candidate) {
+                tried.push(candidate.to_string());
+            }
+            None
+        };
 
         // 1. Try explicit shell_path from config if set
         if let Some(ref path) = self.shell_path {
@@ -268,38 +244,23 @@ impl ShellConfig {
         if let Ok(path) = which::which(&self.shell) {
             return Ok(path);
         }
-        tried.push(self.shell.clone());
-
-        // 3. Try SHELL environment variable
-        if let Ok(shell_env) = std::env::var("SHELL") {
-            let path = PathBuf::from(&shell_env);
-            if path.exists() {
-                return Ok(path);
-            }
-            tried.push(shell_env);
+        if !tried.iter().any(|entry| entry == &self.shell) {
+            tried.push(self.shell.clone());
         }
 
-        // 4. Try platform-specific fallbacks
-        let fallbacks: Vec<&str> = if cfg!(windows) {
-            vec!["cmd.exe", "powershell.exe"]
+        // 3. Try configured fallbacks (if any)
+        for shell in fallbacks {
+            if let Some(path) = try_candidate(shell, &mut tried) {
+                return Ok(path);
+            }
+        }
+
+        let details = if tried.is_empty() {
+            self.shell.clone()
         } else {
-            vec!["/bin/sh", "/bin/bash", "/bin/busybox", "/usr/bin/sh"]
+            format!("{} (tried: {})", self.shell, tried.join(", "))
         };
-
-        for shell in &fallbacks {
-            let path = PathBuf::from(shell);
-            if path.exists() {
-                return Ok(path);
-            }
-            if !tried.contains(&shell.to_string()) {
-                tried.push(shell.to_string());
-            }
-        }
-
-        Err(ShellError::ShellNotFound {
-            shell: self.shell.clone(),
-            tried,
-        })
+        Err(ShellError::ShellNotInstalled(details))
     }
 
     /// Async variant of [`ShellConfig::resolve_shell_path`] that avoids blocking
@@ -370,6 +331,14 @@ mod tests {
             config.project_root,
             PathBuf::new(),
             "project_root should default to empty PathBuf"
+        );
+        assert_eq!(
+            config.max_completed_jobs, 100,
+            "max_completed_jobs should default to 100"
+        );
+        assert_eq!(
+            config.completed_job_ttl_secs, 300,
+            "completed_job_ttl_secs should default to 300"
         );
         assert_eq!(
             config.max_concurrent_processes, 10,
@@ -495,11 +464,11 @@ mod tests {
 
         // Test escape with ..
         let result = config.validate_working_dir(Path::new("../"));
-        assert!(matches!(result, Err(ShellError::WorkingDirEscape { .. })));
+        assert!(matches!(result, Err(ShellError::WorkingDirEscape(_))));
 
         // Test absolute path outside project
         let result = config.validate_working_dir(Path::new("/tmp"));
-        assert!(matches!(result, Err(ShellError::WorkingDirEscape { .. })));
+        assert!(matches!(result, Err(ShellError::WorkingDirEscape(_))));
     }
 
     #[test]
@@ -511,7 +480,7 @@ mod tests {
 
         // Test nonexistent directory
         let result = config.validate_working_dir(Path::new("nonexistent"));
-        assert!(matches!(result, Err(ShellError::WorkingDirNotFound { .. })));
+        assert!(matches!(result, Err(ShellError::WorkingDirNotFound(_))));
     }
 
     #[test]
@@ -531,64 +500,59 @@ mod tests {
 
     #[test]
     fn test_shell_error_display() {
-        let err = ShellError::ShellNotFound {
-            shell: "nu".to_string(),
-            tried: vec!["/bin/nu".to_string(), "/usr/bin/nu".to_string()],
-        };
+        let err = ShellError::ShellNotInstalled("nu".to_string());
         assert_eq!(
             err.to_string(),
-            "Shell 'nu' not found at path, tried fallbacks: [\"/bin/nu\", \"/usr/bin/nu\"]"
+            "Shell not installed: nu. Install from https://nushell.sh"
         );
 
-        let err = ShellError::BlockedCommand {
-            pattern: "rm -rf /".to_string(),
-        };
+        let err = ShellError::BlockedCommand("rm -rf /".to_string());
         assert_eq!(err.to_string(), "Command blocked: contains 'rm -rf /'");
 
-        let err = ShellError::WorkingDirEscape {
-            path: "../../../etc".to_string(),
-            project_root: "/home/user/project".to_string(),
-        };
+        let err = ShellError::WorkingDirEscape("../../../etc".to_string());
         assert_eq!(
             err.to_string(),
-            "Working directory '../../../etc' is outside project root '/home/user/project'"
+            "Working directory '../../../etc' is outside project root"
         );
 
-        let err = ShellError::WorkingDirNotFound {
-            path: "/nonexistent".to_string(),
-        };
+        let err = ShellError::WorkingDirNotFound("/nonexistent".to_string());
         assert_eq!(err.to_string(), "Working directory not found: /nonexistent");
 
-        let err = ShellError::JobNotFound {
-            job_id: "job_123".to_string(),
-            operation: "get_status",
-        };
-        assert_eq!(
-            err.to_string(),
-            "Job job_123 not found while attempting get_status"
-        );
+        let err = ShellError::JobNotFound("job_123".to_string());
+        assert_eq!(err.to_string(), "Job not found: job_123");
 
-        let err = ShellError::JobAlreadyCompleted {
-            job_id: "job_456".to_string(),
-            status: "completed".to_string(),
-            operation: "cancel",
-        };
-        assert_eq!(
-            err.to_string(),
-            "Job job_456 already completed (status: completed) while attempting cancel"
-        );
+        let err = ShellError::JobNotRunning;
+        assert_eq!(err.to_string(), "Job is not running");
 
         let err = ShellError::BackgroundNotConfigured;
         assert_eq!(err.to_string(), "Background execution not configured");
+    }
 
-        let err = ShellError::ConcurrencyLimitExceeded {
-            current: 10,
-            limit: 10,
-        };
-        assert_eq!(
-            err.to_string(),
-            "Concurrency limit exceeded: 10 running jobs, limit is 10"
-        );
+    #[test]
+    fn test_shell_error_variants() {
+        let err = ShellError::ShellNotInstalled("nu".to_string());
+        assert!(matches!(err, ShellError::ShellNotInstalled(_)));
+
+        let err = ShellError::BlockedCommand("rm -rf /".to_string());
+        assert!(matches!(err, ShellError::BlockedCommand(_)));
+
+        let err = ShellError::WorkingDirEscape("../../../etc".to_string());
+        assert!(matches!(err, ShellError::WorkingDirEscape(_)));
+
+        let err = ShellError::WorkingDirNotFound("/nonexistent".to_string());
+        assert!(matches!(err, ShellError::WorkingDirNotFound(_)));
+
+        let err = ShellError::JobNotFound("job_123".to_string());
+        assert!(matches!(err, ShellError::JobNotFound(_)));
+
+        let err = ShellError::JobNotRunning;
+        assert!(matches!(err, ShellError::JobNotRunning));
+
+        let err = ShellError::BackgroundNotConfigured;
+        assert!(matches!(err, ShellError::BackgroundNotConfigured));
+
+        let err = ShellError::Io(std::io::Error::other("io error"));
+        assert!(matches!(err, ShellError::Io(_)));
     }
 
     #[test]
@@ -596,5 +560,12 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let err: ShellError = io_err.into();
         assert!(err.to_string().contains("IO error"));
+    }
+
+    #[test]
+    fn test_shell_error_from_io() {
+        let io_err = std::io::Error::other("boom");
+        let err: ShellError = io_err.into();
+        assert!(matches!(err, ShellError::Io(_)));
     }
 }

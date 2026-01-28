@@ -3,10 +3,11 @@
 //! These tests verify complete agent-to-agent communication flows through the system.
 //! They use real LLM providers and test the full comms stack.
 //!
-//! All E2E tests are marked #[ignore] to avoid running in normal CI
-//! since they require API keys and make real API calls.
+//! These tests require API keys and make real API calls.
+//! When ANTHROPIC_API_KEY is missing, the tests will skip themselves at runtime.
 //!
-//! Run with: cargo test --package meerkat --test e2e_comms -- --ignored
+//! Run with:
+//!   ANTHROPIC_API_KEY=... cargo test --package meerkat --test e2e_comms
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -355,7 +356,6 @@ mod two_agent_message {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_e2e_llm_message_exchange() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -414,7 +414,6 @@ mod request_response {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_e2e_llm_request_response() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -478,7 +477,6 @@ mod multi_turn_comms {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_e2e_llm_multi_turn() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -545,7 +543,6 @@ mod three_agent_coordination {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "Requires ANTHROPIC_API_KEY"]
     async fn test_e2e_llm_three_agent_coordination() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
             eprintln!("Skipping: ANTHROPIC_API_KEY not set");

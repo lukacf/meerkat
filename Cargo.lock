@@ -1369,6 +1369,7 @@ dependencies = [
  "meerkat-comms",
  "meerkat-comms-mcp",
  "meerkat-core",
+ "meerkat-tools",
  "serde",
  "serde_json",
  "tempfile",
@@ -1413,6 +1414,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "meerkat-agent",
+ "meerkat-client",
+ "meerkat-core",
+ "meerkat-store",
+ "meerkat-tools",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "meerkat-mcp-client"
 version = "0.1.0"
 dependencies = [
@@ -1444,9 +1458,11 @@ dependencies = [
  "meerkat-tools",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1459,6 +1475,8 @@ dependencies = [
  "chrono",
  "dirs",
  "futures",
+ "http-body-util",
+ "hyper",
  "meerkat",
  "meerkat-client",
  "meerkat-core",
@@ -1466,6 +1484,7 @@ dependencies = [
  "meerkat-tools",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tower",
@@ -1499,7 +1518,6 @@ dependencies = [
  "jsonschema",
  "meerkat-client",
  "meerkat-comms",
- "meerkat-comms-agent",
  "meerkat-comms-mcp",
  "meerkat-core",
  "meerkat-mcp-client",

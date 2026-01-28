@@ -155,6 +155,7 @@ impl std::fmt::Debug for SubAgentToolState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::empty_object_schema;
     use async_trait::async_trait;
     use meerkat_client::{FactoryError, LlmClient, LlmProvider};
     use meerkat_core::ToolDef;
@@ -342,7 +343,7 @@ mod tests {
                 .map(|name| ToolDef {
                     name: name.clone(),
                     description: format!("{} tool", name),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: empty_object_schema(),
                 })
                 .collect()
         }

@@ -13,6 +13,7 @@ repository.workspace = true
 meerkat-core = { workspace = true }
 meerkat-comms = { workspace = true }
 meerkat-comms-mcp = { workspace = true }
+meerkat-tools = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }

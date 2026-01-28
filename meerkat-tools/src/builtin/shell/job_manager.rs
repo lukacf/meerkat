@@ -233,7 +233,9 @@ impl JobManager {
             let current = self.running_job_count().await;
             if current >= limit {
                 warn!(current = %current, limit = %limit, "Concurrency limit exceeded");
-                return Err(ShellError::ConcurrencyLimitExceeded { current, limit });
+                return Err(ShellError::Io(std::io::Error::other(format!(
+                    "Concurrency limit exceeded: {current} running jobs, limit is {limit}"
+                ))));
             }
         }
 
@@ -493,7 +495,7 @@ impl JobManager {
     /// # Errors
     ///
     /// Returns [`ShellError::JobNotFound`] if the job doesn't exist.
-    /// Returns [`ShellError::JobAlreadyCompleted`] if the job is not in running state.
+    /// Returns [`ShellError::JobNotRunning`] if the job is not in running state.
     #[instrument(skip(self), fields(job_id = %job_id))]
     pub async fn cancel_job(&self, job_id: &JobId) -> Result<(), ShellError> {
         info!("Cancelling job");
@@ -505,10 +507,7 @@ impl JobManager {
             let mut jobs_guard = self.jobs.lock().await;
             let job = jobs_guard.get_mut(job_id).ok_or_else(|| {
                 warn!("Job not found");
-                ShellError::JobNotFound {
-                    job_id: job_id.to_string(),
-                    operation: "cancel",
-                }
+                ShellError::JobNotFound(job_id.to_string())
             })?;
 
             // Check and update atomically
@@ -519,19 +518,8 @@ impl JobManager {
                     .as_secs();
                 (now - started_at_unix) as f64
             } else {
-                let status_str = match &job.status {
-                    JobStatus::Completed { .. } => "completed",
-                    JobStatus::Failed { .. } => "failed",
-                    JobStatus::TimedOut { .. } => "timed_out",
-                    JobStatus::Cancelled { .. } => "cancelled",
-                    JobStatus::Running { .. } => "running",
-                };
                 warn!("Job is not running");
-                return Err(ShellError::JobAlreadyCompleted {
-                    job_id: job_id.to_string(),
-                    status: status_str.to_string(),
-                    operation: "cancel",
-                });
+                return Err(ShellError::JobNotRunning);
             };
 
             // Update status while still holding the lock
@@ -920,7 +908,7 @@ mod tests {
         // Trying to cancel non-existent job
         let fake_id = JobId::from_string("job_fake");
         let result = manager.cancel_job(&fake_id).await;
-        assert!(matches!(result, Err(ShellError::JobNotFound { .. })));
+        assert!(matches!(result, Err(ShellError::JobNotFound(_))));
     }
 
     // ==================== Async Execution Tests (require actual shell) ====================
@@ -1706,7 +1694,7 @@ mod tests {
         let result1 = r1.expect("Task 1 should not panic");
         let result2 = r2.expect("Task 2 should not panic");
 
-        // One should succeed, one should fail with JobAlreadyCompleted
+        // One should succeed, one should fail with JobNotRunning
         let (successes, failures): (Vec<_>, Vec<_>) =
             [result1, result2].into_iter().partition(Result::is_ok);
 
@@ -1714,14 +1702,14 @@ mod tests {
         assert_eq!(
             failures.len(),
             1,
-            "Exactly one cancel should fail with JobAlreadyCompleted"
+            "Exactly one cancel should fail with JobNotRunning"
         );
 
-        // The failure should be JobAlreadyCompleted, not a race condition panic
+        // The failure should be JobNotRunning, not a race condition panic
         if let Err(err) = &failures[0] {
             assert!(
-                matches!(err, ShellError::JobAlreadyCompleted { .. }),
-                "Expected JobAlreadyCompleted error, got: {:?}",
+                matches!(err, ShellError::JobNotRunning),
+                "Expected JobNotRunning error, got: {:?}",
                 err
             );
         }
@@ -1830,10 +1818,7 @@ mod tests {
         // The test passes if it compiles - process group is configured
     }
 
-    /// Regression test for Task #10: Error context includes job_id and operation
-    ///
-    /// Verifies that ShellError variants include context like job_id and operation
-    /// for better debugging.
+    /// Regression test for Task #10: Error variant for missing jobs
     #[tokio::test]
     async fn test_error_context_job_not_found() {
         let config = ShellConfig::default();
@@ -1843,20 +1828,16 @@ mod tests {
         let fake_id = JobId::from_string("job_nonexistent_12345");
         let result = manager.cancel_job(&fake_id).await;
 
-        // Should be JobNotFound with context
+        // Should be JobNotFound
         match result {
-            Err(ShellError::JobNotFound { job_id, operation }) => {
+            Err(ShellError::JobNotFound(job_id)) => {
                 assert_eq!(job_id, "job_nonexistent_12345");
-                assert_eq!(operation, "cancel");
             }
             other => panic!("Expected JobNotFound error, got: {:?}", other),
         }
     }
 
-    /// Regression test for Task #10: Error context for already completed job
-    ///
-    /// Verifies that attempting to cancel an already-completed job returns
-    /// an error with the job's current status.
+    /// Regression test for Task #10: Error variant for non-running jobs
     #[tokio::test]
     #[ignore = "e2e: spawns real shell process"]
     async fn test_error_context_job_already_completed() {
@@ -1873,18 +1854,10 @@ mod tests {
         // Try to cancel the completed job
         let result = manager.cancel_job(&job_id).await;
 
-        // Should be JobAlreadyCompleted with context
+        // Should be JobNotRunning
         match result {
-            Err(ShellError::JobAlreadyCompleted {
-                job_id: err_job_id,
-                status,
-                operation,
-            }) => {
-                assert_eq!(err_job_id, job_id.to_string());
-                assert_eq!(status, "completed");
-                assert_eq!(operation, "cancel");
-            }
-            other => panic!("Expected JobAlreadyCompleted error, got: {:?}", other),
+            Err(ShellError::JobNotRunning) => {}
+            other => panic!("Expected JobNotRunning error, got: {:?}", other),
         }
     }
 
@@ -1966,8 +1939,8 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(
-            matches!(err, ShellError::ConcurrencyLimitExceeded { .. }),
-            "Expected ConcurrencyLimitExceeded error, got: {:?}",
+            err.to_string().contains("Concurrency limit exceeded"),
+            "Expected concurrency limit error, got: {:?}",
             err
         );
     }

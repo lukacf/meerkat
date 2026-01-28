@@ -252,6 +252,49 @@ fn test_run_result_json_schema() {
 }
 
 #[test]
+fn test_tool_def_serialization() {
+    let tool_def = ToolDef {
+        name: "test_tool".to_string(),
+        description: "A test tool".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "arg1": { "type": "string" }
+            },
+            "required": ["arg1"]
+        }),
+    };
+
+    let json = serde_json::to_string(&tool_def).unwrap();
+    let parsed: ToolDef = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.name, "test_tool");
+    assert_eq!(parsed.description, "A test tool");
+    assert_eq!(parsed.input_schema["type"], "object");
+    assert_eq!(parsed.input_schema["required"], json!(["arg1"]));
+}
+
+#[test]
+fn test_tool_def_empty_schema_serialization() {
+    let tool_def = ToolDef {
+        name: "empty_tool".to_string(),
+        description: "An empty tool".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+    };
+
+    let json = serde_json::to_string(&tool_def).unwrap();
+    let parsed: ToolDef = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.name, "empty_tool");
+    assert_eq!(parsed.input_schema["type"], "object");
+    assert_eq!(parsed.input_schema["required"], json!([]));
+}
+
+#[test]
 fn test_artifact_ref_serialization() {
     let artifact = ArtifactRef {
         id: "artifact_123".to_string(),

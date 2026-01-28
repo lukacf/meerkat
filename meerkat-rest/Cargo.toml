@@ -35,7 +35,10 @@ chrono = { workspace = true }
 dirs = { workspace = true }
 
 [dev-dependencies]
+hyper = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = { workspace = true }
+http-body-util = { workspace = true }
 
 [lints]
 workspace = true

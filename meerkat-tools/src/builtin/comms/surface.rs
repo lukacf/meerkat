@@ -25,10 +25,10 @@
 //! ```
 
 use super::tool_set::CommsToolSet;
+use crate::ToolError;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 use async_trait::async_trait;
 use meerkat_comms::{Router, TrustedPeers};
-use meerkat_core::error::ToolError;
 use meerkat_core::gateway::Availability;
 use meerkat_core::{AgentToolDispatcher, ToolDef};
 use serde_json::Value;

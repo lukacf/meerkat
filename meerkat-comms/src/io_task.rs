@@ -11,7 +11,7 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::identity::{Keypair, Signature};
-use crate::inbox::InboxSender;
+use crate::inbox::{InboxError, InboxSender};
 use crate::transport::{TransportError, MAX_PAYLOAD_SIZE};
 use crate::trust::TrustedPeers;
 use crate::types::{Envelope, InboxItem, MessageKind};
@@ -64,7 +64,10 @@ where
     // Enqueue to inbox
     inbox_sender
         .send(InboxItem::External { envelope })
-        .map_err(|_| IoTaskError::InboxClosed)?;
+        .map_err(|err| match err {
+            InboxError::Closed => IoTaskError::InboxClosed,
+            InboxError::Full => IoTaskError::InboxFull,
+        })?;
 
     Ok(())
 }
@@ -153,6 +156,8 @@ pub enum IoTaskError {
     Cbor(String),
     #[error("Inbox closed")]
     InboxClosed,
+    #[error("Inbox full")]
+    InboxFull,
 }
 
 #[cfg(test)]

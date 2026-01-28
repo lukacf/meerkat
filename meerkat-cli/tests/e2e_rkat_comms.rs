@@ -1,11 +1,12 @@
 //! End-to-end tests for rkat CLI inter-agent communication (Phase 12)
 //!
 //! These tests spawn actual rkat processes and verify inter-process communication.
-//! Tests are marked #[ignore] as they require the rkat binary to be built first.
+//! They require ANTHROPIC_API_KEY and a built rkat binary.
+//! When prerequisites are missing, the tests will skip themselves at runtime.
 //!
 //! Run with:
 //!   cargo build -p meerkat-cli
-//!   cargo test -p meerkat-cli --test e2e_rkat_comms -- --ignored
+//!   ANTHROPIC_API_KEY=... cargo test -p meerkat-cli --test e2e_rkat_comms
 
 use meerkat_comms::{Keypair, PubKey, TrustedPeer, TrustedPeers};
 use std::io::{BufRead, BufReader};
@@ -33,7 +34,7 @@ fn get_available_port() -> u16 {
 }
 
 /// Get path to the rkat binary
-fn rkat_binary_path() -> PathBuf {
+fn rkat_binary_path() -> Option<PathBuf> {
     // Look for debug binary first, then release
     let debug_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -41,7 +42,7 @@ fn rkat_binary_path() -> PathBuf {
         .join("target/debug/rkat");
 
     if debug_path.exists() {
-        return debug_path;
+        return Some(debug_path);
     }
 
     let release_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -50,14 +51,10 @@ fn rkat_binary_path() -> PathBuf {
         .join("target/release/rkat");
 
     if release_path.exists() {
-        return release_path;
+        return Some(release_path);
     }
 
-    panic!(
-        "rkat binary not found. Run 'cargo build -p meerkat-cli' first. \
-         Looked at {:?} and {:?}",
-        debug_path, release_path
-    );
+    None
 }
 
 /// Manages a test rkat process with its temp directory and config
@@ -175,7 +172,12 @@ ack_timeout_secs = 30
 
     /// Spawn the rkat process with a prompt
     pub fn spawn(&mut self, prompt: &str) -> std::io::Result<()> {
-        let binary = rkat_binary_path();
+        let Some(binary) = rkat_binary_path() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "rkat binary not found. Run 'cargo build -p meerkat-cli' first.",
+            ));
+        };
 
         let child = Command::new(&binary)
             .arg("run")
@@ -410,15 +412,28 @@ fn test_rkat_wait_for_ready() {
 // E2E SCENARIOS (require ANTHROPIC_API_KEY and rkat binary)
 // ============================================================================
 
-fn skip_if_no_key() -> bool {
-    std::env::var("ANTHROPIC_API_KEY").is_err()
+fn skip_if_no_prereqs() -> bool {
+    let mut missing = Vec::new();
+
+    if std::env::var("ANTHROPIC_API_KEY").is_err() {
+        missing.push("ANTHROPIC_API_KEY");
+    }
+
+    if rkat_binary_path().is_none() {
+        missing.push("rkat binary (build with cargo build -p meerkat-cli)");
+    }
+
+    if missing.is_empty() {
+        return false;
+    }
+
+    eprintln!("Skipping: missing {}", missing.join(" and "));
+    true
 }
 
 #[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
 fn test_e2e_rkat_tcp_message_exchange() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+    if skip_if_no_prereqs() {
         return;
     }
 
@@ -470,10 +485,8 @@ fn test_e2e_rkat_tcp_message_exchange() {
 }
 
 #[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
 fn test_e2e_rkat_uds_message_exchange() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+    if skip_if_no_prereqs() {
         return;
     }
 
@@ -568,10 +581,8 @@ trusted_peers_path = "{}"
 }
 
 #[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
 fn test_e2e_rkat_request_response_flow() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+    if skip_if_no_prereqs() {
         return;
     }
 
@@ -610,10 +621,8 @@ fn test_e2e_rkat_request_response_flow() {
 }
 
 #[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
 fn test_e2e_rkat_untrusted_rejected() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+    if skip_if_no_prereqs() {
         return;
     }
 
@@ -664,10 +673,8 @@ fn test_e2e_rkat_untrusted_rejected() {
 }
 
 #[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
 fn test_e2e_rkat_three_peer_coordination() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+    if skip_if_no_prereqs() {
         return;
     }
 
@@ -729,10 +736,8 @@ fn test_e2e_rkat_three_peer_coordination() {
 /// When RKAT_TEST_LLM_DELAY_MS is set, it simulates slow LLM processing.
 /// The ack should still return within 100ms even if LLM takes >1s.
 #[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
 fn test_e2e_rkat_ack_is_immediate() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+    if skip_if_no_prereqs() {
         return;
     }
 
@@ -786,10 +791,8 @@ fn test_e2e_rkat_ack_is_immediate() {
 /// to continue working (exit or send more messages) without waiting for
 /// the recipient's LLM to generate a response.
 #[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
 fn test_e2e_rkat_sender_nonblocking() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+    if skip_if_no_prereqs() {
         return;
     }
 

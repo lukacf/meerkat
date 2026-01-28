@@ -2,11 +2,12 @@
 
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::ops::SubAgentState;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 
 /// Information about a single sub-agent (view for serialization)
@@ -113,11 +114,7 @@ impl BuiltinTool for AgentListTool {
         ToolDef {
             name: "agent_list".to_string(),
             description: "List all sub-agents spawned by this agent with their current states. Shows running, completed, and failed agents with their IDs, names, and execution times.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
+            input_schema: SchemaBuilder::new().build(),
         }
     }
 
@@ -143,6 +140,7 @@ mod tests {
     use meerkat_core::session::Session;
     use meerkat_core::sub_agent::SubAgentManager;
     use meerkat_core::{AgentSessionStore, AgentToolDispatcher};
+    use serde_json::json;
     use tokio::sync::RwLock;
 
     struct MockClientFactory;
@@ -225,7 +223,7 @@ mod tests {
 
         let schema = &def.input_schema;
         assert_eq!(schema["type"], "object");
-        assert_eq!(schema["required"], json!([]));
+        assert_eq!(schema["required"], serde_json::json!([]));
     }
 
     #[test]

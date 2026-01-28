@@ -23,18 +23,20 @@ fn test_config_env_contract() {
     let mut config = Config::default();
     unsafe {
         std::env::set_var("RKAT_MODEL", "env-model");
+        std::env::set_var("RKAT_ANTHROPIC_API_KEY", "rkat-secret");
         std::env::set_var("ANTHROPIC_API_KEY", "anthropic-secret");
     }
     config.apply_env_overrides().unwrap();
     assert_eq!(config.agent.model, Config::default().agent.model);
     match config.provider {
         ProviderConfig::Anthropic { api_key, .. } => {
-            assert_eq!(api_key.as_deref(), Some("anthropic-secret"));
+            assert_eq!(api_key.as_deref(), Some("rkat-secret"));
         }
         _ => panic!("expected anthropic provider"),
     }
     unsafe {
         std::env::remove_var("RKAT_MODEL");
+        std::env::remove_var("RKAT_ANTHROPIC_API_KEY");
         std::env::remove_var("ANTHROPIC_API_KEY");
     }
 }

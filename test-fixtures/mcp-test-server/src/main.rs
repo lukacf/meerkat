@@ -10,13 +10,13 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let reader = BufReader::new(stdin.lock());
 
     for line in reader.lines() {
-        let Ok(line) = line else { break };
+        let line = line?;
 
         if line.is_empty() {
             continue;
@@ -33,8 +33,8 @@ fn main() {
                         "message": format!("Parse error: {e}")
                     }
                 });
-                writeln!(stdout, "{error}").unwrap();
-                stdout.flush().unwrap();
+                writeln!(stdout, "{error}")?;
+                stdout.flush()?;
                 continue;
             }
         };
@@ -60,9 +60,11 @@ fn main() {
 
         // This is a request, send a response
         let response = handle_request(&request);
-        writeln!(stdout, "{response}").unwrap();
-        stdout.flush().unwrap();
+        writeln!(stdout, "{response}")?;
+        stdout.flush()?;
     }
+
+    Ok(())
 }
 
 fn handle_request(request: &Value) -> Value {

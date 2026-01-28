@@ -1,0 +1,1299 @@
+    Checking meerkat-comms-mcp v0.1.0 (/Users/luka/src/raik/meerkat-comms-mcp)
+    Checking meerkat-store v0.1.0 (/Users/luka/src/raik/meerkat-store)
+    Checking meerkat-client v0.1.0 (/Users/luka/src/raik/meerkat-client)
+    Checking meerkat-mcp-client v0.1.0 (/Users/luka/src/raik/meerkat-mcp-client)
+    Checking meerkat-core v0.1.0 (/Users/luka/src/raik/meerkat-core)
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:221:24
+    |
+221 |         let temp_dir = tempfile::tempdir().unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+    = note: requested on the command line with `-D clippy::unwrap-used`
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:227:22
+    |
+227 |         let result = store.load(&id).await.unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:234:24
+    |
+234 |         let temp_dir = tempfile::tempdir().unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:236:9
+    |
+236 |         store.init().await.unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:250:24
+    |
+250 |         let temp_dir = tempfile::tempdir().unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:260:9
+    |
+260 |         store.save(&session).await.unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:271:29
+    |
+271 |         let meta_contents = fs::read_to_string(&meta_path).await.unwrap();
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:272:33
+    |
+272 |         let meta: SessionMeta = serde_json::from_str(&meta_contents).unwrap();
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:279:24
+    |
+279 |         let temp_dir = tempfile::tempdir().unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:287:9
+    |
+287 |         store.save(&session).await.unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:291:9
+    |
+291 |         fs::remove_file(&session_path).await.unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:294:24
+    |
+294 |         let sessions = store.list(SessionFilter::default()).await.unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:301:24
+    |
+301 |         let temp_dir = tempfile::tempdir().unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:312:9
+    |
+312 |         store.save(&session).await.unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:316:24
+    |
+316 |         let contents = fs::read_to_string(&session_path).await.unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:328:24
+    |
+328 |         let temp_dir = tempfile::tempdir().unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:337:9
+    |
+337 |         store.save(&session).await.unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:341:24
+    |
+341 |         let contents = fs::read_to_string(&session_path).await.unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:352:24
+    |
+352 |         let temp_dir = tempfile::tempdir().unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:364:9
+    |
+364 |         store.save(&session).await.unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-store/src/jsonl.rs:367:22
+    |
+367 |         let loaded = store.load(&id).await.unwrap().unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:367:22
+    |
+367 |         let loaded = store.load(&id).await.unwrap().unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:372:24
+    |
+372 |         let sessions = store.list(SessionFilter::default()).await.unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:377:9
+    |
+377 |         store.delete(&id).await.unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:378:17
+    |
+378 |         assert!(store.load(&id).await.unwrap().is_none());
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:383:24
+    |
+383 |         let temp_dir = tempfile::tempdir().unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:387:22
+    |
+387 |         let result = store.load(&id).await.unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:393:24
+    |
+393 |         let temp_dir = tempfile::tempdir().unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:402:13
+    |
+402 |             store.save(&session).await.unwrap();
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:407:24
+    |
+407 |           let sessions = store
+    |  ________________________^
+408 | |             .list(SessionFilter {
+409 | |                 limit: Some(3),
+410 | |                 ..Default::default()
+411 | |             })
+412 | |             .await
+413 | |             .unwrap();
+    | |_____________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-store/src/jsonl.rs:417:24
+    |
+417 |           let sessions = store
+    |  ________________________^
+418 | |             .list(SessionFilter {
+419 | |                 offset: Some(2),
+420 | |                 ..Default::default()
+421 | |             })
+422 | |             .await
+423 | |             .unwrap();
+    | |_____________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-mcp-client/src/connection.rs:250:28
+    |
+250 |         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+    = note: requested on the command line with `-D clippy::unwrap-used`
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-mcp-client/src/connection.rs:251:30
+    |
+251 |         let workspace_root = PathBuf::from(manifest_dir).parent().unwrap().to_path_buf();
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/connection.rs:285:20
+    |
+285 |           let conn = McpConnection::connect(&config)
+    |  ____________________^
+286 | |             .await
+287 | |             .expect("Failed to connect to MCP server");
+    | |______________________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+    = note: requested on the command line with `-D clippy::expect-used`
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-mcp-client/src/connection.rs:292:20
+    |
+292 |         let info = info.unwrap();
+    |                    ^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/connection.rs:296:9
+    |
+296 |         conn.close().await.expect("Failed to close connection");
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/connection.rs:313:20
+    |
+313 |           let conn = McpConnection::connect(&config)
+    |  ____________________^
+314 | |             .await
+315 | |             .expect("Failed to connect");
+    | |________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/connection.rs:318:21
+    |
+318 |         let tools = conn.list_tools().await.expect("Failed to list tools");
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-mcp-client/src/connection.rs:326:25
+    |
+326 |         let echo_tool = echo_tool.unwrap();
+    |                         ^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-mcp-client/src/connection.rs:347:27
+    |
+347 |         let add_schema = &add_tool.unwrap().input_schema;
+    |                           ^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-mcp-client/src/connection.rs:348:21
+    |
+348 |         let props = add_schema.get("properties").unwrap();
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/connection.rs:358:9
+    |
+358 |         conn.close().await.expect("Failed to close connection");
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/connection.rs:375:20
+    |
+375 |           let conn = McpConnection::connect(&config)
+    |  ____________________^
+376 | |             .await
+377 | |             .expect("Failed to connect");
+    | |________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/connection.rs:380:22
+    |
+380 |           let result = conn
+    |  ______________________^
+381 | |             .call_tool("echo", &serde_json::json!({"message": "Hello, MCP!"}))
+382 | |             .await
+383 | |             .expect("Echo call failed");
+    | |_______________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: argument never used
+  --> meerkat-core/src/types/tests.rs:17:42
+   |
+17 |     assert_eq!(json, format!("\"{{}}\"", id_str));
+   |                              ----------  ^^^^^^ argument never used
+   |                              |
+   |                              formatting specifier missing
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/connection.rs:387:22
+    |
+387 |           let result = conn
+    |  ______________________^
+388 | |             .call_tool("add", &serde_json::json!({"a": 5, "b": 3}))
+389 | |             .await
+390 | |             .expect("Add call failed");
+    | |______________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/connection.rs:399:9
+    |
+399 |         conn.close().await.expect("Failed to close connection");
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `unwrap()` on a `Result` value
+  --> meerkat-mcp-client/src/router.rs:97:28
+   |
+97 |         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: if this value is an `Err`, it will panic
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+  --> meerkat-mcp-client/src/router.rs:98:30
+   |
+98 |         let workspace_root = PathBuf::from(manifest_dir).parent().unwrap().to_path_buf();
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: if this value is `None`, it will panic
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/router.rs:133:9
+    |
+133 | /         router
+134 | |             .add_server(config)
+135 | |             .await
+136 | |             .expect("Failed to add server");
+    | |___________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/router.rs:165:9
+    |
+165 | /         router
+166 | |             .add_server(config)
+167 | |             .await
+168 | |             .expect("Failed to add server");
+    | |___________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/router.rs:213:9
+    |
+213 | /         router
+214 | |             .add_server(config1)
+215 | |             .await
+216 | |             .expect("Failed to add server1");
+    | |____________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/router.rs:217:9
+    |
+217 | /         router
+218 | |             .add_server(config2)
+219 | |             .await
+220 | |             .expect("Failed to add server2");
+    | |____________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/router.rs:253:9
+    |
+253 | /         router
+254 | |             .add_server(config1)
+255 | |             .await
+256 | |             .expect("Failed to add server1");
+    | |____________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-mcp-client/src/router.rs:257:9
+    |
+257 | /         router
+258 | |             .add_server(config2)
+259 | |             .await
+260 | |             .expect("Failed to add server2");
+    | |____________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: could not compile `meerkat-store` (lib test) due to 31 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/error.rs:207:24
+    |
+207 |             let json = serde_json::to_string(&err).unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+    = note: requested on the command line with `-D clippy::unwrap-used`
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/error.rs:208:31
+    |
+208 |             let _: LlmError = serde_json::from_str(&json).unwrap();
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/types.rs:244:24
+    |
+244 |             let json = serde_json::to_value(&event).unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/types.rs:247:36
+    |
+247 |             let parsed: LlmEvent = serde_json::from_value(json).unwrap();
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/types.rs:248:21
+    |
+248 |             let _ = serde_json::to_value(&parsed).unwrap();
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/types.rs:258:25
+    |
+258 |         let completed = buffer.try_complete().unwrap();
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/types.rs:283:25
+    |
+283 |         let completed = buffer.try_complete().unwrap();
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: could not compile `meerkat-mcp-client` (lib test) due to 23 previous errors
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/types.rs:311:20
+    |
+311 |         let json = serde_json::to_value(&request).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/types.rs:316:34
+    |
+316 |         let parsed: LlmRequest = serde_json::from_value(json).unwrap();
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/types.rs:318:22
+    |
+318 |         let params = parsed.provider_params.unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/types.rs:327:20
+    |
+327 |         let json = serde_json::to_value(&request).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/types.rs:330:37
+    |
+330 |         assert!(params.is_none() || params.unwrap().is_null());
+    |                                     ^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/types.rs:333:34
+    |
+333 |         let parsed: LlmRequest = serde_json::from_value(json).unwrap();
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/types.rs:361:22
+    |
+361 |         let params = request.provider_params.unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/types.rs:380:22
+    |
+380 |         let params = request.provider_params.unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/types.rs:393:22
+    |
+393 |         let params = request.provider_params.unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/types.rs:434:25
+    |
+434 |         let completed = buffer.try_complete().unwrap();
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/anthropic.rs:491:22
+    |
+491 |         let client = AnthropicClient::new("test-key".to_string()).unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/anthropic.rs:515:22
+    |
+515 |         let client = AnthropicClient::new("test-key".to_string()).unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/anthropic.rs:533:22
+    |
+533 |         let client = AnthropicClient::new("test-key".to_string()).unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/anthropic.rs:554:22
+    |
+554 |         let client = AnthropicClient::new("test-key".to_string()).unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/anthropic.rs:578:22
+    |
+578 |         let client = AnthropicClient::new("test-key".to_string()).unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/anthropic.rs:600:22
+    |
+600 |           let client = AnthropicClient::builder("test-key".to_string())
+    |  ______________________^
+601 | |             .connect_timeout(std::time::Duration::from_secs(5))
+602 | |             .request_timeout(std::time::Duration::from_secs(120))
+603 | |             .build()
+604 | |             .unwrap();
+    | |_____________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/src/anthropic.rs:612:22
+    |
+612 |         let client = AnthropicClient::new("test-key".to_string()).unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/anthropic.rs:623:21
+    |
+623 |         let event = event.unwrap();
+    |                     ^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/openai.rs:542:24
+    |
+542 |           let messages = body["messages"]
+    |  ________________________^
+543 | |             .as_array()
+544 | |             .expect("messages should be array");
+    | |_______________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+    = note: requested on the command line with `-D clippy::expect-used`
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/openai.rs:545:29
+    |
+545 |           let assistant_msg = messages
+    |  _____________________________^
+546 | |             .iter()
+547 | |             .find(|m| m["role"] == "assistant")
+548 | |             .expect("should have assistant message");
+    | |____________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/openai.rs:550:26
+    |
+550 |           let tool_calls = assistant_msg["tool_calls"]
+    |  __________________________^
+551 | |             .as_array()
+552 | |             .expect("should have tool_calls");
+    | |_____________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/openai.rs:553:25
+    |
+553 |           let arguments = tool_calls[0]["function"]["arguments"]
+    |  _________________________^
+554 | |             .as_str()
+555 | |             .expect("arguments should be string");
+    | |_________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-client/src/openai.rs:559:13
+    |
+559 |             serde_json::from_str(arguments).expect("arguments should be valid JSON");
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/openai.rs:581:21
+    |
+581 |         let chunk = chunk.unwrap();
+    |                     ^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:458:33
+    |
+458 |           let generation_config = body
+    |  _________________________________^
+459 | |             .get("generationConfig")
+460 | |             .expect("generationConfig should exist");
+    | |____________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:461:31
+    |
+461 |           let thinking_config = generation_config
+    |  _______________________________^
+462 | |             .get("thinkingConfig")
+463 | |             .expect("thinkingConfig should exist");
+    | |__________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:464:31
+    |
+464 |           let thinking_budget = thinking_config
+    |  _______________________________^
+465 | |             .get("thinkingBudget")
+466 | |             .expect("thinkingBudget should exist");
+    | |__________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:488:33
+    |
+488 |           let generation_config = body
+    |  _________________________________^
+489 | |             .get("generationConfig")
+490 | |             .expect("generationConfig should exist");
+    | |____________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:491:21
+    |
+491 |         let top_k = generation_config.get("topK").expect("topK should exist");
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:513:33
+    |
+513 |           let generation_config = body
+    |  _________________________________^
+514 | |             .get("generationConfig")
+515 | |             .expect("generationConfig should exist");
+    | |____________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:518:21
+    |
+518 |         let top_k = generation_config.get("topK").expect("topK should exist");
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:522:31
+    |
+522 |           let thinking_config = generation_config
+    |  _______________________________^
+523 | |             .get("thinkingConfig")
+524 | |             .expect("thinkingConfig should exist");
+    | |__________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:525:31
+    |
+525 |           let thinking_budget = thinking_config
+    |  _______________________________^
+526 | |             .get("thinkingBudget")
+527 | |             .expect("thinkingBudget should exist");
+    | |__________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:549:33
+    |
+549 |           let generation_config = body
+    |  _________________________________^
+550 | |             .get("generationConfig")
+551 | |             .expect("generationConfig should exist");
+    | |____________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:577:33
+    |
+577 |           let generation_config = body
+    |  _________________________________^
+578 | |             .get("generationConfig")
+579 | |             .expect("generationConfig should exist");
+    | |____________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:596:24
+    |
+596 |         let response = response.unwrap();
+    |                        ^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:598:26
+    |
+598 |         let candidates = response.candidates.unwrap();
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:610:24
+    |
+610 |         let response = response.unwrap();
+    |                        ^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:612:21
+    |
+612 |         let usage = response.usage_metadata.unwrap();
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:623:24
+    |
+623 |         let response = response.unwrap();
+    |                        ^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:624:26
+    |
+624 |         let candidates = response.candidates.unwrap();
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:625:21
+    |
+625 |           let parts = candidates[0]
+    |  _____________________^
+626 | |             .content
+627 | |             .as_ref()
+628 | |             .unwrap()
+629 | |             .parts
+630 | |             .as_ref()
+631 | |             .unwrap();
+    | |_____________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:625:21
+    |
+625 |           let parts = candidates[0]
+    |  _____________________^
+626 | |             .content
+627 | |             .as_ref()
+628 | |             .unwrap()
+    | |_____________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:632:18
+    |
+632 |         let fc = parts[0].function_call.as_ref().unwrap();
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/src/gemini.rs:634:20
+    |
+634 |         assert_eq!(fc.args.as_ref().unwrap()["city"], "Tokyo");
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: could not compile `meerkat-client` (lib test) due to 52 previous errors
+error[E0308]: mismatched types
+   --> meerkat-core/src/types/tests.rs:234:21
+    |
+234 |         session_id: SessionId::new().to_string(),
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `SessionId`, found `String`
+    |
+help: try removing the method call
+    |
+234 -         session_id: SessionId::new().to_string(),
+234 +         session_id: SessionId::new(),
+    |
+
+error[E0308]: mismatched types
+   --> meerkat-core/src/types/tests.rs:248:21
+    |
+248 |         session_id: SessionId::new().to_string(),
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `SessionId`, found `String`
+    |
+help: try removing the method call
+    |
+248 -         session_id: SessionId::new().to_string(),
+248 +         session_id: SessionId::new(),
+    |
+
+error: used `expect()` on a `Result` value
+  --> meerkat-client/tests/rct_contracts.rs:65:18
+   |
+65 |       let result = adapter
+   |  __________________^
+66 | |         .stream_response(&[], &[], 128, None, None)
+67 | |         .await
+68 | |         .expect("stream response");
+   | |__________________________________^
+   |
+   = note: if this value is an `Err`, it will panic
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+   = note: requested on the command line with `-D clippy::expect-used`
+
+error: used `expect()` on an `Option` value
+  --> meerkat-client/tests/rct_contracts.rs:83:15
+   |
+83 |     let tc1 = tc1.expect("buffered tool call");
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: if this value is `None`, it will panic
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+  --> meerkat-client/tests/rct_contracts.rs:88:15
+   |
+88 |     let tc2 = tc2.expect("complete tool call");
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: if this value is `None`, it will panic
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on an `Option` value
+  --> meerkat-client/tests/rct_contracts.rs:93:17
+   |
+93 |     let event = rx.recv().await.expect("text delta event");
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: if this value is `None`, it will panic
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: `panic` should not be present in production code
+  --> meerkat-client/tests/rct_contracts.rs:96:14
+   |
+96 |         _ => panic!("unexpected event"),
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+   = note: requested on the command line with `-D clippy::panic`
+
+error: used `expect()` on a `Result` value
+   --> meerkat-client/tests/rct_contracts.rs:125:18
+    |
+125 |       let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+    |  __________________^
+126 | |         .arg("test_provider_resolution_contract")
+127 | |         .env("RUN_TEST_RESOLUTION_INNER", "1")
+128 | |         .env("RKAT_OPENAI_API_KEY", "rk-test")
+129 | |         .env("OPENAI_API_KEY", "native-test")
+130 | |         .status()
+131 | |         .expect("failed to spawn test child process");
+    | |_____________________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-client/tests/rct_contracts.rs:125:45
+    |
+125 |     let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+    |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `unwrap_err()` on a `Result` value
+  --> meerkat-store/tests/rct_contracts.rs:35:15
+   |
+35 |     let err = adapter.load("not-a-uuid").await.unwrap_err();
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: if this value is an `Ok`, it will panic
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+   = note: requested on the command line with `-D clippy::unwrap-used`
+
+error: `panic` should not be present in production code
+  --> meerkat-store/tests/rct_contracts.rs:40:14
+   |
+40 |         _ => panic!("unexpected error type"),
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+   = note: requested on the command line with `-D clippy::panic`
+
+error: `panic` should not be present in production code
+  --> meerkat-client/tests/e2e.rs:50:23
+   |
+50 |             Err(e) => panic!("Unexpected error: {:?}", e),
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+   = note: requested on the command line with `-D clippy::panic`
+
+error: `panic` should not be present in production code
+   --> meerkat-client/tests/e2e.rs:108:23
+    |
+108 |             Err(e) => panic!("Unexpected error: {:?}", e),
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-client/tests/e2e.rs:174:18
+    |
+174 |     let client = AnthropicClient::new("invalid-key".to_string()).unwrap();
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+    = note: requested on the command line with `-D clippy::unwrap-used`
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/tests/e2e.rs:187:17
+    |
+187 |     let event = result.unwrap();
+    |                 ^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap_err()` on a `Result` value
+   --> meerkat-client/tests/e2e.rs:190:15
+    |
+190 |     let err = event.unwrap_err();
+    |               ^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Ok`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: `panic` should not be present in production code
+   --> meerkat-client/tests/e2e.rs:239:23
+    |
+239 |             Err(e) => panic!("Unexpected error: {:?}", e),
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: `panic` should not be present in production code
+   --> meerkat-client/tests/e2e.rs:297:23
+    |
+297 |             Err(e) => panic!("Unexpected error: {:?}", e),
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/tests/e2e.rs:376:17
+    |
+376 |     let event = result.unwrap();
+    |                 ^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: `panic` should not be present in production code
+   --> meerkat-client/tests/e2e.rs:418:23
+    |
+418 |             Err(e) => panic!("Unexpected error: {:?}", e),
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: `panic` should not be present in production code
+   --> meerkat-client/tests/e2e.rs:476:23
+    |
+476 |             Err(e) => panic!("Unexpected error: {:?}", e),
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-client/tests/e2e.rs:555:17
+    |
+555 |     let event = result.unwrap();
+    |                 ^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: could not compile `meerkat-client` (test "rct_contracts") due to 7 previous errors
+error: could not compile `meerkat-store` (test "rct_contracts") due to 2 previous errors
+error: could not compile `meerkat-client` (test "e2e") due to 11 previous errors
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `meerkat-core` (lib test) due to 3 previous errors

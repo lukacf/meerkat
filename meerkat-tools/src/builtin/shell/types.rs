@@ -124,6 +124,7 @@ pub struct JobSummary {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -298,7 +299,7 @@ mod tests {
             assert_eq!(stderr, "some error");
             assert!((duration_secs - 10.25).abs() < f64::EPSILON);
         } else {
-            panic!("Expected Completed variant");
+            unreachable!("Expected Completed variant");
         }
 
         // Test with None exit_code (process killed)
@@ -312,7 +313,7 @@ mod tests {
         if let JobStatus::Completed { exit_code, .. } = completed_no_exit {
             assert_eq!(exit_code, None);
         } else {
-            panic!("Expected Completed variant");
+            unreachable!("Expected Completed variant");
         }
     }
 
@@ -373,7 +374,7 @@ mod tests {
             assert_eq!(stderr, "");
             assert!((*duration_secs - 15.3).abs() < f64::EPSILON);
         } else {
-            panic!("Expected Completed status");
+            unreachable!("Expected Completed status");
         }
     }
 

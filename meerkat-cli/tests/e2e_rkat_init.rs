@@ -1,7 +1,6 @@
 use std::path::PathBuf;
-use std::process::Command;
-
 use tempfile::TempDir;
+use tokio::process::Command;
 
 fn rkat_binary_path() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -17,40 +16,35 @@ fn rkat_binary_path() -> Option<PathBuf> {
     None
 }
 
-#[test]
-fn e2e_rkat_init_snapshot() {
-    let Some(rkat) = rkat_binary_path() else {
-        eprintln!("Skipping: rkat binary not found (build with cargo build -p meerkat-cli)");
-        return;
-    };
+#[tokio::test]
+async fn e2e_rkat_init_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
-    let temp_dir = TempDir::new().expect("temp dir");
-    let project_dir = temp_dir.path().join("project");
-    std::fs::create_dir_all(&project_dir).expect("create project dir");
+    let temp_dir = TempDir::new()?;
+    let project_dir = temp_dir.path().join("my-project");
+    std::fs::create_dir_all(&project_dir)?;
 
     let output = Command::new(&rkat)
         .current_dir(&project_dir)
         .env("HOME", temp_dir.path())
         .args(["init"])
         .output()
-        .expect("run rkat init");
+        .await?;
 
-    assert!(
-        output.status.success(),
-        "rkat init failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
 
-    let global_path = temp_dir.path().join(".rkat").join("config.toml");
-    let project_path = project_dir.join(".rkat").join("config.toml");
-    assert!(global_path.exists(), "global config should exist");
+    // Verify .rkat directory and config.toml were created
+    let project_path = project_dir.join(".rkat/config.toml");
+    let global_path = temp_dir.path().join(".rkat/config.toml");
+
     assert!(project_path.exists(), "project config should exist");
+    assert!(global_path.exists(), "global config should exist");
 
-    let global_contents = std::fs::read_to_string(&global_path).expect("read global config");
-    let project_contents = std::fs::read_to_string(&project_path).expect("read project config");
+    let global_contents = std::fs::read_to_string(&global_path)?;
+    let project_contents = std::fs::read_to_string(&project_path)?;
 
-    assert_eq!(
-        global_contents, project_contents,
-        "project config should match global template"
-    );
+    // VERIFY: MIG-001 - verbatim copy
+    assert_eq!(global_contents, project_contents);
+
+    Ok(())
 }

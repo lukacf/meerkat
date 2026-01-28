@@ -550,8 +550,13 @@ fn spawn_uds_listener(
     listener.set_nonblocking(true)?;
 
     let handle = tokio::spawn(async move {
-        let listener =
-            UnixListener::from_std(listener).expect("Failed to convert to tokio listener");
+        let listener = match UnixListener::from_std(listener) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("Failed to convert to tokio listener: {}", e);
+                return;
+            }
+        };
 
         loop {
             match listener.accept().await {
@@ -622,6 +627,7 @@ async fn spawn_tcp_listener(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::net::SocketAddr;

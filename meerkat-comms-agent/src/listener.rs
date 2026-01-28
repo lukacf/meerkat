@@ -67,8 +67,13 @@ pub fn spawn_uds_listener(
     listener.set_nonblocking(true)?;
 
     let handle = tokio::spawn(async move {
-        let listener =
-            UnixListener::from_std(listener).expect("Failed to convert to tokio listener");
+        let listener = match UnixListener::from_std(listener) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("Failed to convert to tokio listener: {}", e);
+                return;
+            }
+        };
 
         loop {
             match listener.accept().await {
@@ -153,20 +158,28 @@ pub async fn spawn_tcp_listener(
 /// Helper to extract secret bytes from a Keypair.
 ///
 /// This is a workaround since Keypair doesn't expose the secret directly.
-pub fn keypair_to_secret(keypair: &Keypair) -> [u8; 32] {
+pub fn keypair_to_secret(keypair: &Keypair) -> std::io::Result<[u8; 32]> {
     let temp_dir =
         std::env::temp_dir().join(format!("meerkat-key-extract-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
-    keypair.save(&temp_dir).expect("Failed to save keypair");
-    let secret_bytes = std::fs::read(temp_dir.join("identity.key")).expect("Failed to read key");
+    std::fs::create_dir_all(&temp_dir)?;
+    keypair.save(&temp_dir).map_err(std::io::Error::other)?;
+    let secret_bytes = std::fs::read(temp_dir.join("identity.key"))?;
     let _ = std::fs::remove_dir_all(&temp_dir);
+
+    if secret_bytes.len() != 32 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid key length",
+        ));
+    }
 
     let mut secret = [0u8; 32];
     secret.copy_from_slice(&secret_bytes);
-    secret
+    Ok(secret)
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_comms::{Envelope, Inbox, MessageKind, PubKey, Signature, TrustedPeer};
@@ -208,7 +221,7 @@ mod tests {
         let sender_pubkey = sender_keypair.public_key();
         let receiver_keypair = make_keypair();
         let receiver_pubkey = receiver_keypair.public_key();
-        let receiver_secret = keypair_to_secret(&receiver_keypair);
+        let receiver_secret = keypair_to_secret(&receiver_keypair).unwrap();
         let trusted = make_trusted_peers("sender", &sender_pubkey);
 
         let (mut inbox, inbox_sender) = Inbox::new();
@@ -257,7 +270,7 @@ mod tests {
             meerkat_comms::InboxItem::External { envelope } => {
                 assert_eq!(envelope.id, envelope_id);
             }
-            _ => panic!("expected External"),
+            _ => unreachable!("expected External"),
         }
 
         handle.abort();
@@ -269,7 +282,7 @@ mod tests {
         let sender_pubkey = sender_keypair.public_key();
         let receiver_keypair = make_keypair();
         let receiver_pubkey = receiver_keypair.public_key();
-        let receiver_secret = keypair_to_secret(&receiver_keypair);
+        let receiver_secret = keypair_to_secret(&receiver_keypair).unwrap();
         let trusted = make_trusted_peers("sender", &sender_pubkey);
 
         let (mut inbox, inbox_sender) = Inbox::new();
@@ -324,7 +337,7 @@ mod tests {
             meerkat_comms::InboxItem::External { envelope } => {
                 assert_eq!(envelope.id, envelope_id);
             }
-            _ => panic!("expected External"),
+            _ => unreachable!("expected External"),
         }
 
         handle.abort();
@@ -344,13 +357,13 @@ mod tests {
         let config =
             CommsManagerConfig::with_keypair(receiver_keypair).trusted_peers(trusted.clone());
 
-        let mut manager = CommsManager::new(config);
+        let mut manager = CommsManager::new(config).unwrap();
 
         let tmp = TempDir::new().unwrap();
         let sock_path = tmp.path().join("manager.sock");
 
         // Get secret from manager's keypair
-        let keypair_secret = keypair_to_secret(&manager.keypair());
+        let keypair_secret = keypair_to_secret(&manager.keypair()).unwrap();
 
         // Start listener using manager's components
         let handle = spawn_uds_listener(
@@ -404,7 +417,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock_path = tmp.path().join("abort.sock");
         let keypair = make_keypair();
-        let secret = keypair_to_secret(&keypair);
+        let secret = keypair_to_secret(&keypair).unwrap();
         let trusted = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, inbox_sender) = Inbox::new();
 

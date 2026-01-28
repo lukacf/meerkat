@@ -1,42 +1,25 @@
-use async_trait::async_trait;
-use meerkat_core::{AgentError, AgentSessionStore, Session, SessionId};
-use meerkat_store::{SessionFilter, SessionStore, StoreAdapter, StoreError};
+use meerkat_core::AgentSessionStore;
+use meerkat_store::{MemoryStore, StoreAdapter};
 use std::sync::Arc;
 
-struct NoopStore;
-
-#[async_trait]
-impl SessionStore for NoopStore {
-    async fn save(&self, _session: &Session) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    async fn load(&self, _id: &SessionId) -> Result<Option<Session>, StoreError> {
-        Ok(None)
-    }
-
-    async fn list(
-        &self,
-        _filter: SessionFilter,
-    ) -> Result<Vec<meerkat_core::SessionMeta>, StoreError> {
-        Ok(Vec::new())
-    }
-
-    async fn delete(&self, _id: &SessionId) -> Result<(), StoreError> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
-async fn test_session_store_adapter_error_mapping() {
-    let store = Arc::new(NoopStore);
+async fn test_session_store_adapter_error_mapping() -> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::new());
     let adapter = StoreAdapter::new(store);
 
-    let err = adapter.load("not-a-uuid").await.unwrap_err();
-    match err {
-        AgentError::StoreError(msg) => {
+    // Test successful load of non-existent session (should return None, not error)
+    let loaded = adapter.load("01ARZ3NDEKTSV4RRFFQ69G5FAV").await?;
+    assert!(loaded.is_none());
+
+    // Test invalid session ID (should return error)
+    let result = adapter.load("not-a-uuid").await;
+    match result {
+        Err(e) => {
+            let msg = format!("{e}");
             assert!(msg.contains("Invalid session ID"));
         }
-        _ => panic!("unexpected error type"),
+        Ok(_) => return Err("expected error for invalid session id".into()),
     }
+
+    Ok(())
 }

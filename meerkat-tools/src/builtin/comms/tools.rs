@@ -174,6 +174,7 @@ impl BuiltinTool for ListPeersTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};

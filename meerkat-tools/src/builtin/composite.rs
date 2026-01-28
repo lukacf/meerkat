@@ -389,7 +389,9 @@ impl CompositeDispatcher {
         // We call usage_instructions() AFTER setting has_sub_agent_tools so the
         // instructions include sub-agent tool usage if they were enabled.
         let instructions = self.usage_instructions();
-        state.set_tool_usage_instructions(instructions);
+        if let Err(e) = state.set_tool_usage_instructions(instructions) {
+            tracing::error!("{}", e);
+        }
 
         Ok(())
     }
@@ -449,6 +451,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::builtin::MemoryTaskStore;
@@ -1202,7 +1205,7 @@ mod tests {
 
             // Verify instructions are initially empty
             assert!(
-                state.get_tool_usage_instructions().is_none(),
+                state.get_tool_usage_instructions().unwrap().is_none(),
                 "Tool usage instructions should be None before registration"
             );
 
@@ -1216,7 +1219,9 @@ mod tests {
                 .unwrap();
 
             // Verify instructions were set
-            let instructions = state_for_verification.get_tool_usage_instructions();
+            let instructions = state_for_verification
+                .get_tool_usage_instructions()
+                .unwrap();
             assert!(
                 instructions.is_some(),
                 "Tool usage instructions should be set after registration"

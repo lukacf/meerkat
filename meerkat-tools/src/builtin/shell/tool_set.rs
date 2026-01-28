@@ -131,6 +131,7 @@ You have access to tools for executing shell commands. Use these carefully and r
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

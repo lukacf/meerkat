@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Example demonstrating multi-turn conversation with tool usage
 //!
 //! This example shows how an agent can use different tools across
@@ -105,7 +106,10 @@ impl AgentToolDispatcher for MultiToolDispatcher {
                 let result = parse_and_calculate(expr).map_err(ToolError::execution_failed)?;
 
                 // Store in history
-                let mut state = self.state.lock().unwrap();
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| ToolError::execution_failed("Lock poisoned"))?;
                 state.calculations.push(result);
 
                 Ok(json!(format!("{} = {}", expr, result)))
@@ -115,17 +119,26 @@ impl AgentToolDispatcher for MultiToolDispatcher {
                     .as_str()
                     .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'note' argument"))?;
 
-                let mut state = self.state.lock().unwrap();
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| ToolError::execution_failed("Lock poisoned"))?;
                 state.notes.push(note.to_string());
 
                 Ok(json!("Note saved"))
             }
             "get_notes" => {
-                let state = self.state.lock().unwrap();
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| ToolError::execution_failed("Lock poisoned"))?;
                 Ok(json!(state.notes))
             }
             "get_calculation_history" => {
-                let state = self.state.lock().unwrap();
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| ToolError::execution_failed("Lock poisoned"))?;
                 Ok(json!(state.calculations))
             }
             _ => Err(ToolError::not_found(name)),
@@ -161,7 +174,7 @@ fn parse_and_calculate(expr: &str) -> Result<f64, String> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .expect("ANTHROPIC_API_KEY environment variable must be set");
+        .map_err(|_| "ANTHROPIC_API_KEY environment variable must be set")?;
 
     let store_dir = std::env::current_dir()?.join(".rkat").join("sessions");
     std::fs::create_dir_all(&store_dir)?;
@@ -169,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let factory = AgentFactory::new(store_dir.clone());
 
     // Create components - tools maintain state across turns
-    let client = Arc::new(AnthropicClient::new(api_key));
+    let client = Arc::new(AnthropicClient::new(api_key)?);
     let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
 
     let store = Arc::new(JsonlStore::new(store_dir));

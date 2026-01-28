@@ -458,6 +458,7 @@ impl BuiltinTool for ShellTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -595,7 +596,7 @@ mod tests {
             Err(ShellError::ShellNotInstalled(details)) => {
                 assert!(details.contains("nu"));
             }
-            Err(e) => panic!("Unexpected error: {}", e),
+            Err(e) => unreachable!("Unexpected error: {}", e),
         }
     }
 
@@ -624,99 +625,62 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_tool_fallback_when_shell_not_found() {
-        let config = ShellConfig {
-            shell: "definitely_not_a_real_shell_xyz123".to_string(),
-            ..Default::default()
-        };
-
-        let tool = ShellTool::new(config);
-
-        let prev_path = std::env::var_os("PATH");
-        let prev_shell = std::env::var_os("SHELL");
-
-        unsafe {
-            std::env::set_var("PATH", "");
-            std::env::set_var("SHELL", "/bin/sh");
+    fn test_shell_tool_find_shell_custom() {
+        if std::env::var("RUN_TEST_FIND_SHELL_INNER").is_ok() {
+            let config = ShellConfig {
+                shell: "definitely_not_a_real_shell_xyz123".to_string(),
+                ..Default::default()
+            };
+            let tool = ShellTool::new(config);
+            let result = tool.find_shell();
+            match result {
+                Err(ShellError::ShellNotInstalled(details)) => {
+                    assert!(details.contains("definitely_not_a_real_shell_xyz123"));
+                }
+                Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
+                Err(e) => unreachable!("Unexpected error: {}", e),
+            }
+            return;
         }
 
-        let result = tool.find_shell();
-
-        match result {
-            Err(ShellError::ShellNotInstalled(details)) => {
-                assert!(details.contains("definitely_not_a_real_shell_xyz123"));
-            }
-            Ok(path) => panic!("Expected ShellNotInstalled, got Ok({:?})", path),
-            Err(e) => panic!("Unexpected error: {}", e),
-        }
-
-        if let Some(path) = prev_path {
-            unsafe {
-                std::env::set_var("PATH", path);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("PATH");
-            }
-        }
-
-        if let Some(shell) = prev_shell {
-            unsafe {
-                std::env::set_var("SHELL", shell);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("SHELL");
-            }
-        }
+        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+            .arg("test_shell_tool_find_shell_custom")
+            .env("RUN_TEST_FIND_SHELL_INNER", "1")
+            .env("PATH", "")
+            .env("SHELL", "/bin/sh")
+            .status()
+            .expect("failed to spawn test child process");
+        assert!(status.success());
     }
 
     #[test]
     fn test_shell_tool_not_installed_error() {
-        let config = ShellConfig {
-            shell: "definitely_not_a_real_shell_xyz123".to_string(),
-            shell_path: Some(PathBuf::from("/nonexistent/path/to/shell")),
-            ..Default::default()
-        };
-
-        let prev_path = std::env::var_os("PATH");
-        let prev_shell = std::env::var_os("SHELL");
-
-        unsafe {
-            std::env::set_var("PATH", "");
-            std::env::set_var("SHELL", "/definitely/not/here");
+        if std::env::var("RUN_TEST_NOT_INSTALLED_INNER").is_ok() {
+            let config = ShellConfig {
+                shell: "definitely_not_a_real_shell_xyz123".to_string(),
+                shell_path: Some(PathBuf::from("/nonexistent/path/to/shell")),
+                ..Default::default()
+            };
+            let tool = ShellTool::new(config);
+            let result = tool.config.resolve_shell_path_with_fallbacks(&[]);
+            match result {
+                Err(ShellError::ShellNotInstalled(details)) => {
+                    assert!(details.contains("definitely_not_a_real_shell_xyz123"));
+                }
+                Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
+                Err(other) => unreachable!("Unexpected error: {}", other),
+            }
+            return;
         }
 
-        let tool = ShellTool::new(config);
-        let result = tool.config.resolve_shell_path_with_fallbacks(&[]);
-
-        match result {
-            Err(ShellError::ShellNotInstalled(details)) => {
-                assert!(details.contains("definitely_not_a_real_shell_xyz123"));
-            }
-            Ok(path) => panic!("Expected ShellNotInstalled, got Ok({:?})", path),
-            Err(other) => panic!("Unexpected error: {}", other),
-        }
-
-        if let Some(path) = prev_path {
-            unsafe {
-                std::env::set_var("PATH", path);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("PATH");
-            }
-        }
-
-        if let Some(shell) = prev_shell {
-            unsafe {
-                std::env::set_var("SHELL", shell);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("SHELL");
-            }
-        }
+        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+            .arg("test_shell_tool_not_installed_error")
+            .env("RUN_TEST_NOT_INSTALLED_INNER", "1")
+            .env("PATH", "")
+            .env("SHELL", "/definitely/not/here")
+            .status()
+            .expect("failed to spawn test child process");
+        assert!(status.success());
     }
 
     // ==================== Synchronous Execution Tests ====================
@@ -1304,49 +1268,31 @@ mod tests {
     /// Verifies that when configured shell is not found, the SHELL env var is ignored.
     #[test]
     fn test_shell_detection_env_fallback() {
-        let config = ShellConfig {
-            shell: "definitely_not_a_real_shell_xyz123".to_string(),
-            ..Default::default()
-        };
-        let tool = ShellTool::new(config);
-
-        let prev_path = std::env::var_os("PATH");
-        let prev_shell = std::env::var_os("SHELL");
-
-        unsafe {
-            std::env::set_var("PATH", "");
-            std::env::set_var("SHELL", "/bin/sh");
+        if std::env::var("RUN_TEST_ENV_FALLBACK_INNER").is_ok() {
+            let config = ShellConfig {
+                shell: "definitely_not_a_real_shell_xyz123".to_string(),
+                ..Default::default()
+            };
+            let tool = ShellTool::new(config);
+            let result = tool.find_shell();
+            match result {
+                Err(ShellError::ShellNotInstalled(details)) => {
+                    assert!(details.contains("definitely_not_a_real_shell_xyz123"));
+                }
+                Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
+                Err(e) => unreachable!("Unexpected error: {:?}", e),
+            }
+            return;
         }
 
-        let result = tool.find_shell();
-
-        match result {
-            Err(ShellError::ShellNotInstalled(details)) => {
-                assert!(details.contains("definitely_not_a_real_shell_xyz123"));
-            }
-            Ok(path) => panic!("Expected ShellNotInstalled, got Ok({:?})", path),
-            Err(e) => panic!("Unexpected error: {:?}", e),
-        }
-
-        if let Some(path) = prev_path {
-            unsafe {
-                std::env::set_var("PATH", path);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("PATH");
-            }
-        }
-
-        if let Some(shell) = prev_shell {
-            unsafe {
-                std::env::set_var("SHELL", shell);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("SHELL");
-            }
-        }
+        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+            .arg("test_shell_detection_env_fallback")
+            .env("RUN_TEST_ENV_FALLBACK_INNER", "1")
+            .env("PATH", "")
+            .env("SHELL", "/bin/sh")
+            .status()
+            .expect("failed to spawn test child process");
+        assert!(status.success());
     }
 
     /// Regression test for Task #11: Shell detection does not use platform fallbacks
@@ -1368,8 +1314,8 @@ mod tests {
             Err(ShellError::ShellNotInstalled(details)) => {
                 assert!(details.contains("nonexistent_shell_xyz123"));
             }
-            Ok(path) => panic!("Expected ShellNotInstalled, got Ok({:?})", path),
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
+            Err(e) => unreachable!("Unexpected error: {:?}", e),
         }
     }
 
@@ -1401,8 +1347,8 @@ mod tests {
                     details
                 );
             }
-            Ok(path) => panic!("Expected ShellNotInstalled, got Ok({:?})", path),
-            Err(e) => panic!("Unexpected error type: {:?}", e),
+            Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
+            Err(e) => unreachable!("Unexpected error type: {:?}", e),
         }
     }
 

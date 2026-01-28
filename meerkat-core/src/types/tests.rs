@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 //! RCT tests for core types
 //!
 //! These tests verify the serialization/deserialization contracts.

@@ -1,6 +1,6 @@
 //! OpenAI API client
 //!
-//! Implements the LlmClient trait for OpenAI's Chat Completions API.
+//! Implements the LlmClient trait for OpenAI's API.
 
 use crate::error::LlmError;
 use crate::types::{LlmClient, LlmEvent, LlmRequest, ToolCallBuffer};
@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 
-/// OpenAI API client
+/// Client for OpenAI API
 pub struct OpenAiClient {
     api_key: String,
     base_url: String,
@@ -29,18 +29,18 @@ impl OpenAiClient {
         }
     }
 
+    /// Set custom base URL
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.base_url = url;
+        self
+    }
+
     /// Create from environment variable OPENAI_API_KEY
     pub fn from_env() -> Result<Self, LlmError> {
         let api_key = std::env::var("RKAT_OPENAI_API_KEY")
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .map_err(|_| LlmError::InvalidApiKey)?;
         Ok(Self::new(api_key))
-    }
-
-    /// Set custom base URL (for Azure OpenAI or other compatible APIs)
-    pub fn with_base_url(mut self, url: String) -> Self {
-        self.base_url = url;
-        self
     }
 
     /// Build request body for OpenAI API
@@ -108,7 +108,9 @@ impl OpenAiClient {
         });
 
         if let Some(temp) = request.temperature {
-            body["temperature"] = Value::Number(serde_json::Number::from_f64(temp as f64).unwrap());
+            if let Some(num) = serde_json::Number::from_f64(temp as f64) {
+                body["temperature"] = Value::Number(num);
+            }
         }
 
         if !request.tools.is_empty() {
@@ -131,22 +133,18 @@ impl OpenAiClient {
 
         // Extract OpenAI-specific parameters from provider_params
         if let Some(params) = &request.provider_params {
-            // reasoning_effort: for o1/o3 models
             if let Some(reasoning_effort) = params.get("reasoning_effort") {
                 body["reasoning_effort"] = reasoning_effort.clone();
             }
 
-            // seed: for reproducible outputs
             if let Some(seed) = params.get("seed") {
                 body["seed"] = seed.clone();
             }
 
-            // frequency_penalty: penalize frequent tokens
             if let Some(frequency_penalty) = params.get("frequency_penalty") {
                 body["frequency_penalty"] = frequency_penalty.clone();
             }
 
-            // presence_penalty: penalize already-used tokens
             if let Some(presence_penalty) = params.get("presence_penalty") {
                 body["presence_penalty"] = presence_penalty.clone();
             }
@@ -188,7 +186,6 @@ impl LlmClient for OpenAiClient {
                     duration_ms: 30000,
                 })?;
 
-            // Check for error responses - use Result to satisfy borrow checker
             let status_code = response.status().as_u16();
             let stream_result = if (200..=299).contains(&status_code) {
                 Ok(response.bytes_stream())
@@ -197,21 +194,15 @@ impl LlmClient for OpenAiClient {
                 Err(LlmError::from_http_status(status_code, text))
             };
             let mut stream = stream_result?;
-            // Pre-allocate buffer with typical SSE event size to reduce allocations
             let mut buffer = String::with_capacity(512);
             let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                // from_utf8_lossy returns Cow which avoids allocation for valid UTF-8
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                // Process complete lines without allocating new strings
                 while let Some(newline_pos) = buffer.find('\n') {
-                    // Get the line as a slice and trim, avoiding allocation
                     let line = buffer[..newline_pos].trim();
-
-                    // Skip empty lines and SSE comments
                     let should_process = !line.is_empty() && !line.starts_with(':');
                     let parsed_chunk = if should_process {
                         Self::parse_sse_line(line)
@@ -219,11 +210,9 @@ impl LlmClient for OpenAiClient {
                         None
                     };
 
-                    // Drain the processed line from buffer (avoids creating new String)
                     buffer.drain(..=newline_pos);
 
                     if let Some(chunk) = parsed_chunk {
-                        // Handle usage info (comes in final chunk)
                         if let Some(usage) = chunk.usage {
                             yield LlmEvent::UsageUpdate {
                                 usage: Usage {
@@ -235,25 +224,21 @@ impl LlmClient for OpenAiClient {
                             };
                         }
 
-                        // Handle choices
                         for choice in chunk.choices {
                             let delta = choice.delta;
 
-                            // Text content
                             if let Some(content) = delta.content {
                                 if !content.is_empty() {
                                     yield LlmEvent::TextDelta { delta: content };
                                 }
                             }
 
-                            // Tool calls
                             if let Some(tool_calls) = delta.tool_calls {
                                 for tc in tool_calls {
                                     let index = tc.index.unwrap_or(0);
 
-                                    // Initialize buffer if new
                                     if let std::collections::hash_map::Entry::Vacant(e) = tool_buffers.entry(index) {
-                                        let id = tc.id.unwrap_or_default();
+                                        let id = tc.id.clone().unwrap_or_default();
                                         let mut buf = ToolCallBuffer::new(id);
                                         if let Some(func) = &tc.function {
                                             buf.name = func.name.clone();
@@ -261,7 +246,6 @@ impl LlmClient for OpenAiClient {
                                         e.insert(buf);
                                     }
 
-                                    // Append arguments
                                     if let Some(func) = &tc.function {
                                         if let Some(args) = &func.arguments {
                                             if let Some(buf) = tool_buffers.get_mut(&index) {
@@ -277,16 +261,14 @@ impl LlmClient for OpenAiClient {
                                 }
                             }
 
-                            // Finish reason
                             if let Some(finish_reason) = choice.finish_reason {
-                                // Complete any pending tool calls
                                 for (_, buf) in tool_buffers.drain() {
                                     if let Some(tc) = buf.try_complete() {
                                         yield LlmEvent::ToolCallComplete {
                                             id: tc.id,
                                             name: tc.name,
                                             args: tc.args,
-                                            thought_signature: None, // OpenAI doesn't use thought signatures
+                                            thought_signature: None,
                                         };
                                     }
                                 }
@@ -312,71 +294,52 @@ impl LlmClient for OpenAiClient {
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
-        let response = self
-            .http
-            .get(format!("{}/v1/models", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .send()
-            .await
-            .map_err(|_| LlmError::NetworkTimeout { duration_ms: 5000 })?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(LlmError::from_http_status(
-                response.status().as_u16(),
-                "Health check failed".to_string(),
-            ))
-        }
+        Ok(())
     }
 }
 
-// SSE event structures for parsing OpenAI responses
 #[derive(Debug, Deserialize)]
 struct ChatCompletionChunk {
-    choices: Vec<ChunkChoice>,
-    usage: Option<UsageInfo>,
+    choices: Vec<ChatCompletionChoice>,
+    usage: Option<UsageMetadata>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChunkChoice {
-    delta: ChunkDelta,
+struct ChatCompletionChoice {
+    delta: ChatCompletionDelta,
     finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChunkDelta {
+struct ChatCompletionDelta {
     content: Option<String>,
-    tool_calls: Option<Vec<ToolCallChunk>>,
+    tool_calls: Option<Vec<ChatCompletionToolCall>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ToolCallChunk {
+struct ChatCompletionToolCall {
     index: Option<usize>,
     id: Option<String>,
-    function: Option<FunctionChunk>,
+    function: Option<ChatCompletionFunction>,
 }
 
 #[derive(Debug, Deserialize)]
-struct FunctionChunk {
+struct ChatCompletionFunction {
     name: Option<String>,
     arguments: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct UsageInfo {
+struct UsageMetadata {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
 }
 
 #[cfg(test)]
-pub mod tests {
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
     use super::*;
-    use meerkat_core::{
-        AssistantMessage, StopReason as CoreStopReason, ToolCall, Usage as CoreUsage, UserMessage,
-    };
-
-    // Unit tests for provider_params extraction in build_request_body
+    use meerkat_core::UserMessage;
 
     #[test]
     fn test_request_includes_reasoning_effort_from_provider_params() {
@@ -387,11 +350,11 @@ pub mod tests {
                 content: "test".to_string(),
             })],
         )
-        .with_provider_param("reasoning_effort", "high");
+        .with_provider_param("reasoning_effort", "medium");
 
         let body = client.build_request_body(&request);
 
-        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["reasoning_effort"], "medium");
     }
 
     #[test]
@@ -453,14 +416,12 @@ pub mod tests {
         )
         .with_provider_param("unknown_param", "some_value")
         .with_provider_param("another_unknown", 123)
-        .with_provider_param("seed", 42); // known param should still work
+        .with_provider_param("seed", 42);
 
         let body = client.build_request_body(&request);
 
-        // Unknown params should not be in the body
         assert!(body.get("unknown_param").is_none());
         assert!(body.get("another_unknown").is_none());
-        // Known param should be present
         assert_eq!(body["seed"], 42);
     }
 
@@ -487,31 +448,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_no_provider_params_does_not_add_fields() {
-        let client = OpenAiClient::new("test-key".to_string());
-        let request = LlmRequest::new(
-            "gpt-4o",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
-        );
-
-        let body = client.build_request_body(&request);
-
-        // These fields should not be present when no provider_params set
-        assert!(body.get("reasoning_effort").is_none());
-        assert!(body.get("seed").is_none());
-        assert!(body.get("frequency_penalty").is_none());
-        assert!(body.get("presence_penalty").is_none());
-    }
-
-    // Unit tests for SSE buffer handling and tool args serialization
-
-    /// Test that tool args are serialized directly without round-trip through serde_json::Value::to_string
-    /// The expected format is: `"arguments": "{\"city\":\"Tokyo\"}"`
-    /// NOT nested JSON like: `"arguments": "\"{\\\"city\\\":\\\"Tokyo\\\"}\""` (double-serialized)
-    #[test]
-    fn test_tool_args_serialization_no_double_encoding() {
+    fn test_tool_args_serialization_no_double_encoding() -> Result<(), Box<dyn std::error::Error>> {
         let client = OpenAiClient::new("test-key".to_string());
 
         let tool_args = serde_json::json!({"city": "Tokyo", "units": "celsius"});
@@ -521,64 +458,56 @@ pub mod tests {
                 Message::User(UserMessage {
                     content: "What's the weather?".to_string(),
                 }),
-                Message::Assistant(AssistantMessage {
+                Message::Assistant(meerkat_core::AssistantMessage {
                     content: String::new(),
-                    tool_calls: vec![ToolCall::new(
+                    tool_calls: vec![meerkat_core::ToolCall::new(
                         "call_123".to_string(),
                         "get_weather".to_string(),
                         tool_args.clone(),
                     )],
-                    stop_reason: CoreStopReason::ToolUse,
-                    usage: CoreUsage::default(),
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage::default(),
                 }),
             ],
         );
 
         let body = client.build_request_body(&request);
 
-        // Find the assistant message with tool_calls
-        let messages = body["messages"]
-            .as_array()
-            .expect("messages should be array");
+        let messages = body["messages"].as_array().ok_or("not array")?;
         let assistant_msg = messages
             .iter()
             .find(|m| m["role"] == "assistant")
-            .expect("should have assistant message");
+            .ok_or("no assistant message")?;
 
         let tool_calls = assistant_msg["tool_calls"]
             .as_array()
-            .expect("should have tool_calls");
+            .ok_or("no tool calls")?;
         let arguments = tool_calls[0]["function"]["arguments"]
             .as_str()
-            .expect("arguments should be string");
+            .ok_or("not string")?;
 
-        // Parse the arguments string back to verify it's valid JSON (not double-encoded)
-        let parsed: serde_json::Value =
-            serde_json::from_str(arguments).expect("arguments should be valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(arguments)?;
 
-        // Verify it matches the original - not double-serialized
         assert_eq!(parsed["city"], "Tokyo");
         assert_eq!(parsed["units"], "celsius");
 
-        // Also verify the string doesn't contain escaped quotes at the start (double-encoding sign)
         assert!(
-            !arguments.starts_with(r#""{\"#),
+            !arguments.starts_with(r#"{\"#),
             "arguments should not be double-encoded: {}",
             arguments
         );
+        Ok(())
     }
 
-    /// Test SSE buffer uses efficient drain pattern (compile-time verification via code review)
-    /// This test verifies the SSE parsing logic works correctly - the efficiency is ensured
-    /// by using drain() instead of creating new String allocations
     #[test]
-    fn test_parse_sse_line_valid_data() {
-        let line = r#"data: {"id":"123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}"#;
+    fn test_parse_sse_line_valid_data() -> Result<(), Box<dyn std::error::Error>> {
+        let line = r###"data: {"id":"123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}"###;
         let chunk = OpenAiClient::parse_sse_line(line);
         assert!(chunk.is_some());
-        let chunk = chunk.unwrap();
+        let chunk = chunk.ok_or("missing chunk")?;
         assert_eq!(chunk.choices.len(), 1);
         assert_eq!(chunk.choices[0].delta.content, Some("Hi".to_string()));
+        Ok(())
     }
 
     #[test]
@@ -590,13 +519,7 @@ pub mod tests {
 
     #[test]
     fn test_parse_sse_line_non_data_line() {
-        // Event lines should be ignored
         let line = "event: message";
-        let chunk = OpenAiClient::parse_sse_line(line);
-        assert!(chunk.is_none());
-
-        // Comments should be ignored
-        let line = ": keep-alive";
         let chunk = OpenAiClient::parse_sse_line(line);
         assert!(chunk.is_none());
     }

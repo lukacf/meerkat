@@ -704,6 +704,7 @@ pub enum SubAgentRunnerError {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -713,7 +714,7 @@ mod tests {
         assert_eq!(session.messages().len(), 1);
         match &session.messages()[0] {
             Message::User(u) => assert_eq!(u.content, "Do this task"),
-            _ => panic!("Expected User message"),
+            _ => unreachable!("Expected User message"),
         }
     }
 
@@ -723,11 +724,11 @@ mod tests {
         assert_eq!(session.messages().len(), 2);
         match &session.messages()[0] {
             Message::System(s) => assert_eq!(s.content, "You are helpful"),
-            _ => panic!("Expected System message"),
+            _ => unreachable!("Expected System message"),
         }
         match &session.messages()[1] {
             Message::User(u) => assert_eq!(u.content, "Do this task"),
-            _ => panic!("Expected User message"),
+            _ => unreachable!("Expected User message"),
         }
     }
 
@@ -742,7 +743,7 @@ mod tests {
         assert_eq!(forked.messages().len(), 2);
         match &forked.messages()[1] {
             Message::User(u) => assert_eq!(u.content, "Continue with this"),
-            _ => panic!("Expected User message"),
+            _ => unreachable!("Expected User message"),
         }
     }
 

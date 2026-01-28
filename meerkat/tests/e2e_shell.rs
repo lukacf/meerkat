@@ -1,4 +1,4 @@
-//! End-to-end tests for Shell Tool (Phase 7)
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
 //! These tests verify the full shell tool functionality from tool call to
 //! subprocess execution and result return.

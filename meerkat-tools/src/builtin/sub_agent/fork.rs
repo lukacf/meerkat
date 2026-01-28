@@ -307,6 +307,7 @@ impl BuiltinTool for AgentForkTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::builtin::sub_agent::config::SubAgentConfig;
@@ -506,7 +507,7 @@ mod tests {
 
         match tool.resolve_budget_policy(Some("fixed:10000")) {
             ForkBudgetPolicy::Fixed(tokens) => assert_eq!(tokens, 10000),
-            _ => panic!("Expected Fixed"),
+            _ => unreachable!("Expected Fixed"),
         }
     }
 

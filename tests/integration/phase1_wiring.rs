@@ -1,12 +1,10 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use meerkat_agent::AgentFactory;
 use meerkat_client::ProviderResolver;
 use meerkat_core::{AgentSessionStore, Message, Provider, Session, UserMessage};
 use meerkat_store::{MemoryStore, StoreAdapter};
 use meerkat_tools::builtin::{BuiltinToolConfig, MemoryTaskStore};
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]
 async fn test_agent_factory_builds_builtin_dispatcher() {
@@ -50,18 +48,19 @@ async fn test_store_adapter_roundtrip() {
 
 #[test]
 fn test_provider_resolver_prefers_rkat_env() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
-
-    unsafe {
-        std::env::set_var("RKAT_OPENAI_API_KEY", "rkat-key");
-        std::env::set_var("OPENAI_API_KEY", "openai-key");
+    if std::env::var("RUN_TEST_RESOLVER_INNER").is_ok() {
+        let key = ProviderResolver::api_key_for(Provider::OpenAI);
+        assert_eq!(key.as_deref(), Some("rkat-key"));
+        return;
     }
 
-    let key = ProviderResolver::api_key_for(Provider::OpenAI);
-    assert_eq!(key.as_deref(), Some("rkat-key"));
+    let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+        .arg("test_provider_resolver_prefers_rkat_env")
+        .env("RUN_TEST_RESOLVER_INNER", "1")
+        .env("RKAT_OPENAI_API_KEY", "rkat-key")
+        .env("OPENAI_API_KEY", "openai-key")
+        .status()
+        .expect("failed to spawn test child process");
 
-    unsafe {
-        std::env::remove_var("RKAT_OPENAI_API_KEY");
-        std::env::remove_var("OPENAI_API_KEY");
-    }
+    assert!(status.success());
 }

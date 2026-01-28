@@ -220,6 +220,7 @@ impl BuiltinTool for TaskCreateTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::builtin::MemoryTaskStore;
@@ -445,7 +446,7 @@ mod tests {
                 assert!(msg.contains("critical"));
                 assert!(msg.contains("low, medium, or high"));
             }
-            _ => panic!("Expected InvalidArgs error, got {:?}", err),
+            _ => unreachable!("Expected InvalidArgs error, got {:?}", err),
         }
     }
 

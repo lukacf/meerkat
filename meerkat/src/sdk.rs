@@ -236,6 +236,7 @@ pub fn spawn_event_logger(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use meerkat_tools::MemoryTaskStore;
@@ -281,6 +282,26 @@ mod tests {
 
     #[test]
     fn test_create_dispatcher_in_project_dir() {
+        if std::env::var("RUN_TEST_DISPATCHER_INNER").is_ok() {
+            let temp_path = std::env::var("TEST_TEMP_PATH").expect("TEST_TEMP_PATH not set");
+            let temp_path = std::path::PathBuf::from(temp_path);
+            std::env::set_current_dir(&temp_path).expect("set cwd failed");
+
+            // Create dispatcher using the helper
+            let result = create_builtins_dispatcher(
+                &BuiltinToolConfig::default(),
+                Some("test-123".to_string()),
+            );
+
+            assert!(result.is_ok());
+            let dispatcher = result.unwrap();
+            let tools = dispatcher.tools();
+            // 4 task tools + 2 utility tools (wait, datetime)
+            assert!(tools.iter().any(|t| t.name == "task_create"));
+            assert!(tools.iter().any(|t| t.name == "wait"));
+            return;
+        }
+
         // Test the helper function (uses tempdir to avoid polluting the workspace)
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_path = temp_dir.path();
@@ -288,23 +309,14 @@ mod tests {
         // Create a .rkat directory to mark it as a project
         std::fs::create_dir_all(temp_path.join(".rkat")).unwrap();
 
-        // Change to temp dir for this test
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp_path).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+            .arg("test_create_dispatcher_in_project_dir")
+            .env("RUN_TEST_DISPATCHER_INNER", "1")
+            .env("TEST_TEMP_PATH", temp_path)
+            .status()
+            .expect("failed to spawn test child process");
 
-        // Create dispatcher using the helper
-        let result =
-            create_builtins_dispatcher(&BuiltinToolConfig::default(), Some("test-123".to_string()));
-
-        // Restore original dir
-        std::env::set_current_dir(original_dir).unwrap();
-
-        assert!(result.is_ok());
-        let dispatcher = result.unwrap();
-        let tools = dispatcher.tools();
-        // 4 task tools + 2 utility tools (wait, datetime)
-        assert!(tools.iter().any(|t| t.name == "task_create"));
-        assert!(tools.iter().any(|t| t.name == "wait"));
+        assert!(status.success());
     }
 
     #[tokio::test]

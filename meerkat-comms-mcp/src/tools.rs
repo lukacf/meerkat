@@ -276,6 +276,7 @@ async fn handle_list_peers(ctx: &ToolContext) -> Result<Value, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_comms::{PubKey, TrustedPeer};
@@ -296,16 +297,20 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_list_contains_all_four_tools() {
+    fn test_tools_list_contains_all_four_tools() -> Result<(), Box<dyn std::error::Error>> {
         let tools = tools_list();
         assert_eq!(tools.len(), 4, "Expected 4 tools");
 
-        let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let tool_names: Vec<&str> = tools
+            .iter()
+            .map(|t| t["name"].as_str().unwrap_or_default())
+            .collect();
 
         assert!(tool_names.contains(&"send_message"));
         assert!(tool_names.contains(&"send_request"));
         assert!(tool_names.contains(&"send_response"));
         assert!(tool_names.contains(&"list_peers"));
+        Ok(())
     }
 
     #[test]
@@ -322,33 +327,35 @@ mod tests {
     }
 
     #[test]
-    fn test_send_message_input_parsing() {
+    fn test_send_message_input_parsing() -> Result<(), Box<dyn std::error::Error>> {
         let input_json = json!({
             "peer": "review-meerkat",
             "body": "Hello!"
         });
 
-        let input: SendMessageInput = serde_json::from_value(input_json).unwrap();
+        let input: SendMessageInput = serde_json::from_value(input_json)?;
         assert_eq!(input.peer, "review-meerkat");
         assert_eq!(input.body, "Hello!");
+        Ok(())
     }
 
     #[test]
-    fn test_send_request_input_parsing() {
+    fn test_send_request_input_parsing() -> Result<(), Box<dyn std::error::Error>> {
         let input_json = json!({
             "peer": "review-meerkat",
             "intent": "review-pr",
             "params": { "pr": 42 }
         });
 
-        let input: SendRequestInput = serde_json::from_value(input_json).unwrap();
+        let input: SendRequestInput = serde_json::from_value(input_json)?;
         assert_eq!(input.peer, "review-meerkat");
         assert_eq!(input.intent, "review-pr");
         assert_eq!(input.params["pr"], 42);
+        Ok(())
     }
 
     #[test]
-    fn test_send_response_input_parsing() {
+    fn test_send_response_input_parsing() -> Result<(), Box<dyn std::error::Error>> {
         let input_json = json!({
             "peer": "coding-meerkat",
             "request_id": "01234567-89ab-cdef-0123-456789abcdef",
@@ -356,21 +363,23 @@ mod tests {
             "result": { "approved": true }
         });
 
-        let input: SendResponseInput = serde_json::from_value(input_json).unwrap();
+        let input: SendResponseInput = serde_json::from_value(input_json)?;
         assert_eq!(input.peer, "coding-meerkat");
         assert!(matches!(input.status, ResponseStatus::Completed));
         assert_eq!(input.result["approved"], true);
+        Ok(())
     }
 
     #[test]
-    fn test_list_peers_input_parsing() {
+    fn test_list_peers_input_parsing() -> Result<(), Box<dyn std::error::Error>> {
         let input_json = json!({});
-        let _input: ListPeersInput = serde_json::from_value(input_json).unwrap();
+        let _input: ListPeersInput = serde_json::from_value(input_json)?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_tool_send_message() {
-        let tmp = TempDir::new().unwrap();
+    async fn test_tool_send_message() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         let sock_path = tmp.path().join("peer.sock");
 
         let peer_keypair = make_keypair();
@@ -386,20 +395,27 @@ mod tests {
         let ctx = ToolContext::new(our_keypair, trusted_peers, CommsConfig::default());
 
         // Start mock peer server
-        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let listener = tokio::net::UnixListener::bind(&sock_path)?;
         let server_handle = tokio::spawn(async move {
             use meerkat_comms::{Envelope, MessageKind, Signature};
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
 
             // Read envelope
             let mut len_bytes = [0u8; 4];
-            stream.read_exact(&mut len_bytes).await.unwrap();
+            stream
+                .read_exact(&mut len_bytes)
+                .await
+                .map_err(|e| e.to_string())?;
             let len = u32::from_be_bytes(len_bytes);
             let mut payload = vec![0u8; len as usize];
-            stream.read_exact(&mut payload).await.unwrap();
-            let envelope: Envelope = ciborium::from_reader(&payload[..]).unwrap();
+            stream
+                .read_exact(&mut payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            let envelope: Envelope =
+                ciborium::from_reader(&payload[..]).map_err(|e| e.to_string())?;
 
             // Send ack
             let mut ack = Envelope {
@@ -414,11 +430,18 @@ mod tests {
             ack.sign(&peer_keypair);
 
             let mut ack_payload = Vec::new();
-            ciborium::into_writer(&ack, &mut ack_payload).unwrap();
+            ciborium::into_writer(&ack, &mut ack_payload).map_err(|e| e.to_string())?;
             let ack_len = ack_payload.len() as u32;
-            stream.write_all(&ack_len.to_be_bytes()).await.unwrap();
-            stream.write_all(&ack_payload).await.unwrap();
-            stream.flush().await.unwrap();
+            stream
+                .write_all(&ack_len.to_be_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            stream
+                .write_all(&ack_payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            stream.flush().await.map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
         });
 
         let result = handle_tools_call(
@@ -431,16 +454,21 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "send_message should succeed");
-        let output = result.unwrap();
+        assert!(
+            result.is_ok(),
+            "send_message should succeed: {:?}",
+            result.err()
+        );
+        let output = result.map_err(|e| e.to_string())?;
         assert_eq!(output["success"], true);
 
-        server_handle.await.unwrap();
+        server_handle.await??;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_tool_send_request() {
-        let tmp = TempDir::new().unwrap();
+    async fn test_tool_send_request() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         let sock_path = tmp.path().join("peer.sock");
 
         let peer_keypair = make_keypair();
@@ -456,20 +484,27 @@ mod tests {
         let ctx = ToolContext::new(our_keypair, trusted_peers, CommsConfig::default());
 
         // Start mock peer server
-        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let listener = tokio::net::UnixListener::bind(&sock_path)?;
         let server_handle = tokio::spawn(async move {
             use meerkat_comms::{Envelope, MessageKind, Signature};
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
 
             // Read envelope
             let mut len_bytes = [0u8; 4];
-            stream.read_exact(&mut len_bytes).await.unwrap();
+            stream
+                .read_exact(&mut len_bytes)
+                .await
+                .map_err(|e| e.to_string())?;
             let len = u32::from_be_bytes(len_bytes);
             let mut payload = vec![0u8; len as usize];
-            stream.read_exact(&mut payload).await.unwrap();
-            let envelope: Envelope = ciborium::from_reader(&payload[..]).unwrap();
+            stream
+                .read_exact(&mut payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            let envelope: Envelope =
+                ciborium::from_reader(&payload[..]).map_err(|e| e.to_string())?;
 
             // Send ack
             let mut ack = Envelope {
@@ -484,11 +519,18 @@ mod tests {
             ack.sign(&peer_keypair);
 
             let mut ack_payload = Vec::new();
-            ciborium::into_writer(&ack, &mut ack_payload).unwrap();
+            ciborium::into_writer(&ack, &mut ack_payload).map_err(|e| e.to_string())?;
             let ack_len = ack_payload.len() as u32;
-            stream.write_all(&ack_len.to_be_bytes()).await.unwrap();
-            stream.write_all(&ack_payload).await.unwrap();
-            stream.flush().await.unwrap();
+            stream
+                .write_all(&ack_len.to_be_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            stream
+                .write_all(&ack_payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            stream.flush().await.map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
         });
 
         let result = handle_tools_call(
@@ -503,15 +545,16 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "send_request should succeed");
-        let output = result.unwrap();
+        let output = result.map_err(|e| e.to_string())?;
         assert_eq!(output["success"], true);
 
-        server_handle.await.unwrap();
+        server_handle.await??;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_tool_send_response() {
-        let tmp = TempDir::new().unwrap();
+    async fn test_tool_send_response() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         let sock_path = tmp.path().join("peer.sock");
 
         let peer_keypair = make_keypair();
@@ -526,22 +569,30 @@ mod tests {
         let ctx = ToolContext::new(our_keypair, trusted_peers, CommsConfig::default());
 
         // Start mock peer server (no ack expected for Response)
-        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let listener = tokio::net::UnixListener::bind(&sock_path)?;
         let server_handle = tokio::spawn(async move {
             use meerkat_comms::Envelope;
             use tokio::io::AsyncReadExt;
 
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
 
             // Read envelope
             let mut len_bytes = [0u8; 4];
-            stream.read_exact(&mut len_bytes).await.unwrap();
+            stream
+                .read_exact(&mut len_bytes)
+                .await
+                .map_err(|e| e.to_string())?;
             let len = u32::from_be_bytes(len_bytes);
             let mut payload = vec![0u8; len as usize];
-            stream.read_exact(&mut payload).await.unwrap();
-            let _envelope: Envelope = ciborium::from_reader(&payload[..]).unwrap();
+            stream
+                .read_exact(&mut payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            let _envelope: Envelope =
+                ciborium::from_reader(&payload[..]).map_err(|e| e.to_string())?;
 
             // No ack sent for Response
+            Ok::<(), String>(())
         });
 
         let result = handle_tools_call(
@@ -557,14 +608,15 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "send_response should succeed");
-        let output = result.unwrap();
+        let output = result.map_err(|e| e.to_string())?;
         assert_eq!(output["success"], true);
 
-        server_handle.await.unwrap();
+        server_handle.await??;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_tool_list_peers() {
+    async fn test_tool_list_peers() -> Result<(), Box<dyn std::error::Error>> {
         let peer1_keypair = make_keypair();
         let peer2_keypair = make_keypair();
         let our_keypair = make_keypair();
@@ -589,17 +641,29 @@ mod tests {
         let result = handle_tools_call(&ctx, "list_peers", &json!({})).await;
 
         assert!(result.is_ok());
-        let output = result.unwrap();
-        let peers = output["peers"].as_array().unwrap();
+        let output = result.map_err(|e| e.to_string())?;
+        let peers = output["peers"].as_array().ok_or("not an array")?;
         assert_eq!(peers.len(), 2);
 
         // Verify peer info
         assert_eq!(peers[0]["name"], "peer1");
-        assert!(peers[0]["pubkey"].as_str().unwrap().starts_with("ed25519:"));
+        assert!(
+            peers[0]["pubkey"]
+                .as_str()
+                .ok_or("not a string")?
+                .starts_with("ed25519:")
+        );
         assert_eq!(peers[0]["addr"], "tcp://192.168.1.1:4200");
 
         assert_eq!(peers[1]["name"], "peer2");
-        assert!(peers[1]["pubkey"].as_str().unwrap().starts_with("ed25519:"));
+        assert!(
+            peers[1]["pubkey"]
+                .as_str()
+                .ok_or("not a string")?
+                .starts_with("ed25519:")
+        );
         assert_eq!(peers[1]["addr"], "uds:///tmp/peer2.sock");
+
+        Ok(())
     }
 }

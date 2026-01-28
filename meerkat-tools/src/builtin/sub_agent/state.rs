@@ -76,23 +76,24 @@ impl SubAgentToolState {
     /// Set tool usage instructions (for inheriting system prompt)
     /// Can be called after Arc is shared since it uses interior mutability.
     /// This is typically called once at setup time by CompositeDispatcher::register_sub_agent_tools.
-    pub fn set_tool_usage_instructions(&self, instructions: String) {
+    pub fn set_tool_usage_instructions(&self, instructions: String) -> Result<(), String> {
         if !instructions.is_empty() {
             let mut guard = self
                 .tool_usage_instructions
                 .write()
-                .expect("tool_usage_instructions lock poisoned");
+                .map_err(|_| "tool_usage_instructions lock poisoned".to_string())?;
             *guard = Some(instructions);
         }
+        Ok(())
     }
 
     /// Get tool usage instructions
-    pub fn get_tool_usage_instructions(&self) -> Option<String> {
+    pub fn get_tool_usage_instructions(&self) -> Result<Option<String>, String> {
         let guard = self
             .tool_usage_instructions
             .read()
-            .expect("tool_usage_instructions lock poisoned");
-        guard.clone()
+            .map_err(|_| "tool_usage_instructions lock poisoned".to_string())?;
+        Ok(guard.clone())
     }
 
     /// Create new sub-agent tool state with comms enabled
@@ -153,6 +154,7 @@ impl std::fmt::Debug for SubAgentToolState {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::schema::empty_object_schema;

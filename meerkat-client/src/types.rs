@@ -97,12 +97,14 @@ impl LlmRequest {
     /// If provider_params is None, creates a new object.
     /// If provider_params exists, merges the new key into it.
     pub fn with_provider_param(mut self, key: &str, value: impl Into<Value>) -> Self {
-        let params = self
+        let mut params = self
             .provider_params
-            .get_or_insert_with(|| serde_json::json!({}));
+            .take()
+            .unwrap_or_else(|| serde_json::json!({}));
         if let Some(obj) = params.as_object_mut() {
             obj.insert(key.to_string(), value.into());
         }
+        self.provider_params = Some(params);
         self
     }
 }
@@ -207,11 +209,12 @@ impl ToolCallBuffer {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_llm_event_serialization() {
+    fn test_llm_event_serialization() -> Result<(), Box<dyn std::error::Error>> {
         let events = vec![
             LlmEvent::TextDelta {
                 delta: "Hello".to_string(),
@@ -241,24 +244,26 @@ mod tests {
         ];
 
         for event in events {
-            let json = serde_json::to_value(&event).unwrap();
+            let json = serde_json::to_value(&event)?;
             assert!(json.get("type").is_some());
 
-            let parsed: LlmEvent = serde_json::from_value(json).unwrap();
-            let _ = serde_json::to_value(&parsed).unwrap();
+            let parsed: LlmEvent = serde_json::from_value(json)?;
+            let _ = serde_json::to_value(&parsed)?;
         }
+        Ok(())
     }
 
     #[test]
-    fn test_tool_call_buffer() {
+    fn test_tool_call_buffer() -> Result<(), Box<dyn std::error::Error>> {
         let mut buffer = ToolCallBuffer::new("tc_1".to_string());
         buffer.name = Some("test_tool".to_string());
         buffer.args_json = r#"{"key": "value"}"#.to_string();
 
-        let completed = buffer.try_complete().unwrap();
+        let completed = buffer.try_complete().ok_or("incomplete")?;
         assert_eq!(completed.id, "tc_1");
         assert_eq!(completed.name, "test_tool");
         assert_eq!(completed.args["key"], "value");
+        Ok(())
     }
 
     #[test]
@@ -275,15 +280,16 @@ mod tests {
     /// Regression test: tools with no parameters should complete successfully
     /// (args_json is empty string, should be treated as empty object)
     #[test]
-    fn test_tool_call_buffer_empty_args() {
+    fn test_tool_call_buffer_empty_args() -> Result<(), Box<dyn std::error::Error>> {
         let mut buffer = ToolCallBuffer::new("tc_1".to_string());
         buffer.name = Some("get_todays_activities".to_string());
         buffer.args_json = String::new(); // Empty args (no parameters)
 
-        let completed = buffer.try_complete().unwrap();
+        let completed = buffer.try_complete().ok_or("incomplete")?;
         assert_eq!(completed.id, "tc_1");
         assert_eq!(completed.name, "get_todays_activities");
         assert_eq!(completed.args, serde_json::json!({})); // Should be empty object
+        Ok(())
     }
 
     #[test]
@@ -298,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn test_llm_request_provider_params_serialization() {
+    fn test_llm_request_provider_params_serialization() -> Result<(), Box<dyn std::error::Error>> {
         // Test serialization with provider_params set
         let request = LlmRequest::new("claude-3", vec![]).with_provider_params(serde_json::json!({
             "thinking": {
@@ -308,30 +314,33 @@ mod tests {
             "custom_flag": true
         }));
 
-        let json = serde_json::to_value(&request).unwrap();
+        let json = serde_json::to_value(&request)?;
         assert!(json.get("provider_params").is_some());
         assert_eq!(json["provider_params"]["thinking"]["budget_tokens"], 10000);
 
         // Deserialize and verify
-        let parsed: LlmRequest = serde_json::from_value(json).unwrap();
+        let parsed: LlmRequest = serde_json::from_value(json)?;
         assert!(parsed.provider_params.is_some());
-        let params = parsed.provider_params.unwrap();
+        let params = parsed.provider_params.as_ref().ok_or("missing params")?;
         assert_eq!(params["thinking"]["type"], "enabled");
+        Ok(())
     }
 
     #[test]
-    fn test_llm_request_provider_params_none_serialization() {
+    fn test_llm_request_provider_params_none_serialization()
+    -> Result<(), Box<dyn std::error::Error>> {
         // Test serialization without provider_params (should serialize as null or be absent)
         let request = LlmRequest::new("claude-3", vec![]);
 
-        let json = serde_json::to_value(&request).unwrap();
+        let json = serde_json::to_value(&request)?;
         // provider_params should either be null or absent
         let params = json.get("provider_params");
-        assert!(params.is_none() || params.unwrap().is_null());
+        assert!(params.is_none() || params.ok_or("not found")?.is_null());
 
         // Deserialize should work
-        let parsed: LlmRequest = serde_json::from_value(json).unwrap();
+        let parsed: LlmRequest = serde_json::from_value(json)?;
         assert!(parsed.provider_params.is_none());
+        Ok(())
     }
 
     #[test]
@@ -348,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn test_llm_request_with_provider_param_single() {
+    fn test_llm_request_with_provider_param_single() -> Result<(), Box<dyn std::error::Error>> {
         // Test with_provider_param sets a single key
         let request = LlmRequest::new("claude-3", vec![]).with_provider_param(
             "thinking",
@@ -358,13 +367,14 @@ mod tests {
             }),
         );
 
-        let params = request.provider_params.unwrap();
+        let params = request.provider_params.as_ref().ok_or("missing params")?;
         assert_eq!(params["thinking"]["type"], "enabled");
         assert_eq!(params["thinking"]["budget_tokens"], 5000);
+        Ok(())
     }
 
     #[test]
-    fn test_llm_request_with_provider_param_multiple() {
+    fn test_llm_request_with_provider_param_multiple() -> Result<(), Box<dyn std::error::Error>> {
         // Test chaining multiple with_provider_param calls
         let request = LlmRequest::new("claude-3", vec![])
             .with_provider_param(
@@ -377,21 +387,23 @@ mod tests {
             .with_provider_param("custom_option", "value")
             .with_provider_param("numeric_setting", 42);
 
-        let params = request.provider_params.unwrap();
+        let params = request.provider_params.as_ref().ok_or("missing params")?;
         assert_eq!(params["thinking"]["budget_tokens"], 10000);
         assert_eq!(params["custom_option"], "value");
         assert_eq!(params["numeric_setting"], 42);
+        Ok(())
     }
 
     #[test]
-    fn test_llm_request_with_provider_param_overwrites() {
+    fn test_llm_request_with_provider_param_overwrites() -> Result<(), Box<dyn std::error::Error>> {
         // Test that setting the same key twice overwrites
         let request = LlmRequest::new("claude-3", vec![])
             .with_provider_param("key", "first")
             .with_provider_param("key", "second");
 
-        let params = request.provider_params.unwrap();
+        let params = request.provider_params.as_ref().ok_or("missing params")?;
         assert_eq!(params["key"], "second");
+        Ok(())
     }
 
     #[test]
@@ -408,9 +420,9 @@ mod tests {
         let buffer = ToolCallBuffer::new("tc_1".to_string());
         // Should have pre-allocated capacity to reduce allocations
         assert!(
-            buffer.args_json.capacity() >= super::TOOL_CALL_ARGS_CAPACITY,
+            buffer.args_json.capacity() >= TOOL_CALL_ARGS_CAPACITY,
             "Buffer should have pre-allocated capacity of at least {} bytes, got {}",
-            super::TOOL_CALL_ARGS_CAPACITY,
+            TOOL_CALL_ARGS_CAPACITY,
             buffer.args_json.capacity()
         );
     }
@@ -425,14 +437,15 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_call_buffer_push_args() {
+    fn test_tool_call_buffer_push_args() -> Result<(), Box<dyn std::error::Error>> {
         let mut buffer = ToolCallBuffer::new("tc_1".to_string());
         buffer.name = Some("test_tool".to_string());
         buffer.push_args(r#"{"key""#);
         buffer.push_args(r#": "value"}"#);
 
-        let completed = buffer.try_complete().unwrap();
+        let completed = buffer.try_complete().ok_or("incomplete")?;
         assert_eq!(completed.args["key"], "value");
+        Ok(())
     }
 
     #[test]

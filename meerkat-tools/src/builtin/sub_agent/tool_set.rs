@@ -127,6 +127,7 @@ impl std::fmt::Debug for SubAgentToolSet {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::builtin::sub_agent::config::SubAgentConfig;

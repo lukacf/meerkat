@@ -62,7 +62,10 @@ impl Envelope {
         // Create a tuple of (id, from, to, kind) for canonical encoding
         let signable = (&self.id, &self.from, &self.to, &self.kind);
         let mut buf = Vec::new();
-        ciborium::into_writer(&signable, &mut buf).expect("CBOR serialization failed");
+        // Ciborium serialization to Vec<u8> for these types is infallible
+        if let Err(e) = ciborium::into_writer(&signable, &mut buf) {
+            unreachable!("CBOR serialization failed for fixed types: {}", e);
+        }
         buf
     }
 
@@ -94,6 +97,7 @@ pub enum InboxItem {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

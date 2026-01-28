@@ -926,7 +926,7 @@ where
         let inbox_notify = self
             .comms_runtime
             .as_ref()
-            .expect("comms verified above")
+            .ok_or_else(|| AgentError::InternalError("comms not initialized".to_string()))?
             .inbox_notify();
 
         // Polling interval for budget checks when no duration limit
@@ -1054,7 +1054,7 @@ where
         let inbox_notify = self
             .comms_runtime
             .as_ref()
-            .expect("comms verified above")
+            .ok_or_else(|| AgentError::InternalError("comms not initialized".to_string()))?
             .inbox_notify();
 
         // Polling interval for budget checks when no duration limit
@@ -1443,6 +1443,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
@@ -2779,7 +2780,7 @@ mod tests {
             AgentError::ConfigError(msg) => {
                 assert!(msg.contains("comms"));
             }
-            other => panic!("Expected ConfigError, got: {:?}", other),
+            other => unreachable!("Expected ConfigError, got: {:?}", other),
         }
     }
 

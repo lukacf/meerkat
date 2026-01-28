@@ -96,6 +96,7 @@ impl LlmError {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -192,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_serialization() {
+    fn test_error_serialization() -> Result<(), Box<dyn std::error::Error>> {
         let errors = vec![
             LlmError::RateLimited {
                 retry_after_ms: Some(1000),
@@ -204,8 +205,9 @@ mod tests {
         ];
 
         for err in errors {
-            let json = serde_json::to_string(&err).unwrap();
-            let _: LlmError = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&err)?;
+            let _: LlmError = serde_json::from_str(&json)?;
         }
+        Ok(())
     }
 }

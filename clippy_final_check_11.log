@@ -1,0 +1,2158 @@
+    Checking meerkat-store v0.1.0 (/Users/luka/src/raik/meerkat-store)
+    Checking meerkat-client v0.1.0 (/Users/luka/src/raik/meerkat-client)
+    Checking meerkat-mcp-client v0.1.0 (/Users/luka/src/raik/meerkat-mcp-client)
+    Checking meerkat-core v0.1.0 (/Users/luka/src/raik/meerkat-core)
+error: found invalid character; only `#` is allowed in raw string delimitation: \u{0}
+   --> meerkat-client/src/types.rs:259:28
+    |
+259 |         buffer.args_json = r#
+    |                            ^^
+
+error: could not compile `meerkat-client` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `meerkat-client` (lib) due to 1 previous error
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1473:33
+     |
+1473 |             let mut responses = self.responses.lock().unwrap();
+     |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+     = note: requested on the command line with `-D clippy::unwrap-used`
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1556:22
+     |
+1556 |         let result = agent.run("Hello".to_string()).await.unwrap();
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1614:22
+     |
+1614 |           let result = agent
+     |  ______________________^
+1615 | |             .run("What's the weather in Tokyo?".to_string())
+1616 | |             .await
+1617 | |             .unwrap();
+     | |_____________________^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1703:19
+     |
+1703 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> meerkat-core/src/agent.rs:1724:22
+     |
+1724 |         let pubkey = agent.comms().unwrap().public_key();
+     |                      ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1759:19
+     |
+1759 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1786:19
+     |
+1786 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1795:23
+     |
+1795 |         let runtime = CommsRuntime::new(resolved).unwrap();
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> meerkat-core/src/agent.rs:1815:13
+     |
+1815 |             agent.comms().unwrap().router() as *const _,
+     |             ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> meerkat-core/src/agent.rs:1822:14
+     |
+1822 |             &agent.comms().unwrap().trusted_peers_shared(),
+     |              ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1849:19
+     |
+1849 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1875:22
+     |
+1875 |         let result = agent.run("Test".to_string()).await.unwrap();
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1895:19
+     |
+1895 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> meerkat-core/src/agent.rs:1921:13
+     |
+1921 |             config.listen_uds.as_ref().unwrap().exists(),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1936:19
+     |
+1936 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:1978:22
+     |
+1978 |         let result = agent.run("Test".to_string()).await.unwrap();
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> meerkat-core/src/agent.rs:2034:22
+     |
+2034 |         let params = config.provider_params.unwrap();
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2073:13
+     |
+2073 |             self.captured_params.lock().unwrap().clone()
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2088:14
+     |
+2088 |             *self.captured_params.lock().unwrap() = provider_params.cloned();
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2090:33
+     |
+2090 |             let mut responses = self.responses.lock().unwrap();
+     |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2131:23
+     |
+2131 |         let _result = agent.run("Test".to_string()).await.unwrap();
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> meerkat-core/src/agent.rs:2136:20
+     |
+2136 |         assert_eq!(captured.unwrap(), thinking_config);
+     |                    ^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2155:23
+     |
+2155 |         let _result = agent.run("Test".to_string()).await.unwrap();
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap_err()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2231:17
+     |
+2231 |         assert!(result.unwrap_err().to_string().contains("not allowed"));
+     |                 ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Ok`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2293:22
+     |
+2293 |         let result = agent.run("Test".to_string()).await.unwrap();
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2318:13
+     |
+2318 |             self.timings.lock().unwrap().clone()
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2337:13
+     |
+2337 | /             self.timings
+2338 | |                 .lock()
+2339 | |                 .unwrap()
+     | |_________________________^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2410:22
+     |
+2410 |         let result = agent.run("Test".to_string()).await.unwrap();
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> meerkat-core/src/agent.rs:2432:28
+     |
+2432 |         let first_start = *starts.iter().min().unwrap();
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> meerkat-core/src/agent.rs:2433:27
+     |
+2433 |         let last_start = *starts.iter().max().unwrap();
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2466:13
+     |
+2466 |             self.dispatch_order.lock().unwrap().clone()
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2482:13
+     |
+2482 |             self.dispatch_order.lock().unwrap().push(name.to_string());
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2559:23
+     |
+2559 |         let _result = agent.run("Test".to_string()).await.unwrap();
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> meerkat-core/src/agent.rs:2571:51
+     |
+2571 |         if let Message::ToolResults { results } = tool_results_msg.unwrap() {
+     |                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap_err()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2778:15
+     |
+2778 |         match result.unwrap_err() {
+     |               ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Ok`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: `panic` should not be present in production code
+    --> meerkat-core/src/agent.rs:2782:22
+     |
+2782 |             other => panic!("Expected ConfigError, got: {:?}", other),
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+     = note: requested on the command line with `-D clippy::panic`
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2791:19
+     |
+2791 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2832:22
+     |
+2832 |         let result = result.unwrap();
+     |                      ^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2841:19
+     |
+2841 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2869:22
+     |
+2869 |         let result = result.unwrap();
+     |                      ^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/agent.rs:2883:19
+     |
+2883 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/budget.rs:357:25
+    |
+357 |         let allocated = pool.reserve(&request).unwrap();
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/budget.rs:368:25
+    |
+368 |         let allocated = pool.reserve(&request).unwrap();
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_bootstrap.rs:432:17
+    |
+432 |         assert!(result.unwrap().is_none());
+    |                 ^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_bootstrap.rs:442:17
+    |
+442 |         assert!(result.unwrap().is_none());
+    |                 ^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_bootstrap.rs:447:19
+    |
+447 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_bootstrap.rs:456:24
+    |
+456 |         let prepared = result.unwrap();
+    |                        ^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/comms_bootstrap.rs:458:24
+    |
+458 |         let prepared = prepared.unwrap();
+    |                        ^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_bootstrap.rs:464:19
+    |
+464 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_bootstrap.rs:480:24
+    |
+480 |         let prepared = result.unwrap();
+    |                        ^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/comms_bootstrap.rs:482:24
+    |
+482 |         let prepared = prepared.unwrap();
+    |                        ^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/comms_bootstrap.rs:486:25
+    |
+486 |         let advertise = prepared.advertise.unwrap();
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_bootstrap.rs:558:24
+    |
+558 |         let prepared = result.unwrap();
+    |                        ^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/comms_bootstrap.rs:560:24
+    |
+560 |         let prepared = prepared.unwrap();
+    |                        ^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/comms_bootstrap.rs:564:25
+    |
+564 |         let advertise = prepared.advertise.unwrap();
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/comms_bootstrap.rs:598:24
+    |
+598 |         let prepared = result.unwrap().unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_bootstrap.rs:598:24
+    |
+598 |         let prepared = result.unwrap().unwrap();
+    |                        ^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:148:30
+    |
+148 |             listen_tcp: Some("127.0.0.1:4200".parse().unwrap()),
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:157:44
+    |
+157 |         assert_eq!(config.listen_tcp, Some("127.0.0.1:4200".parse().unwrap()));
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:189:30
+    |
+189 |             listen_tcp: Some("0.0.0.0:4200".parse().unwrap()),
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:197:20
+    |
+197 |         let json = serde_json::to_string(&config).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:199:45
+    |
+199 |         let deserialized: CoreCommsConfig = serde_json::from_str(&json).unwrap();
+    |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:203:20
+    |
+203 |         let toml = toml::to_string(&config).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:204:42
+    |
+204 |         let from_toml: CoreCommsConfig = toml::from_str(&toml).unwrap();
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:253:30
+    |
+253 |             listen_tcp: Some("127.0.0.1:4200".parse().unwrap()),
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:265:46
+    |
+265 |         assert_eq!(resolved.listen_tcp, Some("127.0.0.1:4200".parse().unwrap()));
+    |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:282:30
+    |
+282 |             listen_tcp: Some("127.0.0.1:4200".parse().unwrap()),
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_config.rs:300:30
+    |
+300 |             listen_tcp: Some("127.0.0.1:4200".parse().unwrap()),
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:651:19
+    |
+651 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:653:23
+    |
+653 |         let runtime = CommsRuntime::new(config).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:664:19
+    |
+664 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:666:23
+    |
+666 |         let runtime = CommsRuntime::new(config).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:679:19
+    |
+679 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:683:34
+    |
+683 |         config.listen_tcp = Some("127.0.0.1:0".parse().unwrap());
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:685:27
+    |
+685 |         let mut runtime = CommsRuntime::new(config).unwrap();
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:690:42
+    |
+690 |         runtime.config.listen_tcp = Some("127.0.0.1:44299".parse::<SocketAddr>().unwrap());
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:708:19
+    |
+708 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:710:27
+    |
+710 |         let mut runtime = CommsRuntime::new(config).unwrap();
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:719:19
+    |
+719 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:721:23
+    |
+721 |         let runtime = CommsRuntime::new(config).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:729:19
+    |
+729 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:731:23
+    |
+731 |         let runtime = CommsRuntime::new(config).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:743:19
+    |
+743 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:745:27
+    |
+745 |         let mut runtime = CommsRuntime::new(config).unwrap();
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:841:19
+    |
+841 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:845:24
+    |
+845 |         let runtime1 = CommsRuntime::new(config.clone()).unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:850:24
+    |
+850 |         let runtime2 = CommsRuntime::new(config).unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:861:19
+    |
+861 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:872:9
+    |
+872 |         std::fs::create_dir_all(tmp.path()).unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:873:9
+    |
+873 |         trusted.save(&config.trusted_peers_path).unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:875:23
+    |
+875 |         let runtime = CommsRuntime::new(config).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:885:19
+    |
+885 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:889:27
+    |
+889 |         let mut runtime = CommsRuntime::new(config.clone()).unwrap();
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:890:9
+    |
+890 |         runtime.start_listeners().await.unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/comms_runtime.rs:893:17
+    |
+893 |         assert!(config.listen_uds.as_ref().unwrap().exists());
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:900:19
+    |
+900 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:902:23
+    |
+902 |         let runtime = CommsRuntime::new(config).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:921:19
+    |
+921 |         let tmp = TempDir::new().unwrap();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:923:23
+    |
+923 |         let runtime = CommsRuntime::new(config).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:960:30
+    |
+960 |             listen_tcp: Some("127.0.0.1:4200".parse().unwrap()),
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/comms_runtime.rs:982:23
+    |
+982 |         let runtime = CommsRuntime::inproc_only("test-inproc-agent").unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1006:23
+     |
+1006 |         let runtime = CommsRuntime::inproc_only("my-agent").unwrap();
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1020:36
+     |
+1020 |         let mut receiver_runtime = CommsRuntime::inproc_only("receiver").unwrap();
+     |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1024:30
+     |
+1024 |         let sender_runtime = CommsRuntime::inproc_only("sender").unwrap();
+     |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1064:23
+     |
+1064 |         let runtime = CommsRuntime::inproc_only("no-listeners").unwrap();
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1080:27
+     |
+1080 |             let runtime = CommsRuntime::inproc_only("drop-test-agent").unwrap();
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1110:19
+     |
+1110 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1117:27
+     |
+1117 |         let mut runtime = CommsRuntime::new(config).unwrap();
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1127:9
+     |
+1127 |         runtime.start_listeners().await.unwrap();
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1159:19
+     |
+1159 |         let tmp = TempDir::new().unwrap();
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1165:34
+     |
+1165 |         let mut parent_runtime = CommsRuntime::new(parent_config).unwrap();
+     |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1167:9
+     |
+1167 |         parent_runtime.start_listeners().await.unwrap();
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> meerkat-core/src/comms_runtime.rs:1170:29
+     |
+1170 |         let child_runtime = CommsRuntime::inproc_only("child-inproc").unwrap();
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: `panic` should not be present in production code
+    --> meerkat-core/src/comms_runtime.rs:1215:18
+     |
+1215 |             _ => panic!("expected Message content"),
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: used `expect()` on a `Result` value
+   --> meerkat-core/src/config.rs:781:13
+    |
+781 |             config.apply_env_overrides().expect("apply env overrides");
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+    = note: requested on the command line with `-D clippy::expect-used`
+
+error: `panic` should not be present in production code
+   --> meerkat-core/src/config.rs:786:22
+    |
+786 |                 _ => panic!("expected anthropic provider"),
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: used `expect()` on a `Result` value
+   --> meerkat-core/src/config.rs:797:22
+    |
+797 |           let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+    |  ______________________^
+798 | |             .arg("test_config_layering")
+799 | |             .env("RUN_TEST_LAYERING_INNER", "1")
+800 | |             .env("RKAT_MODEL", "env-model")
+801 | |             .env("ANTHROPIC_API_KEY", "secret-key")
+802 | |             .status()
+803 | |             .expect("failed to spawn test child process");
+    | |_________________________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-core/src/config.rs:797:49
+    |
+797 |         let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+    |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/config.rs:837:20
+    |
+837 |         let json = serde_json::to_value(&anthropic).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/config.rs:846:20
+    |
+846 |         let json = serde_json::to_value(&openai).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/config.rs:853:20
+    |
+853 |         let json = serde_json::to_value(&gemini).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/config.rs:865:20
+    |
+865 |         let json = serde_json::to_string(&budget).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/config.rs:866:36
+    |
+866 |         let parsed: BudgetConfig = serde_json::from_str(&json).unwrap();
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/event.rs:291:24
+    |
+291 |             let json = serde_json::to_value(&event).unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/event.rs:301:41
+    |
+301 |             let roundtrip: AgentEvent = serde_json::from_value(json.clone()).unwrap();
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/event.rs:302:25
+    |
+302 |             let json2 = serde_json::to_value(&roundtrip).unwrap();
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/event.rs:309:20
+    |
+309 |         assert_eq!(serde_json::to_value(BudgetType::Tokens).unwrap(), "tokens");
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/event.rs:310:20
+    |
+310 |         assert_eq!(serde_json::to_value(BudgetType::Time).unwrap(), "time");
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/event.rs:312:13
+    |
+312 |             serde_json::to_value(BudgetType::ToolCalls).unwrap(),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:375:23
+    |
+375 |         let gateway = ToolGateway::new(base, Some(overlay)).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:390:23
+    |
+390 |         let gateway = ToolGateway::new(base, None).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap_err()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:409:19
+    |
+409 |         let err = result.unwrap_err();
+    |                   ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Ok`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:419:23
+    |
+419 |         let gateway = ToolGateway::new(base, Some(overlay)).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:421:22
+    |
+421 |         let result = gateway.dispatch("task_create", &json!({})).await.unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:431:23
+    |
+431 |         let gateway = ToolGateway::new(base, Some(overlay)).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:433:22
+    |
+433 |         let result = gateway.dispatch("send_message", &json!({})).await.unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:442:23
+    |
+442 |         let gateway = ToolGateway::new(base, None).unwrap();
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap_err()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:446:26
+    |
+446 |         assert!(matches!(result.unwrap_err(), ToolError::NotFound { .. }));
+    |                          ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Ok`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:455:23
+    |
+455 |           let gateway = ToolGatewayBuilder::new()
+    |  _______________________^
+456 | |             .add_dispatcher(base)
+457 | |             .add_dispatcher(comms)
+458 | |             .add_dispatcher(shell)
+459 | |             .build()
+460 | |             .unwrap();
+    | |_____________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:512:23
+    |
+512 |           let gateway = ToolGatewayBuilder::new()
+    |  _______________________^
+513 | |             .add_dispatcher(base)
+514 | |             .add_dispatcher_with_availability(
+515 | |                 comms,
+...   |
+521 | |             .build()
+522 | |             .unwrap();
+    | |_____________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:548:23
+    |
+548 |           let gateway = ToolGatewayBuilder::new()
+    |  _______________________^
+549 | |             .add_dispatcher(base)
+550 | |             .add_dispatcher_with_availability(
+551 | |                 comms,
+...   |
+557 | |             .build()
+558 | |             .unwrap();
+    | |_____________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap_err()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:563:19
+    |
+563 |         let err = result.unwrap_err();
+    |                   ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Ok`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap_err()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:595:17
+    |
+595 |         assert!(result.unwrap_err().to_string().contains("collision"));
+    |                 ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Ok`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:612:23
+    |
+612 |           let gateway = ToolGatewayBuilder::new()
+    |  _______________________^
+613 | |             .add_dispatcher(base.clone())
+614 | |             .maybe_add_dispatcher(None)
+615 | |             .build()
+616 | |             .unwrap();
+    | |_____________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:621:23
+    |
+621 |           let gateway = ToolGatewayBuilder::new()
+    |  _______________________^
+622 | |             .add_dispatcher(base)
+623 | |             .maybe_add_dispatcher(Some(overlay))
+624 | |             .build()
+625 | |             .unwrap();
+    | |_____________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/gateway.rs:648:23
+    |
+648 |           let gateway = ToolGatewayBuilder::new()
+    |  _______________________^
+649 | |             .add_dispatcher(base)
+650 | |             .add_dispatcher_with_availability(
+651 | |                 comms,
+...   |
+657 | |             .build()
+658 | |             .unwrap();
+    | |_____________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:448:22
+    |
+448 |         let config = McpConfig::load_from_paths(None, None).unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:466:33
+    |
+466 |         let config: McpConfig = toml::from_str(toml).unwrap();
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: `panic` should not be present in production code
+   --> meerkat-core/src/mcp_config.rs:475:18
+    |
+475 |             _ => panic!("Expected stdio transport"),
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: `panic` should not be present in production code
+   --> meerkat-core/src/mcp_config.rs:486:18
+    |
+486 |             _ => panic!("Expected http transport"),
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: `panic` should not be present in production code
+   --> meerkat-core/src/mcp_config.rs:515:18
+    |
+515 |             _ => panic!("Expected stdio transport"),
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:523:20
+    |
+523 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:526:9
+    |
+526 |         fs::create_dir_all(&user_dir).unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:528:9
+    |
+528 | /         fs::write(
+529 | |             &user_file,
+530 | |             r#"
+531 | | [[servers]]
+...   |
+536 | |         .unwrap();
+    | |_________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:539:9
+    |
+539 |         fs::create_dir_all(&project_dir).unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:541:9
+    |
+541 | /         fs::write(
+542 | |             &project_file,
+543 | |             r#"
+544 | | [[servers]]
+...   |
+549 | |         .unwrap();
+    | |_________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:551:22
+    |
+551 |         let config = McpConfig::load_from_paths(Some(&user_file), Some(&project_file)).unwrap();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:561:20
+    |
+561 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:565:9
+    |
+565 |         fs::create_dir_all(&parent_config).unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:566:9
+    |
+566 | /         fs::write(
+567 | |             parent_config.join("mcp.toml"),
+568 | |             r#"
+569 | | [[servers]]
+...   |
+574 | |         .unwrap();
+    | |_________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:578:9
+    |
+578 |         fs::create_dir_all(&child_dir).unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:594:20
+    |
+594 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:598:9
+    |
+598 |         fs::create_dir_all(&meerkat_dir).unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:600:9
+    |
+600 | /         fs::write(
+601 | |             &config_path,
+602 | |             r#"
+603 | | [[servers]]
+...   |
+608 | |         .unwrap();
+    | |_________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:621:33
+    |
+621 |         let config: McpConfig = toml::from_str(toml).unwrap();
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:637:33
+    |
+637 |         let config: McpConfig = toml::from_str(toml).unwrap();
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:657:31
+    |
+657 |             let config_path = std::env::var("TEST_CONFIG_PATH").expect("TEST_CONFIG_PATH not set");
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:658:26
+    |
+658 |             let config = McpConfig::load_from_paths(Some(config_path.as_ref()), None).unwrap();
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: `panic` should not be present in production code
+   --> meerkat-core/src/mcp_config.rs:667:22
+    |
+667 |                 _ => panic!("Expected http transport"),
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:672:20
+    |
+672 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:674:9
+    |
+674 | /         fs::write(
+675 | |             &config_path,
+676 | |             r#"
+677 | | [[servers]]
+...   |
+683 | |         .unwrap();
+    | |_________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:685:22
+    |
+685 |           let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+    |  ______________________^
+686 | |             .arg("test_env_expansion_in_config")
+687 | |             .env("RUN_TEST_EXPANSION_INNER", "1")
+688 | |             .env("RKAT_TEST_API_KEY", "secret")
+689 | |             .env("TEST_CONFIG_PATH", &config_path)
+690 | |             .status()
+691 | |             .expect("failed to spawn test child process");
+    | |_________________________________________________________^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `expect()` on a `Result` value
+   --> meerkat-core/src/mcp_config.rs:685:49
+    |
+685 |         let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+    |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:288:20
+    |
+288 |         let json = serde_json::to_string(&id).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:290:35
+    |
+290 |         let parsed: OperationId = serde_json::from_str(&json).unwrap();
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:297:13
+    |
+297 |             serde_json::to_value(WorkKind::ToolCall).unwrap(),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:301:13
+    |
+301 |             serde_json::to_value(WorkKind::ShellCommand).unwrap(),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:305:13
+    |
+305 |             serde_json::to_value(WorkKind::SubAgent).unwrap(),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:313:20
+    |
+313 |         let json = serde_json::to_value(&full).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:317:20
+    |
+317 |         let json = serde_json::to_value(&last).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:323:20
+    |
+323 |         let json = serde_json::to_value(&summary).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:329:39
+    |
+329 |         let parsed: ContextStrategy = serde_json::from_value(json).unwrap();
+    |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: `panic` should not be present in production code
+   --> meerkat-core/src/ops.rs:332:18
+    |
+332 |             _ => panic!("Wrong variant"),
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:345:24
+    |
+345 |             let json = serde_json::to_value(&policy).unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:350:20
+    |
+350 |         let json = serde_json::to_value(&fixed).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:356:40
+    |
+356 |         let parsed: ForkBudgetPolicy = serde_json::from_value(json).unwrap();
+    |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: `panic` should not be present in production code
+   --> meerkat-core/src/ops.rs:359:18
+    |
+359 |             _ => panic!("Wrong variant"),
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:366:20
+    |
+366 |         let json = serde_json::to_value(&inherit).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:371:20
+    |
+371 |         let json = serde_json::to_value(&allow).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:377:20
+    |
+377 |         let json = serde_json::to_value(&deny).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:382:40
+    |
+382 |         let parsed: ToolAccessPolicy = serde_json::from_value(json).unwrap();
+    |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: `panic` should not be present in production code
+   --> meerkat-core/src/ops.rs:388:18
+    |
+388 |             _ => panic!("Wrong variant"),
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:424:24
+    |
+424 |             let json = serde_json::to_value(&event).unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/ops.rs:428:30
+    |
+428 |             let _: OpEvent = serde_json::from_value(json).unwrap();
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:217:20
+    |
+217 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:219:9
+    |
+219 |         fs::write(&agents_path, "# Should not appear").unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:231:20
+    |
+231 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:233:9
+    |
+233 |         fs::write(&agents_path, "# Build Instructions\nRun `make build`").unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:246:20
+    |
+246 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:248:9
+    |
+248 |         fs::write(&global_path, "# Global rules\nAlways be nice").unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:259:20
+    |
+259 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:262:9
+    |
+262 |         fs::write(&global_path, "Global instructions").unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:265:9
+    |
+265 |         fs::write(&project_path, "Project instructions").unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/prompt.rs:274:26
+    |
+274 |         let global_pos = prompt.find("Global instructions").unwrap();
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/prompt.rs:275:27
+    |
+275 |         let project_pos = prompt.find("Project instructions").unwrap();
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:281:20
+    |
+281 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:283:9
+    |
+283 |         fs::write(&agents_path, "   \n\n  ").unwrap(); // whitespace only
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:293:20
+    |
+293 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:298:9
+    |
+298 |         fs::write(&agents_path, &large_content).unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/prompt.rs:305:36
+    |
+305 |         let agents_section_start = prompt.find("# Project Instructions").unwrap();
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:312:20
+    |
+312 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:314:9
+    |
+314 |         fs::write(&agents_path, "content").unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:322:20
+    |
+322 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:324:9
+    |
+324 |         fs::create_dir_all(&meerkat_dir).unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:326:9
+    |
+326 |         fs::write(&agents_path, "content").unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:334:20
+    |
+334 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:338:9
+    |
+338 |         fs::write(&root_path, "root content").unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:341:9
+    |
+341 |         fs::create_dir_all(&meerkat_dir).unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:342:9
+    |
+342 |         fs::write(meerkat_dir.join("AGENTS.md"), "test content").unwrap();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/prompt.rs:351:20
+    |
+351 |         let temp = TempDir::new().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/retry.rs:180:20
+    |
+180 |         let json = serde_json::to_string(&policy).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/retry.rs:181:35
+    |
+181 |         let parsed: RetryPolicy = serde_json::from_str(&json).unwrap();
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/session.rs:507:20
+    |
+507 |         assert_eq!(session.metadata().get("key").unwrap(), "value");
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/session.rs:517:20
+    |
+517 |         let json = serde_json::to_string(&session).unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/session.rs:518:31
+    |
+518 |         let parsed: Session = serde_json::from_str(&json).unwrap();
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap_err()` on a `Result` value
+   --> meerkat-core/src/state.rs:218:13
+    |
+218 |             result.unwrap_err(),
+    |             ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Ok`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/state.rs:235:24
+    |
+235 |             let json = serde_json::to_value(&state).unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> meerkat-core/src/state.rs:236:37
+    |
+236 |             let parsed: LoopState = serde_json::from_value(json).unwrap();
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> meerkat-core/src/sub_agent.rs:735:20
+    |
+735 |         let last = session.messages().last().unwrap();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used
+
+error: `panic` should not be present in production code
+   --> meerkat-core/src/sub_agent.rs:741:18
+    |
+741 |             _ => panic!("Expected User message"),
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#panic
+
+error: could not compile `meerkat-core` (lib test) due to 230 previous errors

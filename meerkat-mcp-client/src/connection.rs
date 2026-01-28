@@ -187,6 +187,7 @@ impl McpConnection {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 pub mod tests {
     use super::*;
     use rmcp::model::Content;

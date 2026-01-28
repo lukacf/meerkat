@@ -555,7 +555,7 @@ async fn handle_meerkat_run_simple(
         let comms_name = input
             .comms_name
             .as_ref()
-            .expect("validated in handle_meerkat_run");
+            .ok_or_else(|| "comms_name required when host_mode is enabled".to_string())?;
         let base_dir = resolve_project_root();
         let runtime = build_comms_runtime_from_config(&config, base_dir, comms_name)
             .await
@@ -796,7 +796,7 @@ async fn handle_meerkat_run_with_builtins(
         let comms_name = input
             .comms_name
             .as_ref()
-            .expect("validated in handle_meerkat_run");
+            .ok_or_else(|| "comms_name required when host_mode is enabled".to_string())?;
         let base_dir = resolve_project_root();
         let runtime = build_comms_runtime_from_config(&config, base_dir, comms_name)
             .await
@@ -1026,7 +1026,9 @@ async fn handle_meerkat_resume_simple(
     let store_adapter = Arc::new(SessionStoreAdapter::new(session_store));
 
     let comms_runtime = if host_mode {
-        let comms_name = comms_name.as_ref().expect("validated above");
+        let comms_name = comms_name
+            .as_ref()
+            .ok_or_else(|| "comms_name required when host_mode is enabled".to_string())?;
         let base_dir = resolve_project_root();
         let runtime = build_comms_runtime_from_config(&config, base_dir, comms_name)
             .await
@@ -1293,7 +1295,9 @@ async fn handle_meerkat_resume_with_builtins(
     let store_adapter = Arc::new(SessionStoreAdapter::new(session_store));
 
     let comms_runtime = if host_mode {
-        let comms_name = comms_name.as_ref().expect("validated above");
+        let comms_name = comms_name
+            .as_ref()
+            .ok_or_else(|| "comms_name required when host_mode is enabled".to_string())?;
         let base_dir = resolve_project_root();
         let runtime = build_comms_runtime_from_config(&config, base_dir, comms_name)
             .await
@@ -1511,6 +1515,7 @@ impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

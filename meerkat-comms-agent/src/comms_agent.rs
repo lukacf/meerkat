@@ -313,6 +313,7 @@ impl Default for CommsAgentBuilder {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::manager::CommsManagerConfig;
@@ -432,7 +433,7 @@ mod tests {
     #[test]
     fn test_comms_agent_struct() {
         let config = CommsManagerConfig::new();
-        let comms_manager = CommsManager::new(config);
+        let comms_manager = CommsManager::new(config).unwrap();
 
         let client = Arc::new(MockLlmClient::new(vec![]));
         let tools = Arc::new(MockToolDispatcher);
@@ -458,7 +459,7 @@ mod tests {
         let trusted = make_trusted_peers("sender-agent", &sender_pubkey);
 
         let config = CommsManagerConfig::with_keypair(our_keypair).trusted_peers(trusted);
-        let comms_manager = CommsManager::new(config);
+        let comms_manager = CommsManager::new(config).unwrap();
 
         // Send a message to the inbox
         let mut envelope = Envelope {
@@ -511,7 +512,7 @@ mod tests {
     #[test]
     fn test_comms_agent_builder() {
         let config = CommsManagerConfig::new();
-        let comms_manager = CommsManager::new(config);
+        let comms_manager = CommsManager::new(config).unwrap();
 
         let client = Arc::new(MockLlmClient::new(vec![]));
         let tools = Arc::new(MockToolDispatcher);

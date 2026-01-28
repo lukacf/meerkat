@@ -133,6 +133,7 @@ pub fn read_envelope<R: Read>(reader: &mut R) -> Result<Envelope, TransportError
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::identity::{Keypair, PubKey};

@@ -419,7 +419,9 @@ async fn create_session(
     // Create comms runtime if host_mode is enabled
     // Note: inproc_only() already registers in InprocRegistry, no need to start listeners
     let comms_runtime = if req.host_mode {
-        let comms_name = req.comms_name.as_ref().expect("validated above");
+        let comms_name = req.comms_name.as_ref().ok_or_else(|| {
+            ApiError::Configuration("comms_name required when host_mode is enabled".to_string())
+        })?;
         let base_dir = state
             .project_root
             .clone()
@@ -654,7 +656,9 @@ async fn continue_session(
     let store_adapter = Arc::new(StoreAdapter::new(Arc::new(store)));
 
     let comms_runtime = if host_mode {
-        let comms_name = comms_name.as_ref().expect("validated above");
+        let comms_name = comms_name.as_ref().ok_or_else(|| {
+            ApiError::Configuration("comms_name required when host_mode is enabled".to_string())
+        })?;
         let base_dir = state
             .project_root
             .clone()
@@ -875,6 +879,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 /// This enum allows us to use different tool dispatcher implementations
 /// while still satisfying the generic type requirements of AgentBuilder.
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

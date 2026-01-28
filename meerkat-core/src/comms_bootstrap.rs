@@ -389,6 +389,7 @@ fn create_child_trusted_peers(parent_context: &ParentCommsContext) -> TrustedPee
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

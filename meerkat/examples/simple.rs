@@ -14,14 +14,14 @@ use meerkat_store::StoreAdapter;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get API key from environment
     let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .expect("ANTHROPIC_API_KEY environment variable must be set");
+        .map_err(|_| "ANTHROPIC_API_KEY environment variable must be set")?;
 
     let store_dir = std::env::current_dir()?.join(".rkat").join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
 
-    let client = Arc::new(AnthropicClient::new(api_key));
+    let client = Arc::new(AnthropicClient::new(api_key)?);
     let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
 
     let store = Arc::new(JsonlStore::new(store_dir));

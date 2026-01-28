@@ -127,6 +127,7 @@ impl BuiltinTool for TaskListTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::builtin::MemoryTaskStore;
@@ -416,7 +417,7 @@ mod tests {
                 assert!(msg.contains("Invalid status: invalid_status"));
                 assert!(msg.contains("Must be pending, in_progress, or completed"));
             }
-            _ => panic!("Expected InvalidArgs error, got {:?}", err),
+            _ => unreachable!("Expected InvalidArgs error, got {:?}", err),
         }
     }
 

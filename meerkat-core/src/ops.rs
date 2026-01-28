@@ -279,6 +279,7 @@ pub enum SubAgentState {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -329,7 +330,7 @@ mod tests {
         let parsed: ContextStrategy = serde_json::from_value(json).unwrap();
         match parsed {
             ContextStrategy::Summary { max_tokens } => assert_eq!(max_tokens, 1000),
-            _ => panic!("Wrong variant"),
+            _ => unreachable!("Wrong variant"),
         }
     }
 
@@ -356,7 +357,7 @@ mod tests {
         let parsed: ForkBudgetPolicy = serde_json::from_value(json).unwrap();
         match parsed {
             ForkBudgetPolicy::Fixed(tokens) => assert_eq!(tokens, 5000),
-            _ => panic!("Wrong variant"),
+            _ => unreachable!("Wrong variant"),
         }
     }
 
@@ -385,7 +386,7 @@ mod tests {
                 assert_eq!(tools.len(), 1);
                 assert_eq!(tools[0], "dangerous_tool");
             }
-            _ => panic!("Wrong variant"),
+            _ => unreachable!("Wrong variant"),
         }
     }
 

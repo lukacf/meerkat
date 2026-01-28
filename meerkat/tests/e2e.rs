@@ -1,4 +1,4 @@
-//! End-to-end tests for Meerkat (Gate 1: E2E Scenarios)
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
 //! These tests verify complete user flows through the system.
 //! They use real LLM providers and test the full stack.
@@ -306,7 +306,7 @@ mod simple_chat {
         };
 
         // Create components
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
@@ -508,7 +508,7 @@ mod tool_invocation {
         ));
 
         // Create agent with tool support
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
 
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
@@ -556,7 +556,7 @@ mod multi_turn {
             return;
         };
 
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
@@ -647,7 +647,7 @@ mod session_resume {
 
         // Phase 1: Create agent, establish context, save
         let session_id = {
-            let llm_client = Arc::new(AnthropicClient::new(api_key.clone()));
+            let llm_client = Arc::new(AnthropicClient::new(api_key.clone()).unwrap());
             let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
             let tools = Arc::new(EmptyToolDispatcher);
             let store_adapter = Arc::new(SessionStoreAdapter::new(store.clone()));
@@ -678,7 +678,7 @@ mod session_resume {
                 .expect("Load should succeed")
                 .expect("Session should exist");
 
-            let llm_client = Arc::new(AnthropicClient::new(api_key));
+            let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
             let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
             let tools = Arc::new(EmptyToolDispatcher);
             let store_adapter = Arc::new(SessionStoreAdapter::new(store.clone()));
@@ -723,7 +723,7 @@ mod budget_exhaustion {
             return;
         };
 
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
@@ -783,7 +783,7 @@ mod budget_exhaustion {
             return;
         };
 
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
 
         // Create mock tools
@@ -880,7 +880,7 @@ mod parallel_tools {
             std::time::Duration::from_secs(30),
         ));
 
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
 
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
@@ -1019,7 +1019,7 @@ mod parallel_tools {
         let tool_delay_ms = 200;
         let dispatcher = Arc::new(TimedToolDispatcher::new(tool_delay_ms));
 
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
 
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
@@ -1096,7 +1096,7 @@ mod parallel_tools {
 
         let dispatcher = Arc::new(TimedToolDispatcher::new(100));
 
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
 
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
@@ -1204,7 +1204,7 @@ mod parallel_tools {
 
         let dispatcher = Arc::new(PartialFailureDispatcher);
 
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let llm_adapter = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
 
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
@@ -1273,7 +1273,7 @@ mod sub_agent_fork {
         };
 
         // Create a parent agent
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let client = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store, _temp_dir) = create_temp_store().await;
@@ -1323,7 +1323,7 @@ mod sub_agent_fork {
             return;
         };
 
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let client = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store, _temp_dir) = create_temp_store().await;
@@ -1432,7 +1432,7 @@ mod sub_agent_fork {
             return;
         };
 
-        let llm_client = Arc::new(AnthropicClient::new(api_key));
+        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
         let client = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
         let tools = Arc::new(EmptyToolDispatcher);
         let (_store, store, _temp_dir) = create_temp_store().await;

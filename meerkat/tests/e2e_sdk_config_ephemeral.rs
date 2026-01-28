@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use meerkat::{ConfigDelta, SdkConfigStore};
 use serde_json::json;
 

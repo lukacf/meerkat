@@ -1,4 +1,5 @@
-//! Integration tests for Meerkat (Gate 2: Choke Point Tests)
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
 //! These tests verify the integration points between components.
 //! Per RCT methodology, tests are COMPLETE - they exercise real code paths.
@@ -26,7 +27,7 @@ mod llm_normalization {
             }
         };
 
-        let client = AnthropicClient::new(api_key);
+        let client = AnthropicClient::new(api_key).unwrap();
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
             vec![Message::User(UserMessage {

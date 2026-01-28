@@ -1,8 +1,9 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use std::path::PathBuf;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
-use meerkat_core::{Config, SessionId};
+use meerkat::{Config, SessionId};
 use meerkat_store::{JsonlStore, SessionStore};
 use tempfile::TempDir;
 
@@ -36,36 +37,54 @@ fn skip_if_no_prereqs() -> bool {
 }
 
 #[tokio::test]
-async fn e2e_cli_resume_tools() {
+async fn e2e_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_prereqs() {
-        return;
+        return Ok(());
     }
 
-    let temp_dir = TempDir::new().expect("temp dir");
+    if std::env::var("RUN_TEST_CLI_RESUME_INNER").is_ok() {
+        return inner_test_cli_resume_tools().await;
+    }
+
+    let temp_dir = TempDir::new()?;
     let project_dir = temp_dir.path().join("project");
-    std::fs::create_dir_all(project_dir.join(".rkat")).expect("create .rkat");
+    std::fs::create_dir_all(project_dir.join(".rkat"))?;
+
+    let data_dir = temp_dir.path().join("data");
+    std::fs::create_dir_all(&data_dir)?;
+
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .arg("e2e_cli_resume_tools")
+        .env("RUN_TEST_CLI_RESUME_INNER", "1")
+        .env("HOME", temp_dir.path())
+        .env("XDG_DATA_HOME", &data_dir)
+        .env("TEST_PROJECT_DIR", &project_dir)
+        .env("TEST_DATA_DIR", &data_dir)
+        .status()?;
+
+    assert!(status.success());
+    Ok(())
+}
+
+async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
+    let project_dir = std::env::var("TEST_PROJECT_DIR")?;
+    let data_dir = std::env::var("TEST_DATA_DIR")?;
+    let project_dir = std::path::PathBuf::from(project_dir);
+    let data_dir = std::path::PathBuf::from(data_dir);
+
+    // Change to project dir so .rkat is found
+    std::env::set_current_dir(&project_dir)?;
 
     let mut config = Config::default();
     config.agent.max_tokens_per_turn = 128;
-    let config_toml = toml::to_string_pretty(&config).expect("serialize config");
-    std::fs::write(project_dir.join(".rkat/config.toml"), config_toml).expect("write config");
+    let config_toml = toml::to_string_pretty(&config)?;
+    std::fs::write(project_dir.join(".rkat/config.toml"), config_toml)?;
 
-    let data_dir = temp_dir.path().join("data");
-    std::fs::create_dir_all(&data_dir).expect("create data dir");
-    let original_home = std::env::var_os("HOME");
-    let original_xdg = std::env::var_os("XDG_DATA_HOME");
-    unsafe {
-        std::env::set_var("HOME", temp_dir.path());
-        std::env::set_var("XDG_DATA_HOME", &data_dir);
-    }
-
-    let rkat = rkat_binary_path().expect("rkat binary");
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
     let output = timeout(
         Duration::from_secs(120),
         Command::new(&rkat)
             .current_dir(&project_dir)
-            .env("HOME", temp_dir.path())
-            .env("XDG_DATA_HOME", &data_dir)
             .env("RKAT_TEST_CLIENT", "1")
             .args([
                 "run",
@@ -76,35 +95,47 @@ async fn e2e_cli_resume_tools() {
             ])
             .output(),
     )
-    .await
-    .expect("rkat run timed out")
-    .expect("run rkat");
+    .await??;
 
-    assert!(
-        output.status.success(),
-        "rkat run failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    if !output.status.success() {
+        return Err(format!(
+            "rkat run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("parse run json");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())?;
     let session_id = parsed["session_id"]
         .as_str()
-        .expect("session_id")
+        .ok_or("session_id missing in response")?
         .to_string();
 
-    let store_dir = dirs::data_dir()
-        .unwrap_or_else(|| temp_dir.path().to_path_buf())
-        .join("meerkat")
-        .join("sessions");
+    let output_find = std::process::Command::new("find")
+        .arg(&std::env::var("HOME")?)
+        .arg("-name")
+        .arg("*.jsonl")
+        .output()?;
+    let find_stdout = String::from_utf8_lossy(&output_find.stdout);
+
+    // Heuristic: pick the directory of the first found session file
+    let store_dir = if let Some(first_file) = find_stdout.lines().next() {
+        std::path::Path::new(first_file)
+            .parent()
+            .ok_or("no parent dir")?
+            .to_path_buf()
+    } else {
+        data_dir.join("meerkat").join("sessions")
+    };
+
     let store = JsonlStore::new(store_dir);
-    store.init().await.expect("init store");
+    store.init().await?;
     let session = store
-        .load(&SessionId::parse(&session_id).expect("session id"))
-        .await
-        .expect("load session")
-        .expect("session exists");
-    let metadata = session.session_metadata().expect("metadata");
+        .load(&SessionId::parse(&session_id)?)
+        .await?
+        .ok_or("session not found")?;
+    let metadata = session.session_metadata().ok_or("metadata missing")?;
     assert!(metadata.tooling.builtins, "builtins should be recorded");
 
     let original_model = metadata.model.clone();
@@ -115,35 +146,34 @@ async fn e2e_cli_resume_tools() {
     let mut config_alt = config.clone();
     config_alt.agent.model = "gpt-4o-mini".to_string();
     config_alt.agent.max_tokens_per_turn = 7;
-    let config_toml = toml::to_string_pretty(&config_alt).expect("serialize config");
-    std::fs::write(project_dir.join(".rkat/config.toml"), config_toml).expect("write config");
+    let config_toml = toml::to_string_pretty(&config_alt)?;
+    std::fs::write(project_dir.join(".rkat/config.toml"), config_toml)?;
 
     let output = timeout(
         Duration::from_secs(120),
         Command::new(&rkat)
             .current_dir(&project_dir)
-            .env("HOME", temp_dir.path())
-            .env("XDG_DATA_HOME", &data_dir)
             .env("RKAT_TEST_CLIENT", "1")
             .args(["resume", &session_id, "Continue."])
             .output(),
     )
-    .await
-    .expect("rkat resume timed out")
-    .expect("resume rkat");
+    .await??;
 
-    assert!(
-        output.status.success(),
-        "rkat resume failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    if !output.status.success() {
+        return Err(format!(
+            "rkat resume failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
 
     let session = store
-        .load(&SessionId::parse(&session_id).expect("session id"))
-        .await
-        .expect("load session")
-        .expect("session exists");
-    let metadata = session.session_metadata().expect("metadata");
+        .load(&SessionId::parse(&session_id)?)
+        .await?
+        .ok_or("session not found after resume")?;
+    let metadata = session
+        .session_metadata()
+        .ok_or("metadata missing after resume")?;
 
     assert_eq!(metadata.model, original_model, "model should persist");
     assert_eq!(
@@ -158,17 +188,5 @@ async fn e2e_cli_resume_tools() {
     assert_eq!(metadata.tooling.shell, original_tooling.shell);
     assert_eq!(metadata.tooling.comms, original_tooling.comms);
     assert_eq!(metadata.tooling.subagents, original_tooling.subagents);
-
-    unsafe {
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(xdg) = original_xdg {
-            std::env::set_var("XDG_DATA_HOME", xdg);
-        } else {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
-    }
+    Ok(())
 }

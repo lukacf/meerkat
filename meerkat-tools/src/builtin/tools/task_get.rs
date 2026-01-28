@@ -85,6 +85,7 @@ impl BuiltinTool for TaskGetTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::builtin::memory_store::MemoryTaskStore;
@@ -185,7 +186,7 @@ mod tests {
                 assert!(msg.contains("Task not found"));
                 assert!(msg.contains("nonexistent-task-id"));
             }
-            _ => panic!("Expected ExecutionFailed error, got {:?}", err),
+            _ => unreachable!("Expected ExecutionFailed error, got {:?}", err),
         }
     }
 
@@ -205,7 +206,7 @@ mod tests {
             BuiltinToolError::InvalidArgs(msg) => {
                 assert!(msg.contains("id") || msg.contains("missing"));
             }
-            _ => panic!("Expected InvalidArgs error, got {:?}", err),
+            _ => unreachable!("Expected InvalidArgs error, got {:?}", err),
         }
     }
 
@@ -227,7 +228,7 @@ mod tests {
             BuiltinToolError::InvalidArgs(msg) => {
                 assert!(msg.contains("string") || msg.contains("invalid type"));
             }
-            _ => panic!("Expected InvalidArgs error, got {:?}", err),
+            _ => unreachable!("Expected InvalidArgs error, got {:?}", err),
         }
     }
 
@@ -247,7 +248,7 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             BuiltinToolError::InvalidArgs(_) => {}
-            _ => panic!("Expected InvalidArgs error, got {:?}", err),
+            _ => unreachable!("Expected InvalidArgs error, got {:?}", err),
         }
     }
 
@@ -289,7 +290,7 @@ mod tests {
             BuiltinToolError::ExecutionFailed(msg) => {
                 assert!(msg.contains("Task not found"));
             }
-            _ => panic!("Expected ExecutionFailed error, got {:?}", err),
+            _ => unreachable!("Expected ExecutionFailed error, got {:?}", err),
         }
     }
 

@@ -52,6 +52,7 @@ pub fn ensure_rkat_dir(project_root: &Path) -> std::io::Result<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::fs;

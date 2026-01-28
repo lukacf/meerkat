@@ -657,6 +657,7 @@ impl JobManager {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -964,7 +965,7 @@ mod tests {
             assert!(stdout.contains("test output"));
             assert!(*duration_secs >= 0.0);
         } else {
-            panic!("Expected Completed status, got {:?}", job.status);
+            unreachable!("Expected Completed status, got {:?}", job.status);
         }
     }
 
@@ -988,7 +989,7 @@ mod tests {
         if let JobStatus::Completed { exit_code, .. } = &job.status {
             assert_eq!(*exit_code, Some(1));
         } else {
-            panic!(
+            unreachable!(
                 "Expected Completed status with exit code 1, got {:?}",
                 job.status
             );
@@ -1833,7 +1834,7 @@ mod tests {
             Err(ShellError::JobNotFound(job_id)) => {
                 assert_eq!(job_id, "job_nonexistent_12345");
             }
-            other => panic!("Expected JobNotFound error, got: {:?}", other),
+            other => unreachable!("Expected JobNotFound error, got: {:?}", other),
         }
     }
 
@@ -1857,7 +1858,7 @@ mod tests {
         // Should be JobNotRunning
         match result {
             Err(ShellError::JobNotRunning) => {}
-            other => panic!("Expected JobNotRunning error, got: {:?}", other),
+            other => unreachable!("Expected JobNotRunning error, got: {:?}", other),
         }
     }
 

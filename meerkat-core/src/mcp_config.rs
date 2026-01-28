@@ -439,6 +439,7 @@ impl std::fmt::Display for McpScope {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -472,7 +473,7 @@ headers = { Authorization = "Bearer token" }
                 assert_eq!(stdio.args, vec!["-y", "@test/mcp-server"]);
                 assert_eq!(stdio.env.get("API_KEY"), Some(&"secret".to_string()));
             }
-            _ => panic!("Expected stdio transport"),
+            _ => unreachable!("Expected stdio transport"),
         }
         assert_eq!(config.servers[1].name, "remote-server");
         match &config.servers[1].transport {
@@ -483,7 +484,7 @@ headers = { Authorization = "Bearer token" }
                     Some(&"Bearer token".to_string())
                 );
             }
-            _ => panic!("Expected http transport"),
+            _ => unreachable!("Expected http transport"),
         }
     }
 
@@ -512,7 +513,7 @@ headers = { Authorization = "Bearer token" }
             McpTransportConfig::Stdio(stdio) => {
                 assert_eq!(stdio.command, "project-cmd"); // Project wins
             }
-            _ => panic!("Expected stdio transport"),
+            _ => unreachable!("Expected stdio transport"),
         }
         assert_eq!(merged.servers[1].name, "project-only");
         assert_eq!(merged.servers[2].name, "user-only");
@@ -653,11 +654,24 @@ url = "https://example.com/mcp"
 
     #[test]
     fn test_env_expansion_in_config() {
+        if std::env::var("RUN_TEST_EXPANSION_INNER").is_ok() {
+            let config_path = std::env::var("TEST_CONFIG_PATH").expect("TEST_CONFIG_PATH not set");
+            let config = McpConfig::load_from_paths(Some(config_path.as_ref()), None).unwrap();
+            let server = &config.servers[0];
+            match &server.transport {
+                McpTransportConfig::Http(http) => {
+                    assert_eq!(
+                        http.headers.get("Authorization"),
+                        Some(&"Bearer secret".to_string())
+                    );
+                }
+                _ => unreachable!("Expected http transport"),
+            }
+            return;
+        }
+
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("mcp.toml");
-        unsafe {
-            std::env::set_var("RKAT_TEST_API_KEY", "secret");
-        }
         fs::write(
             &config_path,
             r#"
@@ -669,19 +683,14 @@ headers = { Authorization = "Bearer ${RKAT_TEST_API_KEY}" }
         )
         .unwrap();
 
-        let config = McpConfig::load_from_paths(Some(&config_path), None).unwrap();
-        let server = &config.servers[0];
-        match &server.transport {
-            McpTransportConfig::Http(http) => {
-                assert_eq!(
-                    http.headers.get("Authorization"),
-                    Some(&"Bearer secret".to_string())
-                );
-            }
-            _ => panic!("Expected http transport"),
-        }
-        unsafe {
-            std::env::remove_var("RKAT_TEST_API_KEY");
-        }
+        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+            .arg("test_env_expansion_in_config")
+            .env("RUN_TEST_EXPANSION_INNER", "1")
+            .env("RKAT_TEST_API_KEY", "secret")
+            .env("TEST_CONFIG_PATH", &config_path)
+            .status()
+            .expect("failed to spawn test child process");
+
+        assert!(status.success());
     }
 }

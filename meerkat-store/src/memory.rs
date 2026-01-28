@@ -29,18 +29,27 @@ impl Default for MemoryStore {
 #[async_trait]
 impl SessionStore for MemoryStore {
     async fn save(&self, session: &Session) -> Result<(), StoreError> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| StoreError::Internal("Lock poisoned".to_string()))?;
         sessions.insert(session.id().clone(), session.clone());
         Ok(())
     }
 
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| StoreError::Internal("Lock poisoned".to_string()))?;
         Ok(sessions.get(id).cloned())
     }
 
     async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| StoreError::Internal("Lock poisoned".to_string()))?;
         let mut metas: Vec<SessionMeta> = sessions
             .values()
             .filter(|s| {
@@ -70,19 +79,23 @@ impl SessionStore for MemoryStore {
     }
 
     async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| StoreError::Internal("Lock poisoned".to_string()))?;
         sessions.remove(id);
         Ok(())
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_core::{Message, UserMessage};
 
     #[tokio::test]
-    async fn test_memory_store_roundtrip() {
+    async fn test_memory_store_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let store = MemoryStore::new();
 
         let mut session = Session::new();
@@ -92,10 +105,11 @@ mod tests {
 
         let id = session.id().clone();
 
-        store.save(&session).await.unwrap();
+        store.save(&session).await?;
 
-        let loaded = store.load(&id).await.unwrap().unwrap();
+        let loaded = store.load(&id).await?.ok_or("session not found")?;
         assert_eq!(loaded.id(), &id);
         assert_eq!(loaded.messages().len(), 1);
+        Ok(())
     }
 }

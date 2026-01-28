@@ -1,0 +1,35 @@
+    Checking meerkat-comms v0.1.0 (/Users/luka/src/raik/meerkat-comms)
+    Checking meerkat-core v0.1.0 (/Users/luka/src/raik/meerkat-core)
+    Checking meerkat-comms-mcp v0.1.0 (/Users/luka/src/raik/meerkat-comms-mcp)
+    Checking meerkat-client v0.1.0 (/Users/luka/src/raik/meerkat-client)
+    Checking meerkat-mcp-client v0.1.0 (/Users/luka/src/raik/meerkat-mcp-client)
+    Checking meerkat-store v0.1.0 (/Users/luka/src/raik/meerkat-store)
+error: multiple unused formatting arguments
+   --> meerkat-client/src/gemini.rs:215:17
+    |
+214 |                 "{{}}/v1beta/models/{{}}:streamGenerateContent?alt=sse&key={{}}",
+    |                 ---------------------------------------------------------------- multiple missing formatting specifiers
+215 |                 self.base_url, request.model, self.api_key
+    |                 ^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^ argument never used
+    |                 |              |
+    |                 |              argument never used
+    |                 argument never used
+
+error: unused import: `std::collections::HashMap`
+  --> meerkat-client/src/anthropic.rs:12:5
+   |
+12 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `ToolCall`
+   --> meerkat-client/src/openai.rs:334:24
+    |
+334 |     use meerkat_core::{ToolCall, UserMessage};
+    |                        ^^^^^^^^
+
+error: could not compile `meerkat-client` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `meerkat-client` (lib test) due to 3 previous errors

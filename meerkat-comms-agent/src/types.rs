@@ -196,6 +196,7 @@ impl CommsMessage {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_comms::{Envelope, Keypair, Signature, TrustedPeer};
@@ -281,7 +282,7 @@ mod tests {
         assert_eq!(msg.from_peer, "sender-agent");
         match msg.content {
             CommsContent::Message { body } => assert_eq!(body, "hello world"),
-            _ => panic!("expected Message"),
+            _ => unreachable!("expected Message"),
         }
     }
 
@@ -314,7 +315,7 @@ mod tests {
                 assert_eq!(intent, "review-pr");
                 assert_eq!(params["pr"], 123);
             }
-            _ => panic!("expected Request"),
+            _ => unreachable!("expected Request"),
         }
     }
 
@@ -348,7 +349,7 @@ mod tests {
                 assert_eq!(status, CommsStatus::Completed);
                 assert_eq!(result["approved"], true);
             }
-            _ => panic!("expected Response"),
+            _ => unreachable!("expected Response"),
         }
     }
 

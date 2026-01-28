@@ -223,7 +223,8 @@ impl LlmClientFactory for DefaultClientFactory {
             #[cfg(feature = "anthropic")]
             LlmProvider::Anthropic => {
                 let key = key.ok_or_else(|| FactoryError::MissingApiKey("anthropic".into()))?;
-                let mut client = crate::AnthropicClient::new(key);
+                let mut client = crate::AnthropicClient::new(key)
+                    .map_err(|e| FactoryError::UnsupportedProvider(e.to_string()))?;
                 if let Some(base_url) = self.config.get_base_url(provider) {
                     client = client.with_base_url(base_url.to_string());
                 }
@@ -290,6 +291,7 @@ fn env_preferring_rkat(rkat_key: &str, provider_key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

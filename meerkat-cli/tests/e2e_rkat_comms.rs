@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! End-to-end tests for rkat CLI inter-agent communication (Phase 12)
 //!
 //! These tests spawn actual rkat processes and verify inter-process communication.

@@ -325,7 +325,7 @@ pub struct SessionMetadata {
 pub const SESSION_METADATA_KEY: &str = "session_metadata";
 
 /// Tooling flags captured at session creation time.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionTooling {
     pub builtins: bool,
@@ -348,6 +348,7 @@ impl From<&Session> for SessionMeta {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::types::{AssistantMessage, StopReason, SystemMessage, UserMessage};

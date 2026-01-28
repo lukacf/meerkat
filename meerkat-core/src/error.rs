@@ -189,6 +189,9 @@ pub enum AgentError {
 
     #[error("Sub-agent spawn failed: {reason}")]
     SubAgentSpawnFailed { reason: String },
+
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }
 
 impl AgentError {
@@ -226,6 +229,7 @@ pub fn invalid_session_id_message(err: impl std::fmt::Display) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

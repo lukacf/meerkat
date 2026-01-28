@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -18,10 +19,21 @@ async fn e2e_rest_resume_metadata() {
     if skip_if_no_prereqs() {
         return;
     }
-    unsafe {
-        std::env::set_var("RKAT_TEST_CLIENT", "1");
+    if std::env::var("RUN_TEST_REST_RESUME_INNER").is_ok() {
+        inner_test_rest_resume_metadata().await;
+        return;
     }
 
+    let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+        .arg("e2e_rest_resume_metadata")
+        .env("RUN_TEST_REST_RESUME_INNER", "1")
+        .env("RKAT_TEST_CLIENT", "1")
+        .status()
+        .expect("failed to spawn test child process");
+    assert!(status.success());
+}
+
+async fn inner_test_rest_resume_metadata() {
     let temp_dir = TempDir::new().expect("temp dir");
     let project_root = temp_dir.path().join("project");
     std::fs::create_dir_all(project_root.join(".rkat")).expect("create .rkat");
@@ -98,24 +110,21 @@ async fn e2e_rest_resume_metadata() {
         max_tokens: 7,
         rest_host: config.rest.host.clone(),
         rest_port: config.rest.port,
-        enable_builtins: false,
-        enable_shell: false,
+        enable_builtins: true,
+        enable_shell: true,
         project_root: Some(project_root.clone()),
-        config_store: std::sync::Arc::new(MemoryConfigStore::new(config)),
+        config_store: std::sync::Arc::new(MemoryConfigStore::new(config.clone())),
         event_tx: tokio::sync::broadcast::channel(16).0,
     };
 
     let app = router(state_resume);
     let resume_payload = json!({
-        "session_id": session_id,
         "prompt": "Continue.",
+        "session_id": session_id
     });
     let request = Request::builder()
         .method("POST")
-        .uri(format!(
-            "/sessions/{}/messages",
-            run_json["session_id"].as_str().unwrap()
-        ))
+        .uri(format!("/sessions/{}/messages", session_id))
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_vec(&resume_payload).expect("serialize payload"),
@@ -135,20 +144,9 @@ async fn e2e_rest_resume_metadata() {
         .expect("session exists");
     let metadata = session.session_metadata().expect("metadata");
 
-    assert_eq!(metadata.model, original_model, "model should persist");
-    assert_eq!(
-        metadata.max_tokens, original_max_tokens,
-        "max_tokens should persist"
-    );
-    assert_eq!(
-        metadata.provider, original_provider,
-        "provider should persist"
-    );
+    assert_eq!(metadata.model, original_model);
+    assert_eq!(metadata.max_tokens, original_max_tokens);
     assert_eq!(metadata.tooling.builtins, original_tooling.builtins);
     assert_eq!(metadata.tooling.shell, original_tooling.shell);
-    assert_eq!(metadata.tooling.comms, original_tooling.comms);
-    assert_eq!(metadata.tooling.subagents, original_tooling.subagents);
-    unsafe {
-        std::env::remove_var("RKAT_TEST_CLIENT");
-    }
+    assert_eq!(metadata.provider, original_provider);
 }

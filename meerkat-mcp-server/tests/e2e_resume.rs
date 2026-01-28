@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -41,11 +42,15 @@ async fn e2e_mcp_resume_metadata() {
         return;
     }
 
+    if std::env::var("RUN_TEST_MCP_RESUME_INNER").is_ok() {
+        inner_test_mcp_resume_metadata().await;
+        return;
+    }
+
     let temp_dir = TempDir::new().expect("temp dir");
     let project_root = temp_dir.path().join("project");
     std::fs::create_dir_all(project_root.join(".rkat")).expect("create .rkat");
 
-    let base_config = Config::default();
     let store_dir = temp_dir.path().join("sessions");
     std::fs::write(
         project_root.join(".rkat/config.toml"),
@@ -57,13 +62,33 @@ async fn e2e_mcp_resume_metadata() {
     )
     .expect("write config");
 
+    let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+        .arg("e2e_mcp_resume_metadata")
+        .env("RUN_TEST_MCP_RESUME_INNER", "1")
+        .env("TEST_PROJECT_ROOT", &project_root)
+        .env("TEST_STORE_DIR", &store_dir)
+        .status()
+        .expect("failed to spawn test child process");
+
+    assert!(status.success());
+}
+
+async fn inner_test_mcp_resume_metadata() {
+    let project_root = std::env::var("TEST_PROJECT_ROOT").expect("TEST_PROJECT_ROOT not set");
+    let store_dir = std::env::var("TEST_STORE_DIR").expect("TEST_STORE_DIR not set");
+    let project_root = std::path::PathBuf::from(project_root);
+    let store_dir = std::path::PathBuf::from(store_dir);
+
+    std::env::set_current_dir(&project_root).expect("set cwd failed");
+
+    let base_config = Config::default();
+
     let mut env = HashMap::new();
     env.insert("RKAT_TEST_CLIENT".to_string(), "1".to_string());
 
     let mcp_bin = mcp_binary_path().expect("mcp server binary");
     let server_config = McpServerConfig::stdio("meerkat", mcp_bin.to_string_lossy(), vec![], env);
-    let original_dir = std::env::current_dir().expect("cwd");
-    std::env::set_current_dir(&project_root).expect("set cwd");
+
     let connection = timeout(
         Duration::from_secs(20),
         McpConnection::connect(&server_config),
@@ -71,7 +96,6 @@ async fn e2e_mcp_resume_metadata() {
     .await
     .expect("connect timed out")
     .expect("connect to mcp server");
-    std::env::set_current_dir(&original_dir).expect("restore cwd");
 
     let tools = timeout(Duration::from_secs(20), connection.list_tools())
         .await

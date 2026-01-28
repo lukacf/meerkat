@@ -1,0 +1,284 @@
+project: "Meerkat Interface Consolidation"
+source: "ARCH_PROB_1.md"
+last_updated: "2026-01-27"
+
+authoritative_decisions: "Post-interview decisions take precedence over transcript defaults."
+
+requirements:
+  - id: REQ-001
+    title: "Shared AgentFactory/runner for all interfaces"
+    priority: P1
+    description: "CLI, SDK, MCP, REST, sub-agent runner, and tests must build agents via a single AgentFactory (new crate) that centralizes store path resolution, LLM client creation, tool dispatcher creation (builtins/shell/comms/subagents), and session store creation."
+  - id: REQ-002
+    title: "Unified LlmClientAdapter in meerkat-client"
+    priority: P0
+    description: "Provide one adapter used by all interfaces and tests, including optional event_tx and provider_params, with ToolCallDelta buffering and thought_signature handling."
+  - id: REQ-003
+    title: "Unified SessionStoreAdapter in meerkat-store"
+    priority: P0
+    description: "Single adapter for AgentSessionStore used across CLI/MCP/REST/SDK and tests; consistent error mapping and SessionId parsing."
+  - id: REQ-004
+    title: "Config-only defaults"
+    priority: P0
+    description: "Defaults for model, max tokens, shell, store paths, tooling, etc. live only in config files/templates; no hardcoded defaults in code. Global config auto-generated if missing."
+  - id: REQ-005
+    title: "Unified config loading and env var scheme"
+    priority: P1
+    description: "All interfaces adopt core Config::load. Non-secret config comes only from config files and programmatic overrides; env overrides are secrets-only (API keys)."
+  - id: REQ-006
+    title: "Unified tool dispatcher + builtins setup"
+    priority: P1
+    description: "Consolidate Empty/Composite/WithComms dispatcher patterns and builtin tool setup (task store, shell config, policy) into shared code using trait objects."
+  - id: REQ-007
+    title: "Resume consistency across interfaces"
+    priority: P0
+    description: "Resume must preserve model/max_tokens/tooling/comms/host_mode from session metadata unless explicitly overridden; identical tool dispatchers must be wired on resume."
+  - id: REQ-008
+    title: "SDK parity: remove quick builder"
+    priority: P1
+    description: "Remove SDK quick builder/.tool() API; SDK must use AgentFactory for parity."
+  - id: REQ-009
+    title: "Multi-provider support in MCP/REST"
+    priority: P1
+    description: "MCP/REST must support provider selection and API key resolution comparable to CLI; honor base URL overrides from client factory/config."
+  - id: REQ-010
+    title: "System prompt composition everywhere"
+    priority: P1
+    description: "AGENTS.md injection and tool-usage instructions must be included by default across CLI/SDK/MCP/REST, with explicit override hooks."
+  - id: REQ-011
+    title: "Comms tool surface parity"
+    priority: P1
+    description: "When host mode is enabled, SDK/MCP/REST must surface comms tools to the agent, not just run host mode silently."
+  - id: REQ-012
+    title: "Tool error/schema unification"
+    priority: P2
+    description: "Resolve duplicate ToolError types and provide a shared tool schema builder to avoid manual json!() repetition."
+  - id: REQ-013
+    title: "MCP logging initialization"
+    priority: P2
+    description: "MCP server must initialize a tracing subscriber like REST does."
+  - id: REQ-014
+    title: "ConfigStore abstraction + persistence rules"
+    priority: P1
+    description: "Introduce ConfigStore with File and Memory implementations. SDK defaults to memory and requires explicit path to persist. CLI/REST/MCP default to FileConfigStore."
+  - id: REQ-015
+    title: "Local config lifecycle and project root"
+    priority: P1
+    description: "Local scope exists only when .rkat/ is present. .rkat/ is created only via rkat init or explicit local config write. Project root is nearest ancestor containing .rkat/."
+  - id: REQ-016
+    title: "Config APIs across interfaces"
+    priority: P1
+    description: "All interfaces expose programmatic config view/edit/override (interface-specific surfaces with similar naming). Overrides are ephemeral by default; persistence is explicit."
+  - id: REQ-017
+    title: "Provider resolution"
+    priority: P1
+    description: "Shared ProviderResolver with model inference for all interfaces. Support RKAT_* and native provider env vars; precedence RKAT_* over native."
+  - id: REQ-018
+    title: "Feature parity scope"
+    priority: P1
+    description: "Bring parity for MCP tool routing, sub-agent tools, streaming events, verbose mode, and budget limits across interfaces."
+  - id: REQ-019
+    title: "Shell defaults via config"
+    priority: P2
+    description: "Shell default executable, timeout, and allowlist are defined only in config (no code defaults)."
+  - id: REQ-020
+    title: "Builtin task persistence defaults"
+    priority: P1
+    description: "Builtin task storage defaults are interface-dependent: CLI/REST/MCP use file-backed stores; SDK uses memory unless explicitly configured with a path."
+  - id: REQ-021
+    title: "Comms runtime parity"
+    priority: P1
+    description: "Comms runtime options are fully supported across interfaces (inproc/TCP/UDS), consistent with CLI."
+
+types:
+  - id: TYPE-001
+    name: "LlmClientAdapter"
+    location: "meerkat-client/src/adapter.rs"
+    fields:
+      - "client: Arc<dyn LlmClient>"
+      - "model: String"
+      - "event_tx: Option<mpsc::Sender<AgentEvent>>"
+      - "provider_params: Option<Value>"
+    implements: "AgentLlmClient"
+  - id: TYPE-002
+    name: "StoreAdapter<S: SessionStore>"
+    location: "meerkat-store/src/adapter.rs"
+    implements: "AgentSessionStore"
+  - id: TYPE-003
+    name: "AgentFactory"
+    location: "meerkat-agent/src/factory.rs"
+    fields:
+      - "store_path: PathBuf"
+      - "project_root: Option<PathBuf>"
+      - "enable_builtins: bool"
+      - "enable_shell: bool"
+      - "enable_subagents: bool"
+      - "enable_comms: bool"
+  - id: TYPE-004
+    name: "ProviderResolver"
+    location: "meerkat-client/src/provider_resolver.rs"
+    fields:
+      - "provider: Provider"
+      - "api_key: String"
+      - "base_url: Option<String>"
+      - "model_inference: bool"
+  - id: TYPE-005
+    name: "SessionMetadata"
+    location: "meerkat-core (session persistence)"
+    fields:
+      - "model: String"
+      - "max_tokens: u32"
+      - "provider: Provider"
+      - "tooling: { builtins, shell, comms, subagents }"
+      - "host_mode: bool"
+      - "comms_name: Option<String>"
+  - id: TYPE-006
+    name: "Resume request shapes"
+    location: "meerkat-rest + meerkat-mcp-server"
+    fields:
+      - "host_mode: bool"
+      - "comms_name: Option<String>"
+      - "session_id: String"
+      - "model: Option<String>"
+      - "max_tokens: Option<u32>"
+  - id: TYPE-007
+    name: "Config"
+    location: "meerkat-core/src/config.rs"
+    fields:
+      - "models"
+      - "limits"
+      - "providers"
+      - "store"
+      - "tools"
+      - "comms"
+      - "shell"
+  - id: TYPE-008
+    name: "ConfigStore"
+    location: "meerkat-core/src/config_store.rs"
+    fields:
+      - "load()"
+      - "save()"
+      - "overlay()"
+  - id: TYPE-009
+    name: "FileConfigStore"
+    location: "meerkat-agent/src/config_store.rs"
+    fields:
+      - "global_path: PathBuf (default ~/.rkat/config.toml)"
+      - "project_path: Option<PathBuf> (<project>/.rkat/config.toml)"
+  - id: TYPE-010
+    name: "MemoryConfigStore"
+    location: "meerkat-core/src/config_store.rs"
+    fields:
+      - "base: Config"
+      - "overlay: ConfigDelta"
+  - id: TYPE-011
+    name: "ConfigDelta"
+    location: "meerkat-core/src/config_delta.rs"
+    fields:
+      - "deep-merge map (last write wins)"
+  - id: TYPE-012
+    name: "Config template"
+    location: "meerkat-core/config/default.toml"
+
+contracts:
+  - id: CONTRACT-001
+    title: "LLM adapter streaming contract"
+    description: "ToolCallDelta buffering and thought_signature handling are preserved in the unified adapter; optional event_tx emits live deltas."
+  - id: CONTRACT-002
+    title: "SessionStoreAdapter error mapping"
+    description: "SessionId parsing and save/load error mapping are consistent across all interfaces."
+  - id: CONTRACT-003
+    title: "AgentFactory configuration contract"
+    description: "Store path resolution and builtin setup are identical across interfaces and derive from Config and ConfigStore."
+  - id: CONTRACT-004
+    title: "Config precedence and scope contract"
+    description: "If a local .rkat/config.toml exists, it fully replaces global config. Otherwise global config is used. Programmatic overrides apply last. No env overrides except secrets."
+  - id: CONTRACT-005
+    title: "Resume metadata contract"
+    description: "Resume must use stored SessionMetadata unless explicitly overridden; model/max_tokens/tooling/comms cannot drift by default."
+  - id: CONTRACT-006
+    title: "Shell tool allowlist contract"
+    description: "Allowlist entries match actual tool names (e.g., shell_job_status, shell_jobs, shell_job_cancel)."
+  - id: CONTRACT-007
+    title: "ToolError/schema contract"
+    description: "Single ToolError type lives in meerkat-tools and shared schema builder is used by builtins and tool surfaces."
+  - id: CONTRACT-008
+    title: "Config creation contract"
+    description: "Global config is auto-generated from the template only when FileConfigStore is selected and global config is missing."
+  - id: CONTRACT-009
+    title: "Project root contract"
+    description: "Project root is the nearest ancestor containing .rkat/; no git or CWD fallback."
+
+invariants:
+  - id: INV-001
+    description: "If local config exists, global config is ignored."
+  - id: INV-002
+    description: "Programmatic overrides are ephemeral by default; persistence is explicit."
+  - id: INV-003
+    description: "Resumed sessions preserve model/max_tokens/tooling/comms unless explicitly overridden."
+  - id: INV-004
+    description: "Task tools record using the agent session_id that created them."
+  - id: INV-005
+    description: "AGENTS.md injection is applied by default in all interfaces."
+
+interfaces:
+  - id: IFACE-CLI
+    config_default_scope: "local if .rkat/ exists, otherwise global"
+  - id: IFACE-SDK
+    config_store_default: "memory"
+    persistence_requires_explicit_path: true
+  - id: IFACE-MCP
+    config_store_default: "file (instance-scoped path)"
+    project_root: "fixed at server start"
+  - id: IFACE-REST
+    config_store_default: "file (instance-scoped path)"
+
+migrations:
+  - id: MIG-001
+    description: "rkat init creates .rkat/ and copies global config into local config verbatim."
+
+notes:
+  - "Local config fully replaces global; no explicit removal directives required."
+  - "No profiles or named config variants."
+
+feature_parity:
+  - id: PARITY-001
+    description: "MCP tool routing parity with CLI."
+  - id: PARITY-002
+    description: "Sub-agent tools parity across interfaces."
+  - id: PARITY-003
+    description: "Streaming events parity across interfaces."
+  - id: PARITY-004
+    description: "Verbose mode parity across interfaces."
+  - id: PARITY-005
+    description: "Budget limits parity across interfaces."
+
+e2e:
+  - id: E2E-001
+    title: "CLI run + resume preserves tools and comms"
+    flow: "CLI run with builtins+shell+subagents+comms → resume CLI"
+    asserts:
+      - "same tool set available after resume"
+      - "session metadata model/max_tokens unchanged unless explicitly overridden"
+      - "task records tied to the original session_id"
+  - id: E2E-002
+    title: "MCP host-mode resume preserves metadata"
+    flow: "MCP run with host_mode + custom model (config) → resume MCP"
+    asserts:
+      - "host_mode/comms_name preserved unless explicitly overridden"
+      - "model/max_tokens unchanged unless explicitly overridden"
+      - "AGENTS.md injected"
+  - id: E2E-003
+    title: "REST resume uses stored metadata"
+    flow: "REST run with builtins + model set in config → resume REST"
+    asserts:
+      - "model/max_tokens match stored metadata unless explicitly overridden"
+      - "builtins/tooling preserved"
+      - "session persistence uses configured store_path"
+  - id: E2E-004
+    title: "SDK AgentFactory tool dispatch"
+    flow: "SDK AgentFactory registers tool → tool call"
+    asserts:
+      - "dispatch succeeds for registered tool"
+      - "SDK defaults to memory config store"
+      - "SDK persistence requires explicit path"

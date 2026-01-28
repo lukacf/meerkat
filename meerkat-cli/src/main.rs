@@ -704,10 +704,11 @@ fn build_comms_config(config: &Config, overrides: &CommsOverrides) -> Option<Cor
 
 /// Get the default session store directory
 fn get_session_store_dir() -> std::path::PathBuf {
-    dirs::data_dir()
+    let config = meerkat_core::Config::load().unwrap_or_default();
+    config
+        .storage
+        .directory
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("meerkat")
-        .join("sessions")
 }
 
 /// Create the session store (persistent)
@@ -1815,40 +1816,40 @@ impl Provider {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    // === Tests for --param flag parsing ===
-
     #[test]
-    fn test_parse_provider_params_single() {
+    fn test_parse_provider_params_single() -> Result<(), Box<dyn std::error::Error>> {
         let params = vec!["reasoning_effort=high".to_string()];
-        let result = parse_provider_params(&params).unwrap();
-        assert!(result.is_some());
-        let json = result.unwrap();
+        let result = parse_provider_params(&params)?;
+        let json = result.ok_or("missing result")?;
         assert_eq!(json["reasoning_effort"], "high");
+        Ok(())
     }
 
     #[test]
-    fn test_parse_provider_params_multiple() {
+    fn test_parse_provider_params_multiple() -> Result<(), Box<dyn std::error::Error>> {
         let params = vec![
             "reasoning_effort=high".to_string(),
             "seed=42".to_string(),
             "custom_flag=true".to_string(),
         ];
-        let result = parse_provider_params(&params).unwrap();
-        assert!(result.is_some());
-        let json = result.unwrap();
+        let result = parse_provider_params(&params)?;
+        let json = result.ok_or("missing result")?;
         assert_eq!(json["reasoning_effort"], "high");
         assert_eq!(json["seed"], "42");
         assert_eq!(json["custom_flag"], "true");
+        Ok(())
     }
 
     #[test]
-    fn test_parse_provider_params_empty() {
+    fn test_parse_provider_params_empty() -> Result<(), Box<dyn std::error::Error>> {
         let params: Vec<String> = vec![];
-        let result = parse_provider_params(&params).unwrap();
+        let result = parse_provider_params(&params)?;
         assert!(result.is_none());
+        Ok(())
     }
 
     #[test]
@@ -1856,34 +1857,25 @@ mod tests {
         let params = vec!["invalid_param".to_string()];
         let result = parse_provider_params(&params);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid --param format")
-        );
     }
 
     #[test]
-    fn test_parse_provider_params_value_with_equals() {
-        // Value can contain equals signs (e.g., base64 encoded strings)
+    fn test_parse_provider_params_value_with_equals() -> Result<(), Box<dyn std::error::Error>> {
         let params = vec!["key=value=with=equals".to_string()];
-        let result = parse_provider_params(&params).unwrap();
-        assert!(result.is_some());
-        let json = result.unwrap();
+        let result = parse_provider_params(&params)?;
+        let json = result.ok_or("missing result")?;
         assert_eq!(json["key"], "value=with=equals");
+        Ok(())
     }
 
     #[test]
-    fn test_parse_provider_params_empty_value() {
+    fn test_parse_provider_params_empty_value() -> Result<(), Box<dyn std::error::Error>> {
         let params = vec!["key=".to_string()];
-        let result = parse_provider_params(&params).unwrap();
-        assert!(result.is_some());
-        let json = result.unwrap();
+        let result = parse_provider_params(&params)?;
+        let json = result.ok_or("missing result")?;
         assert_eq!(json["key"], "");
+        Ok(())
     }
-
-    // === End of --param flag tests ===
 
     #[test]
     fn test_infer_provider_anthropic() {

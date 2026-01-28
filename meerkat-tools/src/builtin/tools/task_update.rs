@@ -260,6 +260,7 @@ impl BuiltinTool for TaskUpdateTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::builtin::memory_store::MemoryTaskStore;
@@ -558,7 +559,7 @@ mod tests {
             BuiltinToolError::TaskError(msg) => {
                 assert!(msg.contains("not found") || msg.contains("NotFound"));
             }
-            _ => panic!("Expected TaskError, got {:?}", err),
+            _ => unreachable!("Expected TaskError, got {:?}", err),
         }
     }
 
@@ -581,7 +582,7 @@ mod tests {
                 assert!(msg.contains("Invalid status"));
                 assert!(msg.contains("invalid_status"));
             }
-            _ => panic!("Expected InvalidArgs, got {:?}", err),
+            _ => unreachable!("Expected InvalidArgs, got {:?}", err),
         }
     }
 
@@ -604,7 +605,7 @@ mod tests {
                 assert!(msg.contains("Invalid priority"));
                 assert!(msg.contains("urgent"));
             }
-            _ => panic!("Expected InvalidArgs, got {:?}", err),
+            _ => unreachable!("Expected InvalidArgs, got {:?}", err),
         }
     }
 
@@ -639,7 +640,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             BuiltinToolError::InvalidArgs(_) => {}
-            other => panic!("Expected InvalidArgs, got {:?}", other),
+            other => unreachable!("Expected InvalidArgs, got {:?}", other),
         }
     }
 

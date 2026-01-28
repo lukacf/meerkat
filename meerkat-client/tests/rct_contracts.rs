@@ -4,6 +4,7 @@ use meerkat_client::error::LlmError;
 use meerkat_client::types::{LlmClient, LlmEvent, LlmRequest};
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
 use meerkat_core::{AgentEvent, AgentLlmClient, Provider, StopReason};
+use serde_json::json;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -32,7 +33,7 @@ impl LlmClient for MockClient {
 }
 
 #[tokio::test]
-async fn test_llm_adapter_streaming_contract() {
+async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error::Error>> {
     let events = vec![
         LlmEvent::TextDelta {
             delta: "hello".to_string(),
@@ -50,7 +51,7 @@ async fn test_llm_adapter_streaming_contract() {
         LlmEvent::ToolCallComplete {
             id: "tc2".to_string(),
             name: "tool_b".to_string(),
-            args: serde_json::json!({"baz": true}),
+            args: json!({"baz": true}),
             thought_signature: Some("sig-123".to_string()),
         },
         LlmEvent::Done {
@@ -62,10 +63,7 @@ async fn test_llm_adapter_streaming_contract() {
     let (tx, mut rx) = mpsc::channel(4);
     let adapter = LlmClientAdapter::with_event_channel(client, "model-x".to_string(), tx);
 
-    let result = adapter
-        .stream_response(&[], &[], 128, None, None)
-        .await
-        .expect("stream response");
+    let result = adapter.stream_response(&[], &[], 128, None, None).await?;
 
     assert_eq!(result.content, "hello");
     assert_eq!(result.stop_reason, StopReason::EndTurn);
@@ -80,25 +78,33 @@ async fn test_llm_adapter_streaming_contract() {
         }
     }
 
-    let tc1 = tc1.expect("buffered tool call");
+    let tc1 = tc1.ok_or("buffered tool call missing")?;
     assert_eq!(tc1.name, "tool_a");
-    assert_eq!(tc1.args, serde_json::json!({"foo":"bar"}));
+    assert_eq!(tc1.args, json!({"foo":"bar"}));
     assert!(tc1.thought_signature.is_none());
 
-    let tc2 = tc2.expect("complete tool call");
+    let tc2 = tc2.ok_or("complete tool call missing")?;
     assert_eq!(tc2.name, "tool_b");
-    assert_eq!(tc2.args, serde_json::json!({"baz": true}));
+    assert_eq!(tc2.args, json!({"baz": true}));
     assert_eq!(tc2.thought_signature.as_deref(), Some("sig-123"));
 
-    let event = rx.recv().await.expect("text delta event");
+    let event = rx.recv().await.ok_or("text delta event missing")?;
     match event {
         AgentEvent::TextDelta { delta } => assert_eq!(delta, "hello"),
-        _ => panic!("unexpected event"),
+        _ => return Err("unexpected event".into()),
     }
+
+    Ok(())
 }
 
 #[test]
-fn test_provider_resolution_contract() {
+fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("RUN_TEST_RESOLUTION_INNER").is_ok() {
+        let key = ProviderResolver::api_key_for(Provider::OpenAI);
+        assert_eq!(key.as_deref(), Some("rk-test"));
+        return Ok(());
+    }
+
     assert_eq!(
         ProviderResolver::infer_from_model("claude-3"),
         Provider::Anthropic
@@ -116,16 +122,15 @@ fn test_provider_resolution_contract() {
         Provider::Other
     );
 
-    unsafe {
-        std::env::set_var("RKAT_OPENAI_API_KEY", "rk-test");
-        std::env::set_var("OPENAI_API_KEY", "native-test");
-    }
-    let key = ProviderResolver::api_key_for(Provider::OpenAI);
-    assert_eq!(key.as_deref(), Some("rk-test"));
-    unsafe {
-        std::env::remove_var("RKAT_OPENAI_API_KEY");
-        std::env::remove_var("OPENAI_API_KEY");
-    }
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .arg("test_provider_resolution_contract")
+        .env("RUN_TEST_RESOLUTION_INNER", "1")
+        .env("RKAT_OPENAI_API_KEY", "rk-test")
+        .env("OPENAI_API_KEY", "native-test")
+        .status()?;
+    assert!(status.success());
+
+    Ok(())
 }
 
 #[test]

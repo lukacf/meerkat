@@ -210,6 +210,7 @@ impl SessionStore for JsonlStore {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_core::{Message, UserMessage};
@@ -217,23 +218,24 @@ mod tests {
     /// Test that load() returns None for non-existent sessions without blocking
     /// This verifies we use async file operations, not sync Path::exists()
     #[tokio::test]
-    async fn test_load_nonexistent_uses_async_fs() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_load_nonexistent_uses_async_fs() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
         // This should use async operations internally
         // Previously used sync path.exists() which would block the async runtime
         let id = SessionId::new();
-        let result = store.load(&id).await.unwrap();
+        let result = store.load(&id).await?;
         assert!(result.is_none(), "Non-existent session should return None");
+        Ok(())
     }
 
     /// Test that delete() handles non-existent files gracefully with async ops
     #[tokio::test]
-    async fn test_delete_nonexistent_uses_async_fs() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_delete_nonexistent_uses_async_fs() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
-        store.init().await.unwrap();
+        store.init().await?;
 
         // Deleting a non-existent session should succeed (no-op)
         // Previously used sync path.exists() which would block
@@ -243,11 +245,12 @@ mod tests {
             result.is_ok(),
             "Delete of non-existent session should succeed"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_jsonl_store_uses_metadata_sidecar() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_jsonl_store_uses_metadata_sidecar() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
         // Create a session with some content
@@ -257,7 +260,7 @@ mod tests {
         }));
 
         let id = session.id().clone();
-        store.save(&session).await.unwrap();
+        store.save(&session).await?;
 
         // Verify metadata sidecar file was created
         let meta_path = temp_dir.path().join(format!("{}.meta", id.0));
@@ -268,15 +271,16 @@ mod tests {
         );
 
         // Verify the metadata file contains valid SessionMeta
-        let meta_contents = fs::read_to_string(&meta_path).await.unwrap();
-        let meta: SessionMeta = serde_json::from_str(&meta_contents).unwrap();
+        let meta_contents = fs::read_to_string(&meta_path).await?;
+        let meta: SessionMeta = serde_json::from_str(&meta_contents)?;
         assert_eq!(meta.id, id);
         assert_eq!(meta.message_count, 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_jsonl_store_list_reads_only_metadata() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_jsonl_store_list_reads_only_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
         // Create a session
@@ -284,21 +288,22 @@ mod tests {
         session.push(Message::User(UserMessage {
             content: "Hello".to_string(),
         }));
-        store.save(&session).await.unwrap();
+        store.save(&session).await?;
 
         // Delete the main session file but keep the metadata
         let session_path = temp_dir.path().join(format!("{}.jsonl", session.id().0));
-        fs::remove_file(&session_path).await.unwrap();
+        fs::remove_file(&session_path).await?;
 
         // list() should still work because it reads from metadata sidecar
-        let sessions = store.list(SessionFilter::default()).await.unwrap();
+        let sessions = store.list(SessionFilter::default()).await?;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, *session.id());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_jsonl_store_compact_format() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_jsonl_store_compact_format() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::builder(temp_dir.path().to_path_buf())
             .pretty_print(false)
             .build();
@@ -309,11 +314,11 @@ mod tests {
             content: "Hello".to_string(),
         }));
 
-        store.save(&session).await.unwrap();
+        store.save(&session).await?;
 
         // Read the file and verify it's not pretty-printed (no newlines in middle)
         let session_path = temp_dir.path().join(format!("{}.jsonl", session.id().0));
-        let contents = fs::read_to_string(&session_path).await.unwrap();
+        let contents = fs::read_to_string(&session_path).await?;
 
         // Compact JSON should be a single line
         assert_eq!(
@@ -321,11 +326,12 @@ mod tests {
             1,
             "Compact JSON should be a single line"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_jsonl_store_pretty_format_by_default() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_jsonl_store_pretty_format_by_default() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
         // Create a session
@@ -334,22 +340,23 @@ mod tests {
             content: "Hello".to_string(),
         }));
 
-        store.save(&session).await.unwrap();
+        store.save(&session).await?;
 
         // Read the file and verify it's pretty-printed (multiple lines)
         let session_path = temp_dir.path().join(format!("{}.jsonl", session.id().0));
-        let contents = fs::read_to_string(&session_path).await.unwrap();
+        let contents = fs::read_to_string(&session_path).await?;
 
         // Pretty JSON should have multiple lines
         assert!(
             contents.lines().count() > 1,
             "Pretty JSON should have multiple lines"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_jsonl_store_roundtrip() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_jsonl_store_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
         // Create a session
@@ -361,36 +368,38 @@ mod tests {
         let id = session.id().clone();
 
         // Save
-        store.save(&session).await.unwrap();
+        store.save(&session).await?;
 
         // Load
-        let loaded = store.load(&id).await.unwrap().unwrap();
+        let loaded = store.load(&id).await?.ok_or("not found")?;
         assert_eq!(loaded.id(), &id);
         assert_eq!(loaded.messages().len(), 1);
 
         // List
-        let sessions = store.list(SessionFilter::default()).await.unwrap();
+        let sessions = store.list(SessionFilter::default()).await?;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, id);
 
         // Delete
-        store.delete(&id).await.unwrap();
-        assert!(store.load(&id).await.unwrap().is_none());
+        store.delete(&id).await?;
+        assert!(store.load(&id).await?.is_none());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_jsonl_store_not_found() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_jsonl_store_not_found() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
         let id = SessionId::new();
-        let result = store.load(&id).await.unwrap();
+        let result = store.load(&id).await?;
         assert!(result.is_none());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_jsonl_store_filter() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_jsonl_store_filter() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
         // Create multiple sessions
@@ -399,7 +408,7 @@ mod tests {
             session.push(Message::User(UserMessage {
                 content: format!("Message {}", i),
             }));
-            store.save(&session).await.unwrap();
+            store.save(&session).await?;
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
 
@@ -409,8 +418,7 @@ mod tests {
                 limit: Some(3),
                 ..Default::default()
             })
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(sessions.len(), 3);
 
         // Test offset
@@ -419,8 +427,8 @@ mod tests {
                 offset: Some(2),
                 ..Default::default()
             })
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(sessions.len(), 3);
+        Ok(())
     }
 }

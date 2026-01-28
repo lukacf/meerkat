@@ -1,0 +1,73 @@
+    Checking meerkat-client v0.1.0 (/Users/luka/src/raik/meerkat-client)
+    Checking meerkat-store v0.1.0 (/Users/luka/src/raik/meerkat-store)
+    Checking meerkat-core v0.1.0 (/Users/luka/src/raik/meerkat-core)
+    Checking meerkat-comms v0.1.0 (/Users/luka/src/raik/meerkat-comms)
+error: unused imports: `Message`, `SessionId`, `Session`, and `UserMessage`
+ --> meerkat-store/tests/rct_contracts.rs:1:20
+  |
+1 | use meerkat_core::{Message, Session, UserMessage, SessionId};
+  |                    ^^^^^^^  ^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^
+  |
+  = note: `-D unused-imports` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: found invalid character; only `#` is allowed in raw string delimitation: \u{0}
+   --> meerkat-client/src/types.rs:259:28
+    |
+259 |         buffer.args_json = r#
+    |                            ^^
+
+error[E0599]: no method named `load` found for struct `meerkat_store::StoreAdapter` in the current scope
+   --> meerkat-store/tests/rct_contracts.rs:11:26
+    |
+11  |     let loaded = adapter.load("01ARZ3NDEKTSV4RRFFQ69G5FAV").await?;
+    |                          ^^^^ method not found in `meerkat_store::StoreAdapter<meerkat_store::MemoryStore>`
+    |
+   ::: /Users/luka/src/raik/meerkat-core/src/agent.rs:119:14
+    |
+119 |     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError>;
+    |              ---- the method is available for `meerkat_store::StoreAdapter<meerkat_store::MemoryStore>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `AgentSessionStore` which provides `load` is implemented but not in scope; perhaps you want to import it
+    |
+1   + use meerkat_core::AgentSessionStore;
+    |
+
+error[E0599]: no method named `load` found for struct `meerkat_store::StoreAdapter` in the current scope
+   --> meerkat-store/tests/rct_contracts.rs:15:26
+    |
+15  |     let result = adapter.load("not-a-uuid").await;
+    |                          ^^^^ method not found in `meerkat_store::StoreAdapter<meerkat_store::MemoryStore>`
+    |
+   ::: /Users/luka/src/raik/meerkat-core/src/agent.rs:119:14
+    |
+119 |     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError>;
+    |              ---- the method is available for `meerkat_store::StoreAdapter<meerkat_store::MemoryStore>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `AgentSessionStore` which provides `load` is implemented but not in scope; perhaps you want to import it
+    |
+1   + use meerkat_core::AgentSessionStore;
+    |
+
+For more information about this error, try `rustc --explain E0599`.
+error: `match` arm body without braces
+   --> meerkat-core/src/types/tests.rs:420:31
+    |
+420 |         Message::System(s) => assert!(s.content.contains("helpful"));
+    |                            -- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this statement is not surrounded by a body
+    |                            |
+    |                            while parsing the `match` arm starting here
+    |
+help: replace `;` with `,` to end a `match` arm expression
+    |
+420 -         Message::System(s) => assert!(s.content.contains("helpful"));
+420 +         Message::System(s) => assert!(s.content.contains("helpful")),
+    |
+
+error: could not compile `meerkat-client` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `meerkat-store` (test "rct_contracts") due to 3 previous errors
+error: could not compile `meerkat-client` (lib test) due to 1 previous error
+error: could not compile `meerkat-core` (lib test) due to 1 previous error

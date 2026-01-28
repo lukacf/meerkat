@@ -32,16 +32,26 @@ impl MemoryConfigStore {
 
 impl ConfigStore for MemoryConfigStore {
     fn get(&self) -> Result<Config, ConfigError> {
-        Ok(self.config.lock().unwrap().clone())
+        self.config
+            .lock()
+            .map(|c| c.clone())
+            .map_err(|_| ConfigError::InternalError("Config mutex poisoned".to_string()))
     }
 
     fn set(&self, config: Config) -> Result<(), ConfigError> {
-        *self.config.lock().unwrap() = config;
+        let mut guard = self
+            .config
+            .lock()
+            .map_err(|_| ConfigError::InternalError("Config mutex poisoned".to_string()))?;
+        *guard = config;
         Ok(())
     }
 
     fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
-        let mut config = self.config.lock().unwrap();
+        let mut config = self
+            .config
+            .lock()
+            .map_err(|_| ConfigError::InternalError("Config mutex poisoned".to_string()))?;
         let mut value =
             serde_json::to_value(&*config).map_err(|e| ConfigError::ParseError(e.to_string()))?;
         merge_patch(&mut value, delta.0);

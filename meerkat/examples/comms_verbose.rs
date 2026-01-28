@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Verbose diagnostic for comms flow - shows actual API calls, tool calls, and network traffic
 
 use async_trait::async_trait;
@@ -119,7 +120,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
                         println!("\n┌─── LLM REQUESTED TOOL: {} ───┐", name);
                         println!(
                             "│ Args: {}",
-                            serde_json::to_string(&args).unwrap_or_default()
+                            serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
                         );
                         println!("└────────────────────────────────────────┘");
                         tool_calls.push(ToolCall::new(id, name, args));
@@ -144,7 +145,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
                     println!("\n┌─── LLM REQUESTED TOOL: {} ───┐", tc.name);
                     println!(
                         "│ Args: {}",
-                        serde_json::to_string(&tc.args).unwrap_or_default()
+                        serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string())
                     );
                     println!("└────────────────────────────────────────┘");
                     tool_calls.push(tc);
@@ -199,7 +200,7 @@ impl AgentToolDispatcher for LoggingToolDispatcher {
         println!("┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫");
         println!(
             "┃ Args: {}",
-            serde_json::to_string_pretty(args).unwrap_or_default()
+            serde_json::to_string_pretty(args).unwrap_or_else(|_| "{}".to_string())
         );
 
         let result = self.inner.dispatch(name, args).await;
@@ -232,7 +233,9 @@ impl AgentSessionStore for NoStore {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY required");
+    // We need an API key
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "ANTHROPIC_API_KEY environment variable must be set")?;
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║     MEERKAT COMMS VERBOSE DIAGNOSTIC                         ║");
@@ -282,17 +285,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create separate CommsManagers (each agent has its own)
     println!("\n=== CREATING SEPARATE COMMS MANAGERS ===");
     let config_a = CommsManagerConfig::with_keypair(keypair_a).trusted_peers(trusted_for_a.clone());
-    let comms_manager_a = CommsManager::new(config_a);
+    let comms_manager_a = CommsManager::new(config_a)?;
     println!("Agent A CommsManager created");
 
     let config_b = CommsManagerConfig::with_keypair(keypair_b).trusted_peers(trusted_for_b.clone());
-    let comms_manager_b = CommsManager::new(config_b);
+    let comms_manager_b = CommsManager::new(config_b)?;
     println!("Agent B CommsManager created");
 
     // Start TCP listeners (these accept incoming connections)
     println!("\n=== STARTING TCP LISTENERS ===");
-    let secret_a = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair());
-    let secret_b = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair());
+    let secret_a = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair())?;
+    let secret_b = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair())?;
 
     // Create shared trusted peers for each agent (allows dynamic updates)
     let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a.clone()));
@@ -339,19 +342,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create separate LLM clients for each agent
     let model =
-        std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+        std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-3-sonnet-20240229".to_string());
     println!("\n=== LLM SETUP ===");
     println!("Model: {}", model);
     println!("Each agent has its own AnthropicClient instance");
 
     let llm_a = Arc::new(LoggingLlmAdapter {
-        client: AnthropicClient::new(api_key.clone()),
+        client: AnthropicClient::new(api_key.clone())?,
         model: model.clone(),
         agent_name: "Agent A".to_string(),
     });
 
     let llm_b = Arc::new(LoggingLlmAdapter {
-        client: AnthropicClient::new(api_key),
+        client: AnthropicClient::new(api_key)?,
         model: model.clone(),
         agent_name: "Agent B".to_string(),
     });
@@ -364,7 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .model(&model)
         .max_tokens_per_turn(1024)
         .system_prompt(
-            "You are Agent A. You can communicate with other agents using the send_message tool. \
+            "You are Agent A. You can communicate with other agents using the send_message tool. \\
              Use list_peers to see available peers.",
         )
         .build(llm_a, tools_a, store.clone());

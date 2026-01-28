@@ -304,7 +304,12 @@ impl AgentSpawnTool {
             params.system_prompt.clone()
         } else if self.state.config.inherit_system_prompt {
             // Inherit tool usage instructions from parent if configured
-            self.state.get_tool_usage_instructions()
+            self.state
+                .get_tool_usage_instructions()
+                .unwrap_or_else(|e| {
+                    tracing::error!("{}", e);
+                    None
+                })
         } else {
             None
         };
@@ -464,6 +469,7 @@ impl BuiltinTool for AgentSpawnTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::builtin::sub_agent::config::SubAgentConfig;
@@ -736,7 +742,7 @@ mod tests {
         .into();
         match allow {
             ToolAccessPolicy::AllowList(tools) => assert_eq!(tools, vec!["tool1"]),
-            _ => panic!("Expected AllowList"),
+            _ => unreachable!("Expected AllowList"),
         }
 
         let deny: ToolAccessPolicy = ToolAccessInput::DenyList {
@@ -745,7 +751,7 @@ mod tests {
         .into();
         match deny {
             ToolAccessPolicy::DenyList(tools) => assert_eq!(tools, vec!["tool2"]),
-            _ => panic!("Expected DenyList"),
+            _ => unreachable!("Expected DenyList"),
         }
     }
 

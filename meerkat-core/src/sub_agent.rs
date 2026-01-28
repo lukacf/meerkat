@@ -594,6 +594,7 @@ pub fn inject_steering_messages(session: &mut Session, messages: Vec<SteeringMes
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::types::SystemMessage;
@@ -738,7 +739,7 @@ mod tests {
                 assert!(u.content.starts_with("[STEERING]"));
                 assert!(u.content.contains("Focus on security"));
             }
-            _ => panic!("Expected User message"),
+            _ => unreachable!("Expected User message"),
         }
     }
 }

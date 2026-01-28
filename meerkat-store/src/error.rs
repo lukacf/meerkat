@@ -15,4 +15,7 @@ pub enum StoreError {
 
     #[error("Session corrupted: {0}")]
     Corrupted(SessionId),
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }

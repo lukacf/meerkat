@@ -1400,6 +1400,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dirs",
  "futures",
  "humantime-serde",
  "meerkat-comms",

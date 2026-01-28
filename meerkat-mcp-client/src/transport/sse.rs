@@ -142,13 +142,15 @@ impl<C: SseClient> SseClientTransport<C> {
     }
 }
 
-fn message_endpoint(base: http::Uri, endpoint: String) -> Result<http::Uri, http::uri::InvalidUri> {
+fn message_endpoint<E: std::error::Error + Send + Sync + 'static>(
+    base: http::Uri,
+    endpoint: String,
+) -> Result<http::Uri, SseTransportError<E>> {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-        return endpoint.parse::<http::Uri>();
+        return Ok(endpoint.parse::<http::Uri>()?);
     }
 
     let mut base_parts = base.into_parts();
-    let endpoint_clone = endpoint.clone();
 
     if endpoint.starts_with("?") {
         if let Some(base_path_and_query) = &base_parts.path_and_query {
@@ -166,7 +168,7 @@ fn message_endpoint(base: http::Uri, endpoint: String) -> Result<http::Uri, http
         base_parts.path_and_query = Some(path_to_use.parse()?);
     }
 
-    http::Uri::from_parts(base_parts).map_err(|_| endpoint_clone.parse::<http::Uri>().unwrap_err())
+    Ok(http::Uri::from_parts(base_parts)?)
 }
 
 /// Shared HTTP client for SSE connections.

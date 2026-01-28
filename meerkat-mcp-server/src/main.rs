@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex, mpsc};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
     let stdin = std::io::stdin();
@@ -24,9 +24,10 @@ fn main() {
             let Ok(line) = serde_json::to_string(&message) else {
                 continue;
             };
-            let _guard = notify_lock.lock().unwrap();
-            let _ = writeln!(notify_stdout, "{line}");
-            let _ = notify_stdout.flush();
+            if let Ok(_guard) = notify_lock.lock() {
+                let _ = writeln!(notify_stdout, "{line}");
+                let _ = notify_stdout.flush();
+            }
         }
     });
     let notifier: EventNotifier = {
@@ -48,7 +49,7 @@ fn main() {
     let reader = BufReader::new(stdin.lock());
 
     // Initialize runtime for async operations
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    let rt = tokio::runtime::Runtime::new()?;
 
     for line in reader.lines() {
         let line = match line {
@@ -72,9 +73,10 @@ fn main() {
                     }
                 });
                 {
-                    let _guard = stdout_lock.lock().unwrap();
-                    writeln!(stdout, "{}", error).unwrap();
-                    stdout.flush().unwrap();
+                    if let Ok(_guard) = stdout_lock.lock() {
+                        let _ = writeln!(stdout, "{}", error);
+                        let _ = stdout.flush();
+                    }
                 }
                 continue;
             }
@@ -98,11 +100,14 @@ fn main() {
         // This is a request, send a response
         let response = rt.block_on(handle_request(&request, Some(notifier.clone())));
         {
-            let _guard = stdout_lock.lock().unwrap();
-            writeln!(stdout, "{}", response).unwrap();
-            stdout.flush().unwrap();
+            if let Ok(_guard) = stdout_lock.lock() {
+                let _ = writeln!(stdout, "{}", response);
+                let _ = stdout.flush();
+            }
         }
     }
+
+    Ok(())
 }
 
 fn init_tracing() {
@@ -191,6 +196,7 @@ async fn handle_request(request: &Value, notifier: Option<EventNotifier>) -> Val
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::init_tracing;
 

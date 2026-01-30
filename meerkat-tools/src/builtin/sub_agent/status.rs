@@ -2,19 +2,19 @@
 
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
-use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::ops::{OperationId, SubAgentState};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 
 /// Parameters for agent_status tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct StatusParams {
     /// Sub-agent ID to query
+    #[schemars(description = "The unique identifier of the sub-agent (UUID format)")]
     agent_id: String,
 }
 
@@ -74,7 +74,7 @@ impl AgentStatusTool {
                 ))
             })?;
 
-        let state_str = match info.state {
+        let state_str = match &info.state {
             SubAgentState::Running => "running",
             SubAgentState::Completed => "completed",
             SubAgentState::Failed => "failed",
@@ -84,20 +84,19 @@ impl AgentStatusTool {
         let is_final = info.state != SubAgentState::Running;
 
         // Get result details if available
-        if let Some(ref result) = info.result {
+        if let Some(result) = info.result.as_ref() {
+            let content = result.content.clone();
+            let (output, error) = if result.is_error {
+                (None, Some(content))
+            } else {
+                (Some(content), None)
+            };
+
             return Ok(StatusResponse {
                 agent_id: params.agent_id,
                 state: state_str.to_string(),
-                output: if result.is_error {
-                    None
-                } else {
-                    Some(result.content.clone())
-                },
-                error: if result.is_error {
-                    Some(result.content.clone())
-                } else {
-                    None
-                },
+                output,
+                error,
                 is_final,
                 duration_ms: Some(result.duration_ms),
                 tokens_used: Some(result.tokens_used),
@@ -124,18 +123,9 @@ impl BuiltinTool for AgentStatusTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "agent_status".to_string(),
-            description: "Get status and output of a sub-agent by ID. Returns the current state (running, completed, failed, cancelled) and output when available.".to_string(),
-            input_schema: SchemaBuilder::new()
-                .property(
-                    "agent_id",
-                    json!({
-                        "type": "string",
-                        "description": "The unique identifier of the sub-agent (UUID format)"
-                    }),
-                )
-                .required("agent_id")
-                .build(),
+            name: "agent_status".into(),
+            description: "Get status and output of a sub-agent by ID. Returns the current state (running, completed, failed, cancelled) and output when available.".into(),
+            input_schema: crate::schema::schema_for::<StatusParams>(),
         }
     }
 
@@ -165,6 +155,7 @@ mod tests {
     use meerkat_core::session::Session;
     use meerkat_core::sub_agent::SubAgentManager;
     use meerkat_core::{AgentSessionStore, AgentToolDispatcher};
+    use serde_json::json;
     use tokio::sync::RwLock;
 
     struct MockClientFactory;
@@ -187,8 +178,8 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for MockToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            vec![]
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([])
         }
 
         async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -211,7 +202,7 @@ mod tests {
 
     fn create_test_state() -> Arc<SubAgentToolState> {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory = Arc::new(MockClientFactory);
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);

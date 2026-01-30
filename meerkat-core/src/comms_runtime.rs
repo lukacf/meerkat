@@ -139,8 +139,8 @@ impl ListenerHandle {
 pub struct CommsRuntime {
     /// Configuration (with resolved absolute paths).
     config: ResolvedCommsConfig,
-    /// Our keypair secret (stored for listener spawning).
-    keypair_secret: [u8; 32],
+    /// Our keypair (shared between router and listeners).
+    keypair: Arc<Keypair>,
     /// The public key (derived from keypair).
     public_key: PubKey,
     /// Trusted peers list (shared with router for dynamic updates).
@@ -164,14 +164,19 @@ impl CommsRuntime {
     /// 1. Load or generate the keypair from identity_dir
     /// 2. Load trusted peers from trusted_peers_path (empty if file doesn't exist)
     /// 3. Create inbox and router
-    pub fn new(config: ResolvedCommsConfig) -> Result<Self, CommsRuntimeError> {
+    pub async fn new(config: ResolvedCommsConfig) -> Result<Self, CommsRuntimeError> {
         // Load or generate keypair
         let keypair = Keypair::load_or_generate(&config.identity_dir)
+            .await
             .map_err(|e| CommsRuntimeError::IdentityError(e.to_string()))?;
 
         // Load trusted peers (empty list if file doesn't exist)
-        let trusted_peers = if config.trusted_peers_path.exists() {
+        let trusted_peers = if tokio::fs::try_exists(&config.trusted_peers_path)
+            .await
+            .map_err(CommsRuntimeError::ListenerError)?
+        {
             TrustedPeers::load(&config.trusted_peers_path)
+                .await
                 .map_err(|e| CommsRuntimeError::TrustLoadError(e.to_string()))?
         } else {
             TrustedPeers::new()
@@ -191,21 +196,17 @@ impl CommsRuntime {
         let (inbox, inbox_sender) = Inbox::new();
         let trusted_peers = Arc::new(RwLock::new(trusted_peers));
 
-        // Extract secret from keypair for later recreation
-        let keypair_secret = extract_keypair_secret(&keypair)?;
         let public_key = keypair.public_key();
 
         // Create router with shared trusted peers for dynamic updates
         let comms_config = config.to_comms_config();
-        let router = Arc::new(Router::with_shared_peers(
-            keypair,
-            trusted_peers.clone(),
-            comms_config,
-        ));
+        let router = Router::with_shared_peers(keypair, trusted_peers.clone(), comms_config);
+        let keypair = router.keypair_arc();
+        let router = Arc::new(router);
 
         Ok(Self {
             config,
-            keypair_secret,
+            keypair,
             public_key,
             trusted_peers,
             inbox,
@@ -224,8 +225,8 @@ impl CommsRuntime {
     /// - Does NOT start any network listeners (messages delivered via inproc)
     /// - Automatically unregisters from the registry on drop
     ///
-    /// Note: Keypair extraction temporarily uses the filesystem (temp directory).
-    /// This is an implementation detail and the keypair is not persisted.
+    /// Note: Keypair extraction does not require filesystem access; the keypair
+    /// is kept in-memory only and is not persisted.
     ///
     /// Use this for sub-agent communication when no explicit comms config is provided.
     /// The agent's name is used to register in the InprocRegistry.
@@ -234,7 +235,7 @@ impl CommsRuntime {
     /// * `name` - The agent's name (used for inproc addressing)
     ///
     /// # Example
-    /// ```ignore
+    /// ```text
     /// let runtime = CommsRuntime::inproc_only("my-sub-agent")?;
     /// // Agent is now registered at inproc://my-sub-agent
     /// // When runtime is dropped, it automatically unregisters
@@ -244,7 +245,6 @@ impl CommsRuntime {
 
         // Generate ephemeral keypair (not persisted)
         let keypair = Keypair::generate();
-        let keypair_secret = extract_keypair_secret(&keypair)?;
         let public_key = keypair.public_key();
 
         // Create inbox
@@ -258,11 +258,9 @@ impl CommsRuntime {
 
         // Create router with default config
         let comms_config = meerkat_comms::CommsConfig::default();
-        let router = Arc::new(Router::with_shared_peers(
-            keypair,
-            trusted_peers.clone(),
-            comms_config,
-        ));
+        let router = Router::with_shared_peers(keypair, trusted_peers.clone(), comms_config);
+        let keypair = router.keypair_arc();
+        let router = Arc::new(router);
 
         // Create minimal config (no listeners, no persistence)
         let config = ResolvedCommsConfig {
@@ -278,7 +276,7 @@ impl CommsRuntime {
 
         Ok(Self {
             config,
-            keypair_secret,
+            keypair,
             public_key,
             trusted_peers,
             inbox,
@@ -313,10 +311,11 @@ impl CommsRuntime {
         if let Some(ref path) = self.config.listen_uds {
             let handle = spawn_uds_listener(
                 path,
-                self.keypair_secret,
+                self.keypair.clone(),
                 self.trusted_peers.clone(), // Shared peers for dynamic trust updates
                 self.inbox_sender.clone(),
-            )?;
+            )
+            .await?;
             self.listener_handles.push(handle);
         }
 
@@ -324,7 +323,7 @@ impl CommsRuntime {
         if let Some(ref addr) = self.config.listen_tcp {
             let handle = spawn_tcp_listener(
                 addr,
-                self.keypair_secret,
+                self.keypair.clone(),
                 self.trusted_peers.clone(), // Shared peers for dynamic trust updates
                 self.inbox_sender.clone(),
             )
@@ -413,6 +412,7 @@ impl CommsRuntime {
         // Persist outside the lock to avoid blocking other operations
         peers_snapshot
             .save(&self.config.trusted_peers_path)
+            .await
             .map_err(|e| CommsRuntimeError::TrustLoadError(e.to_string()))?;
         Ok(())
     }
@@ -503,33 +503,11 @@ fn convert_inbox_item(
     }
 }
 
-/// Extract secret bytes from a Keypair.
-fn extract_keypair_secret(keypair: &Keypair) -> Result<[u8; 32], CommsRuntimeError> {
-    let temp_dir =
-        std::env::temp_dir().join(format!("meerkat-key-extract-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_dir)?;
-    keypair
-        .save(&temp_dir)
-        .map_err(|e| CommsRuntimeError::IdentityError(e.to_string()))?;
-    let secret_bytes = std::fs::read(temp_dir.join("identity.key"))?;
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    if secret_bytes.len() != 32 {
-        return Err(CommsRuntimeError::IdentityError(
-            "Invalid key length".to_string(),
-        ));
-    }
-
-    let mut secret = [0u8; 32];
-    secret.copy_from_slice(&secret_bytes);
-    Ok(secret)
-}
-
 /// Spawn a Unix Domain Socket listener.
 #[cfg(unix)]
-fn spawn_uds_listener(
+async fn spawn_uds_listener(
     path: &Path,
-    keypair_secret: [u8; 32],
+    keypair: Arc<Keypair>,
     trusted: Arc<RwLock<TrustedPeers>>,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
@@ -538,39 +516,41 @@ fn spawn_uds_listener(
     let path = path.to_path_buf();
 
     // Remove existing socket file if present
-    let _ = std::fs::remove_file(&path);
-
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    if let Err(err) = tokio::fs::remove_file(&path).await {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(err);
+        }
     }
 
-    // Bind the listener synchronously to get any errors immediately
-    let listener = std::os::unix::net::UnixListener::bind(&path)?;
-    listener.set_nonblocking(true)?;
+    // Ensure parent directory exists
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    // Bind the listener (non-blocking) for tokio accept loop.
+    let listener = UnixListener::bind(&path)?;
 
     let handle = tokio::spawn(async move {
-        let listener = match UnixListener::from_std(listener) {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("Failed to convert to tokio listener: {}", e);
-                return;
-            }
-        };
-
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
-                    let keypair = Keypair::from_secret(keypair_secret);
+                    let keypair = keypair.clone();
                     let trusted = trusted.clone();
                     let inbox_sender = inbox_sender.clone();
 
                     tokio::spawn(async move {
                         // Get a snapshot of trusted peers for this connection
                         let trusted_snapshot = trusted.read().await.clone();
-                        if let Err(e) =
-                            handle_connection(stream, &keypair, &trusted_snapshot, &inbox_sender)
-                                .await
+                        if let Err(e) = handle_connection(
+                            stream,
+                            keypair.as_ref(),
+                            &trusted_snapshot,
+                            &inbox_sender,
+                        )
+                        .await
                         {
                             tracing::warn!("UDS connection error: {}", e);
                         }
@@ -590,7 +570,7 @@ fn spawn_uds_listener(
 /// Spawn a TCP listener.
 async fn spawn_tcp_listener(
     addr: &std::net::SocketAddr,
-    keypair_secret: [u8; 32],
+    keypair: Arc<Keypair>,
     trusted: Arc<RwLock<TrustedPeers>>,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
@@ -600,16 +580,20 @@ async fn spawn_tcp_listener(
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
-                    let keypair = Keypair::from_secret(keypair_secret);
+                    let keypair = keypair.clone();
                     let trusted = trusted.clone();
                     let inbox_sender = inbox_sender.clone();
 
                     tokio::spawn(async move {
                         // Get a snapshot of trusted peers for this connection
                         let trusted_snapshot = trusted.read().await.clone();
-                        if let Err(e) =
-                            handle_connection(stream, &keypair, &trusted_snapshot, &inbox_sender)
-                                .await
+                        if let Err(e) = handle_connection(
+                            stream,
+                            keypair.as_ref(),
+                            &trusted_snapshot,
+                            &inbox_sender,
+                        )
+                        .await
                         {
                             tracing::warn!("TCP connection error: {}", e);
                         }
@@ -647,11 +631,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_comms_runtime_struct() {
+    #[tokio::test]
+    async fn test_comms_runtime_struct() {
         let tmp = TempDir::new().unwrap();
         let config = make_test_config(&tmp);
-        let runtime = CommsRuntime::new(config).unwrap();
+        let runtime = CommsRuntime::new(config).await.unwrap();
 
         // Verify all fields are accessible
         let _ = runtime.public_key();
@@ -660,11 +644,11 @@ mod tests {
         let _ = runtime.inbox_sender();
     }
 
-    #[test]
-    fn test_comms_runtime_new() {
+    #[tokio::test]
+    async fn test_comms_runtime_new() {
         let tmp = TempDir::new().unwrap();
         let config = make_test_config(&tmp);
-        let runtime = CommsRuntime::new(config).unwrap();
+        let runtime = CommsRuntime::new(config).await.unwrap();
 
         // Keypair should be generated
         let pubkey = runtime.public_key();
@@ -683,7 +667,7 @@ mod tests {
         // Configure TCP listener on random port
         config.listen_tcp = Some("127.0.0.1:0".parse().unwrap());
 
-        let mut runtime = CommsRuntime::new(config).unwrap();
+        let mut runtime = CommsRuntime::new(config).await.unwrap();
 
         // Start listeners should succeed
         // Note: port 0 will fail because we can't actually use it
@@ -708,28 +692,28 @@ mod tests {
     async fn test_comms_runtime_drain_messages() {
         let tmp = TempDir::new().unwrap();
         let config = make_test_config(&tmp);
-        let mut runtime = CommsRuntime::new(config).unwrap();
+        let mut runtime = CommsRuntime::new(config).await.unwrap();
 
         // Empty inbox should return empty vec
         let messages = runtime.drain_messages().await;
         assert!(messages.is_empty());
     }
 
-    #[test]
-    fn test_comms_runtime_router() {
+    #[tokio::test]
+    async fn test_comms_runtime_router() {
         let tmp = TempDir::new().unwrap();
         let config = make_test_config(&tmp);
-        let runtime = CommsRuntime::new(config).unwrap();
+        let runtime = CommsRuntime::new(config).await.unwrap();
 
         // Router should be accessible
         let _router = runtime.router();
     }
 
-    #[test]
-    fn test_comms_runtime_public_key() {
+    #[tokio::test]
+    async fn test_comms_runtime_public_key() {
         let tmp = TempDir::new().unwrap();
         let config = make_test_config(&tmp);
-        let runtime = CommsRuntime::new(config).unwrap();
+        let runtime = CommsRuntime::new(config).await.unwrap();
 
         let pubkey = runtime.public_key();
         assert_eq!(pubkey.as_bytes().len(), 32);
@@ -739,11 +723,11 @@ mod tests {
         assert_eq!(pubkey, pubkey2);
     }
 
-    #[test]
-    fn test_comms_runtime_shutdown() {
+    #[tokio::test]
+    async fn test_comms_runtime_shutdown() {
         let tmp = TempDir::new().unwrap();
         let config = make_test_config(&tmp);
-        let mut runtime = CommsRuntime::new(config).unwrap();
+        let mut runtime = CommsRuntime::new(config).await.unwrap();
 
         // Shutdown with no listeners should be fine
         runtime.shutdown();
@@ -837,18 +821,18 @@ mod tests {
         assert_ne!(CommsStatus::Accepted, CommsStatus::Completed);
     }
 
-    #[test]
-    fn test_comms_runtime_persists_keypair() {
+    #[tokio::test]
+    async fn test_comms_runtime_persists_keypair() {
         let tmp = TempDir::new().unwrap();
         let config = make_test_config(&tmp);
 
         // First runtime generates keypair
-        let runtime1 = CommsRuntime::new(config.clone()).unwrap();
+        let runtime1 = CommsRuntime::new(config.clone()).await.unwrap();
         let pubkey1 = runtime1.public_key();
         drop(runtime1);
 
         // Second runtime loads same keypair
-        let runtime2 = CommsRuntime::new(config).unwrap();
+        let runtime2 = CommsRuntime::new(config).await.unwrap();
         let pubkey2 = runtime2.public_key();
 
         assert_eq!(
@@ -870,10 +854,10 @@ mod tests {
                 addr: "tcp://127.0.0.1:4200".to_string(),
             }],
         };
-        std::fs::create_dir_all(tmp.path()).unwrap();
-        trusted.save(&config.trusted_peers_path).unwrap();
+        tokio::fs::create_dir_all(tmp.path()).await.unwrap();
+        trusted.save(&config.trusted_peers_path).await.unwrap();
 
-        let runtime = CommsRuntime::new(config).unwrap();
+        let runtime = CommsRuntime::new(config).await.unwrap();
         let peers_arc = runtime.trusted_peers_shared();
         let peers = peers_arc.read().await;
         assert_eq!(peers.peers.len(), 1);
@@ -887,7 +871,7 @@ mod tests {
         let mut config = make_test_config(&tmp);
         config.listen_uds = Some(tmp.path().join("test.sock"));
 
-        let mut runtime = CommsRuntime::new(config.clone()).unwrap();
+        let mut runtime = CommsRuntime::new(config.clone()).await.unwrap();
         runtime.start_listeners().await.unwrap();
 
         // Socket file should exist
@@ -900,7 +884,7 @@ mod tests {
     async fn test_comms_runtime_arc_accessors() {
         let tmp = TempDir::new().unwrap();
         let config = make_test_config(&tmp);
-        let runtime = CommsRuntime::new(config).unwrap();
+        let runtime = CommsRuntime::new(config).await.unwrap();
 
         // Test that we can get Arc clones for use with CommsToolDispatcher
         let router_arc = runtime.router_arc();
@@ -921,7 +905,7 @@ mod tests {
     async fn test_comms_runtime_dynamic_trust_updates() {
         let tmp = TempDir::new().unwrap();
         let config = make_test_config(&tmp);
-        let runtime = CommsRuntime::new(config).unwrap();
+        let runtime = CommsRuntime::new(config).await.unwrap();
 
         // Initially no peers
         {
@@ -1115,7 +1099,7 @@ mod tests {
         config.listen_uds = None;
         config.listen_tcp = None;
 
-        let mut runtime = CommsRuntime::new(config).unwrap();
+        let mut runtime = CommsRuntime::new(config).await.unwrap();
         let pubkey = runtime.public_key();
 
         // Before start_listeners, NOT registered in InprocRegistry
@@ -1163,7 +1147,7 @@ mod tests {
         parent_config.listen_uds = None;
         parent_config.listen_tcp = None;
 
-        let mut parent_runtime = CommsRuntime::new(parent_config).unwrap();
+        let mut parent_runtime = CommsRuntime::new(parent_config).await.unwrap();
         let parent_pubkey = parent_runtime.public_key();
         parent_runtime.start_listeners().await.unwrap();
 

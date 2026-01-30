@@ -13,10 +13,9 @@ use serde_json::Value;
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::{NewTask, TaskId, TaskPriority};
 use crate::builtin::{BuiltinTool, BuiltinToolError};
-use crate::schema::SchemaBuilder;
 
 /// Parameters for the task_create tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct TaskCreateParams {
     /// Brief title for the task
     subject: String,
@@ -24,7 +23,7 @@ struct TaskCreateParams {
     description: String,
     /// Priority level: "low", "medium", or "high"
     #[serde(default)]
-    priority: Option<String>,
+    priority: Option<TaskPriority>,
     /// Labels/tags for categorization
     #[serde(default)]
     labels: Option<Vec<String>>,
@@ -49,7 +48,7 @@ struct TaskCreateParams {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use std::sync::Arc;
 /// use meerkat_tools::builtin::{MemoryTaskStore, TaskCreateTool, BuiltinTool};
 /// use serde_json::json;
@@ -103,73 +102,9 @@ impl BuiltinTool for TaskCreateTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "task_create".to_string(),
-            description: "Create a new task in the project task list".to_string(),
-            input_schema: SchemaBuilder::new()
-                .property(
-                    "subject",
-                    serde_json::json!({
-                        "type": "string",
-                        "description": "Brief title for the task"
-                    }),
-                )
-                .property(
-                    "description",
-                    serde_json::json!({
-                        "type": "string",
-                        "description": "Detailed description of what needs to be done"
-                    }),
-                )
-                .property(
-                    "priority",
-                    serde_json::json!({
-                        "type": "string",
-                        "enum": ["low", "medium", "high"],
-                        "description": "Task priority level"
-                    }),
-                )
-                .property(
-                    "labels",
-                    serde_json::json!({
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Labels/tags for categorization"
-                    }),
-                )
-                .property(
-                    "blocks",
-                    serde_json::json!({
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "IDs of tasks that this task blocks"
-                    }),
-                )
-                .property(
-                    "owner",
-                    serde_json::json!({
-                        "type": "string",
-                        "description": "Owner/assignee of the task"
-                    }),
-                )
-                .property(
-                    "metadata",
-                    serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": true,
-                        "description": "Arbitrary key-value metadata"
-                    }),
-                )
-                .property(
-                    "blocked_by",
-                    serde_json::json!({
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "IDs of tasks that block THIS task"
-                    }),
-                )
-                .required("subject")
-                .required("description")
-                .build(),
+            name: "task_create".into(),
+            description: "Create a new task in the project task list".into(),
+            input_schema: crate::schema::schema_for::<TaskCreateParams>(),
         }
     }
 
@@ -181,23 +116,10 @@ impl BuiltinTool for TaskCreateTool {
         let params: TaskCreateParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
 
-        let priority = match params.priority.as_deref() {
-            Some("low") => Some(TaskPriority::Low),
-            Some("medium") => Some(TaskPriority::Medium),
-            Some("high") => Some(TaskPriority::High),
-            Some(other) => {
-                return Err(BuiltinToolError::InvalidArgs(format!(
-                    "Invalid priority: {}. Must be low, medium, or high",
-                    other
-                )));
-            }
-            None => None,
-        };
-
         let new_task = NewTask {
             subject: params.subject,
             description: params.description,
-            priority,
+            priority: params.priority,
             labels: params.labels,
             blocks: params
                 .blocks
@@ -225,6 +147,45 @@ mod tests {
     use super::*;
     use crate::builtin::MemoryTaskStore;
     use crate::builtin::types::{Task, TaskPriority, TaskStatus};
+
+    fn schema_resolve_ref<'a>(root: &'a Value, ref_path: &str) -> Option<&'a Value> {
+        let path = ref_path.strip_prefix("#/")?;
+        let mut current = root;
+        for part in path.split('/') {
+            current = current.get(part)?;
+        }
+        Some(current)
+    }
+
+    fn schema_allows_value(root: &Value, schema: &Value, expected: &Value) -> bool {
+        if let Some(const_value) = schema.get("const") {
+            return const_value == expected;
+        }
+
+        if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+            return values.contains(expected);
+        }
+
+        if let Some(ref_path) = schema.get("$ref").and_then(Value::as_str) {
+            if let Some(resolved) = schema_resolve_ref(root, ref_path) {
+                return schema_allows_value(root, resolved, expected);
+            }
+        }
+
+        for key in ["anyOf", "oneOf", "allOf"] {
+            let Some(options) = schema.get(key).and_then(Value::as_array) else {
+                continue;
+            };
+            if options
+                .iter()
+                .any(|option| schema_allows_value(root, option, expected))
+            {
+                return true;
+            }
+        }
+
+        false
+    }
 
     #[test]
     fn test_task_create_tool_def() {
@@ -259,10 +220,21 @@ mod tests {
         assert!(required.contains(&serde_json::json!("description")));
 
         // Verify priority enum values
-        let priority_enum = properties["priority"]["enum"].as_array().unwrap();
-        assert!(priority_enum.contains(&serde_json::json!("low")));
-        assert!(priority_enum.contains(&serde_json::json!("medium")));
-        assert!(priority_enum.contains(&serde_json::json!("high")));
+        assert!(schema_allows_value(
+            schema,
+            &properties["priority"],
+            &serde_json::json!("low")
+        ));
+        assert!(schema_allows_value(
+            schema,
+            &properties["priority"],
+            &serde_json::json!("medium")
+        ));
+        assert!(schema_allows_value(
+            schema,
+            &properties["priority"],
+            &serde_json::json!("high")
+        ));
     }
 
     #[test]

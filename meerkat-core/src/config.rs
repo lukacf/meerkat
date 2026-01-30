@@ -71,15 +71,15 @@ impl Config {
     /// Load configuration from all sources with proper layering
     /// Order: defaults → project config OR global config → env vars (secrets only)
     /// → CLI (CLI applied separately)
-    pub fn load() -> Result<Self, ConfigError> {
+    pub async fn load() -> Result<Self, ConfigError> {
         let mut config = Self::default();
 
         // 1. Load project config (if exists). Local config replaces global.
-        if let Some(path) = Self::find_project_config() {
-            config.merge_file(&path)?;
+        if let Some(path) = Self::find_project_config().await {
+            config.merge_file(&path).await?;
         } else if let Some(path) = Self::global_config_path() {
-            if path.exists() {
-                config.merge_file(&path)?;
+            if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                config.merge_file(&path).await?;
             }
         }
 
@@ -100,15 +100,28 @@ impl Config {
     }
 
     /// Find project config by walking up directories (.rkat/config.toml)
-    fn find_project_config() -> Option<PathBuf> {
-        let cwd = std::env::current_dir().ok()?;
-        find_project_root(&cwd).map(|root| root.join(".rkat/config.toml"))
+    async fn find_project_config() -> Option<PathBuf> {
+        let mut current = std::env::current_dir().ok()?;
+        loop {
+            let marker_dir = current.join(".rkat");
+            let is_project_root = match tokio::fs::metadata(&marker_dir).await {
+                Ok(meta) => meta.is_dir(),
+                Err(_) => false,
+            };
+            if is_project_root {
+                return Some(marker_dir.join("config.toml"));
+            }
+            if !current.pop() {
+                return None;
+            }
+        }
     }
 
     /// Merge configuration from a TOML file
-    pub fn merge_file(&mut self, path: &PathBuf) -> Result<(), ConfigError> {
-        let content =
-            std::fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
+    pub async fn merge_file(&mut self, path: &PathBuf) -> Result<(), ConfigError> {
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| ConfigError::IoError(e.to_string()))?;
 
         let file_config: Config =
             toml::from_str(&content).map_err(|e| ConfigError::ParseError(e.to_string()))?;

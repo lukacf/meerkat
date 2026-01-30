@@ -8,6 +8,7 @@ pub mod adapter;
 pub mod error;
 pub mod factory;
 pub mod provider;
+mod streaming;
 mod test_client;
 pub mod types;
 
@@ -27,7 +28,7 @@ pub use factory::{
 };
 pub use provider::ProviderResolver;
 pub use test_client::TestClient;
-pub use types::{LlmClient, LlmEvent, LlmRequest, LlmResponse};
+pub use types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmResponse};
 
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicClient;

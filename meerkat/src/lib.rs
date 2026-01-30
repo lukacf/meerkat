@@ -4,7 +4,7 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,ignore
+//! ```text
 //! use meerkat::prelude::*;
 //! use meerkat_agent::AgentFactory;
 //! use meerkat::AnthropicClient;
@@ -113,7 +113,7 @@ pub use meerkat_core::{
 };
 
 // Re-export client types
-pub use meerkat_client::{LlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse};
+pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};
 pub use meerkat_tools::ToolError;
 
 // AgentFactory

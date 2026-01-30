@@ -97,7 +97,7 @@ pub enum InboxError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::identity::PubKey;
@@ -127,7 +127,7 @@ mod tests {
     fn test_inbox_sender_struct() {
         let (_inbox, sender) = Inbox::new();
         // Sender exists and can be cloned
-        let _sender2 = sender.clone();
+        let _sender2 = sender;
     }
 
     #[test]
@@ -218,7 +218,7 @@ mod tests {
         // Inbox should expose a Notify
         let notify = inbox.notify();
         // Arc should be clonable
-        let _notify2 = notify.clone();
+        let _notify2 = notify;
     }
 
     #[tokio::test]

@@ -51,6 +51,16 @@ pub fn ensure_rkat_dir(project_root: &Path) -> std::io::Result<PathBuf> {
     Ok(rkat_dir)
 }
 
+/// Ensure `.rkat` directory exists in project root, creating if needed.
+///
+/// This async variant uses `tokio::fs` so it can be called from async request handlers
+/// without blocking the runtime.
+pub async fn ensure_rkat_dir_async(project_root: &Path) -> std::io::Result<PathBuf> {
+    let rkat_dir = project_root.join(".rkat");
+    tokio::fs::create_dir_all(&rkat_dir).await?;
+    Ok(rkat_dir)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

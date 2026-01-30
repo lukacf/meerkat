@@ -669,7 +669,7 @@ mod tests {
     fn test_job_manager_struct() {
         // Verify JobManager has the required fields
         let config = ShellConfig::default();
-        let manager = JobManager::new(config.clone());
+        let manager = JobManager::new(config);
 
         // Check that it has the expected structure by using it
         assert!(manager.event_tx.is_none());
@@ -690,7 +690,7 @@ mod tests {
             max_concurrent_processes: 10,
         };
 
-        let manager = JobManager::new(config.clone());
+        let manager = JobManager::new(config);
 
         // Verify config is stored
         assert!(manager.config.enabled);
@@ -860,7 +860,6 @@ mod tests {
     // ==================== Cancel Job Tests ====================
 
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_job_manager_cancel() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -888,7 +887,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_job_manager_cancel_signal() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -915,10 +913,10 @@ mod tests {
     // ==================== Async Execution Tests (require actual shell) ====================
 
     #[tokio::test]
-    #[ignore = "requires nu"]
     async fn test_job_manager_tokio_spawn() {
         let temp_dir = TempDir::new().unwrap();
-        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.shell = "sh".to_string();
 
         let manager = JobManager::new(config);
 
@@ -938,10 +936,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires nu"]
     async fn test_job_manager_completed_status() {
         let temp_dir = TempDir::new().unwrap();
-        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.shell = "sh".to_string();
 
         let manager = JobManager::new(config);
 
@@ -970,10 +968,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires nu"]
     async fn test_job_manager_failed_status() {
         let temp_dir = TempDir::new().unwrap();
-        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.shell = "sh".to_string();
 
         let manager = JobManager::new(config);
 
@@ -997,15 +995,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires nu"]
     async fn test_job_manager_timeout_status() {
         let temp_dir = TempDir::new().unwrap();
-        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.shell = "sh".to_string();
 
         let manager = JobManager::new(config);
 
         // Job that will timeout
-        let job_id = manager.spawn_job("sleep 30sec", None, 1).await.unwrap();
+        let job_id = manager.spawn_job("sleep 30", None, 1).await.unwrap();
 
         // Wait for timeout
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1023,14 +1021,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires nu"]
     async fn test_job_manager_cancelled_status() {
         let temp_dir = TempDir::new().unwrap();
-        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.shell = "sh".to_string();
 
         let manager = JobManager::new(config);
 
-        let job_id = manager.spawn_job("sleep 60sec", None, 120).await.unwrap();
+        let job_id = manager.spawn_job("sleep 60", None, 120).await.unwrap();
 
         // Let it start
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1116,7 +1114,6 @@ mod tests {
     /// Spawning a job should return immediately without waiting for the
     /// command to complete. This verifies that spawn_job doesn't block.
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_async_execution_nonblocking() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1161,15 +1158,15 @@ mod tests {
     /// A job that runs longer than its timeout should be terminated and
     /// marked as TimedOut.
     #[tokio::test]
-    #[ignore = "requires nu"]
     async fn test_timeout_enforced() {
         let temp_dir = TempDir::new().unwrap();
-        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.shell = "sh".to_string();
 
         let manager = JobManager::new(config);
 
         // Spawn a job that sleeps longer than the timeout
-        let job_id = manager.spawn_job("sleep 10sec", None, 1).await.unwrap();
+        let job_id = manager.spawn_job("sleep 10", None, 1).await.unwrap();
 
         // Wait for timeout to occur (plus buffer)
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1197,7 +1194,6 @@ mod tests {
     /// When a job is cancelled, the underlying process should be terminated
     /// and the job status should be Cancelled.
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_kill_terminates_process() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1245,7 +1241,6 @@ mod tests {
     ///
     /// When spawning many jobs concurrently, each should get a unique ID.
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_concurrent_job_spawning() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1300,7 +1295,6 @@ mod tests {
     // ==================== Job Cleanup Tests ====================
 
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_remove_job() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1330,7 +1324,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_job_count() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1354,7 +1347,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_completed_job_count() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1379,7 +1371,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_cleanup_respects_max_completed_jobs() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1440,7 +1431,6 @@ mod tests {
     /// Verifies that job output containing emoji, Chinese characters, and other
     /// multi-byte UTF-8 sequences is captured without panicking or data corruption.
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_multibyte_utf8_output() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1484,7 +1474,6 @@ mod tests {
     /// Verifies that when cancel_job is called, the underlying process is
     /// fully terminated and reaped via child.kill().await (not just start_kill()).
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_kill_reaps_process() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1533,7 +1522,6 @@ mod tests {
     /// Verifies that when a background job finishes, the monitoring task
     /// automatically updates the job status to Completed with output captured.
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_background_job_auto_completes() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1666,7 +1654,6 @@ mod tests {
     /// within a single lock scope, preventing race conditions where another
     /// operation could change the status between checking and modifying.
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_cancel_job_atomic_status_check() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1727,7 +1714,6 @@ mod tests {
     /// fast cancellations. A future improvement could keep a reference for
     /// graceful termination.
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     #[cfg(unix)]
     async fn test_graceful_kill_function_exists() {
         use tokio::process::Command;
@@ -1749,7 +1735,6 @@ mod tests {
     /// and performs all cleanup operations atomically, rather than using
     /// a read-then-write pattern that could cause race conditions.
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_cleanup_atomicity() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1840,7 +1825,6 @@ mod tests {
 
     /// Regression test for Task #10: Error variant for non-running jobs
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_error_context_job_already_completed() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1896,7 +1880,6 @@ mod tests {
 
     /// Test running_job_count returns correct count of running jobs
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_running_job_count() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1908,17 +1891,19 @@ mod tests {
         assert_eq!(manager.running_job_count().await, 0);
 
         // Spawn a long-running job
-        let _job1 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
+        let job1 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
         assert_eq!(manager.running_job_count().await, 1);
 
         // Spawn another long-running job
-        let _job2 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
+        let job2 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
         assert_eq!(manager.running_job_count().await, 2);
+
+        let _ = manager.cancel_job(&job1).await;
+        let _ = manager.cancel_job(&job2).await;
     }
 
     /// Test that concurrency limit is enforced
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_concurrency_limit_enforced() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1928,8 +1913,8 @@ mod tests {
         let manager = JobManager::new(config);
 
         // Spawn up to the limit
-        let _job1 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
-        let _job2 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
+        let job1 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
+        let job2 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
 
         // Third job should be rejected
         let result = manager.spawn_job("sleep 60", None, 120).await;
@@ -1944,11 +1929,13 @@ mod tests {
             "Expected concurrency limit error, got: {:?}",
             err
         );
+
+        let _ = manager.cancel_job(&job1).await;
+        let _ = manager.cancel_job(&job2).await;
     }
 
     /// Test that concurrency limit of 0 means unlimited
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_concurrency_limit_zero_means_unlimited() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1958,18 +1945,23 @@ mod tests {
         let manager = JobManager::new(config);
 
         // Should be able to spawn many jobs
+        let mut jobs = Vec::new();
         for _ in 0..5 {
             let result = manager.spawn_job("sleep 60", None, 120).await;
             assert!(
                 result.is_ok(),
                 "Should allow unlimited jobs when limit is 0"
             );
+            jobs.push(result.unwrap());
+        }
+
+        for job in jobs {
+            let _ = manager.cancel_job(&job).await;
         }
     }
 
     /// Test that completed jobs don't count toward concurrency limit
     #[tokio::test]
-    #[ignore = "e2e: spawns real shell process"]
     async fn test_concurrency_limit_excludes_completed() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
@@ -1992,11 +1984,14 @@ mod tests {
         );
 
         // Should still be able to spawn 2 more jobs (completed doesn't count)
-        let _job2 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
-        let _job3 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
+        let job2 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
+        let job3 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
 
         // Now at limit - next should fail
         let result = manager.spawn_job("sleep 60", None, 120).await;
         assert!(result.is_err(), "Should reject when at limit");
+
+        let _ = manager.cancel_job(&job2).await;
+        let _ = manager.cancel_job(&job3).await;
     }
 }

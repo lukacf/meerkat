@@ -7,7 +7,7 @@
 //! The [`builtin`] module provides built-in tools for task management and utilities.
 //! Use [`CompositeDispatcher`] to combine built-in tools with external MCP tools.
 //!
-//! ```ignore
+//! ```text
 //! use meerkat_tools::{
 //!     CompositeDispatcher, BuiltinToolConfig, FileTaskStore,
 //!     find_project_root, ensure_rkat_dir,
@@ -36,7 +36,7 @@ pub use builtin::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CommsToolSurface,
     CompositeDispatcher, CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore,
     MemoryTaskStore, ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
-    find_project_root,
+    ensure_rkat_dir_async, find_project_root,
 };
 pub use comms_dispatcher::{
     CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, wrap_with_comms,
@@ -45,4 +45,4 @@ pub use dispatcher::EmptyToolDispatcher;
 pub use dispatcher::{FilteredToolDispatcher, ToolDispatcher};
 pub use error::{DispatchError, ToolError, ToolValidationError};
 pub use registry::ToolRegistry;
-pub use schema::{SchemaBuilder, empty_object_schema};
+pub use schema::{empty_object_schema, schema_for};

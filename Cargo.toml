@@ -34,7 +34,7 @@ async-trait = "0.1"
 async-stream = "0.3"
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 toml = "0.8"
 toml_edit = "0.22"
@@ -56,9 +56,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 humantime = "2.1"
 humantime-serde = "1.1"
+redb = "2"
 
 # JSON Schema validation
 jsonschema = "0.26"
+schemars = { version = "1", features = ["derive"] }
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -93,13 +95,17 @@ meerkat-comms-mcp = { path = "meerkat-comms-mcp" }
 meerkat-comms-agent = { path = "meerkat-comms-agent" }
 
 [workspace.lints.rust]
-# unsafe_code = "forbid"  # Enable after stabilizing
+unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 panic = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
+mutex_integer = "deny"
+mutex_atomic = "deny"
+redundant_clone = "deny"
+implicit_clone = "deny"
 # Allow patterns common in development
 module_name_repetitions = "allow"
 must_use_candidate = "allow"

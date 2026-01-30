@@ -68,8 +68,8 @@ impl Default for CommsManagerConfig {
 /// - Inbox for receiving messages
 /// - Router for sending messages
 pub struct CommsManager {
-    /// Our keypair for signing messages (stored as secret for recreation).
-    keypair_secret: [u8; 32],
+    /// Our keypair for signing messages.
+    keypair: Arc<Keypair>,
     /// List of trusted peers.
     trusted_peers: Arc<TrustedPeers>,
     /// The inbox for receiving messages.
@@ -86,18 +86,12 @@ impl CommsManager {
         let (inbox, inbox_sender) = Inbox::new();
         let trusted_peers = Arc::new(config.trusted_peers.clone());
 
-        let keypair_secret = crate::listener::keypair_to_secret(&config.keypair)?;
-
-        // Recreate keypair for router (router takes ownership)
-        let router_keypair = Keypair::from_secret(keypair_secret);
-        let router = Arc::new(Router::new(
-            router_keypair,
-            config.trusted_peers,
-            config.comms_config,
-        ));
+        let router = Router::new(config.keypair, config.trusted_peers, config.comms_config);
+        let keypair = router.keypair_arc();
+        let router = Arc::new(router);
 
         Ok(Self {
-            keypair_secret,
+            keypair,
             trusted_peers,
             inbox,
             inbox_sender,
@@ -105,14 +99,17 @@ impl CommsManager {
         })
     }
 
-    /// Get a fresh keypair instance (recreated from stored secret).
-    pub fn keypair(&self) -> Keypair {
-        Keypair::from_secret(self.keypair_secret)
+    pub fn keypair(&self) -> &Keypair {
+        self.keypair.as_ref()
+    }
+
+    pub fn keypair_arc(&self) -> Arc<Keypair> {
+        self.keypair.clone()
     }
 
     /// Get the public key.
     pub fn public_key(&self) -> meerkat_comms::PubKey {
-        self.keypair().public_key()
+        self.keypair.public_key()
     }
 
     /// Get the trusted peers.

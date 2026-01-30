@@ -3,6 +3,7 @@ use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolPolicyLayer,
 };
 use serde_json::json;
+use std::path::Path;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -77,7 +78,7 @@ fn test_rct_contracts_all_builtin_schemas_have_required_field()
     let config = BuiltinToolConfig::default();
     let dispatcher = CompositeDispatcher::new(store, &config, None, None, None)?;
 
-    for tool in dispatcher.tools() {
+    for tool in dispatcher.tools().iter() {
         let schema = &tool.input_schema;
         assert_eq!(schema["type"], "object");
         let _props = schema.get("properties").ok_or("missing properties")?;
@@ -118,4 +119,82 @@ fn test_rct_contracts_shell_defaults_contract() -> Result<(), Box<dyn std::error
     let json_val: serde_json::Value = serde_json::from_str(&json_str)?;
     assert_eq!(json_val["shell"], "nu");
     Ok(())
+}
+
+#[test]
+fn test_rct_contracts_no_manual_tool_schema_literals() -> Result<(), Box<dyn std::error::Error>> {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = crate_root
+        .parent()
+        .ok_or("missing workspace root")?
+        .to_path_buf();
+
+    let mut offenders = Vec::new();
+    scan_for_manual_input_schema_literals(&workspace_root, &workspace_root, &mut offenders)?;
+
+    assert!(
+        offenders.is_empty(),
+        "Manual tool schema literals found:\n{}",
+        offenders.join("\n")
+    );
+    Ok(())
+}
+
+fn scan_for_manual_input_schema_literals(
+    root: &Path,
+    dir: &Path,
+    offenders: &mut Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+
+        if path.is_dir() {
+            match file_name.as_ref() {
+                ".git" | "target" => continue,
+                _ => {}
+            }
+
+            scan_for_manual_input_schema_literals(root, &path, offenders)?;
+            continue;
+        }
+
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+
+        let contents = std::fs::read_to_string(&path)?;
+        for (idx, line) in contents.lines().enumerate() {
+            if contains_manual_input_schema_literal(line) {
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                offenders.push(format!("{}:{}: {}", rel.display(), idx + 1, line.trim()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn contains_manual_input_schema_literal(line: &str) -> bool {
+    for needle in [
+        "input_schema: serde_json::json!(",
+        "input_schema: json!(",
+        "input_schema:serde_json::json!(",
+        "input_schema:json!(",
+    ] {
+        let Some(pos) = line.find(needle) else {
+            continue;
+        };
+
+        // Don't trip over our own pattern strings.
+        if line[..pos].ends_with('"') {
+            continue;
+        }
+
+        return true;
+    }
+
+    false
 }

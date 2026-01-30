@@ -49,7 +49,8 @@ pub enum CompositeDispatcherError {
 pub struct CompositeDispatcher {
     builtins: HashMap<String, Arc<dyn BuiltinTool>>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
-    tool_defs: Vec<ToolDef>,
+    tool_defs: Vec<Arc<ToolDef>>,
+    tools: Arc<[Arc<ToolDef>]>,
     /// Track which tool sets are enabled for usage instructions
     has_task_tools: bool,
     has_shell_tools: bool,
@@ -183,17 +184,22 @@ impl CompositeDispatcher {
 
         // Check for collisions with external tools
         if let Some(ref ext) = external {
-            for ext_tool in ext.tools() {
-                if builtins.contains_key(&ext_tool.name) {
-                    return Err(CompositeDispatcherError::NameCollision(ext_tool.name));
+            for ext_tool in ext.tools().iter() {
+                if builtins.contains_key(ext_tool.name.as_str()) {
+                    return Err(CompositeDispatcherError::NameCollision(
+                        ext_tool.name.clone(),
+                    ));
                 }
             }
         }
 
-        let mut tool_defs: Vec<ToolDef> = builtins.values().map(|t| t.def()).collect();
+        let mut tool_defs: Vec<Arc<ToolDef>> =
+            builtins.values().map(|t| Arc::new(t.def())).collect();
         if let Some(ref ext) = external {
-            tool_defs.extend(ext.tools());
+            tool_defs.extend(ext.tools().iter().map(Arc::clone));
         }
+        let tools: Arc<[Arc<ToolDef>]> =
+            tool_defs.iter().map(Arc::clone).collect::<Vec<_>>().into();
 
         // Track which tool categories are enabled
         let has_task_tools = builtins.contains_key("task_create")
@@ -212,6 +218,7 @@ impl CompositeDispatcher {
             builtins,
             external,
             tool_defs,
+            tools,
             has_task_tools,
             has_shell_tools,
             has_sub_agent_tools: false, // Set later via register_sub_agent_tools
@@ -321,7 +328,7 @@ impl CompositeDispatcher {
                 return Err(CompositeDispatcherError::NameCollision(name.to_string()));
             }
             if let Some(ref ext) = self.external {
-                for ext_tool in ext.tools() {
+                for ext_tool in ext.tools().iter() {
                     if ext_tool.name == name {
                         return Err(CompositeDispatcherError::NameCollision(name.to_string()));
                     }
@@ -335,7 +342,7 @@ impl CompositeDispatcher {
 
         // Register spawn tool
         if resolved.is_enabled(tool_set.spawn.name(), tool_set.spawn.default_enabled()) {
-            let def = tool_set.spawn.def();
+            let def = Arc::new(tool_set.spawn.def());
             self.builtins
                 .insert(tool_set.spawn.name().to_string(), Arc::new(tool_set.spawn));
             self.tool_defs.push(def);
@@ -343,7 +350,7 @@ impl CompositeDispatcher {
 
         // Register fork tool
         if resolved.is_enabled(tool_set.fork.name(), tool_set.fork.default_enabled()) {
-            let def = tool_set.fork.def();
+            let def = Arc::new(tool_set.fork.def());
             self.builtins
                 .insert(tool_set.fork.name().to_string(), Arc::new(tool_set.fork));
             self.tool_defs.push(def);
@@ -351,7 +358,7 @@ impl CompositeDispatcher {
 
         // Register status tool
         if resolved.is_enabled(tool_set.status.name(), tool_set.status.default_enabled()) {
-            let def = tool_set.status.def();
+            let def = Arc::new(tool_set.status.def());
             self.builtins.insert(
                 tool_set.status.name().to_string(),
                 Arc::new(tool_set.status),
@@ -361,7 +368,7 @@ impl CompositeDispatcher {
 
         // Register cancel tool
         if resolved.is_enabled(tool_set.cancel.name(), tool_set.cancel.default_enabled()) {
-            let def = tool_set.cancel.def();
+            let def = Arc::new(tool_set.cancel.def());
             self.builtins.insert(
                 tool_set.cancel.name().to_string(),
                 Arc::new(tool_set.cancel),
@@ -371,11 +378,18 @@ impl CompositeDispatcher {
 
         // Register list tool
         if resolved.is_enabled(tool_set.list.name(), tool_set.list.default_enabled()) {
-            let def = tool_set.list.def();
+            let def = Arc::new(tool_set.list.def());
             self.builtins
                 .insert(tool_set.list.name().to_string(), Arc::new(tool_set.list));
             self.tool_defs.push(def);
         }
+
+        self.tools = self
+            .tool_defs
+            .iter()
+            .map(Arc::clone)
+            .collect::<Vec<_>>()
+            .into();
 
         // Check if any sub-agent tools were actually registered
         self.has_sub_agent_tools = self.builtins.contains_key("agent_spawn")
@@ -431,8 +445,8 @@ impl CompositeDispatcher {
 
 #[async_trait]
 impl AgentToolDispatcher for CompositeDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        self.tool_defs.clone()
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.tools)
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -581,25 +595,26 @@ mod tests {
         use serde_json::json;
 
         struct MockExternalDispatcher {
-            tools: Vec<ToolDef>,
+            tools: Arc<[Arc<ToolDef>]>,
         }
 
         impl MockExternalDispatcher {
             fn new() -> Self {
                 Self {
-                    tools: vec![ToolDef {
+                    tools: vec![Arc::new(ToolDef {
                         name: "external_tool".to_string(),
                         description: "An external tool".to_string(),
                         input_schema: empty_object_schema(),
-                    }],
+                    })]
+                    .into(),
                 }
             }
         }
 
         #[async_trait]
         impl AgentToolDispatcher for MockExternalDispatcher {
-            fn tools(&self) -> Vec<ToolDef> {
-                self.tools.clone()
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
             }
             async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
                 if name == "external_tool" {
@@ -647,15 +662,16 @@ mod tests {
         #[test]
         fn test_composite_name_collision_error() {
             let store = Arc::new(MemoryTaskStore::new());
+
             struct OverlappingExternal;
             #[async_trait]
             impl AgentToolDispatcher for OverlappingExternal {
-                fn tools(&self) -> Vec<ToolDef> {
-                    vec![ToolDef {
+                fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                    Arc::new([Arc::new(ToolDef {
                         name: "task_list".to_string(),
                         description: "External".to_string(),
                         input_schema: empty_object_schema(),
-                    }]
+                    })])
                 }
                 async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
                     Ok(json!({"source": "external"}))
@@ -685,12 +701,12 @@ mod tests {
             struct OverlappingExternal;
             #[async_trait]
             impl AgentToolDispatcher for OverlappingExternal {
-                fn tools(&self) -> Vec<ToolDef> {
-                    vec![ToolDef {
+                fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                    Arc::new([Arc::new(ToolDef {
                         name: "task_list".to_string(),
                         description: "External".to_string(),
                         input_schema: empty_object_schema(),
-                    }]
+                    })])
                 }
                 async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
                     Ok(json!({"source": "external"}))
@@ -974,8 +990,8 @@ mod tests {
 
         #[async_trait]
         impl AgentToolDispatcher for MockToolDispatcher {
-            fn tools(&self) -> Vec<ToolDef> {
-                vec![]
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::from([])
             }
 
             async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -998,7 +1014,7 @@ mod tests {
 
         fn create_sub_agent_tool_set() -> SubAgentToolSet {
             let limits = ConcurrencyLimits::default();
-            let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+            let manager = Arc::new(SubAgentManager::new(limits, 0));
             let client_factory = Arc::new(MockClientFactory);
             let tool_dispatcher = Arc::new(MockToolDispatcher);
             let session_store = Arc::new(MockSessionStore);
@@ -1141,12 +1157,12 @@ mod tests {
             struct OverlappingExternal;
             #[async_trait]
             impl AgentToolDispatcher for OverlappingExternal {
-                fn tools(&self) -> Vec<ToolDef> {
-                    vec![ToolDef {
+                fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                    Arc::new([Arc::new(ToolDef {
                         name: "agent_spawn".to_string(),
                         description: "Conflicting tool".to_string(),
                         input_schema: empty_object_schema(),
-                    }]
+                    })])
                 }
                 async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
                     Ok(json!({}))

@@ -2,6 +2,8 @@
 //!
 //! These tests verify actual network I/O behavior and are slower than unit tests.
 
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use meerkat_comms::{
     CommsConfig, Envelope, Keypair, MessageKind, Router, SendError, Signature, Status, TrustedPeer,
     TrustedPeers, DEFAULT_MAX_MESSAGE_BYTES,

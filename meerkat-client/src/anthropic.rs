@@ -3,7 +3,7 @@
 //! Implements the LlmClient trait for Anthropic's Claude API.
 
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmEvent, LlmRequest};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use meerkat_core::{Message, StopReason, Usage};
@@ -246,121 +246,127 @@ impl LlmClient for AnthropicClient {
         &'a self,
         request: &'a LlmRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-        Box::pin(async_stream::try_stream! {
-            let body = self.build_request_body(request);
+        let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> = Box::pin(
+            async_stream::try_stream! {
+                let body = self.build_request_body(request);
 
-            let response = self.http
-                .post(format!("{}/v1/messages", self.base_url))
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|_| LlmError::NetworkTimeout {
-                    duration_ms: 30000,
-                })?;
+                let response = self.http
+                    .post(format!("{}/v1/messages", self.base_url))
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|_| LlmError::NetworkTimeout {
+                        duration_ms: 30000,
+                    })?;
 
-            let status_code = response.status().as_u16();
-            let stream_result = if (200..=299).contains(&status_code) {
-                Ok(response.bytes_stream())
-            } else {
-                let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_status(status_code, text))
-            };
-            let mut stream = stream_result?;
-            let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
-            let mut current_tool_id: Option<String> = None;
+                let status_code = response.status().as_u16();
+                let stream_result = if (200..=299).contains(&status_code) {
+                    Ok(response.bytes_stream())
+                } else {
+                    let text = response.text().await.unwrap_or_default();
+                    Err(LlmError::from_http_status(status_code, text))
+                };
+                let mut stream = stream_result?;
+                let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
+                let mut current_tool_id: Option<String> = None;
 
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].trim();
-                    let parsed_event = if !line.is_empty() {
-                        Self::parse_sse_line(line)
-                    } else {
-                        None
-                    };
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].trim();
+                        let parsed_event = if !line.is_empty() {
+                            Self::parse_sse_line(line)
+                        } else {
+                            None
+                        };
 
-                    buffer.drain(..=newline_pos);
+                        buffer.drain(..=newline_pos);
 
-                    if let Some(event) = parsed_event {
-                        match event.event_type.as_str() {
-                            "content_block_delta" => {
-                                if let Some(delta) = event.delta {
-                                    match delta.delta_type.as_str() {
-                                        "text_delta" => {
-                                            if let Some(text) = delta.text {
-                                                yield LlmEvent::TextDelta { delta: text };
+                        if let Some(event) = parsed_event {
+                            match event.event_type.as_str() {
+                                "content_block_delta" => {
+                                    if let Some(delta) = event.delta {
+                                        match delta.delta_type.as_str() {
+                                            "text_delta" => {
+                                                if let Some(text) = delta.text {
+                                                    yield LlmEvent::TextDelta { delta: text };
+                                                }
                                             }
-                                        }
-                                        "input_json_delta" => {
-                                            if let Some(partial_json) = delta.partial_json {
-                                                yield LlmEvent::ToolCallDelta {
-                                                    id: current_tool_id.clone().unwrap_or_default(),
-                                                    name: None,
-                                                    args_delta: partial_json,
-                                                };
+                                            "input_json_delta" => {
+                                                if let Some(partial_json) = delta.partial_json {
+                                                    yield LlmEvent::ToolCallDelta {
+                                                        id: current_tool_id.clone().unwrap_or_default(),
+                                                        name: None,
+                                                        args_delta: partial_json,
+                                                    };
+                                                }
                                             }
+                                            _ => {}
                                         }
-                                        _ => {}
                                     }
                                 }
-                            }
-                            "content_block_start" => {
-                                if let Some(content_block) = event.content_block {
-                                    if content_block.block_type == "tool_use" {
-                                        let id = content_block.id.unwrap_or_default();
-                                        current_tool_id = Some(id.clone());
-                                        yield LlmEvent::ToolCallDelta {
-                                            id,
-                                            name: content_block.name,
-                                            args_delta: String::new(),
+                                "content_block_start" => {
+                                    if let Some(content_block) = event.content_block {
+                                        if content_block.block_type == "tool_use" {
+                                            let id = content_block.id.unwrap_or_default();
+                                            current_tool_id = Some(id.clone());
+                                            yield LlmEvent::ToolCallDelta {
+                                                id,
+                                                name: content_block.name,
+                                                args_delta: String::new(),
+                                            };
+                                        }
+                                    }
+                                }
+                                "message_delta" => {
+                                    if let Some(usage) = event.usage {
+                                        yield LlmEvent::UsageUpdate {
+                                            usage: Usage {
+                                                input_tokens: 0, // already reported in message_start
+                                                output_tokens: usage.output_tokens.unwrap_or(0),
+                                                cache_creation_tokens: None,
+                                                cache_read_tokens: None,
+                                            }
+                                        };
+                                    }
+                                    if let Some(finish_reason) = event.delta.and_then(|d| d.stop_reason) {
+                                        let reason = match finish_reason.as_str() {
+                                            "end_turn" => StopReason::EndTurn,
+                                            "tool_use" => StopReason::ToolUse,
+                                            "max_tokens" => StopReason::MaxTokens,
+                                            _ => StopReason::EndTurn,
+                                        };
+                                        yield LlmEvent::Done {
+                                            outcome: LlmDoneOutcome::Success { stop_reason: reason },
                                         };
                                     }
                                 }
-                            }
-                            "message_delta" => {
-                                if let Some(usage) = event.usage {
-                                    yield LlmEvent::UsageUpdate {
-                                        usage: Usage {
-                                            input_tokens: 0, // already reported in message_start
-                                            output_tokens: usage.output_tokens.unwrap_or(0),
-                                            cache_creation_tokens: None,
-                                            cache_read_tokens: None,
-                                        }
-                                    };
+                                "message_start" => {
+                                    if let Some(usage) = event.message.and_then(|m| m.usage) {
+                                        yield LlmEvent::UsageUpdate {
+                                            usage: Usage {
+                                                input_tokens: usage.input_tokens.unwrap_or(0),
+                                                output_tokens: 0,
+                                                cache_creation_tokens: usage.cache_creation_input_tokens,
+                                                cache_read_tokens: usage.cache_read_input_tokens,
+                                            }
+                                        };
+                                    }
                                 }
-                                if let Some(finish_reason) = event.delta.and_then(|d| d.stop_reason) {
-                                    let reason = match finish_reason.as_str() {
-                                        "end_turn" => StopReason::EndTurn,
-                                        "tool_use" => StopReason::ToolUse,
-                                        "max_tokens" => StopReason::MaxTokens,
-                                        _ => StopReason::EndTurn,
-                                    };
-                                    yield LlmEvent::Done { stop_reason: reason };
-                                }
+                                _ => {}
                             }
-                            "message_start" => {
-                                if let Some(usage) = event.message.and_then(|m| m.usage) {
-                                    yield LlmEvent::UsageUpdate {
-                                        usage: Usage {
-                                            input_tokens: usage.input_tokens.unwrap_or(0),
-                                            output_tokens: 0,
-                                            cache_creation_tokens: usage.cache_creation_input_tokens,
-                                            cache_read_tokens: usage.cache_read_input_tokens,
-                                        }
-                                    };
-                                }
-                            }
-                            _ => {}
                         }
                     }
                 }
-            }
-        })
+            },
+        );
+
+        crate::streaming::ensure_terminal_done(inner)
     }
 
     fn provider(&self) -> &'static str {

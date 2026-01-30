@@ -14,6 +14,7 @@ use meerkat_core::{
     SessionMetadata, SessionTooling, SystemPromptConfig, format_verbose_event,
 };
 use meerkat_tools::find_project_root;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -21,7 +22,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Tool definition provided by the MCP client
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct McpToolDef {
     /// Tool name
     pub name: String,
@@ -30,16 +31,38 @@ pub struct McpToolDef {
     /// JSON Schema for tool input
     pub input_schema: Value,
     /// Handler type: "callback" means the tool result will be provided via meerkat_resume
-    #[serde(default = "default_handler_type")]
-    pub handler: String,
+    #[serde(default)]
+    pub handler: Option<String>,
 }
 
-fn default_handler_type() -> String {
-    "callback".to_string()
+impl McpToolDef {
+    pub fn handler_kind(&self) -> &str {
+        self.handler.as_deref().unwrap_or("callback")
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderInput {
+    Anthropic,
+    Openai,
+    Gemini,
+    Other,
+}
+
+impl ProviderInput {
+    pub fn to_provider(self) -> Provider {
+        match self {
+            ProviderInput::Anthropic => Provider::Anthropic,
+            ProviderInput::Openai => Provider::OpenAI,
+            ProviderInput::Gemini => Provider::Gemini,
+            ProviderInput::Other => Provider::Other,
+        }
+    }
 }
 
 /// Input schema for meerkat_run tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatRunInput {
     pub prompt: String,
     #[serde(default)]
@@ -49,7 +72,7 @@ pub struct MeerkatRunInput {
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
-    pub provider: Option<Provider>,
+    pub provider: Option<ProviderInput>,
     /// Stream agent events to the MCP client via notifications.
     #[serde(default)]
     pub stream: bool,
@@ -75,7 +98,7 @@ pub struct MeerkatRunInput {
 }
 
 /// Configuration options for built-in tools
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct BuiltinConfigInput {
     /// Enable shell tools (default: false)
     #[serde(default)]
@@ -86,7 +109,7 @@ pub struct BuiltinConfigInput {
 }
 
 /// Actions supported by the config tool.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigAction {
     Get,
@@ -95,11 +118,11 @@ pub enum ConfigAction {
 }
 
 /// Input schema for meerkat_config tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatConfigInput {
     pub action: ConfigAction,
     #[serde(default)]
-    pub config: Option<Config>,
+    pub config: Option<Value>,
     #[serde(default)]
     pub patch: Option<Value>,
 }
@@ -110,23 +133,21 @@ fn resolve_project_root() -> PathBuf {
 }
 
 async fn load_config_async() -> Config {
-    tokio::task::spawn_blocking(|| {
-        let project_root = resolve_project_root();
-        let store = FileConfigStore::project(&project_root);
-        let mut config = store.get().unwrap_or_else(|_| Config::default());
-        let _ = config.apply_env_overrides();
-        config
-    })
-    .await
-    .unwrap_or_else(|err| {
-        tracing::warn!("Config load task failed: {}", err);
-        Config::default()
-    })
+    let project_root = resolve_project_root();
+    let store = FileConfigStore::project(&project_root);
+    let mut config = store.get().await.unwrap_or_else(|_| Config::default());
+    let _ = config.apply_env_overrides();
+    config
 }
 
-fn resolve_provider(input: Option<Provider>, model: &str) -> Provider {
+fn resolve_provider(input: Option<ProviderInput>, model: &str) -> Provider {
     match input {
-        Some(provider) => provider,
+        Some(provider) => match provider {
+            ProviderInput::Anthropic => Provider::Anthropic,
+            ProviderInput::Openai => Provider::OpenAI,
+            ProviderInput::Gemini => Provider::Gemini,
+            ProviderInput::Other => Provider::Other,
+        },
         None => match ProviderResolver::infer_from_model(model) {
             Provider::Other => Provider::Anthropic,
             provider => provider,
@@ -158,7 +179,7 @@ fn resolve_store_path(config: &Config) -> PathBuf {
 }
 
 /// Input schema for meerkat_resume tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatResumeInput {
     pub session_id: String,
     pub prompt: String,
@@ -194,11 +215,11 @@ pub struct MeerkatResumeInput {
     pub max_tokens: Option<u32>,
     /// Optional provider override for resume.
     #[serde(default)]
-    pub provider: Option<Provider>,
+    pub provider: Option<ProviderInput>,
 }
 
 /// Tool result provided by the MCP client
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ToolResultInput {
     /// ID of the tool call this is a result for
     pub tool_use_id: String,
@@ -250,169 +271,21 @@ fn maybe_event_channel(
 
 /// Returns the list of tools exposed by this MCP server
 pub fn tools_list() -> Vec<Value> {
-    let tool_def_schema = json!({
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Tool name"
-            },
-            "description": {
-                "type": "string",
-                "description": "Tool description"
-            },
-            "input_schema": {
-                "type": "object",
-                "description": "JSON Schema for tool input"
-            },
-            "handler": {
-                "type": "string",
-                "description": "Handler type: 'callback' means results provided via meerkat_resume (default)"
-            }
-        },
-        "required": ["name", "description", "input_schema"]
-    });
-
-    let tool_result_schema = json!({
-        "type": "object",
-        "properties": {
-            "tool_use_id": {
-                "type": "string",
-                "description": "ID of the tool call this is a result for"
-            },
-            "content": {
-                "type": "string",
-                "description": "Result content or error message"
-            },
-            "is_error": {
-                "type": "boolean",
-                "description": "Whether this is an error result"
-            }
-        },
-        "required": ["tool_use_id", "content"]
-    });
-
     vec![
         json!({
             "name": "meerkat_run",
             "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "The prompt to send to the agent"
-                    },
-                    "system_prompt": {
-                        "type": "string",
-                        "description": "Optional system prompt to configure agent behavior"
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "LLM model to use (default: claude-opus-4-5)"
-                    },
-                    "max_tokens": {
-                        "type": "integer",
-                        "description": "Maximum tokens per turn (default: 4096)"
-                    },
-                    "stream": {
-                        "type": "boolean",
-                        "description": "Stream agent events via MCP notifications"
-                    },
-                    "verbose": {
-                        "type": "boolean",
-                        "description": "Enable verbose event logging (server-side)"
-                    },
-                    "tools": {
-                        "type": "array",
-                        "description": "Tool definitions for the agent to use. Tools with handler='callback' will pause execution and return pending_tool_calls.",
-                        "items": tool_def_schema.clone()
-                    },
-                    "host_mode": {
-                        "type": "boolean",
-                        "description": "Run in host mode: process prompt then stay alive listening for comms messages. Requires comms_name."
-                    },
-                    "comms_name": {
-                        "type": "string",
-                        "description": "Agent name for inter-agent communication. Required for host_mode."
-                    }
-                },
-                "required": ["prompt"]
-            }
+            "inputSchema": meerkat_tools::schema_for::<MeerkatRunInput>()
         }),
         json!({
             "name": "meerkat_resume",
             "description": "Resume an existing Meerkat session. Use this to continue a conversation or provide tool results for pending tool calls.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "The session ID to resume"
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "The prompt to continue the conversation (can be empty if only providing tool results)"
-                    },
-                    "stream": {
-                        "type": "boolean",
-                        "description": "Stream agent events via MCP notifications"
-                    },
-                    "verbose": {
-                        "type": "boolean",
-                        "description": "Enable verbose event logging (server-side)"
-                    },
-                    "tools": {
-                        "type": "array",
-                        "description": "Tool definitions (should match the original run)",
-                        "items": tool_def_schema
-                    },
-                    "tool_results": {
-                        "type": "array",
-                        "description": "Results for pending tool calls from a previous response",
-                        "items": tool_result_schema
-                    },
-                    "host_mode": {
-                        "type": "boolean",
-                        "description": "Run in host mode: process prompt then stay alive listening for comms messages. Requires comms_name."
-                    },
-                    "comms_name": {
-                        "type": "string",
-                        "description": "Agent name for inter-agent communication. Required for host_mode."
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "Optional model override for resume"
-                    },
-                    "max_tokens": {
-                        "type": "integer",
-                        "description": "Optional max tokens override for resume"
-                    }
-                },
-                "required": ["session_id", "prompt"]
-            }
+            "inputSchema": meerkat_tools::schema_for::<MeerkatResumeInput>()
         }),
         json!({
             "name": "meerkat_config",
             "description": "Get or update Meerkat config for this MCP server instance.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["get", "set", "patch"]
-                    },
-                    "config": {
-                        "type": "object",
-                        "description": "Full config payload (required for action=set)."
-                    },
-                    "patch": {
-                        "type": "object",
-                        "description": "JSON merge patch (required for action=patch)."
-                    }
-                },
-                "required": ["action"]
-            }
+            "inputSchema": meerkat_tools::schema_for::<MeerkatConfigInput>()
         }),
     ]
 }
@@ -452,22 +325,18 @@ async fn handle_meerkat_config(input: MeerkatConfigInput) -> Result<Value, Strin
     match input.action {
         ConfigAction::Get => {
             let store = FileConfigStore::project(resolve_project_root());
-            let config = tokio::task::spawn_blocking(move || store.get())
-                .await
-                .map_err(|e| format!("Config load task failed: {}", e))?
-                .map_err(|e| e.to_string())?;
+            let config = store.get().await.map_err(|e| e.to_string())?;
             Ok(json!({ "config": config }))
         }
         ConfigAction::Set => {
             let config = input
                 .config
                 .ok_or_else(|| "config is required for action=set".to_string())?;
+            let config: Config =
+                serde_json::from_value(config).map_err(|e| format!("Invalid config: {e}"))?;
             let store = FileConfigStore::project(resolve_project_root());
             let config_clone = config.clone();
-            tokio::task::spawn_blocking(move || store.set(config_clone))
-                .await
-                .map_err(|e| format!("Config save task failed: {}", e))?
-                .map_err(|e| e.to_string())?;
+            store.set(config_clone).await.map_err(|e| e.to_string())?;
             Ok(json!({ "config": config }))
         }
         ConfigAction::Patch => {
@@ -475,9 +344,9 @@ async fn handle_meerkat_config(input: MeerkatConfigInput) -> Result<Value, Strin
                 .patch
                 .ok_or_else(|| "patch is required for action=patch".to_string())?;
             let store = FileConfigStore::project(resolve_project_root());
-            let updated = tokio::task::spawn_blocking(move || store.patch(ConfigDelta(patch)))
+            let updated = store
+                .patch(ConfigDelta(patch))
                 .await
-                .map_err(|e| format!("Config patch task failed: {}", e))?
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "config": updated }))
         }
@@ -508,8 +377,7 @@ async fn handle_meerkat_run_simple(
     let config = load_config_async().await;
     let model = input
         .model
-        .clone()
-        .unwrap_or_else(|| config.agent.model.clone());
+        .unwrap_or_else(|| config.agent.model.to_string());
     let max_tokens = input.max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
     let provider = resolve_provider(input.provider, &model);
     if ProviderResolver::api_key_for(provider).is_none() {
@@ -574,14 +442,14 @@ async fn handle_meerkat_run_simple(
 
     // Build agent
     let mut builder = AgentBuilder::new()
-        .model(&model)
+        .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits());
 
-    let mut system_prompt = input
-        .system_prompt
-        .clone()
-        .unwrap_or_else(|| SystemPromptConfig::new().compose());
+    let mut system_prompt = match input.system_prompt.clone() {
+        Some(prompt) => prompt,
+        None => SystemPromptConfig::new().compose().await,
+    };
     if !tool_usage_instructions.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);
@@ -593,9 +461,9 @@ async fn handle_meerkat_run_simple(
         builder = builder.with_comms_runtime(runtime);
     }
 
-    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+    let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
     let metadata = SessionMetadata {
-        model: model.clone(),
+        model: model.to_string(),
         max_tokens,
         provider,
         tooling: SessionTooling {
@@ -682,14 +550,13 @@ async fn handle_meerkat_run_with_builtins(
 ) -> Result<Value, String> {
     use meerkat_tools::{
         BuiltinToolConfig, CompositeDispatcher, EnforcedToolPolicy, FileTaskStore, ToolMode,
-        ToolPolicyLayer, builtin::shell::ShellConfig, ensure_rkat_dir, find_project_root,
+        ToolPolicyLayer, builtin::shell::ShellConfig, ensure_rkat_dir_async, find_project_root,
     };
 
     let config = load_config_async().await;
     let model = input
         .model
-        .clone()
-        .unwrap_or_else(|| config.agent.model.clone());
+        .unwrap_or_else(|| config.agent.model.to_string());
     let max_tokens = input.max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
     let provider = resolve_provider(input.provider, &model);
     if ProviderResolver::api_key_for(provider).is_none() {
@@ -732,7 +599,9 @@ async fn handle_meerkat_run_with_builtins(
     let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current dir: {}", e))?;
     let project_root = find_project_root(&cwd)
         .ok_or_else(|| "No .rkat directory found in current or parent directories".to_string())?;
-    ensure_rkat_dir(&project_root).map_err(|e| format!("Failed to create .rkat dir: {}", e))?;
+    ensure_rkat_dir_async(&project_root)
+        .await
+        .map_err(|e| format!("Failed to create .rkat dir: {}", e))?;
     let task_store = Arc::new(FileTaskStore::in_project(&project_root));
 
     // Build builtin tool config - enable shell tools if requested
@@ -815,14 +684,14 @@ async fn handle_meerkat_run_with_builtins(
 
     // Build agent
     let mut builder = AgentBuilder::new()
-        .model(&model)
+        .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits());
 
-    let mut system_prompt = input
-        .system_prompt
-        .clone()
-        .unwrap_or_else(|| SystemPromptConfig::new().compose());
+    let mut system_prompt = match input.system_prompt.clone() {
+        Some(prompt) => prompt,
+        None => SystemPromptConfig::new().compose().await,
+    };
     if !tool_usage_instructions.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);
@@ -834,7 +703,7 @@ async fn handle_meerkat_run_with_builtins(
         builder = builder.with_comms_runtime(runtime);
     }
 
-    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+    let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
 
     let event_task = event_rx.map(|rx| {
         let stream_notifier = if input.stream { notifier.clone() } else { None };
@@ -968,9 +837,8 @@ async fn handle_meerkat_resume_simple(
 ) -> Result<Value, String> {
     let model = input
         .model
-        .clone()
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
-        .unwrap_or_else(|| config.agent.model.clone());
+        .unwrap_or_else(|| config.agent.model.to_string());
     let max_tokens = input
         .max_tokens
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
@@ -993,6 +861,7 @@ async fn handle_meerkat_resume_simple(
     }
     let provider = input
         .provider
+        .map(ProviderInput::to_provider)
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider))
         .unwrap_or_else(|| resolve_provider(None, &model));
     if ProviderResolver::api_key_for(provider).is_none() {
@@ -1047,12 +916,12 @@ async fn handle_meerkat_resume_simple(
 
     // Build agent with resumed session
     let mut builder = AgentBuilder::new()
-        .model(&model)
+        .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits())
         .resume_session(session);
 
-    let mut system_prompt = SystemPromptConfig::new().compose();
+    let mut system_prompt = SystemPromptConfig::new().compose().await;
     if !tool_usage_instructions.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);
@@ -1063,7 +932,7 @@ async fn handle_meerkat_resume_simple(
         builder = builder.with_comms_runtime(runtime);
     }
 
-    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+    let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
 
     let metadata = SessionMetadata {
         model: model.clone(),
@@ -1162,7 +1031,7 @@ async fn handle_meerkat_resume_with_builtins(
 ) -> Result<Value, String> {
     use meerkat_tools::{
         BuiltinToolConfig, CompositeDispatcher, EnforcedToolPolicy, FileTaskStore, ToolMode,
-        ToolPolicyLayer, builtin::shell::ShellConfig, ensure_rkat_dir, find_project_root,
+        ToolPolicyLayer, builtin::shell::ShellConfig, ensure_rkat_dir_async, find_project_root,
     };
 
     // If tool results are provided, inject them into the session
@@ -1178,9 +1047,8 @@ async fn handle_meerkat_resume_with_builtins(
 
     let model = input
         .model
-        .clone()
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
-        .unwrap_or_else(|| config.agent.model.clone());
+        .unwrap_or_else(|| config.agent.model.to_string());
     let max_tokens = input
         .max_tokens
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
@@ -1198,6 +1066,7 @@ async fn handle_meerkat_resume_with_builtins(
 
     let provider = input
         .provider
+        .map(ProviderInput::to_provider)
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider))
         .unwrap_or_else(|| resolve_provider(None, &model));
     if ProviderResolver::api_key_for(provider).is_none() {
@@ -1229,7 +1098,9 @@ async fn handle_meerkat_resume_with_builtins(
     let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current dir: {}", e))?;
     let project_root = find_project_root(&cwd)
         .ok_or_else(|| "No .rkat directory found in current or parent directories".to_string())?;
-    ensure_rkat_dir(&project_root).map_err(|e| format!("Failed to create .rkat dir: {}", e))?;
+    ensure_rkat_dir_async(&project_root)
+        .await
+        .map_err(|e| format!("Failed to create .rkat dir: {}", e))?;
     let task_store = Arc::new(FileTaskStore::in_project(&project_root));
 
     // Build builtin tool config - enable shell tools if requested
@@ -1315,14 +1186,14 @@ async fn handle_meerkat_resume_with_builtins(
     }
 
     // Build agent with resumed session
-    let mut system_prompt = SystemPromptConfig::new().compose();
+    let mut system_prompt = SystemPromptConfig::new().compose().await;
     if !tool_usage_instructions.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);
     }
 
     let mut builder = AgentBuilder::new()
-        .model(&model)
+        .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .system_prompt(system_prompt)
         .budget(config.budget_limits())
@@ -1332,7 +1203,7 @@ async fn handle_meerkat_resume_with_builtins(
         builder = builder.with_comms_runtime(runtime);
     }
 
-    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+    let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
 
     let metadata = SessionMetadata {
         model: model.clone(),
@@ -1435,30 +1306,33 @@ use meerkat::{AgentSessionStore, AgentToolDispatcher, Message, ToolDef};
 /// MCP tool dispatcher - exposes tools to the LLM and handles callback tools
 /// by returning a special error that signals the MCP client needs to handle the tool call
 pub struct MpcToolDispatcher {
-    tool_defs: Vec<ToolDef>,
+    tools: Arc<[Arc<ToolDef>]>,
     callback_tools: std::collections::HashSet<String>,
 }
 
 impl MpcToolDispatcher {
     /// Create a new tool dispatcher from MCP tool definitions
     pub fn new(mcp_tools: &[McpToolDef]) -> Self {
-        let tool_defs = mcp_tools
+        let tools: Arc<[Arc<ToolDef>]> = mcp_tools
             .iter()
-            .map(|t| ToolDef {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: t.input_schema.clone(),
+            .map(|t| {
+                Arc::new(ToolDef {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    input_schema: t.input_schema.clone(),
+                })
             })
-            .collect();
+            .collect::<Vec<_>>()
+            .into();
 
         let callback_tools = mcp_tools
             .iter()
-            .filter(|t| t.handler == "callback")
+            .filter(|t| t.handler_kind() == "callback")
             .map(|t| t.name.clone())
             .collect();
 
         Self {
-            tool_defs,
+            tools,
             callback_tools,
         }
     }
@@ -1466,8 +1340,8 @@ impl MpcToolDispatcher {
 
 #[async_trait]
 impl AgentToolDispatcher for MpcToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        self.tool_defs.clone()
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.tools)
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -1589,7 +1463,7 @@ mod tests {
         assert_eq!(input.prompt, "Hello");
         assert_eq!(input.tools.len(), 1);
         assert_eq!(input.tools[0].name, "get_weather");
-        assert_eq!(input.tools[0].handler, "callback"); // default
+        assert_eq!(input.tools[0].handler_kind(), "callback"); // default
     }
 
     #[test]
@@ -1619,14 +1493,14 @@ mod tests {
             McpToolDef {
                 name: "get_weather".to_string(),
                 description: "Get weather".to_string(),
-                input_schema: json!({"type": "object", "properties": {}, "required": []}),
-                handler: "callback".to_string(),
+                input_schema: meerkat_tools::empty_object_schema(),
+                handler: Some("callback".to_string()),
             },
             McpToolDef {
                 name: "search".to_string(),
                 description: "Search".to_string(),
-                input_schema: json!({"type": "object", "properties": {}, "required": []}),
-                handler: "callback".to_string(),
+                input_schema: meerkat_tools::empty_object_schema(),
+                handler: Some("callback".to_string()),
             },
         ];
 
@@ -1643,8 +1517,8 @@ mod tests {
         let mcp_tools = vec![McpToolDef {
             name: "get_weather".to_string(),
             description: "Get weather".to_string(),
-            input_schema: json!({"type": "object", "properties": {}, "required": []}),
-            handler: "callback".to_string(),
+            input_schema: meerkat_tools::empty_object_schema(),
+            handler: Some("callback".to_string()),
         }];
 
         let dispatcher = MpcToolDispatcher::new(&mcp_tools);
@@ -1750,9 +1624,13 @@ mod tests {
 
         // Verify comms_name parameter exists in the schema
         assert!(run_tool["inputSchema"]["properties"]["comms_name"].is_object());
-        assert_eq!(
-            run_tool["inputSchema"]["properties"]["comms_name"]["type"],
-            "string"
+        let comms_name_type = &run_tool["inputSchema"]["properties"]["comms_name"]["type"];
+        assert!(
+            comms_name_type == "string"
+                || comms_name_type
+                    .as_array()
+                    .is_some_and(|types| types.contains(&json!("string"))),
+            "unexpected comms_name type: {comms_name_type}"
         );
     }
 }

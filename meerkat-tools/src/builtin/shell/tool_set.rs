@@ -166,7 +166,7 @@ mod tests {
             ..Default::default()
         };
 
-        let tool_set = ShellToolSet::new(config.clone());
+        let tool_set = ShellToolSet::new(config);
 
         // Shell tool should have the config
         assert!(tool_set.shell.config.enabled);

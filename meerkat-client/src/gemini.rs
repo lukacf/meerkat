@@ -3,7 +3,7 @@
 //! Implements the LlmClient trait for Google's Gemini API.
 
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmEvent, LlmRequest};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use meerkat_core::{Message, StopReason, Usage};
@@ -218,95 +218,100 @@ impl LlmClient for GeminiClient {
         &'a self,
         request: &'a LlmRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-        Box::pin(async_stream::try_stream! {
-            let body = self.build_request_body(request);
-            let url = format!(
-                "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-                self.base_url, request.model, self.api_key
-            );
+        let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> =
+            Box::pin(async_stream::try_stream! {
+                let body = self.build_request_body(request);
+                let url = format!(
+                    "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+                    self.base_url, request.model, self.api_key
+                );
 
-            let response = self.http
-                .post(url)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|_| LlmError::NetworkTimeout {
-                    duration_ms: 30000,
-                })?;
+                let response = self.http
+                    .post(url)
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|_| LlmError::NetworkTimeout {
+                        duration_ms: 30000,
+                    })?;
 
-            let status_code = response.status().as_u16();
-            let stream_result = if (200..=299).contains(&status_code) {
-                Ok(response.bytes_stream())
-            } else {
-                let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_status(status_code, text))
-            };
-            let mut stream = stream_result?;
-            let mut buffer = String::with_capacity(512);
+                let status_code = response.status().as_u16();
+                let stream_result = if (200..=299).contains(&status_code) {
+                    Ok(response.bytes_stream())
+                } else {
+                    let text = response.text().await.unwrap_or_default();
+                    Err(LlmError::from_http_status(status_code, text))
+                };
+                let mut stream = stream_result?;
+                let mut buffer = String::with_capacity(512);
 
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].trim();
-                    let data = line.strip_prefix("data: ");
-                    let parsed_response = if let Some(d) = data {
-                        Self::parse_stream_line(d)
-                    } else {
-                        None
-                    };
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].trim();
+                        let data = line.strip_prefix("data: ");
+                        let parsed_response = if let Some(d) = data {
+                            Self::parse_stream_line(d)
+                        } else {
+                            None
+                        };
 
-                    buffer.drain(..=newline_pos);
+                        buffer.drain(..=newline_pos);
 
-                    if let Some(resp) = parsed_response {
-                        if let Some(usage) = resp.usage_metadata {
-                            yield LlmEvent::UsageUpdate {
-                                usage: Usage {
-                                    input_tokens: usage.prompt_token_count.unwrap_or(0),
-                                    output_tokens: usage.candidates_token_count.unwrap_or(0),
-                                    cache_creation_tokens: None,
-                                    cache_read_tokens: None,
-                                }
-                            };
-                        }
+                        if let Some(resp) = parsed_response {
+                            if let Some(usage) = resp.usage_metadata {
+                                yield LlmEvent::UsageUpdate {
+                                    usage: Usage {
+                                        input_tokens: usage.prompt_token_count.unwrap_or(0),
+                                        output_tokens: usage.candidates_token_count.unwrap_or(0),
+                                        cache_creation_tokens: None,
+                                        cache_read_tokens: None,
+                                    }
+                                };
+                            }
 
-                        if let Some(candidates) = resp.candidates {
-                            for cand in candidates {
-                                if let Some(content) = cand.content {
-                                    if let Some(parts) = content.parts {
-                                        for part in parts {
-                                            if let Some(text) = part.text {
-                                                yield LlmEvent::TextDelta { delta: text };
-                                            }
-                                            if let Some(fc) = part.function_call {
-                                                yield LlmEvent::ToolCallComplete {
-                                                    id: fc.name.clone(),
-                                                    name: fc.name,
-                                                    args: fc.args.unwrap_or(json!({})) ,
-                                                    thought_signature: part.thought_signature,
-                                                };
+                            if let Some(candidates) = resp.candidates {
+                                for cand in candidates {
+                                    if let Some(content) = cand.content {
+                                        if let Some(parts) = content.parts {
+                                            for part in parts {
+                                                if let Some(text) = part.text {
+                                                    yield LlmEvent::TextDelta { delta: text };
+                                                }
+                                                if let Some(fc) = part.function_call {
+                                                    yield LlmEvent::ToolCallComplete {
+                                                        id: fc.name.clone(),
+                                                        name: fc.name,
+                                                        args: fc.args.unwrap_or(json!({})) ,
+                                                        thought_signature: part.thought_signature,
+                                                    };
+                                                }
                                             }
                                         }
                                     }
-                                }
 
-                                if let Some(reason) = cand.finish_reason {
-                                    let stop = match reason.as_str() {
-                                        "STOP" => StopReason::EndTurn,
-                                        "MAX_TOKENS" => StopReason::MaxTokens,
-                                        "SAFETY" => StopReason::ContentFilter,
-                                        _ => StopReason::EndTurn,
-                                    };
-                                    yield LlmEvent::Done { stop_reason: stop };
+                                    if let Some(reason) = cand.finish_reason {
+                                        let stop = match reason.as_str() {
+                                            "STOP" => StopReason::EndTurn,
+                                            "MAX_TOKENS" => StopReason::MaxTokens,
+                                            "SAFETY" => StopReason::ContentFilter,
+                                            _ => StopReason::EndTurn,
+                                        };
+                                        yield LlmEvent::Done {
+                                            outcome: LlmDoneOutcome::Success { stop_reason: stop },
+                                        };
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-        })
+            });
+
+        crate::streaming::ensure_terminal_done(inner)
     }
 
     fn provider(&self) -> &'static str {

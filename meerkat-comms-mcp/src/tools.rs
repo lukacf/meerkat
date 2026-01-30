@@ -1,15 +1,34 @@
 //! MCP tool implementations for Meerkat comms.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use meerkat_comms::{CommsConfig, Keypair, Router, Status, TrustedPeers};
 
+fn schema_for<T: JsonSchema>() -> Value {
+    let schema = schemars::schema_for!(T);
+    let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
+
+    // Some generators omit empty `properties`/`required` for `{}`.
+    // Our tool schema contract expects explicit presence of both keys.
+    if let Value::Object(ref mut obj) = value {
+        if obj.get("type").and_then(Value::as_str) == Some("object") {
+            obj.entry("properties".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            obj.entry("required".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
+    }
+
+    value
+}
+
 /// Input schema for send_message tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMessageInput {
     /// Name of the peer to send to
     pub peer: String,
@@ -18,7 +37,7 @@ pub struct SendMessageInput {
 }
 
 /// Input schema for send_request tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendRequestInput {
     /// Name of the peer to send to
     pub peer: String,
@@ -34,11 +53,12 @@ pub struct SendRequestInput {
 /// Note: `peer` is explicitly required (rather than auto-routing based on request origin)
 /// because being explicit is simpler and doesn't require tracking pending requests.
 /// The agent can easily extract the sender from the original request envelope's `from` field.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendResponseInput {
     /// Name of the peer to send the response to (typically the request originator)
     pub peer: String,
     /// ID of the request this is a response to
+    #[schemars(with = "String")]
     pub request_id: Uuid,
     /// Status of the response
     pub status: ResponseStatus,
@@ -48,7 +68,7 @@ pub struct SendResponseInput {
 }
 
 /// Response status for the send_response tool
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ResponseStatus {
     Accepted,
@@ -67,7 +87,7 @@ impl From<ResponseStatus> for Status {
 }
 
 /// Input schema for list_peers tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListPeersInput {}
 
 /// Output for list_peers tool
@@ -84,79 +104,22 @@ pub fn tools_list() -> Vec<Value> {
         json!({
             "name": "send_message",
             "description": "Send a message to a peer. Returns when the peer acknowledges receipt.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "peer": {
-                        "type": "string",
-                        "description": "Name of the peer to send to"
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Message body"
-                    }
-                },
-                "required": ["peer", "body"]
-            }
+            "inputSchema": schema_for::<SendMessageInput>()
         }),
         json!({
             "name": "send_request",
             "description": "Send a request to a peer. Returns when the peer acknowledges receipt.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "peer": {
-                        "type": "string",
-                        "description": "Name of the peer to send to"
-                    },
-                    "intent": {
-                        "type": "string",
-                        "description": "Intent of the request (e.g., 'review-pr', 'analyze-code')"
-                    },
-                    "params": {
-                        "type": "object",
-                        "description": "Parameters for the request"
-                    }
-                },
-                "required": ["peer", "intent"]
-            }
+            "inputSchema": schema_for::<SendRequestInput>()
         }),
         json!({
             "name": "send_response",
             "description": "Reply to a request. Does not wait for acknowledgement.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "peer": {
-                        "type": "string",
-                        "description": "Name of the peer to send to"
-                    },
-                    "request_id": {
-                        "type": "string",
-                        "format": "uuid",
-                        "description": "ID of the request this is a response to"
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["accepted", "completed", "failed"],
-                        "description": "Status of the response"
-                    },
-                    "result": {
-                        "type": "object",
-                        "description": "Result of the request"
-                    }
-                },
-                "required": ["peer", "request_id", "status"]
-            }
+            "inputSchema": schema_for::<SendResponseInput>()
         }),
         json!({
             "name": "list_peers",
             "description": "List trusted peers. Note: This returns the trusted list, not live online status. Use send_message to probe liveness.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+            "inputSchema": schema_for::<ListPeersInput>()
         }),
     ]
 }
@@ -170,7 +133,7 @@ pub struct ToolContext {
 impl ToolContext {
     /// Create a new tool context
     pub fn new(keypair: Keypair, trusted_peers: TrustedPeers, config: CommsConfig) -> Self {
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers.clone()));
+        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
         let router = Arc::new(Router::with_shared_peers(
             keypair,
             trusted_peers.clone(),
@@ -459,7 +422,7 @@ mod tests {
             "send_message should succeed: {:?}",
             result.err()
         );
-        let output = result.map_err(|e| e.to_string())?;
+        let output = result?;
         assert_eq!(output["success"], true);
 
         server_handle.await??;
@@ -545,7 +508,7 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "send_request should succeed");
-        let output = result.map_err(|e| e.to_string())?;
+        let output = result?;
         assert_eq!(output["success"], true);
 
         server_handle.await??;
@@ -608,7 +571,7 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "send_response should succeed");
-        let output = result.map_err(|e| e.to_string())?;
+        let output = result?;
         assert_eq!(output["success"], true);
 
         server_handle.await??;
@@ -641,7 +604,7 @@ mod tests {
         let result = handle_tools_call(&ctx, "list_peers", &json!({})).await;
 
         assert!(result.is_ok());
-        let output = result.map_err(|e| e.to_string())?;
+        let output = result?;
         let peers = output["peers"].as_array().ok_or("not an array")?;
         assert_eq!(peers.len(), 2);
 

@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Build app state
-    let state = AppState::default();
+    let state = AppState::load().await;
     tracing::info!(
         store_path = %state.store_path.display(),
         default_model = %state.default_model,
@@ -36,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = state
         .config_store
         .get()
+        .await
         .unwrap_or_else(|_| Config::default());
     if let Err(err) = config.apply_env_overrides() {
         tracing::warn!("Failed to apply env overrides: {}", err);

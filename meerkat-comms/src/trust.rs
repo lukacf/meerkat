@@ -1,6 +1,5 @@
 //! Trust management for Meerkat comms.
 
-use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -96,16 +95,16 @@ impl TrustedPeers {
     }
 
     /// Load trusted peers from a JSON file.
-    pub fn load(path: &Path) -> Result<Self, TrustError> {
-        let content = fs::read_to_string(path)?;
+    pub async fn load(path: &Path) -> Result<Self, TrustError> {
+        let content = tokio::fs::read_to_string(path).await?;
         let peers = serde_json::from_str(&content)?;
         Ok(peers)
     }
 
     /// Save trusted peers to a JSON file.
-    pub fn save(&self, path: &Path) -> Result<(), TrustError> {
+    pub async fn save(&self, path: &Path) -> Result<(), TrustError> {
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(path, content)?;
+        tokio::fs::write(path, content).await?;
         Ok(())
     }
 
@@ -210,8 +209,8 @@ mod tests {
 
     // Phase 2 tests
 
-    #[test]
-    fn test_trusted_peers_load() {
+    #[tokio::test]
+    async fn test_trusted_peers_load() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("trusted_peers.json");
         let json = r#"{
@@ -219,16 +218,16 @@ mod tests {
                 { "name": "coding-meerkat", "pubkey": "ed25519:KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=", "addr": "uds:///tmp/meerkat-coding.sock" }
             ]
         }"#;
-        fs::write(&path, json).unwrap();
+        tokio::fs::write(&path, json).await.unwrap();
 
-        let peers = TrustedPeers::load(&path).unwrap();
+        let peers = TrustedPeers::load(&path).await.unwrap();
         assert_eq!(peers.peers.len(), 1);
         assert_eq!(peers.peers[0].name, "coding-meerkat");
         assert_eq!(peers.peers[0].pubkey, PubKey::new([42u8; 32]));
     }
 
-    #[test]
-    fn test_trusted_peers_save() {
+    #[tokio::test]
+    async fn test_trusted_peers_save() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("trusted_peers.json");
 
@@ -239,10 +238,10 @@ mod tests {
                 addr: "tcp://localhost:4200".to_string(),
             }],
         };
-        peers.save(&path).unwrap();
+        peers.save(&path).await.unwrap();
 
         assert!(path.exists());
-        let content = fs::read_to_string(&path).unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(content.contains("test-peer"));
         assert!(content.contains("ed25519:"));
     }
@@ -342,8 +341,8 @@ mod tests {
         assert!(pubkey_str.starts_with("ed25519:"));
     }
 
-    #[test]
-    fn test_trusted_peers_persistence_roundtrip() {
+    #[tokio::test]
+    async fn test_trusted_peers_persistence_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("trusted_peers.json");
 
@@ -362,8 +361,8 @@ mod tests {
             ],
         };
 
-        original.save(&path).unwrap();
-        let loaded = TrustedPeers::load(&path).unwrap();
+        original.save(&path).await.unwrap();
+        let loaded = TrustedPeers::load(&path).await.unwrap();
         assert_eq!(original, loaded);
     }
 

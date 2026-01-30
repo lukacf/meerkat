@@ -41,20 +41,20 @@ impl SdkConfigStore {
     }
 
     /// Fetch the current config.
-    pub fn get(&self) -> Result<Config, ConfigError> {
-        let mut config = self.store.get()?;
+    pub async fn get(&self) -> Result<Config, ConfigError> {
+        let mut config = self.store.get().await?;
         let _ = config.apply_env_overrides();
         Ok(config)
     }
 
     /// Persist the provided config.
-    pub fn set(&self, config: Config) -> Result<(), ConfigError> {
-        self.store.set(config)
+    pub async fn set(&self, config: Config) -> Result<(), ConfigError> {
+        self.store.set(config).await
     }
 
     /// Apply a config patch and return the updated config.
-    pub fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
-        self.store.patch(delta)
+    pub async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
+        self.store.patch(delta).await
     }
 
     /// Return the inner store (for advanced integration).

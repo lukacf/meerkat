@@ -1,0 +1,441 @@
+{
+  "datetime": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {},
+    "required": [],
+    "title": "EmptyObject",
+    "type": "object"
+  },
+  "shell": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Input arguments for the shell tool",
+    "properties": {
+      "background": {
+        "default": false,
+        "description": "If true, run in background and return job ID immediately",
+        "type": "boolean"
+      },
+      "command": {
+        "description": "The command to execute (Nushell syntax)",
+        "type": "string"
+      },
+      "timeout_secs": {
+        "description": "Timeout in seconds (uses config default if not specified)",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "working_dir": {
+        "description": "Working directory (relative to project root)",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "command"
+    ],
+    "title": "ShellInput",
+    "type": "object"
+  },
+  "shell_job_cancel": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Input arguments for the job cancel tool",
+    "properties": {
+      "job_id": {
+        "description": "The job ID to cancel",
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "title": "JobCancelInput",
+    "type": "object"
+  },
+  "shell_job_status": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Input arguments for the job status tool",
+    "properties": {
+      "job_id": {
+        "description": "The job ID to check",
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "title": "JobStatusInput",
+    "type": "object"
+  },
+  "shell_jobs": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {},
+    "required": [],
+    "title": "EmptyObject",
+    "type": "object"
+  },
+  "task_create": {
+    "$defs": {
+      "TaskPriority": {
+        "description": "Priority level for a task",
+        "oneOf": [
+          {
+            "const": "low",
+            "description": "Low priority task",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium priority task (default)",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High priority task",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for the task_create tool",
+    "properties": {
+      "blocked_by": {
+        "default": null,
+        "description": "IDs of tasks that block THIS task",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "blocks": {
+        "default": null,
+        "description": "IDs of tasks that this task blocks",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "description": {
+        "description": "Detailed description of what needs to be done",
+        "type": "string"
+      },
+      "labels": {
+        "default": null,
+        "description": "Labels/tags for categorization",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "metadata": {
+        "additionalProperties": true,
+        "default": null,
+        "description": "Arbitrary key-value metadata",
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "owner": {
+        "default": null,
+        "description": "Owner/assignee of the task",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "priority": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TaskPriority"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Priority level: \"low\", \"medium\", or \"high\""
+      },
+      "subject": {
+        "description": "Brief title for the task",
+        "type": "string"
+      }
+    },
+    "required": [
+      "subject",
+      "description"
+    ],
+    "title": "TaskCreateParams",
+    "type": "object"
+  },
+  "task_get": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for the task_get tool",
+    "properties": {
+      "id": {
+        "description": "The task ID",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "title": "TaskGetParams",
+    "type": "object"
+  },
+  "task_list": {
+    "$defs": {
+      "TaskStatus": {
+        "description": "Status of a task in its lifecycle",
+        "oneOf": [
+          {
+            "const": "pending",
+            "description": "Task is waiting to be started",
+            "type": "string"
+          },
+          {
+            "const": "in_progress",
+            "description": "Task is actively being worked on",
+            "type": "string"
+          },
+          {
+            "const": "completed",
+            "description": "Task has been finished",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for the task_list tool",
+    "properties": {
+      "labels": {
+        "default": null,
+        "description": "Filter by labels (any match)",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "status": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TaskStatus"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Filter by status: \"pending\", \"in_progress\", \"completed\""
+      }
+    },
+    "required": [],
+    "title": "TaskListParams",
+    "type": "object"
+  },
+  "task_update": {
+    "$defs": {
+      "TaskPriority": {
+        "description": "Priority level for a task",
+        "oneOf": [
+          {
+            "const": "low",
+            "description": "Low priority task",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium priority task (default)",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High priority task",
+            "type": "string"
+          }
+        ]
+      },
+      "TaskStatus": {
+        "description": "Status of a task in its lifecycle",
+        "oneOf": [
+          {
+            "const": "pending",
+            "description": "Task is waiting to be started",
+            "type": "string"
+          },
+          {
+            "const": "in_progress",
+            "description": "Task is actively being worked on",
+            "type": "string"
+          },
+          {
+            "const": "completed",
+            "description": "Task has been finished",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for the task_update tool",
+    "properties": {
+      "add_blocked_by": {
+        "default": null,
+        "description": "Task IDs to add to blocked_by list (optional)",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "add_blocks": {
+        "default": null,
+        "description": "Task IDs to add to blocks list (optional)",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "description": {
+        "default": null,
+        "description": "New description (optional)",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "id": {
+        "description": "The ID of the task to update",
+        "type": "string"
+      },
+      "labels": {
+        "default": null,
+        "description": "Replace all labels (optional)",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "metadata": {
+        "additionalProperties": true,
+        "default": null,
+        "description": "Metadata key-value pairs to merge (null value = delete key)",
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "owner": {
+        "default": null,
+        "description": "New owner/assignee (optional)",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "priority": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TaskPriority"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "New priority: \"low\", \"medium\", \"high\" (optional)"
+      },
+      "remove_blocked_by": {
+        "default": null,
+        "description": "Task IDs to remove from blocked_by list (optional)",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "remove_blocks": {
+        "default": null,
+        "description": "Task IDs to remove from blocks list (optional)",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "status": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TaskStatus"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "New status: \"pending\", \"in_progress\", \"completed\" (optional)"
+      },
+      "subject": {
+        "default": null,
+        "description": "New subject/title (optional)",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "title": "TaskUpdateParams",
+    "type": "object"
+  },
+  "wait": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "seconds": {
+        "description": "Number of seconds to wait (0.1 to 300)",
+        "format": "double",
+        "maximum": 300.0,
+        "minimum": 0.1,
+        "type": "number"
+      }
+    },
+    "required": [
+      "seconds"
+    ],
+    "title": "WaitArgs",
+    "type": "object"
+  }
+}

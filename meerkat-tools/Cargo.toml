@@ -21,6 +21,7 @@ tokio = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 jsonschema = { workspace = true }
+schemars = { workspace = true }
 tracing = { workspace = true }
 ulid = { workspace = true }
 uuid = { workspace = true }

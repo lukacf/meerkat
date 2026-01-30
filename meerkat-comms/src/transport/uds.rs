@@ -1,11 +1,16 @@
 //! Unix domain socket transport for Meerkat comms.
 
 use std::path::Path;
+use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio_util::codec::Framed;
 
-use super::{TransportError, MAX_PAYLOAD_SIZE};
+use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
+
+use super::codec::{EnvelopeFrame, TransportCodec};
+use super::TransportError;
 use crate::types::Envelope;
 
 /// A UDS listener for accepting incoming connections.
@@ -16,8 +21,13 @@ pub struct UdsListener {
 impl UdsListener {
     /// Bind to a Unix domain socket path.
     pub async fn bind(path: &Path) -> Result<Self, TransportError> {
-        // Remove existing socket file if present
-        let _ = std::fs::remove_file(path);
+        // Remove existing socket file if present (without blocking the executor).
+        if let Err(err) = tokio::fs::remove_file(path).await {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                return Err(err.into());
+            }
+        }
+
         let listener = UnixListener::bind(path)?;
         Ok(Self { listener })
     }
@@ -25,56 +35,47 @@ impl UdsListener {
     /// Accept an incoming connection.
     pub async fn accept(&self) -> Result<UdsConnection, TransportError> {
         let (stream, _) = self.listener.accept().await?;
-        Ok(UdsConnection { stream })
+        Ok(UdsConnection {
+            framed: Framed::new(stream, TransportCodec::new()),
+        })
     }
 }
 
 /// A UDS connection for sending and receiving envelopes.
 pub struct UdsConnection {
-    stream: UnixStream,
+    framed: Framed<UnixStream, TransportCodec>,
 }
 
 impl UdsConnection {
     /// Connect to a Unix domain socket.
     pub async fn connect(path: &Path) -> Result<Self, TransportError> {
         let stream = UnixStream::connect(path).await?;
-        Ok(Self { stream })
+        Ok(Self {
+            framed: Framed::new(stream, TransportCodec::new()),
+        })
     }
 
     /// Send an envelope over the connection.
     pub async fn send(&mut self, envelope: &Envelope) -> Result<(), TransportError> {
-        let mut payload = Vec::new();
-        ciborium::into_writer(envelope, &mut payload)
-            .map_err(|e| TransportError::Cbor(e.to_string()))?;
+        let frame = EnvelopeFrame {
+            envelope: envelope.clone(),
+            raw: Arc::new(Bytes::new()),
+        };
 
-        let len = payload.len() as u32;
-        if len > MAX_PAYLOAD_SIZE {
-            return Err(TransportError::MessageTooLarge { size: len });
-        }
-
-        self.stream.write_all(&len.to_be_bytes()).await?;
-        self.stream.write_all(&payload).await?;
-        self.stream.flush().await?;
+        self.framed.send(frame).await.map_err(TransportError::Io)?;
         Ok(())
     }
 
     /// Receive an envelope from the connection.
     pub async fn recv(&mut self) -> Result<Envelope, TransportError> {
-        let mut len_bytes = [0u8; 4];
-        self.stream.read_exact(&mut len_bytes).await?;
-        let len = u32::from_be_bytes(len_bytes);
-
-        if len > MAX_PAYLOAD_SIZE {
-            return Err(TransportError::MessageTooLarge { size: len });
+        match self.framed.next().await {
+            Some(Ok(frame)) => Ok(frame.envelope),
+            Some(Err(err)) => Err(TransportError::Io(err)),
+            None => Err(TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed",
+            ))),
         }
-
-        let mut payload = vec![0u8; len as usize];
-        self.stream.read_exact(&mut payload).await?;
-
-        let envelope: Envelope = ciborium::from_reader(&payload[..])
-            .map_err(|e| TransportError::InvalidFrame(format!("CBOR decode error: {e}")))?;
-
-        Ok(envelope)
     }
 }
 

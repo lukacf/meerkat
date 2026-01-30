@@ -6,15 +6,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::RwLock;
+use tokio_util::codec::Framed;
 use uuid::Uuid;
 
 use crate::identity::{Keypair, Signature};
 use crate::inbox::InboxError;
 use crate::inproc::InprocRegistry;
+use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{PeerAddr, TransportError, MAX_PAYLOAD_SIZE};
 use crate::trust::{TrustedPeer, TrustedPeers};
 use crate::types::{Envelope, MessageKind, Status};
@@ -67,7 +71,7 @@ pub enum SendError {
 /// Router for sending messages to peers.
 pub struct Router {
     /// Our keypair for signing messages.
-    keypair: Keypair,
+    keypair: Arc<Keypair>,
     /// Shared list of trusted peers (allows dynamic updates).
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     /// Configuration.
@@ -78,7 +82,7 @@ impl Router {
     /// Create a new router.
     pub fn new(keypair: Keypair, trusted_peers: TrustedPeers, config: CommsConfig) -> Self {
         Self {
-            keypair,
+            keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
             config,
         }
@@ -94,10 +98,14 @@ impl Router {
         config: CommsConfig,
     ) -> Self {
         Self {
-            keypair,
+            keypair: Arc::new(keypair),
             trusted_peers,
             config,
         }
+    }
+
+    pub fn keypair_arc(&self) -> Arc<Keypair> {
+        self.keypair.clone()
     }
 
     /// Get a reference to the shared trusted peers.
@@ -171,19 +179,19 @@ impl Router {
         envelope.sign(&self.keypair);
 
         // Connect and send
-        match addr {
-            PeerAddr::Uds(path) => {
+        match (addr, envelope) {
+            (PeerAddr::Uds(path), envelope) => {
                 let mut stream = UnixStream::connect(&path).await?;
-                self.send_on_stream(&mut stream, &envelope, wait_for_ack, &peer_pubkey)
+                self.send_on_stream(&mut stream, envelope, wait_for_ack, &peer_pubkey)
                     .await?;
             }
-            PeerAddr::Tcp(addr_str) => {
+            (PeerAddr::Tcp(addr_str), envelope) => {
                 // DNS resolution happens here via ToSocketAddrs
                 let mut stream = TcpStream::connect(&addr_str).await?;
-                self.send_on_stream(&mut stream, &envelope, wait_for_ack, &peer_pubkey)
+                self.send_on_stream(&mut stream, envelope, wait_for_ack, &peer_pubkey)
                     .await?;
             }
-            PeerAddr::Inproc(name) => {
+            (PeerAddr::Inproc(name), envelope) => {
                 // In-process delivery via global registry
                 // The envelope is already signed, deliver directly to the peer's inbox
                 //
@@ -251,27 +259,33 @@ impl Router {
     async fn send_on_stream<S>(
         &self,
         stream: &mut S,
-        envelope: &Envelope,
+        envelope: Envelope,
         wait_for_ack: bool,
         expected_peer: &crate::identity::PubKey,
     ) -> Result<(), SendError>
     where
-        S: AsyncReadExt + AsyncWriteExt + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
-        // Write envelope
-        write_envelope_async(stream, envelope, self.config.max_message_bytes).await?;
+        let mut framed = Framed::new(
+            stream,
+            TransportCodec::with_max_payload_size(self.config.max_message_bytes),
+        );
+
+        let envelope_id = envelope.id;
+        let frame = EnvelopeFrame {
+            envelope,
+            raw: Arc::new(Bytes::new()),
+        };
+        framed.send(frame).await?;
 
         // Wait for ack if required
         if wait_for_ack {
             let timeout = Duration::from_secs(self.config.ack_timeout_secs);
-            let ack_result = tokio::time::timeout(
-                timeout,
-                read_envelope_async(stream, self.config.max_message_bytes),
-            )
-            .await;
+            let ack_result = tokio::time::timeout(timeout, framed.next()).await;
 
             match ack_result {
-                Ok(Ok(ack)) => {
+                Ok(Some(Ok(frame))) => {
+                    let ack = frame.envelope;
                     // Verify ack signature
                     if !ack.verify() {
                         return Err(SendError::InvalidAck(
@@ -291,13 +305,13 @@ impl Router {
 
                     // Verify it's an ack for our message
                     match ack.kind {
-                        MessageKind::Ack { in_reply_to } if in_reply_to == envelope.id => {
+                        MessageKind::Ack { in_reply_to } if in_reply_to == envelope_id => {
                             // Valid ack received
                         }
                         MessageKind::Ack { in_reply_to } => {
                             return Err(SendError::InvalidAck(format!(
                                 "ack for wrong message: expected {}, got {}",
-                                envelope.id, in_reply_to
+                                envelope_id, in_reply_to
                             )));
                         }
                         _ => {
@@ -305,8 +319,8 @@ impl Router {
                         }
                     }
                 }
-                Ok(Err(_)) => {
-                    // Read error - peer closed connection or bad data
+                Ok(Some(Err(_)) | None) => {
+                    // Read error / peer closed connection / bad data
                     return Err(SendError::PeerOffline);
                 }
                 Err(_) => {
@@ -332,56 +346,6 @@ fn should_wait_for_ack(kind: &MessageKind) -> bool {
         kind,
         MessageKind::Message { .. } | MessageKind::Request { .. }
     )
-}
-
-/// Read an envelope from an async stream with length-prefix framing.
-async fn read_envelope_async<R: AsyncReadExt + Unpin>(
-    reader: &mut R,
-    max_size: u32,
-) -> Result<Envelope, SendError> {
-    let mut len_bytes = [0u8; 4];
-    reader.read_exact(&mut len_bytes).await?;
-    let len = u32::from_be_bytes(len_bytes);
-
-    // Use configured max (clamped to hard limit)
-    let effective_max = max_size.min(MAX_PAYLOAD_SIZE);
-    if len > effective_max {
-        return Err(SendError::Transport(TransportError::MessageTooLarge {
-            size: len,
-        }));
-    }
-
-    let mut payload = vec![0u8; len as usize];
-    reader.read_exact(&mut payload).await?;
-
-    let envelope: Envelope =
-        ciborium::from_reader(&payload[..]).map_err(|e| SendError::Cbor(e.to_string()))?;
-
-    Ok(envelope)
-}
-
-/// Write an envelope to an async stream with length-prefix framing.
-async fn write_envelope_async<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    envelope: &Envelope,
-    max_size: u32,
-) -> Result<(), SendError> {
-    let mut payload = Vec::new();
-    ciborium::into_writer(envelope, &mut payload).map_err(|e| SendError::Cbor(e.to_string()))?;
-
-    let len = payload.len() as u32;
-    // Use configured max (clamped to hard limit)
-    let effective_max = max_size.min(MAX_PAYLOAD_SIZE);
-    if len > effective_max {
-        return Err(SendError::Transport(TransportError::MessageTooLarge {
-            size: len,
-        }));
-    }
-
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&payload).await?;
-    writer.flush().await?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use crate::identity::{Keypair, PubKey, Signature};
+use ciborium::value::{CanonicalValue, Value};
 
 /// Response status for Request messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,22 +50,56 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    /// Compute the canonical CBOR bytes to sign: [id, from, to, kind]
+    /// Compute canonical CBOR bytes to sign: `[id, from, to, kind]`.
     ///
     /// Field order is fixed per spec for cross-implementation compatibility.
-    /// Uses ciborium which implements RFC 8949 Core Deterministic Encoding:
-    /// - Map keys sorted in bytewise lexicographic order
-    /// - Integers use minimal encoding
-    /// - No indefinite-length encoding
     ///
-    /// PubKey is encoded as CBOR byte string (major type 2) not array.
+    /// Note: `ciborium`'s serde `into_writer` does **not** sort map keys. To ensure
+    /// deterministic (RFC 8949) encoding, we serialize into `ciborium::value::Value`,
+    /// then recursively sort all maps by canonical key order before encoding.
+    ///
+    /// `PubKey` is encoded as a CBOR byte string (major type 2), not an array.
     pub fn signable_bytes(&self) -> Vec<u8> {
-        // Create a tuple of (id, from, to, kind) for canonical encoding
+        fn canonicalize(value: &mut Value) {
+            match value {
+                Value::Array(items) => {
+                    for item in items {
+                        canonicalize(item);
+                    }
+                }
+                Value::Map(entries) => {
+                    for (key, val) in entries.iter_mut() {
+                        canonicalize(key);
+                        canonicalize(val);
+                    }
+
+                    entries.sort_by(|(k1, _), (k2, _)| match (k1, k2) {
+                        (Value::Text(a), Value::Text(b)) => match a.len().cmp(&b.len()) {
+                            std::cmp::Ordering::Equal => a.cmp(b),
+                            ord => ord,
+                        },
+                        _ => {
+                            CanonicalValue::from(k1.clone()).cmp(&CanonicalValue::from(k2.clone()))
+                        }
+                    });
+                }
+                Value::Tag(_, inner) => canonicalize(inner),
+                _ => {}
+            }
+        }
+
+        // Create a tuple of (id, from, to, kind) for signing.
         let signable = (&self.id, &self.from, &self.to, &self.kind);
+
+        let mut value = match Value::serialized(&signable) {
+            Ok(value) => value,
+            Err(_) => return Vec::new(),
+        };
+        canonicalize(&mut value);
+
         let mut buf = Vec::new();
-        // Ciborium serialization to Vec<u8> for these types is infallible
-        if let Err(e) = ciborium::into_writer(&signable, &mut buf) {
-            unreachable!("CBOR serialization failed for fixed types: {}", e);
+        if ciborium::into_writer(&value, &mut buf).is_err() {
+            return Vec::new();
         }
         buf
     }
@@ -72,12 +107,19 @@ impl Envelope {
     /// Sign the envelope with the given keypair, updating the sig field.
     pub fn sign(&mut self, keypair: &Keypair) {
         let bytes = self.signable_bytes();
+        if bytes.is_empty() {
+            self.sig = Signature::new([0u8; 64]);
+            return;
+        }
         self.sig = keypair.sign(&bytes);
     }
 
     /// Verify the signature using the sender's public key.
     pub fn verify(&self) -> bool {
         let bytes = self.signable_bytes();
+        if bytes.is_empty() {
+            return false;
+        }
         self.from.verify(&bytes, &self.sig)
     }
 }
@@ -97,7 +139,7 @@ pub enum InboxItem {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

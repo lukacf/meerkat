@@ -10,7 +10,7 @@
 //! [`CommsToolSurface::peer_availability`] to create an [`Availability`] predicate
 //! that automatically shows/hides tools based on peer count.
 //!
-//! ```ignore
+//! ```text
 //! use meerkat_core::{ToolGatewayBuilder, Availability};
 //! use meerkat_tools::CommsToolSurface;
 //!
@@ -40,7 +40,7 @@ use tokio::sync::RwLock;
 ///
 /// Use this with [`ToolGateway`] to compose comms tools with other dispatchers:
 ///
-/// ```ignore
+/// ```text
 /// use meerkat_core::ToolGateway;
 /// use meerkat_tools::builtin::comms::CommsToolSurface;
 ///
@@ -49,7 +49,7 @@ use tokio::sync::RwLock;
 /// ```
 pub struct CommsToolSurface {
     tools: HashMap<String, Arc<dyn BuiltinTool>>,
-    tool_defs: Vec<ToolDef>,
+    tool_defs: Arc<[Arc<ToolDef>]>,
 }
 
 impl CommsToolSurface {
@@ -62,26 +62,29 @@ impl CommsToolSurface {
     /// Create from an existing CommsToolSet.
     pub fn from_tool_set(tool_set: CommsToolSet) -> Self {
         let mut tools: HashMap<String, Arc<dyn BuiltinTool>> = HashMap::new();
-        let mut tool_defs = Vec::new();
+        let mut tool_defs: Vec<Arc<ToolDef>> = Vec::new();
 
         // Register each tool
         let send_message: Arc<dyn BuiltinTool> = Arc::new(tool_set.send_message);
-        tool_defs.push(send_message.def());
+        tool_defs.push(Arc::new(send_message.def()));
         tools.insert(send_message.name().to_string(), send_message);
 
         let send_request: Arc<dyn BuiltinTool> = Arc::new(tool_set.send_request);
-        tool_defs.push(send_request.def());
+        tool_defs.push(Arc::new(send_request.def()));
         tools.insert(send_request.name().to_string(), send_request);
 
         let send_response: Arc<dyn BuiltinTool> = Arc::new(tool_set.send_response);
-        tool_defs.push(send_response.def());
+        tool_defs.push(Arc::new(send_response.def()));
         tools.insert(send_response.name().to_string(), send_response);
 
         let list_peers: Arc<dyn BuiltinTool> = Arc::new(tool_set.list_peers);
-        tool_defs.push(list_peers.def());
+        tool_defs.push(Arc::new(list_peers.def()));
         tools.insert(list_peers.name().to_string(), list_peers);
 
-        Self { tools, tool_defs }
+        Self {
+            tools,
+            tool_defs: tool_defs.into(),
+        }
     }
 
     /// Get usage instructions for comms tools.
@@ -102,7 +105,7 @@ impl CommsToolSurface {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```text
     /// let trusted_peers = router.shared_trusted_peers();
     /// let availability = CommsToolSurface::peer_availability(trusted_peers.clone());
     ///
@@ -127,8 +130,8 @@ impl CommsToolSurface {
 
 #[async_trait]
 impl AgentToolDispatcher for CommsToolSurface {
-    fn tools(&self) -> Vec<ToolDef> {
-        self.tool_defs.clone()
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.tool_defs)
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -178,7 +181,7 @@ mod tests {
 
         assert_eq!(tools.len(), 4);
 
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert!(names.contains(&"send_message"));
         assert!(names.contains(&"send_request"));
         assert!(names.contains(&"send_response"));

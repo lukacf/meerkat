@@ -9,6 +9,7 @@ use meerkat_core::{Message, StopReason, ToolDef, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// Abstraction over LLM providers
 ///
@@ -38,7 +39,7 @@ pub struct LlmRequest {
     pub model: String,
     pub messages: Vec<Message>,
     #[serde(default)]
-    pub tools: Vec<ToolDef>,
+    pub tools: Vec<Arc<ToolDef>>,
     pub max_tokens: u32,
     pub temperature: Option<f32>,
     #[serde(default)]
@@ -79,7 +80,7 @@ impl LlmRequest {
     }
 
     /// Add tools
-    pub fn with_tools(mut self, tools: Vec<ToolDef>) -> Self {
+    pub fn with_tools(mut self, tools: Vec<Arc<ToolDef>>) -> Self {
         self.tools = tools;
         self
     }
@@ -111,6 +112,14 @@ impl LlmRequest {
 
 /// Normalized streaming events from LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum LlmDoneOutcome {
+    Success { stop_reason: StopReason },
+    Error { error: LlmError },
+}
+
+/// Normalized streaming events from LLM
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmEvent {
     /// Incremental text output
@@ -136,7 +145,10 @@ pub enum LlmEvent {
     UsageUpdate { usage: Usage },
 
     /// Stream completed with stop reason
-    Done { stop_reason: StopReason },
+    Done {
+        #[serde(flatten)]
+        outcome: LlmDoneOutcome,
+    },
 }
 
 /// Accumulated response from LLM stream
@@ -239,7 +251,9 @@ mod tests {
                 },
             },
             LlmEvent::Done {
-                stop_reason: StopReason::EndTurn,
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: StopReason::EndTurn,
+                },
             },
         ];
 

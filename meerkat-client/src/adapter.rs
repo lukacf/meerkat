@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::types::{LlmClient, LlmEvent, LlmRequest, ToolCallBuffer};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, ToolCallBuffer};
 
 /// Shared adapter for streaming LLM clients.
 #[derive(Clone)]
@@ -60,7 +60,7 @@ impl AgentLlmClient for LlmClientAdapter {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&Value>,
@@ -125,12 +125,25 @@ impl AgentLlmClient for LlmClientAdapter {
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
+                    LlmEvent::Done { outcome } => match outcome {
+                        LlmDoneOutcome::Success { stop_reason: sr } => {
+                            stop_reason = sr;
+                        }
+                        LlmDoneOutcome::Error { error } => {
+                            return Err(AgentError::llm(
+                                self.client.provider(),
+                                error.failure_reason(),
+                                error.to_string(),
+                            ));
+                        }
+                    },
                 },
                 Err(e) => {
-                    return Err(AgentError::LlmError(e.to_string()));
+                    return Err(AgentError::llm(
+                        self.client.provider(),
+                        e.failure_reason(),
+                        e.to_string(),
+                    ));
                 }
             }
         }
@@ -143,12 +156,12 @@ impl AgentLlmClient for LlmClientAdapter {
             }
         }
 
-        Ok(LlmStreamResult {
+        Ok(LlmStreamResult::new(
             content,
             tool_calls,
             stop_reason,
             usage,
-        })
+        ))
     }
 
     fn provider(&self) -> &'static str {

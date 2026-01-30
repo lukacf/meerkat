@@ -12,12 +12,12 @@ use serde_json::Value;
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::TaskId;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
-use crate::schema::SchemaBuilder;
 
 /// Parameters for the task_get tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct TaskGetParams {
     /// The task ID to retrieve
+    #[schemars(description = "The task ID")]
     id: String,
 }
 
@@ -44,18 +44,9 @@ impl BuiltinTool for TaskGetTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "task_get".to_string(),
-            description: "Get a task by its ID".to_string(),
-            input_schema: SchemaBuilder::new()
-                .property(
-                    "id",
-                    serde_json::json!({
-                        "type": "string",
-                        "description": "The task ID"
-                    }),
-                )
-                .required("id")
-                .build(),
+            name: "task_get".into(),
+            description: "Get a task by its ID".into(),
+            input_schema: crate::schema::schema_for::<TaskGetParams>(),
         }
     }
 
@@ -67,9 +58,10 @@ impl BuiltinTool for TaskGetTool {
         let params: TaskGetParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
 
+        let id = TaskId(params.id);
         let task = self
             .store
-            .get(&TaskId(params.id.clone()))
+            .get(&id)
             .await
             .map_err(|e| BuiltinToolError::TaskError(e.to_string()))?;
 
@@ -78,7 +70,7 @@ impl BuiltinTool for TaskGetTool {
                 .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string())),
             None => Err(BuiltinToolError::ExecutionFailed(format!(
                 "Task not found: {}",
-                params.id
+                id
             ))),
         }
     }

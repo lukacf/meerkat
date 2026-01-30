@@ -19,7 +19,7 @@
 //!
 //! The [`CompositeDispatcher`] combines built-in tools with external dispatchers (e.g., MCP):
 //!
-//! ```ignore
+//! ```text
 //! use meerkat_tools::builtin::{
 //!     CompositeDispatcher, BuiltinToolConfig, FileTaskStore,
 //!     find_project_root, ensure_rkat_dir,
@@ -61,7 +61,7 @@ pub use config::{
 };
 pub use file_store::FileTaskStore;
 pub use memory_store::MemoryTaskStore;
-pub use project::{ensure_rkat_dir, find_project_root};
+pub use project::{ensure_rkat_dir, ensure_rkat_dir_async, find_project_root};
 pub use store::TaskStore;
 pub use sub_agent::{
     AgentCancelTool, AgentForkTool, AgentListTool, AgentSpawnTool, AgentStatusTool,
@@ -223,8 +223,8 @@ mod tests {
 
             fn def(&self) -> ToolDef {
                 ToolDef {
-                    name: "mock_tool".to_string(),
-                    description: "A mock tool for testing".to_string(),
+                    name: "mock_tool".into(),
+                    description: "A mock tool for testing".into(),
                     input_schema: empty_object_schema(),
                 }
             }

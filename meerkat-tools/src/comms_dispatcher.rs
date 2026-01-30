@@ -24,6 +24,7 @@ pub struct CommsToolDispatcher<T: AgentToolDispatcher = NoOpDispatcher> {
     tool_context: ToolContext,
     /// Optional inner dispatcher for non-comms tools.
     inner: Option<Arc<T>>,
+    tool_defs: Arc<[Arc<ToolDef>]>,
 }
 
 impl CommsToolDispatcher<NoOpDispatcher> {
@@ -33,9 +34,11 @@ impl CommsToolDispatcher<NoOpDispatcher> {
             router,
             trusted_peers,
         };
+        let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {
             tool_context,
             inner: None,
+            tool_defs,
         }
     }
 }
@@ -53,9 +56,13 @@ impl<T: AgentToolDispatcher> CommsToolDispatcher<T> {
             router,
             trusted_peers,
         };
+        let mut tools = comms_tool_defs();
+        tools.extend(inner.tools().iter().map(Arc::clone));
+        let tool_defs: Arc<[Arc<ToolDef>]> = tools.into();
         Self {
             tool_context,
             inner: Some(inner),
+            tool_defs,
         }
     }
 }
@@ -65,8 +72,8 @@ pub struct NoOpDispatcher;
 
 #[async_trait]
 impl AgentToolDispatcher for NoOpDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        vec![]
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from([])
     }
 
     async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -82,28 +89,23 @@ const COMMS_TOOL_NAMES: &[&str] = &[
     "list_peers",
 ];
 
-#[async_trait]
-impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatcher<T> {
-    fn tools(&self) -> Vec<ToolDef> {
-        // Convert mcp tool definitions to ToolDef
-        let comms_tools: Vec<ToolDef> = tools_list()
-            .into_iter()
-            .map(|t| ToolDef {
+fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
+    tools_list()
+        .into_iter()
+        .map(|t| {
+            Arc::new(ToolDef {
                 name: t["name"].as_str().unwrap_or_default().to_string(),
                 description: t["description"].as_str().unwrap_or_default().to_string(),
                 input_schema: t["inputSchema"].clone(),
             })
-            .collect();
+        })
+        .collect()
+}
 
-        // Combine with inner dispatcher tools if present
-        match &self.inner {
-            Some(inner) => {
-                let mut all_tools = comms_tools;
-                all_tools.extend(inner.tools());
-                all_tools
-            }
-            None => comms_tools,
-        }
+#[async_trait]
+impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatcher<T> {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.tool_defs)
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -131,6 +133,7 @@ pub struct DynCommsToolDispatcher {
     tool_context: ToolContext,
     /// Inner dispatcher for non-comms tools.
     inner: Arc<dyn AgentToolDispatcher>,
+    tool_defs: Arc<[Arc<ToolDef>]>,
 }
 
 impl DynCommsToolDispatcher {
@@ -144,30 +147,21 @@ impl DynCommsToolDispatcher {
             router,
             trusted_peers,
         };
+        let mut tools = comms_tool_defs();
+        tools.extend(inner.tools().iter().map(Arc::clone));
+        let tool_defs: Arc<[Arc<ToolDef>]> = tools.into();
         Self {
             tool_context,
             inner,
+            tool_defs,
         }
     }
 }
 
 #[async_trait]
 impl AgentToolDispatcher for DynCommsToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        // Convert mcp tool definitions to ToolDef
-        let comms_tools: Vec<ToolDef> = tools_list()
-            .into_iter()
-            .map(|t| ToolDef {
-                name: t["name"].as_str().unwrap_or_default().to_string(),
-                description: t["description"].as_str().unwrap_or_default().to_string(),
-                input_schema: t["inputSchema"].clone(),
-            })
-            .collect();
-
-        // Combine with inner dispatcher tools
-        let mut all_tools = comms_tools;
-        all_tools.extend(self.inner.tools());
-        all_tools
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.tool_defs)
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -298,11 +292,7 @@ mod tests {
                 tools: vec![ToolDef {
                     name: "inner_tool".to_string(),
                     description: "A tool from inner dispatcher".to_string(),
-                    input_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {},
-                        "required": []
-                    }),
+                    input_schema: crate::empty_object_schema(),
                 }],
             }
         }
@@ -310,8 +300,9 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for MockInnerDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            self.tools.clone()
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            let tools: Vec<Arc<ToolDef>> = self.tools.iter().map(|t| Arc::new(t.clone())).collect();
+            tools.into()
         }
 
         async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {

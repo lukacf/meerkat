@@ -21,11 +21,12 @@ pub mod retry;
 pub mod session;
 pub mod state;
 pub mod sub_agent;
+pub mod turn_boundary;
 pub mod types;
 
 // Re-export main types at crate root
 pub use agent::{
-    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
+    Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
     CALLBACK_TOOL_PREFIX, LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
@@ -59,4 +60,5 @@ pub use retry::RetryPolicy;
 pub use session::{SESSION_VERSION, Session, SessionMeta, SessionMetadata, SessionTooling};
 pub use state::LoopState;
 pub use sub_agent::{SubAgentCommsInfo, SubAgentCompletion, SubAgentInfo, SubAgentManager};
+pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use types::*;

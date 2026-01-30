@@ -108,9 +108,9 @@ impl LlmClient for UnsupportedClient {
         _request: &'a LlmRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
         let message = self.message.clone();
-        Box::pin(futures::stream::once(async move {
+        crate::streaming::ensure_terminal_done(Box::pin(futures::stream::once(async move {
             Err(LlmError::InvalidRequest { message })
-        }))
+        })))
     }
 
     fn provider(&self) -> &'static str {

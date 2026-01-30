@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let factory = AgentFactory::new(store_dir.clone());
 
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
@@ -34,7 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .model("claude-sonnet-4")
         .system_prompt("You are a helpful assistant. Be concise in your responses.")
         .max_tokens_per_turn(1024)
-        .build(Arc::new(llm), tools, store);
+        .build(Arc::new(llm), tools, store)
+        .await;
 
     let result = agent
         .run("What is the capital of France? Answer in one sentence.".to_string())

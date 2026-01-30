@@ -7,13 +7,13 @@
 //! # Usage
 //!
 //! For a main agent:
-//! ```ignore
+//! ```text
 //! let bootstrap = CommsBootstrap::from_config(config, base_dir);
 //! let prepared = bootstrap.prepare()?;
 //! ```
 //!
 //! For a sub-agent (uses lightweight inproc transport by default):
-//! ```ignore
+//! ```text
 //! let bootstrap = CommsBootstrap::for_child_inproc(name, parent_context);
 //! let prepared = bootstrap.prepare()?;
 //! // Parent should trust child using: prepared.advertise
@@ -240,6 +240,7 @@ impl CommsBootstrap {
 
                 let resolved = config.resolve_paths(&self.base_dir);
                 let mut runtime = CommsRuntime::new(resolved)
+                    .await
                     .map_err(|e| CommsBootstrapError::RuntimeCreation(e.to_string()))?;
 
                 // Start listeners
@@ -269,21 +270,27 @@ impl CommsBootstrap {
                 let trusted_peers = create_child_trusted_peers(&parent_context);
 
                 // Ensure directories exist
-                std::fs::create_dir_all(&resolved.identity_dir)
+                tokio::fs::create_dir_all(&resolved.identity_dir)
+                    .await
                     .map_err(|e| CommsBootstrapError::DirectoryCreation(e.to_string()))?;
 
                 if let Some(parent) = resolved.trusted_peers_path.parent() {
-                    std::fs::create_dir_all(parent)
+                    tokio::fs::create_dir_all(parent)
+                        .await
                         .map_err(|e| CommsBootstrapError::DirectoryCreation(e.to_string()))?;
                 }
 
                 // Save trusted peers
+                let trusted_peers_path = resolved.trusted_peers_path.clone();
                 trusted_peers
-                    .save(&resolved.trusted_peers_path)
+                    .save(&trusted_peers_path)
+                    .await
                     .map_err(|e| CommsBootstrapError::TrustedPeersSave(e.to_string()))?;
 
                 // Create runtime with the keypair that will be loaded/generated
-                let mut runtime = CommsRuntime::new(resolved.clone())
+                let resolved_for_runtime = resolved.clone();
+                let mut runtime = CommsRuntime::new(resolved_for_runtime)
+                    .await
                     .map_err(|e| CommsBootstrapError::RuntimeCreation(e.to_string()))?;
 
                 // Get child's public key and address for advertising
@@ -325,8 +332,13 @@ impl CommsBootstrap {
             }
 
             CommsBootstrapMode::Inproc(parent_context) => {
-                // Create inproc-only runtime (no filesystem, no network listeners)
-                let runtime = CommsRuntime::inproc_only(&self.name)
+                // Create inproc-only runtime (no network listeners).
+                // This may still perform blocking work (e.g., identity/key material setup),
+                // so do it on the blocking pool.
+                let name = self.name.clone();
+                let runtime = tokio::task::spawn_blocking(move || CommsRuntime::inproc_only(name))
+                    .await
+                    .map_err(|e| CommsBootstrapError::RuntimeCreation(e.to_string()))?
                     .map_err(|e| CommsBootstrapError::RuntimeCreation(e.to_string()))?;
 
                 // Get child's public key and inproc address

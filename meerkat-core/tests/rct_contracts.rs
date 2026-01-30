@@ -101,50 +101,44 @@ fn test_config_scope_contract() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[test]
-fn test_config_store_contract() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+async fn test_config_store_contract() -> Result<(), Box<dyn std::error::Error>> {
     struct MemoryStore {
-        config: std::sync::Mutex<Config>,
+        config: tokio::sync::Mutex<Config>,
     }
 
+    #[async_trait::async_trait]
     impl meerkat_core::ConfigStore for MemoryStore {
-        fn get(&self) -> Result<Config, meerkat_core::config::ConfigError> {
-            self.config
-                .lock()
-                .map(|c| c.clone())
-                .map_err(|_| meerkat_core::config::ConfigError::InternalError("poisoned".into()))
+        async fn get(&self) -> Result<Config, meerkat_core::config::ConfigError> {
+            Ok(self.config.lock().await.clone())
         }
 
-        fn set(&self, config: Config) -> Result<(), meerkat_core::config::ConfigError> {
-            let mut guard = self
-                .config
-                .lock()
-                .map_err(|_| meerkat_core::config::ConfigError::InternalError("poisoned".into()))?;
-            *guard = config;
+        async fn set(&self, config: Config) -> Result<(), meerkat_core::config::ConfigError> {
+            *self.config.lock().await = config;
             Ok(())
         }
 
-        fn patch(&self, delta: ConfigDelta) -> Result<Config, meerkat_core::config::ConfigError> {
-            let mut config = self
-                .config
-                .lock()
-                .map_err(|_| meerkat_core::config::ConfigError::InternalError("poisoned".into()))?;
+        async fn patch(
+            &self,
+            delta: ConfigDelta,
+        ) -> Result<Config, meerkat_core::config::ConfigError> {
+            let mut guard = self.config.lock().await;
             if let Some(max_tokens) = delta.0.get("max_tokens").and_then(|v| v.as_u64()) {
-                config.max_tokens = max_tokens as u32;
+                guard.max_tokens = max_tokens as u32;
             }
-            Ok(config.clone())
+            Ok(guard.clone())
         }
     }
 
     let store = MemoryStore {
-        config: std::sync::Mutex::new(Config::default()),
+        config: tokio::sync::Mutex::new(Config::default()),
     };
 
-    let mut config = store.get()?;
+    let mut config = store.get().await?;
     config.max_tokens = 777;
-    store.set(config)?;
+    store.set(config).await?;
 
-    let updated = store.patch(ConfigDelta(json!({"max_tokens": 888})))?;
+    let updated = store.patch(ConfigDelta(json!({"max_tokens": 888}))).await?;
     assert_eq!(updated.max_tokens, 888);
     Ok(())
 }
@@ -229,15 +223,17 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-#[test]
-fn test_inv_005_agents_md_injected() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+async fn test_inv_005_agents_md_injected() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let agents_path = dir.path().join("AGENTS.md");
     std::fs::write(&agents_path, "custom instructions")?;
 
     let prompt = SystemPromptConfig::new()
         .with_project_agents_md(&agents_path)
-        .compose();
+        .compose()
+        .await;
+
     assert!(prompt.contains("custom instructions"));
     Ok(())
 }
@@ -249,14 +245,14 @@ fn test_inv_008_comms_runtime_defaults_consistent() {
     assert!(!config.auto_enable_for_subagents);
 }
 
-#[test]
-fn test_inv_009_local_replaces_global() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+async fn test_inv_009_local_replaces_global() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("RUN_TEST_009_INNER").is_ok() {
         let project_dir = std::env::var("TEST_PROJECT_DIR")?;
         let project_dir = std::path::PathBuf::from(project_dir);
         std::env::set_current_dir(&project_dir)?;
 
-        let config = Config::load()?;
+        let config = Config::load().await?;
         assert_eq!(config.agent.model, "local");
         assert_eq!(config.budget.max_tokens, None);
         return Ok(());

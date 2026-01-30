@@ -9,8 +9,7 @@
 use crate::comms_dispatcher::wrap_with_comms;
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_client::LlmClient;
-use meerkat_client::{LlmEvent, LlmRequest};
+use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_comms::{PubKey, TrustedPeer, TrustedPeers};
 use meerkat_core::comms_bootstrap::CommsBootstrap;
 use meerkat_core::comms_config::CoreCommsConfig;
@@ -75,7 +74,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&Value>,
@@ -119,23 +118,36 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
+                    LlmEvent::Done { outcome } => match outcome {
+                        LlmDoneOutcome::Success { stop_reason: sr } => {
+                            stop_reason = sr;
+                        }
+                        LlmDoneOutcome::Error { error } => {
+                            return Err(AgentError::llm(
+                                self.client.provider(),
+                                error.failure_reason(),
+                                error.to_string(),
+                            ));
+                        }
+                    },
                     _ => {}
                 },
                 Err(e) => {
-                    return Err(AgentError::LlmError(e.to_string()));
+                    return Err(AgentError::llm(
+                        self.client.provider(),
+                        e.failure_reason(),
+                        e.to_string(),
+                    ));
                 }
             }
         }
 
-        Ok(LlmStreamResult {
+        Ok(LlmStreamResult::new(
             content,
             tool_calls,
             stop_reason,
             usage,
-        })
+        ))
     }
 
     fn provider(&self) -> &'static str {
@@ -164,7 +176,7 @@ impl AgentLlmClient for DynLlmClientAdapter {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&Value>,
@@ -208,23 +220,36 @@ impl AgentLlmClient for DynLlmClientAdapter {
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
+                    LlmEvent::Done { outcome } => match outcome {
+                        LlmDoneOutcome::Success { stop_reason: sr } => {
+                            stop_reason = sr;
+                        }
+                        LlmDoneOutcome::Error { error } => {
+                            return Err(AgentError::llm(
+                                self.client.provider(),
+                                error.failure_reason(),
+                                error.to_string(),
+                            ));
+                        }
+                    },
                     _ => {}
                 },
                 Err(e) => {
-                    return Err(AgentError::LlmError(e.to_string()));
+                    return Err(AgentError::llm(
+                        self.client.provider(),
+                        e.failure_reason(),
+                        e.to_string(),
+                    ));
                 }
             }
         }
 
-        Ok(LlmStreamResult {
+        Ok(LlmStreamResult::new(
             content,
             tool_calls,
             stop_reason,
             usage,
-        })
+        ))
     }
 
     fn provider(&self) -> &'static str {
@@ -316,21 +341,18 @@ pub async fn setup_child_comms(
             .map_err(|e| SubAgentRunnerError::CommsSetup(format!("Failed to create dir: {}", e)))?;
     }
 
-    // Save trusted peers in a blocking task since it performs filesystem writes.
+    // Save trusted peers
     let trusted_peers_path = resolved_config.trusted_peers_path.clone();
-    tokio::task::spawn_blocking(move || trusted_peers.save(&trusted_peers_path))
-        .await
-        .map_err(|e| {
-            SubAgentRunnerError::CommsSetup(format!("Failed to save trusted peers: {}", e))
-        })?
-        .map_err(|e| {
-            SubAgentRunnerError::CommsSetup(format!("Failed to save trusted peers: {}", e))
-        })?;
+    trusted_peers.save(&trusted_peers_path).await.map_err(|e| {
+        SubAgentRunnerError::CommsSetup(format!("Failed to save trusted peers: {}", e))
+    })?;
 
     // Create and start comms runtime
-    let mut runtime = CommsRuntime::new(resolved_config.clone()).map_err(|e| {
-        SubAgentRunnerError::CommsSetup(format!("Failed to create comms runtime: {}", e))
-    })?;
+    let mut runtime = CommsRuntime::new(resolved_config.clone())
+        .await
+        .map_err(|e| {
+            SubAgentRunnerError::CommsSetup(format!("Failed to create comms runtime: {}", e))
+        })?;
 
     // Get child's public key before starting listeners
     let child_pubkey = *runtime.public_key().as_bytes();
@@ -477,7 +499,7 @@ pub async fn spawn_sub_agent_dyn(
                 // Extract advertise info for parent trust
                 let comms_info = prepared.advertise.map(|adv| SubAgentCommsInfo {
                     pubkey: adv.pubkey,
-                    addr: adv.addr.clone(),
+                    addr: adv.addr,
                 });
 
                 // Add the child to the parent's trusted peers so the parent
@@ -513,7 +535,7 @@ pub async fn spawn_sub_agent_dyn(
     };
 
     // Pass trait objects directly - no wrappers needed thanks to ?Sized bounds
-    let mut agent = builder.build(llm_adapter, tools, spec.store);
+    let mut agent = builder.build(llm_adapter, tools, spec.store).await;
 
     // Get the steering sender from the agent
     let steering_tx = agent.steering_sender();
@@ -612,7 +634,7 @@ where
         builder = builder.budget(budget);
     }
 
-    let mut agent = builder.build(llm_adapter, spec.tools, spec.store);
+    let mut agent = builder.build(llm_adapter, spec.tools, spec.store).await;
 
     // Get the steering sender from the agent
     let steering_tx = agent.steering_sender();

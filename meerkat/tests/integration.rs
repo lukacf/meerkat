@@ -6,6 +6,7 @@
 //! Tests may fail on NotImplemented, but NOT on boot/module errors.
 
 use meerkat::*;
+use schemars::JsonSchema;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,11 +19,18 @@ mod llm_normalization {
 
     #[tokio::test]
     async fn test_anthropic_normalizes_to_llm_event() {
+        if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("Skipping: live API tests disabled (set MEERKAT_LIVE_API_TESTS=1)");
+            return;
+        }
+
         // Skip if no API key - this is expected for CI without keys
-        let api_key = match std::env::var("ANTHROPIC_API_KEY") {
+        let api_key = match std::env::var("RKAT_ANTHROPIC_API_KEY")
+            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+        {
             Ok(key) => key,
             Err(_) => {
-                eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+                eprintln!("Skipping: missing ANTHROPIC_API_KEY");
                 return;
             }
         };
@@ -48,7 +56,9 @@ mod llm_normalization {
                     let _ = delta;
                     got_text_delta = true;
                 }
-                Ok(LlmEvent::Done { stop_reason }) => {
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { stop_reason },
+                }) => {
                     // Stop reason should be valid
                     assert!(matches!(
                         stop_reason,
@@ -56,6 +66,9 @@ mod llm_normalization {
                     ));
                     got_done = true;
                 }
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error { error },
+                }) => panic!("Unexpected error outcome: {error:?}"),
                 Ok(LlmEvent::ToolCallDelta { .. }) => {
                     // Tool call deltas are valid events
                 }
@@ -80,10 +93,17 @@ mod llm_normalization {
     #[cfg(feature = "openai")]
     #[tokio::test]
     async fn test_openai_normalizes_to_llm_event() {
-        let api_key = match std::env::var("OPENAI_API_KEY") {
+        if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("Skipping: live API tests disabled (set MEERKAT_LIVE_API_TESTS=1)");
+            return;
+        }
+
+        let api_key = match std::env::var("RKAT_OPENAI_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+        {
             Ok(key) => key,
             Err(_) => {
-                eprintln!("Skipping: OPENAI_API_KEY not set");
+                eprintln!("Skipping: missing OPENAI_API_KEY");
                 return;
             }
         };
@@ -120,10 +140,18 @@ mod llm_normalization {
     #[cfg(feature = "gemini")]
     #[tokio::test]
     async fn test_gemini_normalizes_to_llm_event() {
-        let api_key = match std::env::var("GOOGLE_API_KEY") {
+        if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("Skipping: live API tests disabled (set MEERKAT_LIVE_API_TESTS=1)");
+            return;
+        }
+
+        let api_key = match std::env::var("RKAT_GEMINI_API_KEY")
+            .or_else(|_| std::env::var("GEMINI_API_KEY"))
+            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+        {
             Ok(key) => key,
             Err(_) => {
-                eprintln!("Skipping: GOOGLE_API_KEY not set");
+                eprintln!("Skipping: missing GOOGLE_API_KEY");
                 return;
             }
         };
@@ -198,6 +226,12 @@ mod llm_normalization {
 mod tool_dispatch {
     use super::*;
 
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct ToolInput {
+        input: String,
+    }
+
     #[test]
     fn test_tool_discovery_validates_schema() {
         let mut registry = ToolRegistry::new();
@@ -206,13 +240,7 @@ mod tool_dispatch {
         let valid_tool = ToolDef {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "input": { "type": "string" }
-                },
-                "required": ["input"]
-            }),
+            input_schema: meerkat_tools::schema_for::<ToolInput>(),
         };
 
         // Registry.register returns () - no error case
@@ -625,7 +653,7 @@ mod operation_injection {
         let session_id = SessionId::new();
         let artifact = ArtifactRef {
             id: "artifact_123".to_string(),
-            session_id: session_id.clone(),
+            session_id,
             size_bytes: 1024,
             ttl_seconds: Some(3600),
             version: 1,
@@ -663,10 +691,11 @@ mod operation_injection {
             percent: Some(0.5),
         };
 
+        let result_id = op_id;
         let completed = OpEvent::Completed {
-            id: op_id.clone(),
+            id: result_id.clone(),
             result: OperationResult {
-                id: op_id.clone(),
+                id: result_id,
                 content: "Done".to_string(),
                 is_error: false,
                 duration_ms: 100,
@@ -965,6 +994,19 @@ mod mcp_protocol {
 mod combined {
     use super::*;
 
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct ReadFileArgs {
+        path: String,
+    }
+
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct WriteFileArgs {
+        path: String,
+        content: String,
+    }
+
     #[test]
     fn test_session_with_tool_results() {
         let mut session = Session::new();
@@ -1065,29 +1107,16 @@ mod combined {
     #[test]
     fn test_llm_request_with_tools() {
         let tools = vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "read_file".to_string(),
                 description: "Read a file".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" }
-                    },
-                    "required": ["path"]
-                }),
-            },
-            ToolDef {
+                input_schema: meerkat_tools::schema_for::<ReadFileArgs>(),
+            }),
+            Arc::new(ToolDef {
                 name: "write_file".to_string(),
                 description: "Write a file".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "content": { "type": "string" }
-                    },
-                    "required": ["path", "content"]
-                }),
-            },
+                input_schema: meerkat_tools::schema_for::<WriteFileArgs>(),
+            }),
         ];
 
         let request = LlmRequest::new(
@@ -1096,7 +1125,7 @@ mod combined {
                 content: "Read the file".to_string(),
             })],
         )
-        .with_tools(tools.clone())
+        .with_tools(tools)
         .with_max_tokens(4096)
         .with_temperature(0.7);
 

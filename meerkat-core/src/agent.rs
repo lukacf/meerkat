@@ -2,30 +2,29 @@
 //!
 //! The Agent struct ties together all components and runs the agent loop.
 
-use crate::budget::{Budget, BudgetLimits};
-use crate::comms_config::CoreCommsConfig;
+mod builder;
+mod comms;
+mod runner;
+mod state;
+
+use crate::budget::Budget;
 use crate::comms_runtime::CommsRuntime;
 use crate::config::AgentConfig;
 use crate::error::AgentError;
-use crate::event::{AgentEvent, BudgetType};
-use crate::ops::{
-    ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, OperationId, OperationResult, SpawnSpec,
-    SteeringHandle, ToolAccessPolicy,
-};
-use crate::prompt::SystemPromptConfig;
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
-use crate::sub_agent::{SubAgentManager, inject_steering_messages};
-use crate::types::{
-    AssistantMessage, Message, RunResult, StopReason, ToolCall, ToolDef, ToolResult, Usage,
-    UserMessage,
-};
+use crate::sub_agent::SubAgentManager;
+use crate::types::{Message, StopReason, ToolCall, ToolDef, Usage};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
+
+pub use builder::AgentBuilder;
+pub use runner::AgentRunner;
 
 /// Special error prefix to signal tool calls that must be routed externally.
 pub const CALLBACK_TOOL_PREFIX: &str = "CALLBACK_TOOL_PENDING:";
@@ -44,7 +43,7 @@ pub trait AgentLlmClient: Send + Sync {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&Value>,
@@ -56,17 +55,53 @@ pub trait AgentLlmClient: Send + Sync {
 
 /// Result of streaming from the LLM
 pub struct LlmStreamResult {
-    pub content: String,
-    pub tool_calls: Vec<ToolCall>,
-    pub stop_reason: StopReason,
-    pub usage: Usage,
+    content: String,
+    tool_calls: Vec<ToolCall>,
+    stop_reason: StopReason,
+    usage: Usage,
+}
+
+impl LlmStreamResult {
+    pub fn new(
+        content: String,
+        tool_calls: Vec<ToolCall>,
+        stop_reason: StopReason,
+        usage: Usage,
+    ) -> Self {
+        Self {
+            content,
+            tool_calls,
+            stop_reason,
+            usage,
+        }
+    }
+
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    pub fn tool_calls(&self) -> &[ToolCall] {
+        &self.tool_calls
+    }
+
+    pub fn stop_reason(&self) -> StopReason {
+        self.stop_reason
+    }
+
+    pub fn usage(&self) -> &Usage {
+        &self.usage
+    }
+
+    pub fn into_parts(self) -> (String, Vec<ToolCall>, StopReason, Usage) {
+        (self.content, self.tool_calls, self.stop_reason, self.usage)
+    }
 }
 
 /// Trait for tool dispatchers
 #[async_trait]
 pub trait AgentToolDispatcher: Send + Sync {
     /// Get available tool definitions
-    fn tools(&self) -> Vec<ToolDef>;
+    fn tools(&self) -> Arc<[Arc<ToolDef>]>;
 
     /// Execute a tool call
     ///
@@ -80,6 +115,7 @@ pub struct FilteredToolDispatcher<T: AgentToolDispatcher + ?Sized> {
     inner: Arc<T>,
     /// HashSet for O(1) lookup instead of Vec O(n)
     allowed_tools: HashSet<String>,
+    cache: RwLock<FilteredToolCache>,
 }
 
 impl<T: AgentToolDispatcher + ?Sized> FilteredToolDispatcher<T> {
@@ -87,18 +123,58 @@ impl<T: AgentToolDispatcher + ?Sized> FilteredToolDispatcher<T> {
         Self {
             inner,
             allowed_tools: allowed_tools.into_iter().collect(),
+            cache: RwLock::new(FilteredToolCache::default()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FilteredToolCache {
+    inner_ptr: usize,
+    inner_len: usize,
+    tools: Arc<[Arc<ToolDef>]>,
+    valid: bool,
+}
+
+impl Default for FilteredToolCache {
+    fn default() -> Self {
+        Self {
+            inner_ptr: 0,
+            inner_len: 0,
+            tools: Arc::from([]),
+            valid: false,
         }
     }
 }
 
 #[async_trait]
 impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for FilteredToolDispatcher<T> {
-    fn tools(&self) -> Vec<ToolDef> {
-        self.inner
-            .tools()
-            .into_iter()
-            .filter(|t| self.allowed_tools.contains(&t.name))
-            .collect()
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        let inner = self.inner.tools();
+        let inner_ptr = inner.as_ptr() as usize;
+        let inner_len = inner.len();
+
+        if let Ok(cached) = self.cache.try_read() {
+            if cached.valid && cached.inner_ptr == inner_ptr && cached.inner_len == inner_len {
+                return Arc::clone(&cached.tools);
+            }
+        }
+
+        let filtered: Vec<Arc<ToolDef>> = inner
+            .iter()
+            .filter(|t| self.allowed_tools.contains(t.name.as_str()))
+            .map(Arc::clone)
+            .collect();
+        let filtered: Arc<[Arc<ToolDef>]> = filtered.into();
+
+        if let Ok(mut cached) = self.cache.try_write() {
+            cached.inner_ptr = inner_ptr;
+            cached.inner_len = inner_len;
+            cached.tools = Arc::clone(&filtered);
+            cached.valid = true;
+        }
+
+        filtered
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, crate::error::ToolError> {
@@ -117,245 +193,6 @@ pub trait AgentSessionStore: Send + Sync {
 
     /// Load a session by ID
     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError>;
-}
-
-/// Builder for creating an Agent
-#[derive(Default)]
-pub struct AgentBuilder {
-    config: AgentConfig,
-    system_prompt: Option<String>,
-    budget_limits: Option<BudgetLimits>,
-    retry_policy: RetryPolicy,
-    session: Option<Session>,
-    concurrency_limits: ConcurrencyLimits,
-    depth: u32,
-    /// Comms configuration (optional, enables inter-agent communication)
-    comms_config: Option<CoreCommsConfig>,
-    /// Base directory for resolving comms paths (defaults to current dir)
-    comms_base_dir: Option<std::path::PathBuf>,
-    /// Pre-created comms runtime (alternative to comms_config)
-    comms_runtime: Option<CommsRuntime>,
-}
-
-impl AgentBuilder {
-    /// Create a new agent builder with default config
-    pub fn new() -> Self {
-        Self {
-            config: AgentConfig::default(),
-            system_prompt: None,
-            budget_limits: None,
-            retry_policy: RetryPolicy::default(),
-            session: None,
-            concurrency_limits: ConcurrencyLimits::default(),
-            depth: 0,
-            comms_config: None,
-            comms_base_dir: None,
-            comms_runtime: None,
-        }
-    }
-
-    /// Set concurrency limits for sub-agents
-    pub fn concurrency_limits(mut self, limits: ConcurrencyLimits) -> Self {
-        self.concurrency_limits = limits;
-        self
-    }
-
-    /// Set the nesting depth for sub-agents
-    ///
-    /// This controls how deeply nested this agent is in the sub-agent hierarchy.
-    /// Depth 0 is the top-level agent. Sub-agents spawned from it have depth 1, etc.
-    ///
-    /// The depth affects:
-    /// - Whether comms listeners are enabled (only depth 0 can have listeners)
-    /// - Max depth limit checking for further sub-agent spawning
-    pub fn depth(mut self, depth: u32) -> Self {
-        self.depth = depth;
-        self
-    }
-
-    /// Set the model to use
-    pub fn model(mut self, model: impl Into<String>) -> Self {
-        self.config.model = model.into();
-        self
-    }
-
-    /// Set the system prompt
-    pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(prompt.into());
-        self
-    }
-
-    /// Set max tokens per turn
-    pub fn max_tokens_per_turn(mut self, tokens: u32) -> Self {
-        self.config.max_tokens_per_turn = tokens;
-        self
-    }
-
-    /// Set temperature
-    pub fn temperature(mut self, temp: f32) -> Self {
-        self.config.temperature = Some(temp);
-        self
-    }
-
-    /// Set budget limits
-    pub fn budget(mut self, limits: BudgetLimits) -> Self {
-        self.budget_limits = Some(limits);
-        self
-    }
-
-    /// Set provider-specific parameters (e.g., thinking config, reasoning effort)
-    ///
-    /// These parameters are passed through to the LLM client unchanged.
-    /// Each provider implementation is responsible for reading and applying
-    /// relevant parameters.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let agent = AgentBuilder::new()
-    ///     .model("claude-sonnet-4")
-    ///     .provider_params(serde_json::json!({
-    ///         "thinking": {
-    ///             "type": "enabled",
-    ///             "budget_tokens": 10000
-    ///         }
-    ///     }))
-    ///     .build(client, tools, store);
-    /// ```
-    pub fn provider_params(mut self, params: Value) -> Self {
-        self.config.provider_params = Some(params);
-        self
-    }
-
-    /// Set retry policy for LLM calls
-    pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
-        self.retry_policy = policy;
-        self
-    }
-
-    /// Resume from an existing session
-    pub fn resume_session(mut self, session: Session) -> Self {
-        self.session = Some(session);
-        self
-    }
-
-    /// Enable inter-agent communication with the given config.
-    ///
-    /// When comms is enabled, the agent will:
-    /// - Start listeners for incoming messages (UDS and/or TCP)
-    /// - Provide comms tools (send_message, send_request, send_response, list_peers)
-    /// - Drain inbox at turn boundaries and inject messages into the session
-    ///
-    /// Note: For top-level agents (depth == 0), this config is used to create comms.
-    /// For sub-agents, use `with_comms_runtime()` to pass a pre-configured runtime.
-    pub fn comms(mut self, config: CoreCommsConfig) -> Self {
-        self.comms_config = Some(config);
-        self
-    }
-
-    /// Set the base directory for resolving comms paths.
-    ///
-    /// Relative paths in comms config will be resolved relative to this directory.
-    /// Defaults to current working directory if not set.
-    pub fn comms_base_dir(mut self, dir: std::path::PathBuf) -> Self {
-        self.comms_base_dir = Some(dir);
-        self
-    }
-
-    /// Set a pre-created comms runtime.
-    ///
-    /// Use this when you need to share the router/trusted_peers with other components
-    /// (e.g., CommsToolDispatcher) before building the agent.
-    ///
-    /// This takes precedence over `comms()` configuration.
-    pub fn with_comms_runtime(mut self, runtime: CommsRuntime) -> Self {
-        self.comms_runtime = Some(runtime);
-        self
-    }
-
-    /// Build the agent
-    ///
-    /// Supports both concrete types and trait objects (`dyn Trait`).
-    pub fn build<C, T, S>(self, client: Arc<C>, tools: Arc<T>, store: Arc<S>) -> Agent<C, T, S>
-    where
-        C: AgentLlmClient + ?Sized,
-        T: AgentToolDispatcher + ?Sized,
-        S: AgentSessionStore + ?Sized,
-    {
-        let session = self.session.unwrap_or_else(|| {
-            let mut s = Session::new();
-            let prompt = self
-                .system_prompt
-                .unwrap_or_else(|| SystemPromptConfig::new().compose());
-            s.set_system_prompt(prompt);
-            s
-        });
-
-        let budget = Budget::new(self.budget_limits.unwrap_or_default());
-        let sub_agent_manager = Arc::new(SubAgentManager::new(self.concurrency_limits, self.depth));
-
-        // Create steering channel for receiving steering messages from parent
-        let (steering_tx, steering_rx) = mpsc::channel(16);
-
-        // Create comms runtime.
-        // Priority: 1) Pre-created runtime (always used, regardless of depth)
-        //           2) Create from config (only for top-level agents, depth == 0)
-        //
-        // Sub-agents can have comms when explicitly provided via with_comms_runtime().
-        // This allows parent-child communication over UDS sockets.
-        let comms_runtime = if let Some(runtime) = self.comms_runtime {
-            // Always use pre-created runtime regardless of depth
-            // This enables sub-agent comms when the parent sets it up
-            Some(runtime)
-        } else if self.depth == 0 {
-            // Only auto-create from config for top-level agents
-            self.comms_config.filter(|c| c.enabled).and_then(|config| {
-                let base_dir = self.comms_base_dir.unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                });
-                let resolved = config.resolve_paths(&base_dir);
-                match CommsRuntime::new(resolved) {
-                    Ok(mut runtime) => {
-                        tracing::info!(
-                            "Comms enabled for agent '{}' (peer ID: {})",
-                            config.name,
-                            runtime.public_key().to_peer_id()
-                        );
-                        // Start listeners automatically when comms is enabled
-                        // This is done in a blocking context since build() is sync
-                        // Listeners run in background tasks and don't block
-                        if let Err(e) = futures::executor::block_on(runtime.start_listeners()) {
-                            tracing::warn!("Failed to start comms listeners: {}", e);
-                        }
-                        Some(runtime)
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create comms runtime: {}", e);
-                        None
-                    }
-                }
-            })
-        } else {
-            // Sub-agents without explicit comms runtime get None
-            // (They can still communicate via parent-provided runtime)
-            None
-        };
-
-        Agent {
-            config: self.config,
-            client,
-            tools,
-            store,
-            session,
-            budget,
-            retry_policy: self.retry_policy,
-            state: LoopState::CallingLlm,
-            sub_agent_manager,
-            depth: self.depth,
-            steering_rx,
-            steering_tx,
-            comms_runtime,
-        }
-    }
 }
 
 /// The main Agent struct
@@ -385,1068 +222,23 @@ where
     comms_runtime: Option<CommsRuntime>,
 }
 
-impl<C, T, S> Agent<C, T, S>
-where
-    C: AgentLlmClient + ?Sized + 'static,
-    T: AgentToolDispatcher + ?Sized + 'static,
-    S: AgentSessionStore + ?Sized + 'static,
-{
-    /// Create a new agent builder
-    pub fn builder() -> AgentBuilder {
-        AgentBuilder::new()
-    }
-
-    /// Get the current session
-    pub fn session(&self) -> &Session {
-        &self.session
-    }
-
-    /// Get mutable access to the session (for setting metadata)
-    pub fn session_mut(&mut self) -> &mut Session {
-        &mut self.session
-    }
-
-    /// Get the current budget
-    pub fn budget(&self) -> &Budget {
-        &self.budget
-    }
-
-    /// Get the current state
-    pub fn state(&self) -> &LoopState {
-        &self.state
-    }
-
-    /// Get the retry policy
-    pub fn retry_policy(&self) -> &RetryPolicy {
-        &self.retry_policy
-    }
-
-    /// Get the current nesting depth
-    pub fn depth(&self) -> u32 {
-        self.depth
-    }
-
-    /// Get the comms runtime, if enabled.
-    ///
-    /// Returns `None` if comms is disabled or if this is a subagent.
-    pub fn comms(&self) -> Option<&CommsRuntime> {
-        self.comms_runtime.as_ref()
-    }
-
-    /// Get mutable access to the comms runtime, if enabled.
-    ///
-    /// Returns `None` if comms is disabled or if this is a subagent.
-    pub fn comms_mut(&mut self) -> Option<&mut CommsRuntime> {
-        self.comms_runtime.as_mut()
-    }
-
-    /// Get the steering sender (for parent to use when spawning this agent)
-    pub fn steering_sender(&self) -> mpsc::Sender<crate::ops::SteeringMessage> {
-        self.steering_tx.clone()
-    }
-
-    /// Spawn a new sub-agent with minimal context
-    ///
-    /// The sub-agent runs independently with its own budget and tool access.
-    /// Results are collected at turn boundaries.
-    pub async fn spawn(&self, spec: SpawnSpec) -> Result<OperationId, AgentError> {
-        // Check depth limit
-        if self.depth + 1 > self.sub_agent_manager.limits.max_depth {
-            return Err(AgentError::DepthLimitExceeded {
-                depth: self.depth + 1,
-                max: self.sub_agent_manager.limits.max_depth,
-            });
-        }
-
-        // Check if we can spawn more sub-agents
-        if !self.sub_agent_manager.can_spawn().await {
-            return Err(AgentError::SubAgentLimitExceeded {
-                limit: self.sub_agent_manager.limits.max_concurrent_agents,
-            });
-        }
-
-        // Validate tool access policy
-        let all_tools = self.tools.tools();
-        let allowed_tools = self
-            .sub_agent_manager
-            .apply_tool_access_policy(&all_tools, &spec.tool_access);
-
-        if let ToolAccessPolicy::AllowList(ref names) = spec.tool_access {
-            for name in names {
-                if !all_tools.iter().any(|t| &t.name == name) {
-                    return Err(AgentError::InvalidToolAccess { tool: name.clone() });
-                }
-            }
-        }
-
-        // Apply context strategy to get messages for sub-agent
-        let messages = self
-            .sub_agent_manager
-            .apply_context_strategy(&self.session, &spec.context);
-
-        // Create sub-agent session with context
-        let mut sub_session = Session::new();
-        for msg in messages {
-            sub_session.push(msg);
-        }
-        if let Some(sys_prompt) = &spec.system_prompt {
-            sub_session.set_system_prompt(sys_prompt.clone());
-        }
-
-        // Generate operation ID
-        let op_id = OperationId::new();
-
-        // Create steering channel for this sub-agent
-        let (steering_tx, _steering_rx) = mpsc::channel(16);
-
-        // Register the sub-agent
-        self.sub_agent_manager
-            .register(op_id.clone(), "spawn".to_string(), steering_tx)
-            .await?;
-
-        // Clone components for the spawned task
-        let client = self.client.clone();
-        let store = self.store.clone();
-        let prompt = spec.prompt.clone();
-        let budget = spec.budget.clone();
-        let sub_agent_manager = self.sub_agent_manager.clone();
-        let op_id_clone = op_id.clone();
-        let depth = self.depth + 1;
-        let model = self.config.model.clone();
-        let max_tokens = self.config.max_tokens_per_turn;
-
-        // Create filtered tools based on policy
-        let allowed_tool_names: Vec<String> =
-            allowed_tools.iter().map(|t| t.name.clone()).collect();
-        let filtered_tools = Arc::new(FilteredToolDispatcher::new(
-            self.tools.clone(),
-            allowed_tool_names,
-        ));
-
-        // Spawn the sub-agent in a background task
-        tokio::spawn(async move {
-            let start = std::time::Instant::now();
-
-            // Build sub-agent with filtered tools
-            let mut sub_agent = AgentBuilder::new()
-                .model(&model)
-                .max_tokens_per_turn(max_tokens)
-                .budget(budget)
-                .resume_session(sub_session)
-                .build(client, filtered_tools, store);
-
-            // Run the sub-agent
-            let result = sub_agent.run(prompt).await;
-
-            // Report completion
-            match result {
-                Ok(run_result) => {
-                    sub_agent_manager
-                        .complete(
-                            &op_id_clone,
-                            OperationResult {
-                                id: op_id_clone.clone(),
-                                content: run_result.text,
-                                is_error: false,
-                                duration_ms: start.elapsed().as_millis() as u64,
-                                tokens_used: run_result.usage.total_tokens(),
-                            },
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    sub_agent_manager.fail(&op_id_clone, e.to_string()).await;
-                }
-            }
-        });
-
-        tracing::info!(
-            "Spawned sub-agent {} at depth {} with {} tools",
-            op_id,
-            depth,
-            allowed_tools.len()
-        );
-
-        Ok(op_id)
-    }
-
-    /// Fork the current conversation into parallel branches
-    ///
-    /// Each branch gets a copy of the full conversation history and runs independently.
-    pub async fn fork(
-        &self,
-        branches: Vec<ForkBranch>,
-        budget_policy: ForkBudgetPolicy,
-    ) -> Result<Vec<OperationId>, AgentError> {
-        // Check depth limit
-        if self.depth + 1 > self.sub_agent_manager.limits.max_depth {
-            return Err(AgentError::DepthLimitExceeded {
-                depth: self.depth + 1,
-                max: self.sub_agent_manager.limits.max_depth,
-            });
-        }
-
-        // Check if we can spawn enough sub-agents
-        let running = self.sub_agent_manager.running_ids().await.len();
-        if running + branches.len() > self.sub_agent_manager.limits.max_concurrent_agents {
-            return Err(AgentError::SubAgentLimitExceeded {
-                limit: self.sub_agent_manager.limits.max_concurrent_agents,
-            });
-        }
-
-        // Allocate budget for each branch
-        let remaining_tokens = self.budget.remaining();
-        let budgets = self.sub_agent_manager.allocate_fork_budget(
-            remaining_tokens,
-            branches.len(),
-            &budget_policy,
-        );
-
-        let mut op_ids = Vec::with_capacity(branches.len());
-
-        for (i, branch) in branches.into_iter().enumerate() {
-            let op_id = OperationId::new();
-
-            // Validate tool access if specified
-            if let Some(ToolAccessPolicy::AllowList(names)) = &branch.tool_access {
-                let all_tools = self.tools.tools();
-                for name in names {
-                    if !all_tools.iter().any(|t| &t.name == name) {
-                        return Err(AgentError::InvalidToolAccess { tool: name.clone() });
-                    }
-                }
-            }
-
-            // Create steering channel
-            let (steering_tx, _steering_rx) = mpsc::channel(16);
-
-            // Register the branch as a sub-agent
-            self.sub_agent_manager
-                .register(op_id.clone(), branch.name.clone(), steering_tx)
-                .await?;
-
-            // Apply tool access policy for this branch
-            let all_tools = self.tools.tools();
-            let allowed_tools = match &branch.tool_access {
-                Some(policy) => self
-                    .sub_agent_manager
-                    .apply_tool_access_policy(&all_tools, policy),
-                None => all_tools, // Inherit all tools
-            };
-            let allowed_tool_names: Vec<String> =
-                allowed_tools.iter().map(|t| t.name.clone()).collect();
-            let filtered_tools = Arc::new(FilteredToolDispatcher::new(
-                self.tools.clone(),
-                allowed_tool_names,
-            ));
-
-            // Clone components for the spawned task
-            let client = self.client.clone();
-            let store = self.store.clone();
-            let prompt = branch.prompt.clone();
-            let budget = budgets[i].clone();
-            let sub_agent_manager = self.sub_agent_manager.clone();
-            let op_id_clone = op_id.clone();
-            let model = self.config.model.clone();
-            let max_tokens = self.config.max_tokens_per_turn;
-            let branch_name = branch.name.clone();
-
-            // Create session with full history (fork uses FullHistory context)
-            let mut fork_session = Session::new();
-            for msg in self.session.messages() {
-                fork_session.push(msg.clone());
-            }
-
-            // Spawn the branch in a background task
-            tokio::spawn(async move {
-                let start = std::time::Instant::now();
-
-                // Build sub-agent for this branch with filtered tools
-                let mut sub_agent = AgentBuilder::new()
-                    .model(&model)
-                    .max_tokens_per_turn(max_tokens)
-                    .budget(budget)
-                    .resume_session(fork_session)
-                    .build(client, filtered_tools, store);
-
-                // Run the sub-agent with the branch prompt
-                let result = sub_agent.run(prompt).await;
-
-                // Report completion
-                match result {
-                    Ok(run_result) => {
-                        sub_agent_manager
-                            .complete(
-                                &op_id_clone,
-                                OperationResult {
-                                    id: op_id_clone.clone(),
-                                    content: format!("[{}] {}", branch_name, run_result.text),
-                                    is_error: false,
-                                    duration_ms: start.elapsed().as_millis() as u64,
-                                    tokens_used: run_result.usage.total_tokens(),
-                                },
-                            )
-                            .await;
-                    }
-                    Err(e) => {
-                        sub_agent_manager.fail(&op_id_clone, e.to_string()).await;
-                    }
-                }
-            });
-
-            tracing::info!(
-                "Forked branch '{}' as {} at depth {}",
-                branch.name,
-                op_id,
-                self.depth + 1
-            );
-
-            op_ids.push(op_id);
-        }
-
-        Ok(op_ids)
-    }
-
-    /// Send a steering message to a running sub-agent
-    pub async fn steer(
-        &self,
-        op_id: &OperationId,
-        message: String,
-    ) -> Result<SteeringHandle, AgentError> {
-        self.sub_agent_manager.steer(op_id, message).await
-    }
-
-    /// Cancel a running sub-agent
-    pub async fn cancel_sub_agent(&self, op_id: &OperationId) {
-        self.sub_agent_manager.cancel(op_id).await;
-    }
-
-    /// Collect completed sub-agent results (called at turn boundaries)
-    pub async fn collect_sub_agent_results(&self) -> Vec<OperationResult> {
-        self.sub_agent_manager.collect_completed().await
-    }
-
-    /// Check if there are running sub-agents
-    pub async fn has_running_sub_agents(&self) -> bool {
-        self.sub_agent_manager.has_running().await
-    }
-
-    /// Drain pending steering messages and inject them into session
-    async fn apply_pending_steering(&mut self) {
-        let mut messages = Vec::new();
-
-        // Drain all pending steering messages from the channel
-        while let Ok(msg) = self.steering_rx.try_recv() {
-            messages.push(msg);
-        }
-
-        if !messages.is_empty() {
-            inject_steering_messages(&mut self.session, messages);
-        }
-    }
-
-    /// Drain comms inbox and inject messages into session.
-    ///
-    /// This is called at turn boundaries to process incoming inter-agent messages.
-    /// It is non-blocking on the inbox but awaits the trusted peers read lock.
-    async fn drain_comms_inbox(&mut self) {
-        if let Some(ref mut comms) = self.comms_runtime {
-            let messages = comms.drain_messages().await;
-            if !messages.is_empty() {
-                tracing::debug!("Injecting {} comms messages into session", messages.len());
-
-                // Format all messages into a single user message for the LLM
-                // Pre-calculate capacity to avoid reallocations
-                let mut combined = String::new();
-                let mut first = true;
-                for msg in &messages {
-                    if !first {
-                        combined.push_str("\n\n");
-                    }
-                    combined.push_str(&msg.to_user_message_text());
-                    first = false;
-                }
-
-                self.session
-                    .push(Message::User(UserMessage { content: combined }));
-            }
-        }
-    }
-
-    /// Call LLM with retry logic
-    async fn call_llm_with_retry(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        max_tokens: u32,
-    ) -> Result<LlmStreamResult, AgentError> {
-        let mut attempt = 0u32;
-
-        loop {
-            // Wait for retry delay if not first attempt
-            if attempt > 0 {
-                let delay = self.retry_policy.delay_for_attempt(attempt);
-                tokio::time::sleep(delay).await;
-            }
-
-            match self
-                .client
-                .stream_response(
-                    messages,
-                    tools,
-                    max_tokens,
-                    self.config.temperature,
-                    self.config.provider_params.as_ref(),
-                )
-                .await
-            {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    // Check if we should retry
-                    if e.is_recoverable() && self.retry_policy.should_retry(attempt) {
-                        tracing::warn!(
-                            "LLM call failed (attempt {}), retrying: {}",
-                            attempt + 1,
-                            e
-                        );
-                        attempt += 1;
-                        continue;
-                    }
-                    return Err(e);
-                }
-            }
-        }
-    }
-
-    /// Run the agent with a user message
-    pub async fn run(&mut self, user_input: String) -> Result<RunResult, AgentError> {
-        // Reset state for new run (allows multi-turn on same agent)
-        self.state = LoopState::CallingLlm;
-
-        // Add user message
-        self.session.push(Message::User(crate::types::UserMessage {
-            content: user_input,
-        }));
-
-        // Run the loop without event emission (no listener)
-        self.run_loop(None).await
-    }
-
-    /// Run the agent with events streamed to the provided channel
-    pub async fn run_with_events(
-        &mut self,
-        user_input: String,
-        event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<RunResult, AgentError> {
-        // Reset state for new run (allows multi-turn on same agent)
-        self.state = LoopState::CallingLlm;
-
-        let session_id = self.session.id().clone();
-        let run_prompt = user_input.clone();
-
-        // Add user message
-        self.session.push(Message::User(crate::types::UserMessage {
-            content: user_input,
-        }));
-
-        let _ = event_tx
-            .send(AgentEvent::RunStarted {
-                session_id,
-                prompt: run_prompt,
-            })
-            .await;
-
-        match self.run_loop(Some(event_tx.clone())).await {
-            Ok(result) => Ok(result),
-            Err(err) => {
-                let _ = event_tx
-                    .send(AgentEvent::RunFailed {
-                        session_id: self.session.id().clone(),
-                        error: err.to_string(),
-                    })
-                    .await;
-                Err(err)
-            }
-        }
-    }
-
-    /// Run the agent in host mode: process initial prompt, then stay alive for comms messages.
-    ///
-    /// Host mode:
-    /// 1. Runs the initial prompt (if non-empty)
-    /// 2. Waits for incoming comms messages
-    /// 3. Processes each batch of messages as a new turn
-    /// 4. Continues until budget exhaustion, error, or process termination
-    ///
-    /// Requires comms to be enabled. Returns error if comms is not configured.
-    ///
-    /// # Arguments
-    /// * `initial_prompt` - Initial prompt to run before entering host loop. If empty,
-    ///   skips the initial LLM call and immediately waits for comms messages.
-    ///
-    /// # Returns
-    /// The result from the last successful run. In practice, this usually means
-    /// the run that exhausted the budget or encountered an error.
-    pub async fn run_host_mode(&mut self, initial_prompt: String) -> Result<RunResult, AgentError> {
-        use std::time::Duration;
-
-        // Verify comms is enabled
-        if self.comms_runtime.is_none() {
-            return Err(AgentError::ConfigError(
-                "Host mode requires comms to be enabled".to_string(),
-            ));
-        }
-
-        // Run initial prompt if non-empty, OR if session has pending user message
-        // (sub-agents pre-load the prompt into session, so initial_prompt may be empty)
-        let has_pending_user_message = self
-            .session
-            .messages()
-            .last()
-            .is_some_and(|m| matches!(m, crate::types::Message::User(_)));
-
-        let mut last_result = if !initial_prompt.trim().is_empty() {
-            // Non-empty prompt - run normally (will push user message)
-            self.run(initial_prompt).await?
-        } else if has_pending_user_message {
-            // Session already has a user message - run the loop directly without pushing
-            self.run_loop(None).await?
-        } else {
-            // No prompt and no pending messages - create minimal result
-            RunResult {
-                text: String::new(),
-                session_id: self.session.id().clone(),
-                turns: 0,
-                tool_calls: 0,
-                usage: Usage::default(),
-            }
-        };
-
-        // Get inbox notify for waiting
-        let inbox_notify = self
-            .comms_runtime
-            .as_ref()
-            .ok_or_else(|| AgentError::InternalError("comms not initialized".to_string()))?
-            .inbox_notify();
-
-        // Polling interval for budget checks when no duration limit
-        const POLL_INTERVAL: Duration = Duration::from_secs(60);
-
-        loop {
-            // Check budget before waiting
-            if self.budget.is_exhausted() {
-                tracing::info!("Host mode: budget exhausted, exiting");
-                return Ok(last_result);
-            }
-
-            // Determine timeout: use remaining budget duration if set, otherwise poll interval
-            let timeout = self.budget.remaining_duration().unwrap_or(POLL_INTERVAL);
-
-            // IMPORTANT: Register the notified future BEFORE draining to avoid race condition.
-            // If we drain first, a message could arrive between drain and await, and we'd
-            // miss the notification (Notify is non-latched).
-            let notified = inbox_notify.notified();
-
-            // Try to drain any already-queued messages first
-            let messages = if let Some(ref mut comms) = self.comms_runtime {
-                comms.drain_messages().await
-            } else {
-                Vec::new()
-            };
-
-            // If we have messages, process them immediately (don't wait)
-            if !messages.is_empty() {
-                let combined_input = messages
-                    .iter()
-                    .map(|m| m.to_user_message_text())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-
-                tracing::debug!("Host mode: processing {} comms message(s)", messages.len());
-
-                match self.run(combined_input).await {
-                    Ok(result) => {
-                        last_result = result;
-                    }
-                    Err(e) => {
-                        if e.is_graceful() {
-                            tracing::info!("Host mode: graceful exit - {}", e);
-                            return Ok(last_result);
-                        }
-                        return Err(e);
-                    }
-                }
-                continue;
-            }
-
-            // No messages queued - wait for notification or timeout
-            tokio::select! {
-                _ = notified => {
-                    // Message arrived, loop back to drain and process
-                }
-                _ = tokio::time::sleep(timeout) => {
-                    // Timeout: check budget again (for duration-based limits)
-                    tracing::trace!("Host mode: timeout, checking budget");
-                }
-            }
-        }
-    }
-
-    /// Run in host mode with event streaming for verbose output
-    ///
-    /// Same as `run_host_mode` but emits events for monitoring the agent's progress.
-    pub async fn run_host_mode_with_events(
-        &mut self,
-        initial_prompt: String,
-        event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<RunResult, AgentError> {
-        use std::time::Duration;
-
-        // Verify comms is enabled
-        if self.comms_runtime.is_none() {
-            return Err(AgentError::ConfigError(
-                "Host mode requires comms to be enabled".to_string(),
-            ));
-        }
-
-        // Run initial prompt if non-empty, OR if session has pending user message
-        // (sub-agents pre-load the prompt into session, so initial_prompt may be empty)
-        let has_pending_user_message = self
-            .session
-            .messages()
-            .last()
-            .is_some_and(|m| matches!(m, crate::types::Message::User(_)));
-
-        let mut last_result = if !initial_prompt.trim().is_empty() {
-            // Non-empty prompt - run normally (will push user message)
-            self.run_with_events(initial_prompt, event_tx.clone())
-                .await?
-        } else if has_pending_user_message {
-            // Session already has a user message - run the loop directly without pushing
-            let run_prompt = self
-                .session
-                .messages()
-                .last()
-                .and_then(|msg| match msg {
-                    Message::User(user) => Some(user.content.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            let _ = event_tx
-                .send(AgentEvent::RunStarted {
-                    session_id: self.session.id().clone(),
-                    prompt: run_prompt,
-                })
-                .await;
-            self.run_loop(Some(event_tx.clone())).await?
-        } else {
-            // No prompt and no pending messages - create minimal result
-            RunResult {
-                text: String::new(),
-                session_id: self.session.id().clone(),
-                turns: 0,
-                tool_calls: 0,
-                usage: Usage::default(),
-            }
-        };
-
-        // Get inbox notify for waiting
-        let inbox_notify = self
-            .comms_runtime
-            .as_ref()
-            .ok_or_else(|| AgentError::InternalError("comms not initialized".to_string()))?
-            .inbox_notify();
-
-        // Polling interval for budget checks when no duration limit
-        const POLL_INTERVAL: Duration = Duration::from_secs(60);
-
-        loop {
-            // Check budget before waiting
-            if self.budget.is_exhausted() {
-                tracing::info!("Host mode: budget exhausted, exiting");
-                return Ok(last_result);
-            }
-
-            // Determine timeout: use remaining budget duration if set, otherwise poll interval
-            let timeout = self.budget.remaining_duration().unwrap_or(POLL_INTERVAL);
-
-            // IMPORTANT: Register the notified future BEFORE draining to avoid race condition.
-            let notified = inbox_notify.notified();
-
-            // Try to drain any already-queued messages first
-            let messages = if let Some(ref mut comms) = self.comms_runtime {
-                comms.drain_messages().await
-            } else {
-                Vec::new()
-            };
-
-            // If we have messages, process them immediately (don't wait)
-            if !messages.is_empty() {
-                let combined_input = messages
-                    .iter()
-                    .map(|m| m.to_user_message_text())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-
-                tracing::debug!("Host mode: processing {} comms message(s)", messages.len());
-
-                match self.run_with_events(combined_input, event_tx.clone()).await {
-                    Ok(result) => {
-                        last_result = result;
-                    }
-                    Err(e) => {
-                        if e.is_graceful() {
-                            tracing::info!("Host mode: graceful exit - {}", e);
-                            return Ok(last_result);
-                        }
-                        return Err(e);
-                    }
-                }
-                continue;
-            }
-
-            // No messages queued - wait for notification or timeout
-            tokio::select! {
-                _ = notified => {
-                    // Message arrived, loop back to drain and process
-                }
-                _ = tokio::time::sleep(timeout) => {
-                    // Timeout: check budget again (for duration-based limits)
-                    tracing::trace!("Host mode: timeout, checking budget");
-                }
-            }
-        }
-    }
-
-    /// The main agent loop
-    async fn run_loop(
-        &mut self,
-        event_tx: Option<mpsc::Sender<AgentEvent>>,
-    ) -> Result<RunResult, AgentError> {
-        let mut turn_count = 0u32;
-        let max_turns = self.config.max_turns.unwrap_or(100);
-        let mut tool_call_count = 0u32;
-
-        // Helper to conditionally emit events (only when listener exists)
-        macro_rules! emit_event {
-            ($event:expr) => {
-                if let Some(ref tx) = event_tx {
-                    let _ = tx.send($event).await;
-                }
-            };
-        }
-
-        loop {
-            // Check turn limit
-            if turn_count >= max_turns {
-                self.state = LoopState::Completed;
-                return Ok(self.build_result(turn_count, tool_call_count));
-            }
-
-            // Check budget
-            if self.budget.is_exhausted() {
-                emit_event!(AgentEvent::BudgetWarning {
-                    budget_type: BudgetType::Tokens,
-                    used: self.session.total_tokens(),
-                    limit: self.budget.remaining(),
-                    percent: 1.0,
-                });
-                self.state = LoopState::Completed;
-                return Ok(self.build_result(turn_count, tool_call_count));
-            }
-
-            match self.state {
-                LoopState::CallingLlm => {
-                    // Emit turn start
-                    emit_event!(AgentEvent::TurnStarted {
-                        turn_number: turn_count,
-                    });
-
-                    // Get tool definitions
-                    let tool_defs = self.tools.tools();
-
-                    // Call LLM with retry
-                    let result = self
-                        .call_llm_with_retry(
-                            self.session.messages(),
-                            &tool_defs,
-                            self.config.max_tokens_per_turn,
-                        )
-                        .await?;
-
-                    // Update budget
-                    self.budget.record_usage(&result.usage);
-
-                    if !result.content.is_empty() {
-                        emit_event!(AgentEvent::TextComplete {
-                            content: result.content.clone(),
-                        });
-                    }
-
-                    // Check if we have tool calls
-                    if !result.tool_calls.is_empty() {
-                        // Add assistant message with tool calls
-                        self.session.push(Message::Assistant(AssistantMessage {
-                            content: result.content,
-                            tool_calls: result.tool_calls.clone(),
-                            stop_reason: result.stop_reason,
-                            usage: result.usage,
-                        }));
-
-                        // Emit tool call requests
-                        for tc in &result.tool_calls {
-                            emit_event!(AgentEvent::ToolCallRequested {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                args: tc.args.clone(),
-                            });
-                        }
-
-                        // Transition to waiting for ops
-                        self.state.transition(LoopState::WaitingForOps)?;
-
-                        // Execute tool calls in parallel
-                        let num_tool_calls = result.tool_calls.len();
-                        let tools_ref = &self.tools;
-
-                        // Emit all execution start events
-                        for tc in &result.tool_calls {
-                            emit_event!(AgentEvent::ToolExecutionStarted {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                            });
-                        }
-
-                        // Execute all tool calls in parallel using join_all
-                        let dispatch_futures: Vec<_> = result
-                            .tool_calls
-                            .iter()
-                            .map(|tc| {
-                                let id = tc.id.clone();
-                                let name = tc.name.clone();
-                                let args = tc.args.clone();
-                                let thought_signature = tc.thought_signature.clone();
-                                async move {
-                                    let start = std::time::Instant::now();
-                                    let dispatch_result = tools_ref.dispatch(&name, &args).await;
-                                    let duration_ms = start.elapsed().as_millis() as u64;
-                                    (
-                                        id,
-                                        name,
-                                        args,
-                                        dispatch_result,
-                                        duration_ms,
-                                        thought_signature,
-                                    )
-                                }
-                            })
-                            .collect();
-
-                        let dispatch_results = futures::future::join_all(dispatch_futures).await;
-
-                        // Process results and emit events
-                        let mut tool_results = Vec::with_capacity(num_tool_calls);
-                        for (id, name, args, dispatch_result, duration_ms, thought_signature) in
-                            dispatch_results
-                        {
-                            let (content, is_error) = match dispatch_result {
-                                Ok(v) => {
-                                    // Stringify the Value for the LLM
-                                    let s = match &v {
-                                        Value::String(s) => s.clone(),
-                                        _ => serde_json::to_string(&v).unwrap_or_default(),
-                                    };
-                                    (s, false)
-                                }
-                                Err(crate::error::ToolError::Other(msg))
-                                    if msg.starts_with(CALLBACK_TOOL_PREFIX) =>
-                                {
-                                    let payload = msg
-                                        .strip_prefix(CALLBACK_TOOL_PREFIX)
-                                        .and_then(|suffix| {
-                                            serde_json::from_str::<Value>(suffix).ok()
-                                        })
-                                        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-                                    let mut payload =
-                                        payload.as_object().cloned().unwrap_or_default();
-                                    payload
-                                        .entry("tool_use_id".to_string())
-                                        .or_insert(Value::String(id.clone()));
-                                    payload
-                                        .entry("tool_name".to_string())
-                                        .or_insert(Value::String(name.clone()));
-                                    payload.entry("args".to_string()).or_insert(args.clone());
-                                    let serialized = serde_json::to_string(&Value::Object(payload))
-                                        .unwrap_or_default();
-                                    return Err(AgentError::ToolError(format!(
-                                        "{}{}",
-                                        CALLBACK_TOOL_PREFIX, serialized
-                                    )));
-                                }
-                                Err(e) => {
-                                    let payload = e.to_error_payload();
-                                    let serialized = serde_json::to_string(&payload)
-                                        .unwrap_or_else(|_| {
-                                            "{\"error\":\"tool_error\",\"message\":\"tool error\"}"
-                                                .to_string()
-                                        });
-                                    (serialized, true)
-                                }
-                            };
-
-                            // Emit execution complete
-                            emit_event!(AgentEvent::ToolExecutionCompleted {
-                                id: id.clone(),
-                                name: name.clone(),
-                                result: content.clone(),
-                                is_error,
-                                duration_ms,
-                            });
-
-                            // Emit result received
-                            emit_event!(AgentEvent::ToolResultReceived {
-                                id: id.clone(),
-                                name: name.clone(),
-                                is_error,
-                            });
-
-                            tool_results.push(ToolResult {
-                                tool_use_id: id,
-                                content,
-                                is_error,
-                                thought_signature,
-                            });
-
-                            // Track tool call in budget
-                            self.budget.record_tool_call();
-                            tool_call_count += 1;
-                        }
-
-                        // Add tool results to session
-                        self.session.push(Message::ToolResults {
-                            results: tool_results,
-                        });
-
-                        // Go through DrainingEvents to CallingLlm (state machine requires this)
-                        self.state.transition(LoopState::DrainingEvents)?;
-
-                        // === TURN BOUNDARY: Apply steering, drain comms, collect sub-agent results ===
-
-                        // Apply any pending steering messages from parent
-                        self.apply_pending_steering().await;
-
-                        // Drain comms inbox and inject messages into session
-                        self.drain_comms_inbox().await;
-
-                        // Collect completed sub-agent results and inject into session
-                        let sub_agent_results = self.collect_sub_agent_results().await;
-                        if !sub_agent_results.is_empty() {
-                            // Inject sub-agent results as tool results
-                            let results: Vec<ToolResult> = sub_agent_results
-                                .into_iter()
-                                .map(|r| ToolResult {
-                                    tool_use_id: r.id.to_string(),
-                                    content: r.content,
-                                    is_error: r.is_error,
-                                    thought_signature: None, // Sub-agents don't use thought signatures
-                                })
-                                .collect();
-                            self.session.push(Message::ToolResults { results });
-                        }
-
-                        // === END TURN BOUNDARY ===
-
-                        self.state.transition(LoopState::CallingLlm)?;
-                        turn_count += 1;
-                    } else {
-                        // No tool calls - we're done
-                        let final_text = result.content.clone();
-                        self.session.push(Message::Assistant(AssistantMessage {
-                            content: result.content,
-                            tool_calls: vec![],
-                            stop_reason: result.stop_reason,
-                            usage: result.usage.clone(),
-                        }));
-
-                        // Emit turn completed
-                        emit_event!(AgentEvent::TurnCompleted {
-                            stop_reason: result.stop_reason,
-                            usage: result.usage,
-                        });
-
-                        // Transition to completed
-                        self.state.transition(LoopState::DrainingEvents)?;
-                        self.state.transition(LoopState::Completed)?;
-
-                        // Save session
-                        if let Err(e) = self.store.save(&self.session).await {
-                            tracing::warn!("Failed to save session: {}", e);
-                        }
-
-                        // Emit run completed
-                        emit_event!(AgentEvent::RunCompleted {
-                            session_id: self.session.id().clone(),
-                            result: final_text.clone(),
-                            usage: self.session.total_usage(),
-                        });
-
-                        return Ok(RunResult {
-                            text: final_text,
-                            session_id: self.session.id().clone(),
-                            usage: self.session.total_usage(),
-                            turns: turn_count + 1,
-                            tool_calls: tool_call_count,
-                        });
-                    }
-                }
-                LoopState::WaitingForOps => {
-                    // This state is handled inline above
-                    unreachable!("WaitingForOps handled inline");
-                }
-                LoopState::DrainingEvents => {
-                    // Wait for any pending events to be processed
-                    self.state.transition(LoopState::Completed)?;
-                }
-                LoopState::Cancelling => {
-                    // Handle cancellation
-                    self.state.transition(LoopState::Completed)?;
-                    return Ok(self.build_result(turn_count, tool_call_count));
-                }
-                LoopState::ErrorRecovery => {
-                    // Attempt recovery
-                    self.state.transition(LoopState::CallingLlm)?;
-                }
-                LoopState::Completed => {
-                    return Ok(self.build_result(turn_count, tool_call_count));
-                }
-            }
-        }
-    }
-
-    /// Build a RunResult from current state
-    fn build_result(&self, turns: u32, tool_calls: u32) -> RunResult {
-        RunResult {
-            text: self.session.last_assistant_text().unwrap_or("").to_string(),
-            session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
-            turns,
-            tool_calls,
-        }
-    }
-
-    /// Cancel the current run
-    pub fn cancel(&mut self) {
-        if !self.state.is_terminal() {
-            let _ = self.state.transition(LoopState::Cancelling);
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::budget::BudgetLimits;
     use std::sync::Mutex;
+
+    fn empty_object_schema() -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".to_string(), Value::String("object".to_string()));
+        obj.insert(
+            "properties".to_string(),
+            Value::Object(serde_json::Map::new()),
+        );
+        obj.insert("required".to_string(), Value::Array(Vec::new()));
+        Value::Object(obj)
+    }
 
     // Mock LLM client for testing
     struct MockLlmClient {
@@ -1466,19 +258,19 @@ mod tests {
         async fn stream_response(
             &self,
             _messages: &[Message],
-            _tools: &[ToolDef],
+            _tools: &[Arc<ToolDef>],
             _max_tokens: u32,
             _temperature: Option<f32>,
             _provider_params: Option<&Value>,
         ) -> Result<LlmStreamResult, AgentError> {
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
-                Ok(LlmStreamResult {
-                    content: "Default response".to_string(),
-                    tool_calls: vec![],
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                })
+                Ok(LlmStreamResult::new(
+                    "Default response".to_string(),
+                    vec![],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ))
             } else {
                 Ok(responses.remove(0))
             }
@@ -1491,30 +283,29 @@ mod tests {
 
     // Mock tool dispatcher
     struct MockToolDispatcher {
-        tools: Vec<ToolDef>,
+        tools: Arc<[Arc<ToolDef>]>,
     }
 
     impl MockToolDispatcher {
-        fn new(tools: Vec<ToolDef>) -> Self {
-            Self { tools }
+        fn new(tools: Vec<Arc<ToolDef>>) -> Self {
+            Self {
+                tools: tools.into(),
+            }
         }
     }
 
     #[async_trait]
     impl AgentToolDispatcher for MockToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             self.tools.clone()
         }
 
         async fn dispatch(
             &self,
-            name: &str,
-            args: &Value,
+            _name: &str,
+            _args: &Value,
         ) -> Result<Value, crate::error::ToolError> {
-            Ok(Value::String(format!(
-                "Result from {} with args: {}",
-                name, args
-            )))
+            Ok(Value::Null)
         }
     }
 
@@ -1552,7 +343,8 @@ mod tests {
         let mut agent = AgentBuilder::new()
             .model("test-model")
             .system_prompt("You are a helpful assistant.")
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         let result = agent.run("Hello".to_string()).await.unwrap();
 
@@ -1595,22 +387,18 @@ mod tests {
             },
         ]));
 
-        let tools = Arc::new(MockToolDispatcher::new(vec![ToolDef {
+        let tools = Arc::new(MockToolDispatcher::new(vec![Arc::new(ToolDef {
             name: "get_weather".to_string(),
             description: "Get weather for a city".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string"}
-                }
-            }),
-        }]));
+            input_schema: empty_object_schema(),
+        })]));
 
         let store = Arc::new(MockSessionStore);
 
         let mut agent = AgentBuilder::new()
             .model("test-model")
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         let result = agent
             .run("What's the weather in Tokyo?".to_string())
@@ -1641,7 +429,8 @@ mod tests {
                 max_duration: None,
                 max_tool_calls: Some(5),
             })
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         assert!(!agent.session().messages().is_empty()); // Should have system prompt
         assert_eq!(agent.state(), &LoopState::CallingLlm);
@@ -1651,8 +440,8 @@ mod tests {
     // Phase 10: Agent Integration Tests (comms wiring)
     // =========================================================================
 
-    #[test]
-    fn test_agent_builder_has_comms_config() {
+    #[tokio::test]
+    async fn test_agent_builder_has_comms_config() {
         // Verify AgentBuilder has comms_config field
         let builder = AgentBuilder::new();
         // The field exists (compiles) and is None by default
@@ -1661,13 +450,13 @@ mod tests {
         let tools = Arc::new(MockToolDispatcher::new(vec![]));
         let store = Arc::new(MockSessionStore);
 
-        let agent = builder.build(client, tools, store);
+        let agent = builder.build(client, tools, store).await;
         // Without comms config, comms runtime should be None
         assert!(agent.comms().is_none());
     }
 
-    #[test]
-    fn test_agent_builder_comms_method() {
+    #[tokio::test]
+    async fn test_agent_builder_comms_method() {
         use crate::comms_config::CoreCommsConfig;
 
         let config = CoreCommsConfig::with_name("test-agent");
@@ -1680,24 +469,24 @@ mod tests {
 
         // Note: This test doesn't verify comms_runtime creation because that
         // requires filesystem access. See test_agent_builder_creates_comms_runtime.
-        let _agent = builder.build(client, tools, store);
+        let _agent = builder.build(client, tools, store).await;
     }
 
-    #[test]
-    fn test_agent_has_comms_runtime() {
+    #[tokio::test]
+    async fn test_agent_has_comms_runtime() {
         // Verify Agent has comms_runtime field (accessible via comms())
         let client = Arc::new(MockLlmClient::new(vec![]));
         let tools = Arc::new(MockToolDispatcher::new(vec![]));
         let store = Arc::new(MockSessionStore);
 
-        let agent = AgentBuilder::new().build(client, tools, store);
+        let agent = AgentBuilder::new().build(client, tools, store).await;
 
         // comms() and comms_mut() methods should exist and return None when disabled
         assert!(agent.comms().is_none());
     }
 
-    #[test]
-    fn test_agent_builder_creates_comms_runtime() {
+    #[tokio::test]
+    async fn test_agent_builder_creates_comms_runtime() {
         use crate::comms_config::CoreCommsConfig;
         use tempfile::TempDir;
 
@@ -1716,7 +505,8 @@ mod tests {
         let agent = AgentBuilder::new()
             .comms(config)
             .comms_base_dir(tmp.path().to_path_buf())
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Comms runtime should be created
         assert!(agent.comms().is_some());
@@ -1726,34 +516,34 @@ mod tests {
         assert_eq!(pubkey.as_bytes().len(), 32);
     }
 
-    #[test]
-    fn test_agent_comms_accessor() {
+    #[tokio::test]
+    async fn test_agent_comms_accessor() {
         let client = Arc::new(MockLlmClient::new(vec![]));
         let tools = Arc::new(MockToolDispatcher::new(vec![]));
         let store = Arc::new(MockSessionStore);
 
-        let agent = AgentBuilder::new().build(client, tools, store);
+        let agent = AgentBuilder::new().build(client, tools, store).await;
 
         // comms() should return Option<&CommsRuntime>
         let comms_ref: Option<&crate::comms_runtime::CommsRuntime> = agent.comms();
         assert!(comms_ref.is_none());
     }
 
-    #[test]
-    fn test_agent_comms_mut_accessor() {
+    #[tokio::test]
+    async fn test_agent_comms_mut_accessor() {
         let client = Arc::new(MockLlmClient::new(vec![]));
         let tools = Arc::new(MockToolDispatcher::new(vec![]));
         let store = Arc::new(MockSessionStore);
 
-        let mut agent = AgentBuilder::new().build(client, tools, store);
+        let mut agent = AgentBuilder::new().build(client, tools, store).await;
 
         // comms_mut() should return Option<&mut CommsRuntime>
         let comms_mut: Option<&mut crate::comms_runtime::CommsRuntime> = agent.comms_mut();
         assert!(comms_mut.is_none());
     }
 
-    #[test]
-    fn test_subagent_has_no_comms() {
+    #[tokio::test]
+    async fn test_subagent_has_no_comms() {
         use crate::comms_config::CoreCommsConfig;
         use tempfile::TempDir;
 
@@ -1771,15 +561,16 @@ mod tests {
             .comms(config)
             .comms_base_dir(tmp.path().to_path_buf())
             .depth(1) // Subagent depth
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Subagents cannot have comms - security restriction
         assert!(agent.comms().is_none());
         assert_eq!(agent.depth(), 1);
     }
 
-    #[test]
-    fn test_agent_with_comms_runtime() {
+    #[tokio::test]
+    async fn test_agent_with_comms_runtime() {
         use crate::comms_config::CoreCommsConfig;
         use crate::comms_runtime::CommsRuntime;
         use tempfile::TempDir;
@@ -1793,7 +584,7 @@ mod tests {
 
         // Create CommsRuntime externally
         let resolved = config.resolve_paths(tmp.path());
-        let runtime = CommsRuntime::new(resolved).unwrap();
+        let runtime = CommsRuntime::new(resolved).await.unwrap();
 
         // Get Arc clones before moving runtime
         let router_arc = runtime.router_arc();
@@ -1806,7 +597,8 @@ mod tests {
         // Inject the pre-created runtime
         let agent = AgentBuilder::new()
             .with_comms_runtime(runtime)
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Agent should have comms
         assert!(agent.comms().is_some());
@@ -1825,17 +617,17 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_agent_no_comms_tools_when_disabled() {
+    #[tokio::test]
+    async fn test_agent_no_comms_tools_when_disabled() {
         let client = Arc::new(MockLlmClient::new(vec![]));
-        let tools = Arc::new(MockToolDispatcher::new(vec![ToolDef {
+        let tools = Arc::new(MockToolDispatcher::new(vec![Arc::new(ToolDef {
             name: "my_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-        }]));
+            input_schema: empty_object_schema(),
+        })]));
         let store = Arc::new(MockSessionStore);
 
-        let agent = AgentBuilder::new().build(client, tools, store);
+        let agent = AgentBuilder::new().build(client, tools, store).await;
 
         // Without comms, agent should have no comms runtime
         assert!(agent.comms().is_none());
@@ -1866,7 +658,8 @@ mod tests {
         let mut agent = AgentBuilder::new()
             .comms(config)
             .comms_base_dir(tmp.path().to_path_buf())
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Verify comms is enabled
         assert!(agent.comms().is_some());
@@ -1908,7 +701,8 @@ mod tests {
         let agent = AgentBuilder::new()
             .comms(config.clone())
             .comms_base_dir(tmp.path().to_path_buf())
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Comms runtime should exist
         assert!(agent.comms().is_some());
@@ -1961,17 +755,18 @@ mod tests {
                 usage: Usage::default(),
             },
         ]));
-        let tools = Arc::new(MockToolDispatcher::new(vec![ToolDef {
+        let tools = Arc::new(MockToolDispatcher::new(vec![Arc::new(ToolDef {
             name: "test_tool".to_string(),
             description: "Test".to_string(),
-            input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-        }]));
+            input_schema: empty_object_schema(),
+        })]));
         let store = Arc::new(MockSessionStore);
 
         let mut agent = AgentBuilder::new()
             .comms(config)
             .comms_base_dir(tmp.path().to_path_buf())
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         assert!(agent.comms().is_some());
 
@@ -2036,8 +831,8 @@ mod tests {
         assert_eq!(params["thinking"]["budget_tokens"], 10000);
     }
 
-    #[test]
-    fn test_agent_builder_provider_params() {
+    #[tokio::test]
+    async fn test_agent_builder_provider_params() {
         let client = Arc::new(MockLlmClient::new(vec![]));
         let tools = Arc::new(MockToolDispatcher::new(vec![]));
         let store = Arc::new(MockSessionStore);
@@ -2051,7 +846,8 @@ mod tests {
                     "budget_tokens": 5000
                 }
             }))
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Agent builds successfully with provider_params
     }
@@ -2080,7 +876,7 @@ mod tests {
         async fn stream_response(
             &self,
             _messages: &[Message],
-            _tools: &[ToolDef],
+            _tools: &[Arc<ToolDef>],
             _max_tokens: u32,
             _temperature: Option<f32>,
             provider_params: Option<&Value>,
@@ -2090,12 +886,12 @@ mod tests {
 
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
-                Ok(LlmStreamResult {
-                    content: "Default response".to_string(),
-                    tool_calls: vec![],
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                })
+                Ok(LlmStreamResult::new(
+                    "Default response".to_string(),
+                    vec![],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ))
             } else {
                 Ok(responses.remove(0))
             }
@@ -2127,7 +923,8 @@ mod tests {
         let mut agent = AgentBuilder::new()
             .model("test-model")
             .provider_params(thinking_config.clone())
-            .build(client.clone(), tools, store);
+            .build(client.clone(), tools, store)
+            .await;
 
         let _result = agent.run("Test".to_string()).await.unwrap();
 
@@ -2151,7 +948,8 @@ mod tests {
         // Build without provider_params
         let mut agent = AgentBuilder::new()
             .model("test-model")
-            .build(client.clone(), tools, store);
+            .build(client.clone(), tools, store)
+            .await;
 
         let _result = agent.run("Test".to_string()).await.unwrap();
 
@@ -2176,11 +974,11 @@ mod tests {
         // Create a dispatcher with many tools
         let mut tools = Vec::new();
         for i in 0..100 {
-            tools.push(ToolDef {
+            tools.push(Arc::new(ToolDef {
                 name: format!("tool_{}", i),
                 description: format!("Tool {}", i),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            });
+                input_schema: empty_object_schema(),
+            }));
         }
         let inner = Arc::new(MockToolDispatcher::new(tools));
 
@@ -2203,16 +1001,16 @@ mod tests {
     #[tokio::test]
     async fn test_filtered_tool_dispatcher_blocks_disallowed() {
         let tools = vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "allowed_tool".to_string(),
                 description: "Allowed".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
-            ToolDef {
+                input_schema: empty_object_schema(),
+            }),
+            Arc::new(ToolDef {
                 name: "blocked_tool".to_string(),
                 description: "Blocked".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
+                input_schema: empty_object_schema(),
+            }),
         ];
         let inner = Arc::new(MockToolDispatcher::new(tools));
         let allowed = vec!["allowed_tool".to_string()];
@@ -2269,27 +1067,28 @@ mod tests {
         ]));
 
         let tools = Arc::new(MockToolDispatcher::new(vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "tool_a".to_string(),
                 description: "A".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
-            ToolDef {
+                input_schema: empty_object_schema(),
+            }),
+            Arc::new(ToolDef {
                 name: "tool_b".to_string(),
                 description: "B".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
-            ToolDef {
+                input_schema: empty_object_schema(),
+            }),
+            Arc::new(ToolDef {
                 name: "tool_c".to_string(),
                 description: "C".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
+                input_schema: empty_object_schema(),
+            }),
         ]));
         let store = Arc::new(MockSessionStore);
 
         let mut agent = AgentBuilder::new()
             .model("test-model")
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         let result = agent.run("Test".to_string()).await.unwrap();
 
@@ -2322,8 +1121,9 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for TimingToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            self.tools.clone()
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            let tools: Vec<Arc<ToolDef>> = self.tools.iter().map(|t| Arc::new(t.clone())).collect();
+            Arc::from(tools)
         }
 
         async fn dispatch(
@@ -2386,17 +1186,17 @@ mod tests {
                 ToolDef {
                     name: "slow_tool_1".to_string(),
                     description: "Slow 1".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
                 ToolDef {
                     name: "slow_tool_2".to_string(),
                     description: "Slow 2".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
                 ToolDef {
                     name: "slow_tool_3".to_string(),
                     description: "Slow 3".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
             ],
             tool_delay_ms,
@@ -2406,7 +1206,8 @@ mod tests {
         let overall_start = std::time::Instant::now();
         let mut agent = AgentBuilder::new()
             .model("test-model")
-            .build(client, tools.clone(), store);
+            .build(client, tools.clone(), store)
+            .await;
 
         let result = agent.run("Test".to_string()).await.unwrap();
         let overall_duration = overall_start.elapsed();
@@ -2470,8 +1271,9 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for FailingToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            self.tools.clone()
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            let tools: Vec<Arc<ToolDef>> = self.tools.iter().map(|t| Arc::new(t.clone())).collect();
+            Arc::from(tools)
         }
 
         async fn dispatch(
@@ -2535,17 +1337,17 @@ mod tests {
                 ToolDef {
                     name: "tool_a".to_string(),
                     description: "Tool A".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
                 ToolDef {
                     name: "tool_b".to_string(),
                     description: "Tool B".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
                 ToolDef {
                     name: "tool_c".to_string(),
                     description: "Tool C".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
             ],
             vec![], // No failures
@@ -2555,7 +1357,8 @@ mod tests {
 
         let mut agent = AgentBuilder::new()
             .model("test-model")
-            .build(client, tools.clone(), store);
+            .build(client, tools.clone(), store)
+            .await;
 
         let _result = agent.run("Test".to_string()).await.unwrap();
 
@@ -2625,17 +1428,17 @@ mod tests {
                 ToolDef {
                     name: "good_tool".to_string(),
                     description: "Good Tool".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
                 ToolDef {
                     name: "bad_tool".to_string(),
                     description: "Bad Tool".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
                 ToolDef {
                     name: "another_good_tool".to_string(),
                     description: "Another Good Tool".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
             ],
             vec!["bad_tool"], // Only bad_tool fails
@@ -2645,7 +1448,8 @@ mod tests {
 
         let mut agent = AgentBuilder::new()
             .model("test-model")
-            .build(client, tools.clone(), store);
+            .build(client, tools.clone(), store)
+            .await;
 
         // Should complete successfully even with partial failure
         let result = agent.run("Test".to_string()).await;
@@ -2719,12 +1523,12 @@ mod tests {
                 ToolDef {
                     name: "fail1".to_string(),
                     description: "Fail 1".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
                 ToolDef {
                     name: "fail2".to_string(),
                     description: "Fail 2".to_string(),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                    input_schema: empty_object_schema(),
                 },
             ],
             vec!["fail1", "fail2"], // Both fail
@@ -2734,7 +1538,8 @@ mod tests {
 
         let mut agent = AgentBuilder::new()
             .model("test-model")
-            .build(client, tools.clone(), store);
+            .build(client, tools.clone(), store)
+            .await;
 
         // Should complete - failures go back to LLM as error results
         let result = agent.run("Test".to_string()).await;
@@ -2767,7 +1572,7 @@ mod tests {
         let tools = Arc::new(MockToolDispatcher::new(vec![]));
         let store = Arc::new(MockSessionStore);
 
-        let mut agent = AgentBuilder::new().build(client, tools, store);
+        let mut agent = AgentBuilder::new().build(client, tools, store).await;
 
         // Verify comms is not enabled
         assert!(agent.comms().is_none());
@@ -2820,7 +1625,8 @@ mod tests {
                 max_duration: None,
                 max_tool_calls: None,
             })
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Verify comms is enabled
         assert!(agent.comms().is_some());
@@ -2860,7 +1666,8 @@ mod tests {
                 max_duration: Some(std::time::Duration::from_millis(50)),
                 max_tool_calls: None,
             })
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Empty prompt - should skip LLM, wait briefly, then exit on duration timeout
         let result = agent.run_host_mode("".to_string()).await;
@@ -2901,7 +1708,8 @@ mod tests {
                 max_duration: Some(Duration::from_millis(100)),
                 max_tool_calls: None,
             })
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         let start = Instant::now();
         let result = agent.run_host_mode("".to_string()).await;

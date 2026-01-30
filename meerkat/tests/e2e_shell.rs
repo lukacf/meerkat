@@ -3,8 +3,7 @@
 //! These tests verify the full shell tool functionality from tool call to
 //! subprocess execution and result return.
 //!
-//! Tests marked with `#[ignore = "requires nu"]` need Nushell installed.
-//! Run with: cargo test -p meerkat --test e2e_shell -- --ignored
+//! Tests use `/bin/sh` for portability and hermetic execution.
 
 use meerkat_tools::builtin::BuiltinTool;
 use meerkat_tools::builtin::shell::{
@@ -18,27 +17,7 @@ use tempfile::TempDir;
 // TEST HELPERS
 // ============================================================================
 
-/// Check if Nushell (nu) is installed on the system
-fn is_nu_installed() -> bool {
-    which::which("nu").is_ok()
-}
-
-/// Create a ShellConfig with a temporary project root
-fn create_test_config(temp_dir: &TempDir) -> ShellConfig {
-    ShellConfig {
-        enabled: true,
-        default_timeout_secs: 30,
-        restrict_to_project: true,
-        shell: "nu".to_string(),
-        shell_path: None,
-        project_root: temp_dir.path().to_path_buf(),
-        max_completed_jobs: 100,
-        completed_job_ttl_secs: 300,
-        max_concurrent_processes: 0, // Unlimited for e2e tests
-    }
-}
-
-/// Create a ShellConfig using /bin/sh for tests that don't need nu-specific features
+/// Create a ShellConfig using /bin/sh for hermetic tests.
 fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
     ShellConfig {
         enabled: true,
@@ -59,15 +38,9 @@ fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
 
 /// E2E: Agent executes sync shell command and receives output
 #[tokio::test]
-#[ignore = "requires nu"]
 async fn test_e2e_shell_sync_execute() {
-    if !is_nu_installed() {
-        eprintln!("Skipping: nu not installed");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
 
     // Execute a simple command
@@ -93,21 +66,15 @@ async fn test_e2e_shell_sync_execute() {
 
 /// E2E: Agent handles command timeout
 #[tokio::test]
-#[ignore = "requires nu"]
 async fn test_e2e_shell_sync_timeout() {
-    if !is_nu_installed() {
-        eprintln!("Skipping: nu not installed");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
 
     // Execute a command that will timeout
     let result = tool
         .call(json!({
-            "command": "sleep 10sec",
+            "command": "sleep 10",
             "timeout_secs": 1
         }))
         .await;
@@ -128,15 +95,9 @@ async fn test_e2e_shell_sync_timeout() {
 
 /// E2E: Agent receives exit code from command
 #[tokio::test]
-#[ignore = "requires nu"]
 async fn test_e2e_shell_exit_code() {
-    if !is_nu_installed() {
-        eprintln!("Skipping: nu not installed");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
 
     // Execute a command that exits with non-zero status
@@ -161,21 +122,15 @@ async fn test_e2e_shell_exit_code() {
 
 /// E2E: Agent handles command with stderr output
 #[tokio::test]
-#[ignore = "requires nu"]
 async fn test_e2e_shell_stderr() {
-    if !is_nu_installed() {
-        eprintln!("Skipping: nu not installed");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
 
     // Execute a command that writes to stderr
     let result = tool
         .call(json!({
-            "command": "print -e 'error message'"
+            "command": "echo 'error message' 1>&2"
         }))
         .await;
 
@@ -197,20 +152,14 @@ async fn test_e2e_shell_stderr() {
 
 /// E2E: Agent spawns background job and receives job_id
 #[tokio::test]
-#[ignore = "requires nu"]
 async fn test_e2e_shell_background_spawn() {
-    if !is_nu_installed() {
-        eprintln!("Skipping: nu not installed");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);
 
     // Spawn a background job
     let job_id = job_manager
-        .spawn_job("sleep 5sec", None, 60)
+        .spawn_job("sleep 5", None, 60)
         .await
         .expect("Should spawn job");
 
@@ -238,15 +187,9 @@ async fn test_e2e_shell_background_spawn() {
 
 /// E2E: Agent receives completion event after background job finishes
 #[tokio::test]
-#[ignore = "requires nu"]
 async fn test_e2e_shell_background_completion() {
-    if !is_nu_installed() {
-        eprintln!("Skipping: nu not installed");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let (tool_set, mut rx) = ShellToolSet::with_event_channel(config);
 
     // Spawn a quick job
@@ -271,20 +214,14 @@ async fn test_e2e_shell_background_completion() {
 
 /// E2E: Agent can cancel running background job
 #[tokio::test]
-#[ignore = "requires nu"]
 async fn test_e2e_shell_background_cancel() {
-    if !is_nu_installed() {
-        eprintln!("Skipping: nu not installed");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);
 
     // Spawn a long-running job
     let job_id = job_manager
-        .spawn_job("sleep 60sec", None, 120)
+        .spawn_job("sleep 60", None, 120)
         .await
         .expect("Should spawn job");
 
@@ -315,28 +252,22 @@ async fn test_e2e_shell_background_cancel() {
 
 /// E2E: Agent can list multiple concurrent jobs
 #[tokio::test]
-#[ignore = "requires nu"]
 async fn test_e2e_shell_multiple_jobs() {
-    if !is_nu_installed() {
-        eprintln!("Skipping: nu not installed");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);
 
     // Spawn multiple jobs
     let id1 = job_manager
-        .spawn_job("sleep 30sec", None, 60)
+        .spawn_job("sleep 30", None, 60)
         .await
         .expect("Should spawn job 1");
     let id2 = job_manager
-        .spawn_job("sleep 30sec", None, 60)
+        .spawn_job("sleep 30", None, 60)
         .await
         .expect("Should spawn job 2");
     let id3 = job_manager
-        .spawn_job("sleep 30sec", None, 60)
+        .spawn_job("sleep 30", None, 60)
         .await
         .expect("Should spawn job 3");
 
@@ -423,7 +354,7 @@ async fn test_e2e_shell_not_installed() {
 #[tokio::test]
 async fn test_e2e_shell_invalid_workdir() {
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
 
     // Try to use a working directory that escapes project root
@@ -694,20 +625,14 @@ async fn test_regression_async_execution_nonblocking() {
 /// Jobs that run longer than their timeout should be terminated and marked
 /// as TimedOut.
 #[tokio::test]
-#[ignore = "requires nu"]
 async fn test_regression_timeout_enforced() {
-    if !is_nu_installed() {
-        eprintln!("Skipping: nu not installed");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);
 
     // Spawn a job that sleeps longer than the timeout
     let job_id = job_manager
-        .spawn_job("sleep 10sec", None, 1)
+        .spawn_job("sleep 10", None, 1)
         .await
         .expect("Should spawn job");
 
@@ -819,24 +744,22 @@ async fn test_regression_non_utf8_output() {
 /// not the beginning, since the end usually contains the most important info
 /// (errors, final results).
 #[tokio::test]
-#[ignore = "requires nu"]
 async fn test_regression_truncation_keeps_tail() {
-    if !is_nu_installed() {
-        eprintln!("Skipping: nu not installed");
-        return;
-    }
-
     let temp_dir = TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
 
     // Generate a lot of output with clear markers at start and end
     let result = tool
         .call(json!({
             "command": r#"
-                print "START_MARKER"
-                1..10000 | each { |i| $"Line ($i): padding to make this longer" }
-                print "END_MARKER"
+                echo "START_MARKER"
+                i=1
+                while [ "$i" -le 10000 ]; do
+                  echo "Line $i: padding to make this longer"
+                  i=$((i+1))
+                done
+                echo "END_MARKER"
             "#
         }))
         .await;

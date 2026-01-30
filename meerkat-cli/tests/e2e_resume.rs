@@ -8,6 +8,13 @@ use meerkat_store::{JsonlStore, SessionStore};
 use tempfile::TempDir;
 
 fn rkat_binary_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rkat") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent()?;
     let debug = workspace_root.join("target/debug/rkat");
@@ -48,19 +55,20 @@ async fn e2e_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
 
     let temp_dir = TempDir::new()?;
     let project_dir = temp_dir.path().join("project");
-    std::fs::create_dir_all(project_dir.join(".rkat"))?;
+    tokio::fs::create_dir_all(project_dir.join(".rkat")).await?;
 
     let data_dir = temp_dir.path().join("data");
-    std::fs::create_dir_all(&data_dir)?;
+    tokio::fs::create_dir_all(&data_dir).await?;
 
-    let status = std::process::Command::new(std::env::current_exe()?)
+    let status = Command::new(std::env::current_exe()?)
         .arg("e2e_cli_resume_tools")
         .env("RUN_TEST_CLI_RESUME_INNER", "1")
         .env("HOME", temp_dir.path())
         .env("XDG_DATA_HOME", &data_dir)
         .env("TEST_PROJECT_DIR", &project_dir)
         .env("TEST_DATA_DIR", &data_dir)
-        .status()?;
+        .status()
+        .await?;
 
     assert!(status.success());
     Ok(())
@@ -78,7 +86,7 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
     let mut config = Config::default();
     config.agent.max_tokens_per_turn = 128;
     let config_toml = toml::to_string_pretty(&config)?;
-    std::fs::write(project_dir.join(".rkat/config.toml"), config_toml)?;
+    tokio::fs::write(project_dir.join(".rkat/config.toml"), config_toml).await?;
 
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
     let output = timeout(
@@ -112,11 +120,12 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
         .ok_or("session_id missing in response")?
         .to_string();
 
-    let output_find = std::process::Command::new("find")
+    let output_find = Command::new("find")
         .arg(&std::env::var("HOME")?)
         .arg("-name")
         .arg("*.jsonl")
-        .output()?;
+        .output()
+        .await?;
     let find_stdout = String::from_utf8_lossy(&output_find.stdout);
 
     // Heuristic: pick the directory of the first found session file
@@ -144,10 +153,10 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
     let original_provider = metadata.provider;
 
     let mut config_alt = config.clone();
-    config_alt.agent.model = "gpt-4o-mini".to_string();
+    config_alt.agent.model = "gpt-4o-mini".into();
     config_alt.agent.max_tokens_per_turn = 7;
     let config_toml = toml::to_string_pretty(&config_alt)?;
-    std::fs::write(project_dir.join(".rkat/config.toml"), config_toml)?;
+    tokio::fs::write(project_dir.join(".rkat/config.toml"), config_toml).await?;
 
     let output = timeout(
         Duration::from_secs(120),

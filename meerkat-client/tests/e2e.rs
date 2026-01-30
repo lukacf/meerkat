@@ -2,25 +2,86 @@
 //!
 //! Verifies stream normalization and error handling for all providers.
 
+use axum::{Router, http::StatusCode, routing::post};
 use futures::StreamExt;
 use meerkat_client::{
-    AnthropicClient, GeminiClient, LlmClient, LlmEvent, LlmRequest, OpenAiClient,
+    AnthropicClient, GeminiClient, LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest,
+    OpenAiClient,
 };
 use meerkat_core::{Message, StopReason, UserMessage};
+use schemars::JsonSchema;
+use serde_json::{Map, Value};
+use tokio::net::TcpListener;
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn spawn_test_server(
+    app: Router,
+) -> Result<(String, AbortOnDrop), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let base_url = format!("http://{}", addr);
+
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    tokio::task::yield_now().await;
+    Ok((base_url, AbortOnDrop(handle)))
+}
+
+fn schema_for<T: JsonSchema>() -> Value {
+    let schema = schemars::schema_for!(T);
+    let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
+
+    // Some generators omit empty `properties`/`required` for `{}`.
+    // Our tool schema contract expects explicit presence of both keys.
+    if let Value::Object(ref mut obj) = value {
+        if obj.get("type").and_then(Value::as_str) == Some("object") {
+            obj.entry("properties".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            obj.entry("required".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
+    }
+
+    value
+}
+
+#[derive(Debug, Clone, JsonSchema)]
+#[allow(dead_code)]
+struct WeatherArgs {
+    city: String,
+}
 
 fn skip_if_no_anthropic_key() -> Option<String> {
+    if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
+        return None;
+    }
     std::env::var("RKAT_ANTHROPIC_API_KEY")
         .ok()
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
 }
 
 fn skip_if_no_openai_key() -> Option<String> {
+    if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
+        return None;
+    }
     std::env::var("RKAT_OPENAI_API_KEY")
         .ok()
         .or_else(|| std::env::var("OPENAI_API_KEY").ok())
 }
 
 fn skip_if_no_gemini_key() -> Option<String> {
+    if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
+        return None;
+    }
     std::env::var("RKAT_GEMINI_API_KEY")
         .ok()
         .or_else(|| std::env::var("GEMINI_API_KEY").ok())
@@ -28,7 +89,6 @@ fn skip_if_no_gemini_key() -> Option<String> {
 }
 
 #[tokio::test]
-#[ignore = "Requires network access"]
 async fn test_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_anthropic_key() else {
         return Ok(());
@@ -63,7 +123,6 @@ async fn test_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-#[ignore = "Requires network access"]
 async fn test_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_anthropic_key() else {
         return Ok(());
@@ -76,17 +135,11 @@ async fn test_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
             content: "What's the weather in Tokyo?".to_string(),
         })],
     )
-    .with_tools(vec![meerkat_core::ToolDef {
+    .with_tools(vec![std::sync::Arc::new(meerkat_core::ToolDef {
         name: "get_weather".to_string(),
         description: "Get weather for a city".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "city": {"type": "string"}
-            },
-            "required": ["city"]
-        }),
-    }]);
+        input_schema: schema_for::<WeatherArgs>(),
+    })]);
 
     let mut stream = client.stream(&request);
     let mut got_tool = false;
@@ -96,10 +149,15 @@ async fn test_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
             Ok(LlmEvent::ToolCallDelta { .. }) => {
                 got_tool = true;
             }
-            Ok(LlmEvent::Done { stop_reason }) => {
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success { stop_reason },
+            }) => {
                 assert_eq!(stop_reason, StopReason::ToolUse);
                 break;
             }
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            }) => return Err(format!("Unexpected error: {:?}", error).into()),
             Ok(_) => {}
             Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
         }
@@ -110,9 +168,14 @@ async fn test_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-#[ignore = "Requires network access"]
 async fn test_anthropic_auth_error() -> Result<(), Box<dyn std::error::Error>> {
-    let client = AnthropicClient::new("invalid-key".to_string())?;
+    let app = Router::new().route(
+        "/v1/messages",
+        post(|| async { (StatusCode::UNAUTHORIZED, "unauthorized") }),
+    );
+    let (base_url, _server) = spawn_test_server(app).await?;
+
+    let client = AnthropicClient::new("invalid-key".to_string())?.with_base_url(base_url);
 
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
@@ -126,14 +189,18 @@ async fn test_anthropic_auth_error() -> Result<(), Box<dyn std::error::Error>> {
 
     let event = result.ok_or("no event")?;
     match event {
-        Err(meerkat_client::error::LlmError::AuthenticationFailed { .. }) => {}
-        _ => return Err(format!("Expected auth error, got {:?}", event).into()),
+        Ok(LlmEvent::Done {
+            outcome:
+                LlmDoneOutcome::Error {
+                    error: LlmError::AuthenticationFailed { .. },
+                },
+        }) => {}
+        other => return Err(format!("Expected auth error, got {:?}", other).into()),
     }
     Ok(())
 }
 
 #[tokio::test]
-#[ignore = "Requires network access"]
 async fn test_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_openai_key() else {
         return Ok(());
@@ -168,7 +235,6 @@ async fn test_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-#[ignore = "Requires network access"]
 async fn test_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_openai_key() else {
         return Ok(());
@@ -181,17 +247,11 @@ async fn test_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
             content: "What's the weather in Tokyo?".to_string(),
         })],
     )
-    .with_tools(vec![meerkat_core::ToolDef {
+    .with_tools(vec![std::sync::Arc::new(meerkat_core::ToolDef {
         name: "get_weather".to_string(),
         description: "Get weather for a city".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "city": {"type": "string"}
-            },
-            "required": ["city"]
-        }),
-    }]);
+        input_schema: schema_for::<WeatherArgs>(),
+    })]);
 
     let mut stream = client.stream(&request);
     let mut got_tool = false;
@@ -201,10 +261,15 @@ async fn test_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
             Ok(LlmEvent::ToolCallDelta { .. }) => {
                 got_tool = true;
             }
-            Ok(LlmEvent::Done { stop_reason }) => {
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success { stop_reason },
+            }) => {
                 assert_eq!(stop_reason, StopReason::ToolUse);
                 break;
             }
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            }) => return Err(format!("Unexpected error: {:?}", error).into()),
             Ok(_) => {}
             Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
         }
@@ -215,7 +280,6 @@ async fn test_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-#[ignore = "Requires network access"]
 async fn test_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_gemini_key() else {
         return Ok(());
@@ -250,7 +314,6 @@ async fn test_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-#[ignore = "Requires network access"]
 async fn test_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_gemini_key() else {
         return Ok(());
@@ -263,17 +326,11 @@ async fn test_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
             content: "What's the weather in Tokyo?".to_string(),
         })],
     )
-    .with_tools(vec![meerkat_core::ToolDef {
+    .with_tools(vec![std::sync::Arc::new(meerkat_core::ToolDef {
         name: "get_weather".to_string(),
         description: "Get weather for a city".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "city": {"type": "string"}
-            },
-            "required": ["city"]
-        }),
-    }]);
+        input_schema: schema_for::<WeatherArgs>(),
+    })]);
 
     let mut stream = client.stream(&request);
     let mut got_tool = false;
@@ -283,10 +340,15 @@ async fn test_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
             Ok(LlmEvent::ToolCallComplete { .. }) => {
                 got_tool = true;
             }
-            Ok(LlmEvent::Done { stop_reason }) => {
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success { stop_reason },
+            }) => {
                 assert_eq!(stop_reason, StopReason::ToolUse);
                 break;
             }
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            }) => return Err(format!("Unexpected error: {:?}", error).into()),
             Ok(_) => {}
             Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
         }
@@ -297,9 +359,14 @@ async fn test_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-#[ignore = "Requires network access"]
 async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
-    let client = OpenAiClient::new("invalid-key".to_string());
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async { (StatusCode::UNAUTHORIZED, "unauthorized") }),
+    );
+    let (base_url, _server) = spawn_test_server(app).await?;
+
+    let client = OpenAiClient::new("invalid-key".to_string()).with_base_url(base_url);
 
     let request = LlmRequest::new(
         "gpt-4o-mini",
@@ -313,8 +380,13 @@ async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
 
     let event = result.ok_or("no event")?;
     match event {
-        Err(meerkat_client::error::LlmError::AuthenticationFailed { .. }) => {}
-        _ => return Err(format!("Expected auth error, got {:?}", event).into()),
+        Ok(LlmEvent::Done {
+            outcome:
+                LlmDoneOutcome::Error {
+                    error: LlmError::AuthenticationFailed { .. },
+                },
+        }) => {}
+        other => return Err(format!("Expected auth error, got {:?}", other).into()),
     }
     Ok(())
 }

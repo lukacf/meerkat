@@ -2,18 +2,23 @@
 //!
 //! Each session is stored as a single file with the session as JSON.
 
+use crate::index::RedbSessionIndex;
 use crate::{SessionFilter, SessionStore, StoreError};
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::RwLock;
+use tokio::task::spawn_blocking;
 
 /// File-based session store using JSONL format
 pub struct JsonlStore {
     dir: PathBuf,
     /// Whether to use pretty-printed JSON (default: true for readability)
     pretty_print: bool,
+    index: RwLock<Option<Arc<RedbSessionIndex>>>,
 }
 
 /// Builder for configuring JsonlStore
@@ -45,6 +50,7 @@ impl JsonlStoreBuilder {
         JsonlStore {
             dir: self.dir,
             pretty_print: self.pretty_print,
+            index: RwLock::new(None),
         }
     }
 }
@@ -55,6 +61,7 @@ impl JsonlStore {
         Self {
             dir,
             pretty_print: true,
+            index: RwLock::new(None),
         }
     }
 
@@ -67,6 +74,136 @@ impl JsonlStore {
     pub async fn init(&self) -> Result<(), StoreError> {
         fs::create_dir_all(&self.dir).await?;
         Ok(())
+    }
+
+    fn index_path(&self) -> PathBuf {
+        self.dir.join("session_index.redb")
+    }
+
+    async fn read_all_metadata_sidecars(&self) -> Result<Vec<SessionMeta>, StoreError> {
+        let mut entries = fs::read_dir(&self.dir).await?;
+        let mut sessions = Vec::new();
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+                continue;
+            }
+
+            let contents = match fs::read_to_string(&path).await {
+                Ok(contents) => contents,
+                Err(err) => {
+                    tracing::warn!("failed to read session metadata sidecar: {path:?}: {err}");
+                    continue;
+                }
+            };
+
+            match serde_json::from_str::<SessionMeta>(&contents) {
+                Ok(meta) => sessions.push(meta),
+                Err(err) => {
+                    tracing::warn!("failed to parse session metadata sidecar: {path:?}: {err}");
+                }
+            }
+        }
+
+        Ok(sessions)
+    }
+
+    async fn open_index(&self) -> Result<Arc<RedbSessionIndex>, StoreError> {
+        self.init().await?;
+
+        let index_path = self.index_path();
+
+        let open_attempt = {
+            let index_path = index_path.clone();
+            spawn_blocking(move || RedbSessionIndex::open(index_path)).await
+        };
+
+        let index = match open_attempt {
+            Ok(Ok(index)) => Arc::new(index),
+            Ok(Err(open_err)) => {
+                tracing::warn!("failed to open session index, attempting rebuild: {open_err}");
+
+                // Best-effort: quarantine the old index file if it exists, then retry.
+                let quarantined = {
+                    let ts =
+                        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                            Ok(duration) => duration.as_secs(),
+                            Err(_) => 0,
+                        };
+                    let filename = match index_path.file_name() {
+                        Some(file) => file.to_string_lossy().to_string(),
+                        None => "session_index.redb".to_string(),
+                    };
+                    let quarantine_path =
+                        index_path.with_file_name(format!("{filename}.corrupt-{ts}"));
+                    match fs::rename(&index_path, &quarantine_path).await {
+                        Ok(()) => {
+                            tracing::warn!(
+                                "quarantined corrupt session index: {index_path:?} -> {quarantine_path:?}"
+                            );
+                            Ok(())
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(err) => Err(StoreError::Io(err)),
+                    }
+                };
+
+                quarantined?;
+
+                let retry = {
+                    let index_path = index_path.clone();
+                    spawn_blocking(move || RedbSessionIndex::open(index_path)).await
+                };
+                match retry {
+                    Ok(Ok(index)) => Arc::new(index),
+                    Ok(Err(err)) => return Err(err),
+                    Err(err) => return Err(StoreError::Internal(err.to_string())),
+                }
+            }
+            Err(err) => return Err(StoreError::Internal(err.to_string())),
+        };
+
+        let is_empty = {
+            let index = Arc::clone(&index);
+            spawn_blocking(move || index.is_empty()).await
+        };
+        let is_empty = match is_empty {
+            Ok(Ok(is_empty)) => is_empty,
+            Ok(Err(err)) => return Err(err),
+            Err(err) => return Err(StoreError::Internal(err.to_string())),
+        };
+
+        if is_empty {
+            let metas = self.read_all_metadata_sidecars().await?;
+            if !metas.is_empty() {
+                let index = Arc::clone(&index);
+                let result = spawn_blocking(move || index.insert_many(metas)).await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => return Err(err),
+                    Err(err) => return Err(StoreError::Internal(err.to_string())),
+                }
+            }
+        }
+
+        Ok(index)
+    }
+
+    async fn index(&self) -> Result<Arc<RedbSessionIndex>, StoreError> {
+        if let Some(index) = self.index.read().await.as_ref() {
+            return Ok(Arc::clone(index));
+        }
+
+        let opened = self.open_index().await?;
+        let mut guard = self.index.write().await;
+        Ok(match guard.as_ref() {
+            Some(existing) => Arc::clone(existing),
+            None => {
+                *guard = Some(Arc::clone(&opened));
+                opened
+            }
+        })
     }
 
     fn session_path(&self, id: &SessionId) -> PathBuf {
@@ -120,6 +257,14 @@ impl SessionStore for JsonlStore {
 
         fs::rename(&meta_temp_path, &meta_path).await?;
 
+        let index = self.index().await?;
+        let result = spawn_blocking(move || index.insert_meta(meta)).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err),
+            Err(err) => return Err(StoreError::Internal(err.to_string())),
+        }
+
         Ok(())
     }
 
@@ -143,49 +288,13 @@ impl SessionStore for JsonlStore {
     }
 
     async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
-        self.init().await?;
-
-        let mut entries = fs::read_dir(&self.dir).await?;
-        let mut sessions = Vec::new();
-
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            // Read from .meta sidecar files instead of loading full sessions
-            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-                continue;
-            }
-
-            // Load metadata from sidecar file
-            if let Ok(mut file) = fs::File::open(&path).await {
-                let mut contents = String::new();
-                if file.read_to_string(&mut contents).await.is_ok() {
-                    if let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) {
-                        // Apply filters
-                        if let Some(created_after) = filter.created_after {
-                            if meta.created_at < created_after {
-                                continue;
-                            }
-                        }
-                        if let Some(updated_after) = filter.updated_after {
-                            if meta.updated_at < updated_after {
-                                continue;
-                            }
-                        }
-
-                        sessions.push(meta);
-                    }
-                }
-            }
+        let index = self.index().await?;
+        let result = spawn_blocking(move || index.list_meta(filter)).await;
+        match result {
+            Ok(Ok(sessions)) => Ok(sessions),
+            Ok(Err(err)) => Err(err),
+            Err(err) => Err(StoreError::Internal(err.to_string())),
         }
-
-        // Sort by updated_at descending
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-
-        // Apply pagination
-        let offset = filter.offset.unwrap_or(0);
-        let limit = filter.limit.unwrap_or(usize::MAX);
-
-        Ok(sessions.into_iter().skip(offset).take(limit).collect())
     }
 
     async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
@@ -203,6 +312,15 @@ impl SessionStore for JsonlStore {
             if e.kind() != std::io::ErrorKind::NotFound {
                 return Err(e.into());
             }
+        }
+
+        let index = self.index().await?;
+        let id = id.clone();
+        let result = spawn_blocking(move || index.remove(&id)).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err),
+            Err(err) => return Err(StoreError::Internal(err.to_string())),
         }
 
         Ok(())
@@ -298,6 +416,57 @@ mod tests {
         let sessions = store.list(SessionFilter::default()).await?;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, *session.id());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_store_list_uses_index_when_metadata_missing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = JsonlStore::new(temp_dir.path().to_path_buf());
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage {
+            content: "Hello".to_string(),
+        }));
+        let id = session.id().clone();
+        store.save(&session).await?;
+
+        // If listing relies on scanning `.meta` sidecars, this would now return 0.
+        let meta_path = temp_dir.path().join(format!("{}.meta", id.0));
+        fs::remove_file(&meta_path).await?;
+
+        let sessions = store.list(SessionFilter::default()).await?;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_store_rebuilds_index_when_missing() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_dir = tempfile::tempdir()?;
+        let store_path = temp_dir.path().to_path_buf();
+
+        let id = {
+            let store = JsonlStore::new(store_path.clone());
+            let mut session = Session::new();
+            session.push(Message::User(UserMessage {
+                content: "Hello".to_string(),
+            }));
+            let id = session.id().clone();
+            store.save(&session).await?;
+            id
+        };
+
+        // Remove the index file to force an index rebuild from `.meta` sidecars.
+        let index_path = store_path.join("session_index.redb");
+        fs::remove_file(&index_path).await?;
+
+        let store = JsonlStore::new(store_path);
+        let sessions = store.list(SessionFilter::default()).await?;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, id);
         Ok(())
     }
 

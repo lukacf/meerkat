@@ -2,6 +2,8 @@
 //!
 //! These tests verify the full system working together with realistic scenarios.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use meerkat_comms::{
     handle_connection, CommsConfig, Inbox, Keypair, PubKey, Router, TrustedPeer, TrustedPeers,
 };

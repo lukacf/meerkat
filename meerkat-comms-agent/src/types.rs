@@ -6,6 +6,7 @@
 use meerkat_comms::{InboxItem, MessageKind, PubKey, TrustedPeers};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::borrow::Cow;
 use uuid::Uuid;
 
 /// Content variants for comms messages.
@@ -176,6 +177,12 @@ impl CommsMessage {
                 )
             }
         }
+    }
+}
+
+impl meerkat_core::TurnBoundaryMessage for CommsMessage {
+    fn render_for_prompt(&self) -> Cow<'_, str> {
+        Cow::Owned(self.to_user_message_text())
     }
 }
 

@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```text
 //! use meerkat_core::{ToolGateway, ToolGatewayBuilder, AgentToolDispatcher, Availability};
 //!
 //! // Compose base dispatcher with conditionally-available comms
@@ -35,6 +35,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Predicate function type for availability checks.
 ///
@@ -135,11 +136,21 @@ struct DispatcherEntry {
 /// - Returning `ToolError::Unavailable` for hidden tools on dispatch
 pub struct ToolGateway {
     /// All registered tool definitions (for collision detection)
-    all_tools: Vec<ToolDef>,
+    all_tools: Vec<Arc<ToolDef>>,
+    /// Parallel vector: tool index -> owning dispatcher entry index
+    tool_entry: Vec<usize>,
     /// Routing table: tool name -> dispatcher entry index
     route: HashMap<String, usize>,
     /// Dispatcher entries with their availability
     entries: Vec<DispatcherEntry>,
+    /// Cached visible tool set; rebuilt only when availability changes.
+    cache: RwLock<ToolGatewayCache>,
+}
+
+#[derive(Debug)]
+struct ToolGatewayCache {
+    entry_available: Vec<bool>,
+    visible_tools: Arc<[Arc<ToolDef>]>,
 }
 
 impl std::fmt::Debug for ToolGateway {
@@ -147,7 +158,11 @@ impl std::fmt::Debug for ToolGateway {
         f.debug_struct("ToolGateway")
             .field(
                 "all_tools",
-                &self.all_tools.iter().map(|t| &t.name).collect::<Vec<_>>(),
+                &self
+                    .all_tools
+                    .iter()
+                    .map(|t| t.name.as_str())
+                    .collect::<Vec<_>>(),
             )
             .field("routes", &self.route.keys().collect::<Vec<_>>())
             .finish()
@@ -234,13 +249,14 @@ impl ToolGatewayBuilder {
     /// All tools are checked for collisions regardless of their availability.
     pub fn build(self) -> Result<ToolGateway, ToolError> {
         let mut route: HashMap<String, usize> = HashMap::new();
-        let mut all_tools: Vec<ToolDef> = Vec::new();
+        let mut all_tools: Vec<Arc<ToolDef>> = Vec::new();
+        let mut tool_entry: Vec<usize> = Vec::new();
         let mut entries: Vec<DispatcherEntry> = Vec::new();
 
         for (dispatcher, availability) in self.dispatchers {
             let entry_idx = entries.len();
 
-            for t in dispatcher.tools() {
+            for t in dispatcher.tools().iter() {
                 if route.contains_key(&t.name) {
                     return Err(ToolError::Other(format!(
                         "tool name collision in gateway: '{}'",
@@ -248,7 +264,8 @@ impl ToolGatewayBuilder {
                     )));
                 }
                 route.insert(t.name.clone(), entry_idx);
-                all_tools.push(t);
+                all_tools.push(Arc::clone(t));
+                tool_entry.push(entry_idx);
             }
 
             entries.push(DispatcherEntry {
@@ -257,10 +274,28 @@ impl ToolGatewayBuilder {
             });
         }
 
+        let entry_available: Vec<bool> = entries
+            .iter()
+            .map(|e| e.availability.is_available())
+            .collect();
+
+        let mut visible = Vec::with_capacity(all_tools.len());
+        for (tool, &idx) in all_tools.iter().zip(tool_entry.iter()) {
+            if entry_available[idx] {
+                visible.push(Arc::clone(tool));
+            }
+        }
+        let visible_tools: Arc<[Arc<ToolDef>]> = visible.into();
+
         Ok(ToolGateway {
             all_tools,
+            tool_entry,
             route,
             entries,
+            cache: RwLock::new(ToolGatewayCache {
+                entry_available,
+                visible_tools,
+            }),
         })
     }
 }
@@ -275,26 +310,36 @@ impl AgentToolDispatcher for ToolGateway {
     /// **Important**: Availability is evaluated once per dispatcher entry to ensure
     /// consistency - either all tools from a dispatcher are visible or none are.
     /// This prevents partial listings when predicates are evaluated under contention.
-    fn tools(&self) -> Vec<ToolDef> {
-        // Pre-compute availability for each dispatcher entry once
-        // This ensures consistency: all tools from a dispatcher are either visible or hidden
-        let entry_available: Vec<bool> = self
-            .entries
-            .iter()
-            .map(|e| e.availability.is_available())
-            .collect();
-
-        let mut visible = Vec::with_capacity(self.all_tools.len());
-
-        for tool in &self.all_tools {
-            if let Some(&idx) = self.route.get(&tool.name) {
-                if entry_available[idx] {
-                    visible.push(tool.clone());
-                }
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        if let Ok(cache) = self.cache.try_read() {
+            let changed = self.entries.iter().enumerate().any(|(idx, entry)| {
+                cache.entry_available[idx] != entry.availability.is_available()
+            });
+            if !changed {
+                return Arc::clone(&cache.visible_tools);
             }
         }
 
-        visible
+        let entry_available: Vec<bool> = self
+            .entries
+            .iter()
+            .map(|entry| entry.availability.is_available())
+            .collect();
+
+        let mut visible = Vec::with_capacity(self.all_tools.len());
+        for (tool, &idx) in self.all_tools.iter().zip(self.tool_entry.iter()) {
+            if entry_available[idx] {
+                visible.push(Arc::clone(tool));
+            }
+        }
+        let visible_tools: Arc<[Arc<ToolDef>]> = visible.into();
+
+        if let Ok(mut cache) = self.cache.try_write() {
+            cache.entry_available = entry_available;
+            cache.visible_tools = Arc::clone(&visible_tools);
+        }
+
+        visible_tools
     }
 
     /// Dispatch a tool call.
@@ -327,22 +372,36 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    fn empty_object_schema() -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".to_string(), Value::String("object".to_string()));
+        obj.insert(
+            "properties".to_string(),
+            Value::Object(serde_json::Map::new()),
+        );
+        obj.insert("required".to_string(), Value::Array(Vec::new()));
+        Value::Object(obj)
+    }
+
     /// A simple mock dispatcher for testing
     struct MockDispatcher {
-        tools: Vec<ToolDef>,
+        tools: Arc<[Arc<ToolDef>]>,
         prefix: String,
     }
 
     impl MockDispatcher {
         fn new(prefix: &str, tool_names: &[&str]) -> Self {
-            let tools = tool_names
+            let tools: Arc<[Arc<ToolDef>]> = tool_names
                 .iter()
-                .map(|name| ToolDef {
-                    name: name.to_string(),
-                    description: format!("{prefix} tool: {name}"),
-                    input_schema: json!({"type": "object", "properties": {}, "required": []}),
+                .map(|name| {
+                    Arc::new(ToolDef {
+                        name: name.to_string(),
+                        description: format!("{prefix} tool: {name}"),
+                        input_schema: empty_object_schema(),
+                    })
                 })
-                .collect();
+                .collect::<Vec<_>>()
+                .into();
             Self {
                 tools,
                 prefix: prefix.to_string(),
@@ -352,8 +411,8 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for MockDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            self.tools.clone()
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
         }
 
         async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -575,7 +634,6 @@ mod tests {
     fn test_collision_detection_ignores_availability() {
         // Collision should be detected even if one dispatcher is conditionally hidden
         let flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = flag.clone();
 
         let base = Arc::new(MockDispatcher::new("base", &["send_message"]));
         let comms = Arc::new(MockDispatcher::new("comms", &["send_message"]));
@@ -584,10 +642,7 @@ mod tests {
             .add_dispatcher(base)
             .add_dispatcher_with_availability(
                 comms,
-                Availability::when(
-                    "no peers",
-                    Arc::new(move || flag_clone.load(Ordering::SeqCst)),
-                ),
+                Availability::when("no peers", Arc::new(move || flag.load(Ordering::SeqCst))),
             )
             .build();
 

@@ -3,11 +3,10 @@
 //! This module provides the [`ShellJobStatusTool`] which checks the status
 //! of a background shell job.
 
-use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 
 use super::config::ShellError;
@@ -32,9 +31,10 @@ impl ShellJobStatusTool {
 }
 
 /// Input arguments for the job status tool
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 struct JobStatusInput {
     /// The job ID to check
+    #[schemars(description = "The job ID to check")]
     job_id: String,
 }
 
@@ -46,18 +46,9 @@ impl BuiltinTool for ShellJobStatusTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "shell_job_status".to_string(),
-            description: "Check status of a background shell job".to_string(),
-            input_schema: SchemaBuilder::new()
-                .property(
-                    "job_id",
-                    json!({
-                        "type": "string",
-                        "description": "The job ID to check"
-                    }),
-                )
-                .required("job_id")
-                .build(),
+            name: "shell_job_status".into(),
+            description: "Check status of a background shell job".into(),
+            input_schema: crate::schema::schema_for::<JobStatusInput>(),
         }
     }
 
@@ -86,6 +77,7 @@ impl BuiltinTool for ShellJobStatusTool {
 mod tests {
     use super::*;
     use crate::builtin::shell::config::ShellConfig;
+    use serde_json::json;
     use tempfile::TempDir;
 
     // ==================== ShellJobStatusTool Struct Tests ====================

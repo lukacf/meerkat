@@ -1,5 +1,5 @@
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmEvent, LlmRequest};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
@@ -22,7 +22,9 @@ impl Default for TestClient {
                 delta: "ok".to_string(),
             },
             LlmEvent::Done {
-                stop_reason: meerkat_core::StopReason::EndTurn,
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                },
             },
         ])
     }
@@ -35,7 +37,9 @@ impl LlmClient for TestClient {
         _request: &'a LlmRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
         let events = self.events.clone();
-        Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        crate::streaming::ensure_terminal_done(Box::pin(futures::stream::iter(
+            events.into_iter().map(Ok),
+        )))
     }
 
     fn provider(&self) -> &'static str {

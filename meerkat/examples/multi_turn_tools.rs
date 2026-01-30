@@ -14,8 +14,23 @@ use meerkat::{
     AgentBuilder, AgentFactory, AgentToolDispatcher, AnthropicClient, ToolDef, ToolError,
 };
 use meerkat_store::{JsonlStore, StoreAdapter};
+use schemars::JsonSchema;
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+#[derive(Debug, Clone, JsonSchema)]
+#[allow(dead_code)]
+struct CalculateArgs {
+    #[schemars(description = "A simple arithmetic expression like '2 + 3' or '10 * 5'")]
+    expression: String,
+}
+
+#[derive(Debug, Clone, JsonSchema)]
+#[allow(dead_code)]
+struct SaveNoteArgs {
+    #[schemars(description = "The note content to save")]
+    note: String,
+}
 
 // Tool dispatcher with multiple specialized tools
 struct MultiToolDispatcher {
@@ -41,58 +56,35 @@ impl MultiToolDispatcher {
 
 #[async_trait]
 impl AgentToolDispatcher for MultiToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![
             // Calculator tool
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "calculate".to_string(),
                 description: "Perform arithmetic calculations. Supports +, -, *, / operations."
                     .to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "expression": {
-                            "type": "string",
-                            "description": "A simple arithmetic expression like '2 + 3' or '10 * 5'"
-                        }
-                    },
-                    "required": ["expression"]
-                }),
-            },
+                input_schema: meerkat_tools::schema_for::<CalculateArgs>(),
+            }),
             // Note-taking tool
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "save_note".to_string(),
                 description: "Save a note for later reference".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "note": {
-                            "type": "string",
-                            "description": "The note content to save"
-                        }
-                    },
-                    "required": ["note"]
-                }),
-            },
+                input_schema: meerkat_tools::schema_for::<SaveNoteArgs>(),
+            }),
             // Note retrieval tool
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "get_notes".to_string(),
                 description: "Retrieve all saved notes".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-            },
+                input_schema: meerkat_tools::empty_object_schema(),
+            }),
             // History tool
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "get_calculation_history".to_string(),
                 description: "Get the history of all calculations performed".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-            },
+                input_schema: meerkat_tools::empty_object_schema(),
+            }),
         ]
+        .into()
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -183,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create components - tools maintain state across turns
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
@@ -200,7 +192,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              or save notes, always use the appropriate tool.",
         )
         .max_tokens_per_turn(2048)
-        .build(Arc::new(llm), tools, store);
+        .build(Arc::new(llm), tools, store)
+        .await;
 
     println!("=== Multi-Turn Tool Usage Example ===\n");
 

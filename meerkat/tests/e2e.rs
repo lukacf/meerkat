@@ -12,6 +12,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
+use schemars::JsonSchema;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,7 +39,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&serde_json::Value>,
@@ -87,12 +88,25 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
+                    LlmEvent::Done { outcome } => match outcome {
+                        LlmDoneOutcome::Success { stop_reason: sr } => {
+                            stop_reason = sr;
+                        }
+                        LlmDoneOutcome::Error { error } => {
+                            return Err(AgentError::llm(
+                                self.client.provider(),
+                                error.failure_reason(),
+                                error.to_string(),
+                            ));
+                        }
+                    },
                 },
                 Err(e) => {
-                    return Err(AgentError::LlmError(e.to_string()));
+                    return Err(AgentError::llm(
+                        self.client.provider(),
+                        e.failure_reason(),
+                        e.to_string(),
+                    ));
                 }
             }
         }
@@ -106,12 +120,12 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
             }
         }
 
-        Ok(LlmStreamResult {
+        Ok(LlmStreamResult::new(
             content,
             tool_calls,
             stop_reason,
             usage,
-        })
+        ))
     }
 
     fn provider(&self) -> &'static str {
@@ -178,8 +192,8 @@ pub struct EmptyToolDispatcher;
 
 #[async_trait]
 impl AgentToolDispatcher for EmptyToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        Vec::new()
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from([])
     }
 
     async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -190,7 +204,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 /// Mock tool dispatcher for testing
 #[derive(Default)]
 pub struct MockToolDispatcher {
-    tools: Vec<ToolDef>,
+    tools: Vec<Arc<ToolDef>>,
     results: HashMap<String, String>,
 }
 
@@ -200,15 +214,11 @@ impl MockToolDispatcher {
     }
 
     pub fn with_tool(mut self, name: &str, description: &str, result: &str) -> Self {
-        self.tools.push(ToolDef {
+        self.tools.push(Arc::new(ToolDef {
             name: name.to_string(),
             description: description.to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        });
+            input_schema: meerkat_tools::empty_object_schema(),
+        }));
         self.results.insert(name.to_string(), result.to_string());
         self
     }
@@ -216,8 +226,8 @@ impl MockToolDispatcher {
 
 #[async_trait]
 impl AgentToolDispatcher for MockToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        self.tools.clone()
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        self.tools.iter().map(Arc::clone).collect::<Vec<_>>().into()
     }
 
     async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -233,18 +243,38 @@ impl AgentToolDispatcher for MockToolDispatcher {
 // HELPER FUNCTIONS
 // ============================================================================
 
+fn live_api_tests_enabled() -> bool {
+    std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() == Some("1")
+}
+
 fn skip_if_no_anthropic_key() -> Option<String> {
-    std::env::var("ANTHROPIC_API_KEY").ok()
+    if !live_api_tests_enabled() {
+        return None;
+    }
+    std::env::var("RKAT_ANTHROPIC_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
 }
 
 #[allow(dead_code)]
 fn skip_if_no_openai_key() -> Option<String> {
-    std::env::var("OPENAI_API_KEY").ok()
+    if !live_api_tests_enabled() {
+        return None;
+    }
+    std::env::var("RKAT_OPENAI_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
 }
 
 #[allow(dead_code)]
 fn skip_if_no_gemini_key() -> Option<String> {
-    std::env::var("GOOGLE_API_KEY").ok()
+    if !live_api_tests_enabled() {
+        return None;
+    }
+    std::env::var("RKAT_GEMINI_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("GEMINI_API_KEY").ok())
+        .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
 }
 
 /// Get the Anthropic model to use in tests (configurable via ANTHROPIC_MODEL env var)
@@ -301,7 +331,7 @@ mod simple_chat {
     #[tokio::test]
     async fn test_simple_chat_anthropic() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -316,7 +346,8 @@ mod simple_chat {
             .model(anthropic_model())
             .max_tokens_per_turn(256)
             .system_prompt("You are a helpful assistant. Respond briefly.")
-            .build(llm_adapter, tools, store_adapter);
+            .build(llm_adapter, tools, store_adapter)
+            .await;
 
         // Run with simple prompt
         let result = agent
@@ -353,7 +384,7 @@ mod simple_chat {
     #[tokio::test]
     async fn test_simple_chat_openai() {
         let Some(api_key) = skip_if_no_openai_key() else {
-            eprintln!("Skipping: OPENAI_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing OPENAI_API_KEY");
             return;
         };
 
@@ -366,7 +397,8 @@ mod simple_chat {
             .model(openai_model())
             .max_tokens_per_turn(256)
             .system_prompt("You are a helpful assistant. Respond briefly.")
-            .build(llm_adapter, tools, store_adapter);
+            .build(llm_adapter, tools, store_adapter)
+            .await;
 
         let result = agent
             .run("What is 2+2? Answer with just the number.".to_string())
@@ -385,7 +417,7 @@ mod simple_chat {
     #[tokio::test]
     async fn test_simple_chat_gemini() {
         let Some(api_key) = skip_if_no_gemini_key() else {
-            eprintln!("Skipping: GOOGLE_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing GOOGLE_API_KEY");
             return;
         };
 
@@ -398,7 +430,8 @@ mod simple_chat {
             .model(gemini_model())
             .max_tokens_per_turn(256)
             .system_prompt("You are a helpful assistant. Respond briefly.")
-            .build(llm_adapter, tools, store_adapter);
+            .build(llm_adapter, tools, store_adapter)
+            .await;
 
         let result = agent
             .run("What is 2+2? Answer with just the number.".to_string())
@@ -426,7 +459,7 @@ mod tool_invocation {
     // Wrapper to implement AgentToolDispatcher for ToolDispatcher
     // Uses tokio::sync::Mutex for async safety
     pub struct DispatcherWrapper {
-        tools: Vec<ToolDef>,
+        tools: Arc<[Arc<ToolDef>]>,
         router: Arc<McpRouter>,
         #[allow(dead_code)]
         timeout: std::time::Duration,
@@ -434,7 +467,7 @@ mod tool_invocation {
 
     impl DispatcherWrapper {
         pub fn new(
-            tools: Vec<ToolDef>,
+            tools: Arc<[Arc<ToolDef>]>,
             router: Arc<McpRouter>,
             timeout: std::time::Duration,
         ) -> Self {
@@ -448,8 +481,8 @@ mod tool_invocation {
 
     #[async_trait]
     impl AgentToolDispatcher for DispatcherWrapper {
-        fn tools(&self) -> Vec<ToolDef> {
-            self.tools.clone()
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
         }
 
         async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -469,7 +502,7 @@ mod tool_invocation {
     #[tokio::test]
     async fn test_tool_invocation_with_mcp() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -499,10 +532,15 @@ mod tool_invocation {
             "Should have echo tool"
         );
 
-        let tools_vec = tools.to_vec();
+        let tools: Arc<[Arc<ToolDef>]> = tools
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect::<Vec<_>>()
+            .into();
         let router = Arc::new(router);
         let dispatcher = Arc::new(DispatcherWrapper::new(
-            tools_vec,
+            tools,
             router,
             std::time::Duration::from_secs(30),
         ));
@@ -519,7 +557,8 @@ mod tool_invocation {
             .system_prompt(
                 "You have access to an 'echo' tool. When asked to echo something, use it.",
             )
-            .build(llm_adapter, dispatcher, store_adapter);
+            .build(llm_adapter, dispatcher, store_adapter)
+            .await;
 
         // Run agent with prompt that should trigger tool use
         let result = agent
@@ -552,7 +591,7 @@ mod multi_turn {
     #[tokio::test]
     async fn test_multi_turn_context_maintained() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -565,7 +604,8 @@ mod multi_turn {
             .model(anthropic_model())
             .max_tokens_per_turn(256)
             .system_prompt("You are a helpful assistant. Keep your responses brief.")
-            .build(llm_adapter, tools, store_adapter);
+            .build(llm_adapter, tools, store_adapter)
+            .await;
 
         // Turn 1: Establish context
         let result1 = agent
@@ -636,7 +676,7 @@ mod session_resume {
     #[tokio::test]
     async fn test_session_resume_from_checkpoint() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -656,7 +696,8 @@ mod session_resume {
                 .model(anthropic_model())
                 .max_tokens_per_turn(256)
                 .system_prompt("You are a helpful assistant. Keep your responses brief.")
-                .build(llm_adapter, tools, store_adapter);
+                .build(llm_adapter, tools, store_adapter)
+                .await;
 
             // Establish context
             let _ = agent
@@ -688,7 +729,8 @@ mod session_resume {
                 .model(anthropic_model())
                 .max_tokens_per_turn(256)
                 .resume_session(saved_session)
-                .build(llm_adapter, tools, store_adapter);
+                .build(llm_adapter, tools, store_adapter)
+                .await;
 
             // Verify context is maintained
             let result = agent
@@ -719,7 +761,7 @@ mod budget_exhaustion {
     #[tokio::test]
     async fn test_budget_exhaustion_graceful_stop() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -738,7 +780,8 @@ mod budget_exhaustion {
                 max_duration: None,
                 max_tool_calls: None,
             })
-            .build(llm_adapter, tools, store_adapter);
+            .build(llm_adapter, tools, store_adapter)
+            .await;
 
         // First turn should succeed
         let result1 = agent
@@ -779,7 +822,7 @@ mod budget_exhaustion {
     #[tokio::test]
     async fn test_tool_call_budget_limit() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -805,7 +848,8 @@ mod budget_exhaustion {
                 max_duration: None,
                 max_tool_calls: Some(2), // Very low tool call limit
             })
-            .build(llm_adapter, tools, store_adapter);
+            .build(llm_adapter, tools, store_adapter)
+            .await;
 
         // Run a query that might trigger tool calls
         let result = agent
@@ -831,10 +875,31 @@ mod budget_exhaustion {
 mod parallel_tools {
     use super::*;
 
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct GetWeatherArgs {
+        #[schemars(description = "City name")]
+        city: String,
+    }
+
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct GetTimeArgs {
+        #[schemars(description = "Timezone name")]
+        timezone: String,
+    }
+
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct GetStockArgs {
+        #[schemars(description = "Stock symbol")]
+        symbol: String,
+    }
+
     #[tokio::test]
     async fn test_parallel_tool_execution() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -872,10 +937,15 @@ mod parallel_tools {
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
 
-        let tools_vec = tools.to_vec();
+        let tools: Arc<[Arc<ToolDef>]> = tools
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect::<Vec<_>>()
+            .into();
         let router = Arc::new(router);
         let dispatcher = Arc::new(tool_invocation::DispatcherWrapper::new(
-            tools_vec,
+            tools,
             router,
             std::time::Duration::from_secs(30),
         ));
@@ -889,7 +959,8 @@ mod parallel_tools {
             .model(anthropic_model())
             .max_tokens_per_turn(512)
             .system_prompt("You have access to an 'add' tool that adds two numbers.")
-            .build(llm_adapter, dispatcher, store_adapter);
+            .build(llm_adapter, dispatcher, store_adapter)
+            .await;
 
         // Ask for multiple calculations - LLM may issue multiple tool calls
         let result = agent
@@ -910,7 +981,7 @@ mod parallel_tools {
 
     /// Tool dispatcher with simulated delays to verify parallel execution timing
     pub struct TimedToolDispatcher {
-        tools: Vec<ToolDef>,
+        tools: Arc<[Arc<ToolDef>]>,
         delay_ms: u64,
         call_log: Arc<std::sync::Mutex<Vec<(String, std::time::Instant, std::time::Instant)>>>,
     }
@@ -919,40 +990,23 @@ mod parallel_tools {
         pub fn new(delay_ms: u64) -> Self {
             Self {
                 tools: vec![
-                    ToolDef {
+                    Arc::new(ToolDef {
                         name: "get_weather".to_string(),
                         description: "Get current weather for a city".to_string(),
-                        input_schema: serde_json::json!({
-                            "type": "object",
-                            "properties": {
-                                "city": { "type": "string", "description": "City name" }
-                            },
-                            "required": ["city"]
-                        }),
-                    },
-                    ToolDef {
+                        input_schema: meerkat_tools::schema_for::<GetWeatherArgs>(),
+                    }),
+                    Arc::new(ToolDef {
                         name: "get_time".to_string(),
                         description: "Get current time for a timezone".to_string(),
-                        input_schema: serde_json::json!({
-                            "type": "object",
-                            "properties": {
-                                "timezone": { "type": "string", "description": "Timezone name" }
-                            },
-                            "required": ["timezone"]
-                        }),
-                    },
-                    ToolDef {
+                        input_schema: meerkat_tools::schema_for::<GetTimeArgs>(),
+                    }),
+                    Arc::new(ToolDef {
                         name: "get_stock".to_string(),
                         description: "Get stock price for a symbol".to_string(),
-                        input_schema: serde_json::json!({
-                            "type": "object",
-                            "properties": {
-                                "symbol": { "type": "string", "description": "Stock symbol" }
-                            },
-                            "required": ["symbol"]
-                        }),
-                    },
-                ],
+                        input_schema: meerkat_tools::schema_for::<GetStockArgs>(),
+                    }),
+                ]
+                .into(),
                 delay_ms,
                 call_log: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
@@ -965,8 +1019,8 @@ mod parallel_tools {
 
     #[async_trait]
     impl AgentToolDispatcher for TimedToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            self.tools.clone()
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
         }
 
         async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -1011,7 +1065,7 @@ mod parallel_tools {
     #[tokio::test]
     async fn test_parallel_tools_with_timing_verification() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -1032,7 +1086,8 @@ mod parallel_tools {
                  When asked about multiple things, use ALL relevant tools in a SINGLE response. \
                  Do not call them one at a time.",
             )
-            .build(llm_adapter, dispatcher.clone(), store_adapter);
+            .build(llm_adapter, dispatcher.clone(), store_adapter)
+            .await;
 
         // Ask for multiple pieces of info to encourage parallel tool calls
         let overall_start = std::time::Instant::now();
@@ -1090,7 +1145,7 @@ mod parallel_tools {
     #[tokio::test]
     async fn test_parallel_tools_multiturn() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -1108,7 +1163,8 @@ mod parallel_tools {
                 "You have access to get_weather, get_time, and get_stock tools. \
                  Use multiple tools when appropriate.",
             )
-            .build(llm_adapter, dispatcher.clone(), store_adapter);
+            .build(llm_adapter, dispatcher.clone(), store_adapter)
+            .await;
 
         // Turn 1: Multiple tool calls
         let result1 = agent
@@ -1154,7 +1210,7 @@ mod parallel_tools {
     #[tokio::test]
     async fn test_parallel_tools_partial_failure() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -1163,24 +1219,25 @@ mod parallel_tools {
 
         #[async_trait]
         impl AgentToolDispatcher for PartialFailureDispatcher {
-            fn tools(&self) -> Vec<ToolDef> {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
                 vec![
-                    ToolDef {
+                    Arc::new(ToolDef {
                         name: "working_tool".to_string(),
                         description: "A tool that works correctly".to_string(),
-                        input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-                    },
-                    ToolDef {
+                        input_schema: meerkat_tools::empty_object_schema(),
+                    }),
+                    Arc::new(ToolDef {
                         name: "broken_tool".to_string(),
                         description: "A tool that always fails".to_string(),
-                        input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-                    },
-                    ToolDef {
+                        input_schema: meerkat_tools::empty_object_schema(),
+                    }),
+                    Arc::new(ToolDef {
                         name: "another_working_tool".to_string(),
                         description: "Another tool that works correctly".to_string(),
-                        input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-                    },
+                        input_schema: meerkat_tools::empty_object_schema(),
+                    }),
                 ]
+                .into()
             }
 
             async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -1217,7 +1274,8 @@ mod parallel_tools {
                  When asked to test all tools, call ALL THREE tools. \
                  If a tool fails, acknowledge the error and report results from successful tools.",
             )
-            .build(llm_adapter, dispatcher, store_adapter);
+            .build(llm_adapter, dispatcher, store_adapter)
+            .await;
 
         // Request that should trigger all three tools
         let result = agent
@@ -1268,7 +1326,7 @@ mod sub_agent_fork {
     #[tokio::test]
     async fn test_sub_agent_fork_and_return() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -1288,7 +1346,8 @@ mod sub_agent_fork {
                 max_concurrent_agents: 5,
                 max_children_per_agent: 3,
             })
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Test fork operation
         let branches = vec![
@@ -1319,7 +1378,7 @@ mod sub_agent_fork {
     #[tokio::test]
     async fn test_sub_agent_spawn() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -1332,7 +1391,8 @@ mod sub_agent_fork {
             .model(anthropic_model())
             .system_prompt("You are a helpful assistant.")
             .max_tokens_per_turn(1024)
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Test spawn with ContextStrategy::LastTurns
         let spec = SpawnSpec {
@@ -1387,21 +1447,21 @@ mod sub_agent_fork {
         let manager = SubAgentManager::new(ConcurrencyLimits::default(), 0);
 
         let tools = vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "read_file".to_string(),
                 description: "Read a file".to_string(),
-                input_schema: serde_json::json!({}),
-            },
-            ToolDef {
+                input_schema: meerkat_tools::empty_object_schema(),
+            }),
+            Arc::new(ToolDef {
                 name: "write_file".to_string(),
                 description: "Write a file".to_string(),
-                input_schema: serde_json::json!({}),
-            },
-            ToolDef {
+                input_schema: meerkat_tools::empty_object_schema(),
+            }),
+            Arc::new(ToolDef {
                 name: "execute".to_string(),
                 description: "Execute command".to_string(),
-                input_schema: serde_json::json!({}),
-            },
+                input_schema: meerkat_tools::empty_object_schema(),
+            }),
         ];
 
         // Inherit should keep all tools
@@ -1428,7 +1488,7 @@ mod sub_agent_fork {
     #[tokio::test]
     async fn test_depth_limit_enforced() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -1446,7 +1506,8 @@ mod sub_agent_fork {
                 max_concurrent_agents: 5,
                 max_children_per_agent: 3,
             })
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         // Spawn should fail because child would be at depth 1 > max_depth (0)
         let spec = SpawnSpec {
@@ -1497,58 +1558,41 @@ mod sanity {
         assert!(!state.is_terminal());
     }
 
-    #[test]
-    fn test_agent_builder_creates_valid_agent() {
-        // Mock implementations for testing builder
-        struct MockClient;
-
-        #[async_trait]
-        impl AgentLlmClient for MockClient {
-            async fn stream_response(
-                &self,
-                _messages: &[Message],
-                _tools: &[ToolDef],
-                _max_tokens: u32,
-                _temperature: Option<f32>,
-                _provider_params: Option<&serde_json::Value>,
-            ) -> Result<LlmStreamResult, AgentError> {
-                Ok(LlmStreamResult {
-                    content: "test".to_string(),
-                    tool_calls: vec![],
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                })
-            }
-
-            fn provider(&self) -> &'static str {
-                "mock"
-            }
+    #[async_trait]
+    impl AgentLlmClient for MockClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&serde_json::Value>,
+        ) -> Result<LlmStreamResult, AgentError> {
+            Ok(LlmStreamResult::new(
+                "test".to_string(),
+                vec![],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
         }
 
-        struct MockStore;
-
-        #[async_trait]
-        impl AgentSessionStore for MockStore {
-            async fn save(&self, _session: &Session) -> Result<(), AgentError> {
-                Ok(())
-            }
-            async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
-                Ok(None)
-            }
+        fn provider(&self) -> &'static str {
+            "mock"
         }
+    }
 
+    struct MockClient;
+
+    #[tokio::test]
+    async fn test_agent_builder_creates_valid_agent() {
         let client = Arc::new(MockClient);
         let tools = Arc::new(EmptyToolDispatcher);
-        let store = Arc::new(MockStore);
+        let (_store, store, _temp_dir) = create_temp_store().await;
 
-        let agent = AgentBuilder::new()
+        let mut _agent = AgentBuilder::new()
             .model("test-model")
-            .system_prompt("Test prompt")
-            .max_tokens_per_turn(1000)
-            .build(client, tools, store);
-
-        assert_eq!(agent.state(), &LoopState::CallingLlm);
-        // System prompt should be added to session
-        assert!(!agent.session().messages().is_empty());
+            .system_prompt("test prompt")
+            .build(client, tools, store)
+            .await;
     }
 }

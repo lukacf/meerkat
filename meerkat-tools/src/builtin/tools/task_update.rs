@@ -12,10 +12,9 @@ use serde_json::Value;
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::{TaskId, TaskPriority, TaskStatus, TaskUpdate};
 use crate::builtin::{BuiltinTool, BuiltinToolError};
-use crate::schema::SchemaBuilder;
 
 /// Parameters for the task_update tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct TaskUpdateParams {
     /// The ID of the task to update
     id: String,
@@ -27,10 +26,10 @@ struct TaskUpdateParams {
     description: Option<String>,
     /// New status: "pending", "in_progress", "completed" (optional)
     #[serde(default)]
-    status: Option<String>,
+    status: Option<TaskStatus>,
     /// New priority: "low", "medium", "high" (optional)
     #[serde(default)]
-    priority: Option<String>,
+    priority: Option<TaskPriority>,
     /// Replace all labels (optional)
     #[serde(default)]
     labels: Option<Vec<String>>,
@@ -93,103 +92,9 @@ impl BuiltinTool for TaskUpdateTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "task_update".to_string(),
-            description: "Update an existing task".to_string(),
-            input_schema: SchemaBuilder::new()
-                .property(
-                    "id",
-                    serde_json::json!({
-                        "type": "string",
-                        "description": "The task ID to update"
-                    }),
-                )
-                .property(
-                    "subject",
-                    serde_json::json!({
-                        "type": "string",
-                        "description": "New subject/title"
-                    }),
-                )
-                .property(
-                    "description",
-                    serde_json::json!({
-                        "type": "string",
-                        "description": "New description"
-                    }),
-                )
-                .property(
-                    "status",
-                    serde_json::json!({
-                        "type": "string",
-                        "enum": ["pending", "in_progress", "completed"],
-                        "description": "New status"
-                    }),
-                )
-                .property(
-                    "priority",
-                    serde_json::json!({
-                        "type": "string",
-                        "enum": ["low", "medium", "high"],
-                        "description": "New priority"
-                    }),
-                )
-                .property(
-                    "labels",
-                    serde_json::json!({
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Replace all labels"
-                    }),
-                )
-                .property(
-                    "add_blocks",
-                    serde_json::json!({
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Task IDs to add to blocks list"
-                    }),
-                )
-                .property(
-                    "remove_blocks",
-                    serde_json::json!({
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Task IDs to remove from blocks list"
-                    }),
-                )
-                .property(
-                    "owner",
-                    serde_json::json!({
-                        "type": "string",
-                        "description": "New owner/assignee"
-                    }),
-                )
-                .property(
-                    "metadata",
-                    serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": true,
-                        "description": "Metadata key-value pairs to merge (null value deletes key)"
-                    }),
-                )
-                .property(
-                    "add_blocked_by",
-                    serde_json::json!({
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Task IDs to add to blocked_by list"
-                    }),
-                )
-                .property(
-                    "remove_blocked_by",
-                    serde_json::json!({
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Task IDs to remove from blocked_by list"
-                    }),
-                )
-                .required("id")
-                .build(),
+            name: "task_update".into(),
+            description: "Update an existing task".into(),
+            input_schema: crate::schema::schema_for::<TaskUpdateParams>(),
         }
     }
 
@@ -201,37 +106,11 @@ impl BuiltinTool for TaskUpdateTool {
         let params: TaskUpdateParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
 
-        let status = match params.status.as_deref() {
-            Some("pending") => Some(TaskStatus::Pending),
-            Some("in_progress") => Some(TaskStatus::InProgress),
-            Some("completed") => Some(TaskStatus::Completed),
-            Some(other) => {
-                return Err(BuiltinToolError::InvalidArgs(format!(
-                    "Invalid status: {}",
-                    other
-                )));
-            }
-            None => None,
-        };
-
-        let priority = match params.priority.as_deref() {
-            Some("low") => Some(TaskPriority::Low),
-            Some("medium") => Some(TaskPriority::Medium),
-            Some("high") => Some(TaskPriority::High),
-            Some(other) => {
-                return Err(BuiltinToolError::InvalidArgs(format!(
-                    "Invalid priority: {}",
-                    other
-                )));
-            }
-            None => None,
-        };
-
         let update = TaskUpdate {
             subject: params.subject,
             description: params.description,
-            status,
-            priority,
+            status: params.status,
+            priority: params.priority,
             labels: params.labels,
             add_blocks: params
                 .add_blocks
@@ -266,6 +145,53 @@ mod tests {
     use crate::builtin::memory_store::MemoryTaskStore;
     use crate::builtin::types::{NewTask, Task, TaskPriority, TaskStatus};
     use serde_json::json;
+
+    fn schema_resolve_ref<'a>(root: &'a Value, ref_path: &str) -> Option<&'a Value> {
+        let path = ref_path.strip_prefix("#/")?;
+        let mut current = root;
+        for part in path.split('/') {
+            current = current.get(part)?;
+        }
+        Some(current)
+    }
+
+    fn schema_allows_value(root: &Value, schema: &Value, expected: &Value) -> bool {
+        if let Some(const_value) = schema.get("const") {
+            return const_value == expected;
+        }
+
+        if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+            return values.contains(expected);
+        }
+
+        if let Some(ref_path) = schema.get("$ref").and_then(Value::as_str) {
+            if let Some(resolved) = schema_resolve_ref(root, ref_path) {
+                return schema_allows_value(root, resolved, expected);
+            }
+        }
+
+        for key in ["anyOf", "oneOf", "allOf"] {
+            let Some(options) = schema.get(key).and_then(Value::as_array) else {
+                continue;
+            };
+            if options
+                .iter()
+                .any(|option| schema_allows_value(root, option, expected))
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn schema_allows_type(schema: &Value, expected: &str) -> bool {
+        match schema.get("type") {
+            Some(Value::String(actual)) => actual == expected,
+            Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some(expected)),
+            _ => false,
+        }
+    }
 
     /// Helper to create a store with a test task
     async fn create_store_with_task() -> (Arc<MemoryTaskStore>, Task) {
@@ -314,16 +240,38 @@ mod tests {
         assert_eq!(required[0], "id");
 
         // Check status enum
-        let status_enum = schema["properties"]["status"]["enum"].as_array().unwrap();
-        assert!(status_enum.contains(&json!("pending")));
-        assert!(status_enum.contains(&json!("in_progress")));
-        assert!(status_enum.contains(&json!("completed")));
+        assert!(schema_allows_value(
+            &schema,
+            &schema["properties"]["status"],
+            &json!("pending")
+        ));
+        assert!(schema_allows_value(
+            &schema,
+            &schema["properties"]["status"],
+            &json!("in_progress")
+        ));
+        assert!(schema_allows_value(
+            &schema,
+            &schema["properties"]["status"],
+            &json!("completed")
+        ));
 
         // Check priority enum
-        let priority_enum = schema["properties"]["priority"]["enum"].as_array().unwrap();
-        assert!(priority_enum.contains(&json!("low")));
-        assert!(priority_enum.contains(&json!("medium")));
-        assert!(priority_enum.contains(&json!("high")));
+        assert!(schema_allows_value(
+            &schema,
+            &schema["properties"]["priority"],
+            &json!("low")
+        ));
+        assert!(schema_allows_value(
+            &schema,
+            &schema["properties"]["priority"],
+            &json!("medium")
+        ));
+        assert!(schema_allows_value(
+            &schema,
+            &schema["properties"]["priority"],
+            &json!("high")
+        ));
     }
 
     #[test]
@@ -691,7 +639,7 @@ mod tests {
         );
 
         let owner_schema = &props["owner"];
-        assert_eq!(owner_schema["type"], "string");
+        assert!(schema_allows_type(owner_schema, "string"));
         assert!(
             owner_schema["description"]
                 .as_str()
@@ -716,7 +664,7 @@ mod tests {
         );
 
         let metadata_schema = &props["metadata"];
-        assert_eq!(metadata_schema["type"], "object");
+        assert!(schema_allows_type(metadata_schema, "object"));
     }
 
     #[test]
@@ -733,7 +681,7 @@ mod tests {
         );
 
         let add_blocked_by_schema = &props["add_blocked_by"];
-        assert_eq!(add_blocked_by_schema["type"], "array");
+        assert!(schema_allows_type(add_blocked_by_schema, "array"));
         assert_eq!(add_blocked_by_schema["items"]["type"], "string");
     }
 
@@ -751,7 +699,7 @@ mod tests {
         );
 
         let remove_blocked_by_schema = &props["remove_blocked_by"];
-        assert_eq!(remove_blocked_by_schema["type"], "array");
+        assert!(schema_allows_type(remove_blocked_by_schema, "array"));
         assert_eq!(remove_blocked_by_schema["items"]["type"], "string");
     }
 

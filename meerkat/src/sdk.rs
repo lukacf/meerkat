@@ -3,15 +3,17 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::AgentToolDispatcher;
-use crate::{CommsRuntime, Config, CoreCommsConfig, ToolError, ToolGatewayBuilder};
+use crate::{
+    AgentFactory, AgentToolDispatcher, CommsRuntime, Config, CoreCommsConfig, ToolError,
+    ToolGatewayBuilder,
+};
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::{AgentEvent, format_verbose_event};
 use meerkat_tools::builtin::comms::CommsToolSurface;
 use meerkat_tools::builtin::shell::ShellConfig;
 use meerkat_tools::{
-    BuiltinDispatcherConfig, BuiltinToolConfig, CompositeDispatcherError, FileTaskStore,
-    MemoryTaskStore, build_builtin_dispatcher, ensure_rkat_dir, find_project_root,
+    BuiltinToolConfig, CompositeDispatcherError, FileTaskStore, MemoryTaskStore, ensure_rkat_dir,
+    find_project_root,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -24,97 +26,103 @@ use tokio::task::JoinHandle;
 /// - Creates a composite dispatcher with the configured built-in tools
 ///
 /// # Arguments
+/// * `factory` - Agent wiring factory used for consistent dispatcher configuration
 /// * `config` - Configuration for enabling/disabling built-in tools
+/// * `shell_config` - Optional shell tool configuration
 /// * `external` - Optional external dispatcher for additional tools (e.g., MCP router)
 /// * `session_id` - Optional session ID for tracking tool usage
 ///
 /// # Returns
 /// An `Arc<dyn AgentToolDispatcher>` ready to use with `AgentBuilder::build()`
-pub fn create_dispatcher_with_builtins(
-    config: &BuiltinToolConfig,
+pub async fn create_dispatcher_with_builtins(
+    factory: &AgentFactory,
+    config: BuiltinToolConfig,
     shell_config: Option<ShellConfig>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
     session_id: Option<String>,
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
     let store = Arc::new(MemoryTaskStore::new());
-    let builder = BuiltinDispatcherConfig {
-        store,
-        config: config.clone(),
-        shell_config,
-        external,
-        session_id,
-        enable_wait_interrupt: false,
-    };
-    build_builtin_dispatcher(builder)
+    factory
+        .build_builtin_dispatcher(store, config, shell_config, external, session_id)
+        .await
 }
 
 /// Create a tool dispatcher with built-in tools and a file-backed task store.
 ///
 /// This persists tasks to the provided path (explicit persistence).
-pub fn create_dispatcher_with_builtins_persisted(
-    config: &BuiltinToolConfig,
+pub async fn create_dispatcher_with_builtins_persisted(
+    factory: &AgentFactory,
+    config: BuiltinToolConfig,
     shell_config: Option<ShellConfig>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
     session_id: Option<String>,
     task_store_path: impl AsRef<Path>,
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
     let store = Arc::new(FileTaskStore::new(task_store_path.as_ref().to_path_buf()));
-    let builder = BuiltinDispatcherConfig {
-        store,
-        config: config.clone(),
-        shell_config,
-        external,
-        session_id,
-        enable_wait_interrupt: false,
-    };
-    build_builtin_dispatcher(builder)
+    factory
+        .build_builtin_dispatcher(store, config, shell_config, external, session_id)
+        .await
 }
 
 /// Create a tool dispatcher with built-ins using the nearest `.rkat` project root.
 ///
 /// This is a convenience for explicit persistence inside the project.
-pub fn create_dispatcher_with_builtins_in_project(
-    config: &BuiltinToolConfig,
+///
+/// If `factory.project_root` is set, it is used instead of scanning `cwd`.
+pub async fn create_dispatcher_with_builtins_in_project(
+    factory: &AgentFactory,
+    config: BuiltinToolConfig,
     shell_config: Option<ShellConfig>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
     session_id: Option<String>,
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
-    let cwd = std::env::current_dir().map_err(CompositeDispatcherError::Io)?;
-    let project_root =
-        find_project_root(&cwd).ok_or_else(|| CompositeDispatcherError::ToolInitFailed {
-            name: "project_root".to_string(),
-            message: "No .rkat directory found in current or parent directories".to_string(),
-        })?;
-    ensure_rkat_dir(&project_root).map_err(CompositeDispatcherError::Io)?;
+    let project_root_override = factory.project_root.clone();
+    let project_root = tokio::task::spawn_blocking(move || {
+        if let Some(root) = project_root_override {
+            ensure_rkat_dir(&root).map_err(CompositeDispatcherError::Io)?;
+            return Ok::<_, CompositeDispatcherError>(root);
+        }
+
+        let cwd = std::env::current_dir().map_err(CompositeDispatcherError::Io)?;
+        let project_root =
+            find_project_root(&cwd).ok_or_else(|| CompositeDispatcherError::ToolInitFailed {
+                name: "project_root".to_string(),
+                message: "No .rkat directory found in current or parent directories".to_string(),
+            })?;
+        ensure_rkat_dir(&project_root).map_err(CompositeDispatcherError::Io)?;
+        Ok(project_root)
+    })
+    .await
+    .map_err(|e| CompositeDispatcherError::ToolInitFailed {
+        name: "project_root".to_string(),
+        message: format!("Failed to resolve project root: {}", e),
+    })??;
+
     let store = Arc::new(FileTaskStore::in_project(&project_root));
-    let builder = BuiltinDispatcherConfig {
-        store,
-        config: config.clone(),
-        shell_config,
-        external,
-        session_id,
-        enable_wait_interrupt: false,
-    };
-    build_builtin_dispatcher(builder)
+    factory
+        .build_builtin_dispatcher(store, config, shell_config, external, session_id)
+        .await
 }
 
 /// Create a tool dispatcher with only built-in task tools (no shell tools, no external tools).
 ///
 /// This is a convenience wrapper around [`create_dispatcher_with_builtins`].
-pub fn create_builtins_dispatcher(
-    config: &BuiltinToolConfig,
+pub async fn create_builtins_dispatcher(
+    factory: &AgentFactory,
+    config: BuiltinToolConfig,
     session_id: Option<String>,
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
-    create_dispatcher_with_builtins(config, None, None, session_id)
+    create_dispatcher_with_builtins(factory, config, None, None, session_id).await
 }
 
 /// Create a tool dispatcher with built-in task and shell tools.
-pub fn create_shell_dispatcher(
-    config: &BuiltinToolConfig,
+pub async fn create_shell_dispatcher(
+    factory: &AgentFactory,
+    config: BuiltinToolConfig,
     shell_config: ShellConfig,
     session_id: Option<String>,
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
-    create_dispatcher_with_builtins(config, Some(shell_config), None, session_id)
+    create_dispatcher_with_builtins(factory, config, Some(shell_config), None, session_id).await
 }
 
 /// Build a comms runtime from the config and base directory.
@@ -146,6 +154,7 @@ pub async fn build_comms_runtime_from_config(
             };
             let resolved = comms.resolve_paths(base_dir.as_ref());
             let mut runtime = CommsRuntime::new(resolved)
+                .await
                 .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
             runtime
                 .start_listeners()
@@ -167,6 +176,7 @@ pub async fn build_comms_runtime_from_config(
             };
             let resolved = comms.resolve_paths(base_dir.as_ref());
             let mut runtime = CommsRuntime::new(resolved)
+                .await
                 .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
             runtime
                 .start_listeners()
@@ -239,23 +249,14 @@ pub fn spawn_event_logger(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_tools::MemoryTaskStore;
 
     #[tokio::test]
     async fn test_builtin_tools_dispatch() {
-        use std::sync::Arc;
-
-        let store = Arc::new(MemoryTaskStore::new());
-        let config = BuiltinToolConfig::default();
-        let builder = BuiltinDispatcherConfig {
-            store,
-            config,
-            shell_config: None,
-            external: None,
-            session_id: None,
-            enable_wait_interrupt: false,
-        };
-        let dispatcher = build_builtin_dispatcher(builder).unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp_dir.path().join("sessions"));
+        let dispatcher = create_builtins_dispatcher(&factory, BuiltinToolConfig::default(), None)
+            .await
+            .unwrap();
 
         // Create a task
         let args = serde_json::json!({
@@ -287,18 +288,37 @@ mod tests {
             let temp_path = std::path::PathBuf::from(temp_path);
             std::env::set_current_dir(&temp_path).expect("set cwd failed");
 
-            // Create dispatcher using the helper
-            let result = create_builtins_dispatcher(
-                &BuiltinToolConfig::default(),
-                Some("test-123".to_string()),
-            );
+            let factory = AgentFactory::new(temp_path.join(".rkat").join("sessions"));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
 
-            assert!(result.is_ok());
-            let dispatcher = result.unwrap();
+            // Create dispatcher using the helper.
+            let dispatcher = rt
+                .block_on(create_dispatcher_with_builtins_in_project(
+                    &factory,
+                    BuiltinToolConfig::default(),
+                    None,
+                    None,
+                    Some("test-123".to_string()),
+                ))
+                .unwrap();
+
             let tools = dispatcher.tools();
-            // 4 task tools + 2 utility tools (wait, datetime)
             assert!(tools.iter().any(|t| t.name == "task_create"));
             assert!(tools.iter().any(|t| t.name == "wait"));
+
+            let _ = rt
+                .block_on(dispatcher.dispatch(
+                    "task_create",
+                    &serde_json::json!({"subject":"Test","description":"Persist"}),
+                ))
+                .unwrap();
+
+            // Verify tasks.json was created in .rkat directory.
+            let tasks_file = temp_path.join(".rkat").join("tasks.json");
+            assert!(tasks_file.exists(), "tasks.json should be created");
             return;
         }
 
@@ -321,8 +341,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_builtin_tools_in_project_dir() {
-        use std::sync::Arc;
-
         // Test using FileTaskStore in a temp directory
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_path = temp_dir.path();
@@ -330,18 +348,18 @@ mod tests {
         // Create the .rkat directory
         ensure_rkat_dir(temp_path).unwrap();
 
-        // Create dispatcher with FileTaskStore
-        let store = Arc::new(FileTaskStore::in_project(temp_path));
-        let config = BuiltinToolConfig::default();
-        let builder = BuiltinDispatcherConfig {
-            store,
-            config,
-            shell_config: None,
-            external: None,
-            session_id: Some("file-test-session".to_string()),
-            enable_wait_interrupt: false,
-        };
-        let dispatcher = build_builtin_dispatcher(builder).unwrap();
+        let factory = AgentFactory::new(temp_path.join(".rkat").join("sessions"));
+        let tasks_file = temp_path.join(".rkat").join("tasks.json");
+        let dispatcher = create_dispatcher_with_builtins_persisted(
+            &factory,
+            BuiltinToolConfig::default(),
+            None,
+            None,
+            Some("file-test-session".to_string()),
+            &tasks_file,
+        )
+        .await
+        .unwrap();
 
         // Create a task
         let create_result = dispatcher
@@ -360,7 +378,6 @@ mod tests {
         assert_eq!(task.get("created_by_session").unwrap(), "file-test-session");
 
         // Verify tasks.json was created in .rkat directory
-        let tasks_file = temp_path.join(".rkat").join("tasks.json");
         assert!(tasks_file.exists(), "tasks.json should be created");
 
         // Get the task back

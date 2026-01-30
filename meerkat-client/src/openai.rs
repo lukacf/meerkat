@@ -3,7 +3,7 @@
 //! Implements the LlmClient trait for OpenAI's API.
 
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmEvent, LlmRequest, ToolCallBuffer};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, ToolCallBuffer};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use meerkat_core::{Message, StopReason, Usage};
@@ -172,121 +172,127 @@ impl LlmClient for OpenAiClient {
         &'a self,
         request: &'a LlmRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-        Box::pin(async_stream::try_stream! {
-            let body = self.build_request_body(request);
+        let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> = Box::pin(
+            async_stream::try_stream! {
+                let body = self.build_request_body(request);
 
-            let response = self.http
-                .post(format!("{}/v1/chat/completions", self.base_url))
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|_| LlmError::NetworkTimeout {
-                    duration_ms: 30000,
-                })?;
+                let response = self.http
+                    .post(format!("{}/v1/chat/completions", self.base_url))
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|_| LlmError::NetworkTimeout {
+                        duration_ms: 30000,
+                    })?;
 
-            let status_code = response.status().as_u16();
-            let stream_result = if (200..=299).contains(&status_code) {
-                Ok(response.bytes_stream())
-            } else {
-                let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_status(status_code, text))
-            };
-            let mut stream = stream_result?;
-            let mut buffer = String::with_capacity(512);
-            let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
+                let status_code = response.status().as_u16();
+                let stream_result = if (200..=299).contains(&status_code) {
+                    Ok(response.bytes_stream())
+                } else {
+                    let text = response.text().await.unwrap_or_default();
+                    Err(LlmError::from_http_status(status_code, text))
+                };
+                let mut stream = stream_result?;
+                let mut buffer = String::with_capacity(512);
+                let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
 
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].trim();
-                    let should_process = !line.is_empty() && !line.starts_with(':');
-                    let parsed_chunk = if should_process {
-                        Self::parse_sse_line(line)
-                    } else {
-                        None
-                    };
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].trim();
+                        let should_process = !line.is_empty() && !line.starts_with(':');
+                        let parsed_chunk = if should_process {
+                            Self::parse_sse_line(line)
+                        } else {
+                            None
+                        };
 
-                    buffer.drain(..=newline_pos);
+                        buffer.drain(..=newline_pos);
 
-                    if let Some(chunk) = parsed_chunk {
-                        if let Some(usage) = chunk.usage {
-                            yield LlmEvent::UsageUpdate {
-                                usage: Usage {
-                                    input_tokens: usage.prompt_tokens.unwrap_or(0),
-                                    output_tokens: usage.completion_tokens.unwrap_or(0),
-                                    cache_creation_tokens: None,
-                                    cache_read_tokens: None,
-                                }
-                            };
-                        }
-
-                        for choice in chunk.choices {
-                            let delta = choice.delta;
-
-                            if let Some(content) = delta.content {
-                                if !content.is_empty() {
-                                    yield LlmEvent::TextDelta { delta: content };
-                                }
+                        if let Some(chunk) = parsed_chunk {
+                            if let Some(usage) = chunk.usage {
+                                yield LlmEvent::UsageUpdate {
+                                    usage: Usage {
+                                        input_tokens: usage.prompt_tokens.unwrap_or(0),
+                                        output_tokens: usage.completion_tokens.unwrap_or(0),
+                                        cache_creation_tokens: None,
+                                        cache_read_tokens: None,
+                                    }
+                                };
                             }
 
-                            if let Some(tool_calls) = delta.tool_calls {
-                                for tc in tool_calls {
-                                    let index = tc.index.unwrap_or(0);
+                            for choice in chunk.choices {
+                                let delta = choice.delta;
 
-                                    if let std::collections::hash_map::Entry::Vacant(e) = tool_buffers.entry(index) {
-                                        let id = tc.id.clone().unwrap_or_default();
-                                        let mut buf = ToolCallBuffer::new(id);
-                                        if let Some(func) = &tc.function {
-                                            buf.name = func.name.clone();
-                                        }
-                                        e.insert(buf);
+                                if let Some(content) = delta.content {
+                                    if !content.is_empty() {
+                                        yield LlmEvent::TextDelta { delta: content };
                                     }
+                                }
 
-                                    if let Some(func) = &tc.function {
-                                        if let Some(args) = &func.arguments {
-                                            if let Some(buf) = tool_buffers.get_mut(&index) {
-                                                buf.args_json.push_str(args);
-                                                yield LlmEvent::ToolCallDelta {
-                                                    id: buf.id.clone(),
-                                                    name: buf.name.clone(),
-                                                    args_delta: args.clone(),
-                                                };
+                                if let Some(tool_calls) = delta.tool_calls {
+                                    for tc in tool_calls {
+                                        let index = tc.index.unwrap_or(0);
+
+                                        if let std::collections::hash_map::Entry::Vacant(e) = tool_buffers.entry(index) {
+                                            let id = tc.id.clone().unwrap_or_default();
+                                            let mut buf = ToolCallBuffer::new(id);
+                                            if let Some(func) = &tc.function {
+                                                buf.name = func.name.clone();
+                                            }
+                                            e.insert(buf);
+                                        }
+
+                                        if let Some(func) = &tc.function {
+                                            if let Some(args) = &func.arguments {
+                                                if let Some(buf) = tool_buffers.get_mut(&index) {
+                                                    buf.args_json.push_str(args);
+                                                    yield LlmEvent::ToolCallDelta {
+                                                        id: buf.id.clone(),
+                                                        name: buf.name.clone(),
+                                                        args_delta: args.clone(),
+                                                    };
+                                                }
                                             }
                                         }
                                     }
                                 }
-                            }
 
-                            if let Some(finish_reason) = choice.finish_reason {
-                                for (_, buf) in tool_buffers.drain() {
-                                    if let Some(tc) = buf.try_complete() {
-                                        yield LlmEvent::ToolCallComplete {
-                                            id: tc.id,
-                                            name: tc.name,
-                                            args: tc.args,
-                                            thought_signature: None,
-                                        };
+                                if let Some(finish_reason) = choice.finish_reason {
+                                    for (_, buf) in tool_buffers.drain() {
+                                        if let Some(tc) = buf.try_complete() {
+                                            yield LlmEvent::ToolCallComplete {
+                                                id: tc.id,
+                                                name: tc.name,
+                                                args: tc.args,
+                                                thought_signature: None,
+                                            };
+                                        }
                                     }
-                                }
 
-                                let reason = match finish_reason.as_str() {
-                                    "stop" => StopReason::EndTurn,
-                                    "tool_calls" => StopReason::ToolUse,
-                                    "length" => StopReason::MaxTokens,
-                                    "content_filter" => StopReason::ContentFilter,
-                                    _ => StopReason::EndTurn,
-                                };
-                                yield LlmEvent::Done { stop_reason: reason };
+                                    let reason = match finish_reason.as_str() {
+                                        "stop" => StopReason::EndTurn,
+                                        "tool_calls" => StopReason::ToolUse,
+                                        "length" => StopReason::MaxTokens,
+                                        "content_filter" => StopReason::ContentFilter,
+                                        _ => StopReason::EndTurn,
+                                    };
+                                    yield LlmEvent::Done {
+                                        outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                                    };
+                                }
                             }
                         }
                     }
                 }
-            }
-        })
+            },
+        );
+
+        crate::streaming::ensure_terminal_done(inner)
     }
 
     fn provider(&self) -> &'static str {
@@ -463,7 +469,7 @@ mod tests {
                     tool_calls: vec![meerkat_core::ToolCall::new(
                         "call_123".to_string(),
                         "get_weather".to_string(),
-                        tool_args.clone(),
+                        tool_args,
                     )],
                     stop_reason: StopReason::ToolUse,
                     usage: Usage::default(),

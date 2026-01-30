@@ -4,7 +4,7 @@ use crate::{SessionFilter, SessionStore, StoreError};
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
 use std::collections::HashMap;
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 
 /// In-memory session store
 pub struct MemoryStore {
@@ -29,27 +29,18 @@ impl Default for MemoryStore {
 #[async_trait]
 impl SessionStore for MemoryStore {
     async fn save(&self, session: &Session) -> Result<(), StoreError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| StoreError::Internal("Lock poisoned".to_string()))?;
+        let mut sessions = self.sessions.write().await;
         sessions.insert(session.id().clone(), session.clone());
         Ok(())
     }
 
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| StoreError::Internal("Lock poisoned".to_string()))?;
+        let sessions = self.sessions.read().await;
         Ok(sessions.get(id).cloned())
     }
 
     async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| StoreError::Internal("Lock poisoned".to_string()))?;
+        let sessions = self.sessions.read().await;
         let mut metas: Vec<SessionMeta> = sessions
             .values()
             .filter(|s| {
@@ -79,10 +70,7 @@ impl SessionStore for MemoryStore {
     }
 
     async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| StoreError::Internal("Lock poisoned".to_string()))?;
+        let mut sessions = self.sessions.write().await;
         sessions.remove(id);
         Ok(())
     }

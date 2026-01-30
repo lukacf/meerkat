@@ -8,7 +8,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 /// MCP configuration containing server definitions
@@ -185,33 +184,33 @@ pub enum McpConfigError {
 impl McpConfig {
     /// Load from user + project config, project wins on name collision.
     /// Returns servers in precedence order (project first, then user).
-    pub fn load() -> Result<Self, McpConfigError> {
+    pub async fn load() -> Result<Self, McpConfigError> {
         let user = user_mcp_path();
-        let project = find_project_mcp();
+        let project = project_mcp_path();
 
-        let user_cfg = read_mcp_file(user.as_deref())?;
-        let project_cfg = read_mcp_file(project.as_deref())?;
+        let user_cfg = read_mcp_file(user.as_deref()).await?;
+        let project_cfg = read_mcp_file(project.as_deref()).await?;
 
         Ok(merge_project_over_user(user_cfg, project_cfg))
     }
 
     /// Load from explicit paths (useful for testing)
-    pub fn load_from_paths(
+    pub async fn load_from_paths(
         user_path: Option<&Path>,
         project_path: Option<&Path>,
     ) -> Result<Self, McpConfigError> {
-        let user_cfg = read_mcp_file(user_path)?;
-        let project_cfg = read_mcp_file(project_path)?;
+        let user_cfg = read_mcp_file(user_path).await?;
+        let project_cfg = read_mcp_file(project_path).await?;
         Ok(merge_project_over_user(user_cfg, project_cfg))
     }
 
     /// Load servers with their scope information
-    pub fn load_with_scopes() -> Result<Vec<McpServerWithScope>, McpConfigError> {
+    pub async fn load_with_scopes() -> Result<Vec<McpServerWithScope>, McpConfigError> {
         let user_path = user_mcp_path();
-        let project_path = find_project_mcp();
+        let project_path = project_mcp_path();
 
-        let user_cfg = read_mcp_file(user_path.as_deref())?;
-        let project_cfg = read_mcp_file(project_path.as_deref())?;
+        let user_cfg = read_mcp_file(user_path.as_deref()).await?;
+        let project_cfg = read_mcp_file(project_path.as_deref()).await?;
 
         let mut seen: HashSet<String> = HashSet::new();
         let mut result: Vec<McpServerWithScope> = Vec::new();
@@ -240,28 +239,28 @@ impl McpConfig {
     }
 
     /// Load from a specific scope only
-    pub fn load_scope(scope: McpScope) -> Result<Self, McpConfigError> {
+    pub async fn load_scope(scope: McpScope) -> Result<Self, McpConfigError> {
         let path = match scope {
             McpScope::User => user_mcp_path(),
-            McpScope::Project => find_project_mcp(),
+            McpScope::Project => project_mcp_path(),
         };
-        read_mcp_file(path.as_deref())
+        read_mcp_file(path.as_deref()).await
     }
 
     /// Check if a server exists in a specific scope
-    pub fn server_exists(name: &str, scope: McpScope) -> Result<bool, McpConfigError> {
-        let config = Self::load_scope(scope)?;
+    pub async fn server_exists(name: &str, scope: McpScope) -> Result<bool, McpConfigError> {
+        let config = Self::load_scope(scope).await?;
         Ok(config.servers.iter().any(|s| s.name == name))
     }
 
     /// Find which scopes contain a server with the given name
-    pub fn find_server_scopes(name: &str) -> Result<Vec<McpScope>, McpConfigError> {
+    pub async fn find_server_scopes(name: &str) -> Result<Vec<McpScope>, McpConfigError> {
         let mut scopes = Vec::new();
 
-        if Self::server_exists(name, McpScope::Project)? {
+        if Self::server_exists(name, McpScope::Project).await? {
             scopes.push(McpScope::Project);
         }
-        if Self::server_exists(name, McpScope::User)? {
+        if Self::server_exists(name, McpScope::User).await? {
             scopes.push(McpScope::User);
         }
 
@@ -269,14 +268,19 @@ impl McpConfig {
     }
 }
 
-fn read_mcp_file(path: Option<&Path>) -> Result<McpConfig, McpConfigError> {
+async fn read_mcp_file(path: Option<&Path>) -> Result<McpConfig, McpConfigError> {
     let Some(path) = path else {
         return Ok(McpConfig::default());
     };
-    if !path.exists() {
+    if !tokio::fs::try_exists(path)
+        .await
+        .map_err(|e| McpConfigError::Io(e.to_string()))?
+    {
         return Ok(McpConfig::default());
     }
-    let contents = fs::read_to_string(path).map_err(|e| McpConfigError::Io(e.to_string()))?;
+    let contents = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| McpConfigError::Io(e.to_string()))?;
     let parsed: McpConfig = toml::from_str(&contents).map_err(|e| McpConfigError::Parse {
         path: path.display().to_string(),
         message: e.to_string(),
@@ -444,9 +448,9 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_empty_config_loads() {
-        let config = McpConfig::load_from_paths(None, None).unwrap();
+    #[tokio::test]
+    async fn test_empty_config_loads() {
+        let config = McpConfig::load_from_paths(None, None).await.unwrap();
         assert!(config.servers.is_empty());
     }
 
@@ -519,14 +523,14 @@ headers = { Authorization = "Bearer token" }
         assert_eq!(merged.servers[2].name, "user-only");
     }
 
-    #[test]
-    fn test_load_from_files() {
+    #[tokio::test]
+    async fn test_load_from_files() {
         let temp = TempDir::new().unwrap();
 
         let user_dir = temp.path().join("user");
-        fs::create_dir_all(&user_dir).unwrap();
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
         let user_file = user_dir.join("mcp.toml");
-        fs::write(
+        tokio::fs::write(
             &user_file,
             r#"
 [[servers]]
@@ -534,12 +538,13 @@ name = "user-server"
 command = "user-cmd"
 "#,
         )
+        .await
         .unwrap();
 
         let project_dir = temp.path().join("project");
-        fs::create_dir_all(&project_dir).unwrap();
+        tokio::fs::create_dir_all(&project_dir).await.unwrap();
         let project_file = project_dir.join("mcp.toml");
-        fs::write(
+        tokio::fs::write(
             &project_file,
             r#"
 [[servers]]
@@ -547,9 +552,12 @@ name = "project-server"
 command = "project-cmd"
 "#,
         )
+        .await
         .unwrap();
 
-        let config = McpConfig::load_from_paths(Some(&user_file), Some(&project_file)).unwrap();
+        let config = McpConfig::load_from_paths(Some(&user_file), Some(&project_file))
+            .await
+            .unwrap();
 
         assert_eq!(config.servers.len(), 2);
         // Project first
@@ -557,14 +565,14 @@ command = "project-cmd"
         assert_eq!(config.servers[1].name, "user-server");
     }
 
-    #[test]
-    fn test_find_project_mcp_does_not_walk_up_tree() {
+    #[tokio::test]
+    async fn test_find_project_mcp_does_not_walk_up_tree() {
         let temp = TempDir::new().unwrap();
 
         // Create parent/.rkat/mcp.toml (should NOT be found)
         let parent_config = temp.path().join(".rkat");
-        fs::create_dir_all(&parent_config).unwrap();
-        fs::write(
+        tokio::fs::create_dir_all(&parent_config).await.unwrap();
+        tokio::fs::write(
             parent_config.join("mcp.toml"),
             r#"
 [[servers]]
@@ -572,11 +580,12 @@ name = "parent-server"
 command = "should-not-load"
 "#,
         )
+        .await
         .unwrap();
 
         // Create parent/child/ directory (no .rkat here)
         let child_dir = temp.path().join("child");
-        fs::create_dir_all(&child_dir).unwrap();
+        tokio::fs::create_dir_all(&child_dir).await.unwrap();
 
         // Looking from child/ should NOT find parent/.rkat/mcp.toml
         let result = find_project_mcp_in(&child_dir);
@@ -590,15 +599,15 @@ command = "should-not-load"
         assert!(result.is_some(), "Should find config in current directory");
     }
 
-    #[test]
-    fn test_find_project_mcp_finds_config_in_current_dir() {
+    #[tokio::test]
+    async fn test_find_project_mcp_finds_config_in_current_dir() {
         let temp = TempDir::new().unwrap();
 
         // Create .rkat/mcp.toml in the directory
         let meerkat_dir = temp.path().join(".rkat");
-        fs::create_dir_all(&meerkat_dir).unwrap();
+        tokio::fs::create_dir_all(&meerkat_dir).await.unwrap();
         let config_path = meerkat_dir.join("mcp.toml");
-        fs::write(
+        tokio::fs::write(
             &config_path,
             r#"
 [[servers]]
@@ -606,6 +615,7 @@ name = "local-server"
 command = "echo"
 "#,
         )
+        .await
         .unwrap();
 
         let result = find_project_mcp_in(temp.path());
@@ -652,11 +662,13 @@ url = "https://example.com/mcp"
         assert!(parsed.is_err(), "Config with command + url should fail");
     }
 
-    #[test]
-    fn test_env_expansion_in_config() {
+    #[tokio::test]
+    async fn test_env_expansion_in_config() {
         if std::env::var("RUN_TEST_EXPANSION_INNER").is_ok() {
             let config_path = std::env::var("TEST_CONFIG_PATH").expect("TEST_CONFIG_PATH not set");
-            let config = McpConfig::load_from_paths(Some(config_path.as_ref()), None).unwrap();
+            let config = McpConfig::load_from_paths(Some(config_path.as_ref()), None)
+                .await
+                .unwrap();
             let server = &config.servers[0];
             match &server.transport {
                 McpTransportConfig::Http(http) => {
@@ -672,7 +684,7 @@ url = "https://example.com/mcp"
 
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("mcp.toml");
-        fs::write(
+        tokio::fs::write(
             &config_path,
             r#"
 [[servers]]
@@ -681,6 +693,7 @@ url = "https://mcp.example.com/mcp"
 headers = { Authorization = "Bearer ${RKAT_TEST_API_KEY}" }
 "#,
         )
+        .await
         .unwrap();
 
         let status = std::process::Command::new(std::env::current_exe().expect("current exe"))

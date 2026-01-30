@@ -44,8 +44,7 @@ pub struct SubAgentToolState {
 
     /// Tool usage instructions from parent (for inheriting system prompt)
     /// These explain how to use shell, task, and other tools.
-    /// Uses std::sync::RwLock since this is set once at setup and read when spawning.
-    pub tool_usage_instructions: std::sync::RwLock<Option<String>>,
+    pub tool_usage_instructions: RwLock<Option<String>>,
 }
 
 impl SubAgentToolState {
@@ -69,7 +68,7 @@ impl SubAgentToolState {
             current_depth,
             parent_comms: None,
             parent_trusted_peers: None,
-            tool_usage_instructions: std::sync::RwLock::new(None),
+            tool_usage_instructions: RwLock::new(None),
         }
     }
 
@@ -78,10 +77,9 @@ impl SubAgentToolState {
     /// This is typically called once at setup time by CompositeDispatcher::register_sub_agent_tools.
     pub fn set_tool_usage_instructions(&self, instructions: String) -> Result<(), String> {
         if !instructions.is_empty() {
-            let mut guard = self
-                .tool_usage_instructions
-                .write()
-                .map_err(|_| "tool_usage_instructions lock poisoned".to_string())?;
+            let mut guard = self.tool_usage_instructions.try_write().map_err(|_| {
+                "tool_usage_instructions lock unavailable (already in use)".to_string()
+            })?;
             *guard = Some(instructions);
         }
         Ok(())
@@ -91,8 +89,8 @@ impl SubAgentToolState {
     pub fn get_tool_usage_instructions(&self) -> Result<Option<String>, String> {
         let guard = self
             .tool_usage_instructions
-            .read()
-            .map_err(|_| "tool_usage_instructions lock poisoned".to_string())?;
+            .try_read()
+            .map_err(|_| "tool_usage_instructions lock unavailable (already in use)".to_string())?;
         Ok(guard.clone())
     }
 
@@ -123,7 +121,7 @@ impl SubAgentToolState {
             current_depth,
             parent_comms: Some(parent_comms),
             parent_trusted_peers: Some(parent_trusted_peers),
-            tool_usage_instructions: std::sync::RwLock::new(None),
+            tool_usage_instructions: RwLock::new(None),
         }
     }
 
@@ -187,8 +185,8 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for MockToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            vec![]
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([])
         }
 
         async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -211,7 +209,7 @@ mod tests {
 
     fn create_test_state() -> SubAgentToolState {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory = Arc::new(MockClientFactory);
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);
@@ -239,7 +237,7 @@ mod tests {
     #[test]
     fn test_state_depth() {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 2));
+        let manager = Arc::new(SubAgentManager::new(limits, 2));
         let client_factory = Arc::new(MockClientFactory);
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);
@@ -263,7 +261,7 @@ mod tests {
     #[test]
     fn test_state_cannot_nest_at_max_depth() {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 3));
+        let manager = Arc::new(SubAgentManager::new(limits, 3));
         let client_factory = Arc::new(MockClientFactory);
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);
@@ -287,7 +285,7 @@ mod tests {
     #[test]
     fn test_state_cannot_nest_when_disabled() {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory = Arc::new(MockClientFactory);
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);
@@ -339,19 +337,22 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for MockToolDispatcherWithTools {
-        fn tools(&self) -> Vec<ToolDef> {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             self.tool_names
                 .iter()
-                .map(|name| ToolDef {
-                    name: name.clone(),
-                    description: format!("{} tool", name),
-                    input_schema: empty_object_schema(),
+                .map(|name| {
+                    Arc::new(ToolDef {
+                        name: name.clone(),
+                        description: format!("{name} tool"),
+                        input_schema: empty_object_schema(),
+                    })
                 })
-                .collect()
+                .collect::<Vec<_>>()
+                .into()
         }
 
         async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
-            if self.tool_names.contains(&name.to_string()) {
+            if self.tool_names.iter().any(|n| n == name) {
                 Ok(Value::String(format!("{} executed", name)))
             } else {
                 Err(ToolError::not_found(name))
@@ -385,7 +386,7 @@ mod tests {
 
         // Verify the tool dispatcher provides the expected tools
         let tools = state.tool_dispatcher.tools();
-        let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
+        let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
 
         for expected in &expected_tools {
             assert!(
@@ -423,7 +424,7 @@ mod tests {
 
         // Verify sub-agent tools are NOT present
         let tools = state.tool_dispatcher.tools();
-        let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
+        let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
 
         let forbidden_tools = [
             "agent_spawn",

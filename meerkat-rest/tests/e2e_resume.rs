@@ -47,9 +47,9 @@ async fn inner_test_rest_resume_metadata() {
 
     let state_run = AppState {
         store_path: store_path.clone(),
-        default_model: config.agent.model.clone(),
+        default_model: config.agent.model.clone().into(),
         max_tokens: config.agent.max_tokens_per_turn,
-        rest_host: config.rest.host.clone(),
+        rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
         enable_builtins: true,
         enable_shell: true,
@@ -106,9 +106,9 @@ async fn inner_test_rest_resume_metadata() {
 
     let state_resume = AppState {
         store_path: store_path.clone(),
-        default_model: "gpt-4o-mini".to_string(),
+        default_model: "gpt-4o-mini".into(),
         max_tokens: 7,
-        rest_host: config.rest.host.clone(),
+        rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
         enable_builtins: true,
         enable_shell: true,

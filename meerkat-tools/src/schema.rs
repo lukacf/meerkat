@@ -1,41 +1,29 @@
 //! Shared JSON schema helpers for tool definitions.
 
-use serde_json::{Map, Value, json};
+use schemars::JsonSchema;
+use serde_json::{Map, Value};
 
-#[derive(Debug, Default)]
-pub struct SchemaBuilder {
-    properties: Map<String, Value>,
-    required: Vec<String>,
+pub fn schema_for<T: JsonSchema>() -> Value {
+    let schema = schemars::schema_for!(T);
+    let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
+
+    // Some generators omit empty `properties`/`required` for `{}`.
+    // Our tool schema contract expects explicit presence of both keys.
+    if let Value::Object(ref mut obj) = value {
+        if obj.get("type").and_then(Value::as_str) == Some("object") {
+            obj.entry("properties".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            obj.entry("required".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
+    }
+
+    value
 }
 
-impl SchemaBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn property(mut self, name: impl Into<String>, schema: Value) -> Self {
-        self.properties.insert(name.into(), schema);
-        self
-    }
-
-    pub fn required(mut self, name: impl Into<String>) -> Self {
-        self.required.push(name.into());
-        self
-    }
-
-    pub fn build(self) -> Value {
-        json!({
-            "type": "object",
-            "properties": self.properties,
-            "required": self.required,
-        })
-    }
-}
+#[derive(Debug, Clone, Copy, JsonSchema)]
+struct EmptyObject {}
 
 pub fn empty_object_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {},
-        "required": [],
-    })
+    schema_for::<EmptyObject>()
 }

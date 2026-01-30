@@ -51,7 +51,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&serde_json::Value>,
@@ -89,6 +89,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
         };
 
         let mut stream = self.client.stream(&request);
+        // ...
 
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -128,12 +129,25 @@ impl AgentLlmClient for LoggingLlmAdapter {
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
+                    LlmEvent::Done { outcome } => match outcome {
+                        LlmDoneOutcome::Success { stop_reason: sr } => {
+                            stop_reason = sr;
+                        }
+                        LlmDoneOutcome::Error { error } => {
+                            return Err(AgentError::llm(
+                                self.client.provider(),
+                                error.failure_reason(),
+                                error.to_string(),
+                            ));
+                        }
+                    },
                 },
                 Err(e) => {
-                    return Err(AgentError::LlmError(e.to_string()));
+                    return Err(AgentError::llm(
+                        self.client.provider(),
+                        e.failure_reason(),
+                        e.to_string(),
+                    ));
                 }
             }
         }
@@ -160,12 +174,12 @@ impl AgentLlmClient for LoggingLlmAdapter {
             tool_calls.len()
         );
 
-        Ok(LlmStreamResult {
+        Ok(LlmStreamResult::new(
             content,
             tool_calls,
             stop_reason,
             usage,
-        })
+        ))
     }
 
     fn provider(&self) -> &'static str {
@@ -181,7 +195,7 @@ struct LoggingToolDispatcher {
 
 #[async_trait]
 impl AgentToolDispatcher for LoggingToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.inner.tools()
     }
 
@@ -294,8 +308,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start TCP listeners (these accept incoming connections)
     println!("\n=== STARTING TCP LISTENERS ===");
-    let secret_a = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair())?;
-    let secret_b = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair())?;
 
     // Create shared trusted peers for each agent (allows dynamic updates)
     let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a.clone()));
@@ -303,7 +315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _handle_a = spawn_tcp_listener(
         &addr_a.to_string(),
-        secret_a,
+        comms_manager_a.keypair_arc(),
         trusted_a_shared.clone(),
         comms_manager_a.inbox_sender().clone(),
     )
@@ -312,7 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _handle_b = spawn_tcp_listener(
         &addr_b.to_string(),
-        secret_b,
+        comms_manager_b.keypair_arc(),
         trusted_b_shared.clone(),
         comms_manager_b.inbox_sender().clone(),
     )
@@ -325,7 +337,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tools_check =
         CommsToolDispatcher::new(comms_manager_a.router().clone(), trusted_a_shared.clone());
     println!("\n=== COMMS TOOLS AVAILABLE TO EACH AGENT ===");
-    for tool in tools_check.tools() {
+    for tool in tools_check.tools().iter() {
         println!("  • {} - {}", tool.name, tool.description);
     }
 
@@ -370,7 +382,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "You are Agent A. You can communicate with other agents using the send_message tool. \\
              Use list_peers to see available peers.",
         )
-        .build(llm_a, tools_a, store.clone());
+        .build(llm_a, tools_a, store.clone())
+        .await;
     println!("Agent A built with system prompt and comms tools");
 
     let agent_b_inner = AgentBuilder::new()
@@ -379,7 +392,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .system_prompt(
             "You are Agent B. When you receive messages from other agents, acknowledge them.",
         )
-        .build(llm_b, tools_b, store);
+        .build(llm_b, tools_b, store)
+        .await;
     println!("Agent B built with system prompt and comms tools");
 
     let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);

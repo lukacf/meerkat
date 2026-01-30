@@ -36,8 +36,8 @@ impl BuiltinTool for ShellJobsListTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "shell_jobs".to_string(),
-            description: "List all background shell jobs".to_string(),
+            name: "shell_jobs".into(),
+            description: "List all background shell jobs".into(),
             input_schema: empty_object_schema(),
         }
     }

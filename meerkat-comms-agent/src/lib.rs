@@ -20,7 +20,7 @@
 //! Use [`wrap_with_comms`] to add comms tools to any tool dispatcher. This provides
 //! a uniform way to enable comms for both main agents and sub-agents:
 //!
-//! ```ignore
+//! ```text
 //! use meerkat_comms_agent::wrap_with_comms;
 //!
 //! // For main agent

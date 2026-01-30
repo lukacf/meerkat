@@ -6,7 +6,7 @@
 use super::store::TaskStore;
 use super::types::{NewTask, Task, TaskError, TaskId, TaskStatus, TaskUpdate};
 use async_trait::async_trait;
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 
 /// In-memory task store for testing
 ///
@@ -15,7 +15,7 @@ use std::sync::RwLock;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use meerkat_tools::builtin::{MemoryTaskStore, TaskStore, NewTask};
 ///
 /// let store = MemoryTaskStore::new();
@@ -58,7 +58,7 @@ impl MemoryTaskStore {
     ///
     /// This is a convenience method for testing.
     pub fn len(&self) -> usize {
-        self.tasks.read().map(|t| t.len()).unwrap_or(0)
+        self.tasks.try_read().ok().map(|t| t.len()).unwrap_or(0)
     }
 
     /// Check if the store is empty
@@ -76,18 +76,12 @@ impl Default for MemoryTaskStore {
 #[async_trait]
 impl TaskStore for MemoryTaskStore {
     async fn list(&self) -> Result<Vec<Task>, TaskError> {
-        let tasks = self
-            .tasks
-            .read()
-            .map_err(|e| TaskError::StorageError(e.to_string()))?;
+        let tasks = self.tasks.read().await;
         Ok(tasks.clone())
     }
 
     async fn get(&self, id: &TaskId) -> Result<Option<Task>, TaskError> {
-        let tasks = self
-            .tasks
-            .read()
-            .map_err(|e| TaskError::StorageError(e.to_string()))?;
+        let tasks = self.tasks.read().await;
         Ok(tasks.iter().find(|t| &t.id == id).cloned())
     }
 
@@ -110,10 +104,7 @@ impl TaskStore for MemoryTaskStore {
             blocked_by: new_task.blocked_by.unwrap_or_default(),
         };
 
-        let mut tasks = self
-            .tasks
-            .write()
-            .map_err(|e| TaskError::StorageError(e.to_string()))?;
+        let mut tasks = self.tasks.write().await;
         tasks.push(task.clone());
         Ok(task)
     }
@@ -124,10 +115,7 @@ impl TaskStore for MemoryTaskStore {
         update: TaskUpdate,
         session_id: Option<&str>,
     ) -> Result<Task, TaskError> {
-        let mut tasks = self
-            .tasks
-            .write()
-            .map_err(|e| TaskError::StorageError(e.to_string()))?;
+        let mut tasks = self.tasks.write().await;
         let task = tasks
             .iter_mut()
             .find(|t| &t.id == id)
@@ -191,10 +179,7 @@ impl TaskStore for MemoryTaskStore {
     }
 
     async fn delete(&self, id: &TaskId) -> Result<(), TaskError> {
-        let mut tasks = self
-            .tasks
-            .write()
-            .map_err(|e| TaskError::StorageError(e.to_string()))?;
+        let mut tasks = self.tasks.write().await;
         let len_before = tasks.len();
         tasks.retain(|t| &t.id != id);
         if tasks.len() == len_before {

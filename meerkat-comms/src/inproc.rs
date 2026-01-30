@@ -6,7 +6,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```text
 //! // Register an agent's inbox
 //! let (inbox, sender) = Inbox::new();
 //! InprocRegistry::global().register("my-agent", pubkey, sender);
@@ -245,7 +245,7 @@ pub enum InprocSendError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::inbox::Inbox;

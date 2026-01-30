@@ -28,7 +28,7 @@ const MAX_COMPLETED_TASKS: usize = 5_000;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use meerkat_tools::builtin::{FileTaskStore, TaskStore, NewTask};
 /// use std::path::PathBuf;
 ///

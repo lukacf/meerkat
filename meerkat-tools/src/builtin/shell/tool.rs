@@ -3,11 +3,10 @@
 //! This module provides the [`ShellTool`] which executes shell commands
 //! using Nushell as the backend.
 
-use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -329,16 +328,20 @@ pub struct ShellOutput {
 }
 
 /// Input arguments for the shell tool
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 struct ShellInput {
     /// The command to execute
+    #[schemars(description = "The command to execute (Nushell syntax)")]
     command: String,
     /// Working directory (optional)
+    #[schemars(description = "Working directory (relative to project root)")]
     working_dir: Option<String>,
     /// Timeout in seconds (optional, uses config default)
+    #[schemars(description = "Timeout in seconds (uses config default if not specified)")]
     timeout_secs: Option<u64>,
     /// Run in background (optional, default false)
     #[serde(default)]
+    #[schemars(description = "If true, run in background and return job ID immediately")]
     background: bool,
 }
 
@@ -350,40 +353,9 @@ impl BuiltinTool for ShellTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "shell".to_string(),
-            description: "Execute a shell command using Nushell".to_string(),
-            input_schema: SchemaBuilder::new()
-                .property(
-                    "command",
-                    json!({
-                        "type": "string",
-                        "description": "The command to execute (Nushell syntax)"
-                    }),
-                )
-                .property(
-                    "working_dir",
-                    json!({
-                        "type": "string",
-                        "description": "Working directory (relative to project root)"
-                    }),
-                )
-                .property(
-                    "timeout_secs",
-                    json!({
-                        "type": "integer",
-                        "description": "Timeout in seconds (uses config default if not specified)"
-                    }),
-                )
-                .property(
-                    "background",
-                    json!({
-                        "type": "boolean",
-                        "description": "If true, run in background and return job ID immediately",
-                        "default": false
-                    }),
-                )
-                .required("command")
-                .build(),
+            name: "shell".into(),
+            description: "Execute a shell command using Nushell".into(),
+            input_schema: crate::schema::schema_for::<ShellInput>(),
         }
     }
 
@@ -461,6 +433,7 @@ impl BuiltinTool for ShellTool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::path::PathBuf;
     use tempfile::TempDir;
 

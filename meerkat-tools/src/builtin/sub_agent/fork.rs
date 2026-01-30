@@ -3,17 +3,34 @@
 use super::config::SubAgentError;
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
-use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_client::LlmProvider;
 use meerkat_core::ToolDef;
 use meerkat_core::ops::{ForkBudgetPolicy, OperationId, ToolAccessPolicy};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ProviderName {
+    Anthropic,
+    Openai,
+    Gemini,
+}
+
+impl ProviderName {
+    fn to_provider(self) -> LlmProvider {
+        match self {
+            ProviderName::Anthropic => LlmProvider::Anthropic,
+            ProviderName::Openai => LlmProvider::OpenAi,
+            ProviderName::Gemini => LlmProvider::Gemini,
+        }
+    }
+}
+
 /// Tool access policy for forked agents
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "policy", rename_all = "snake_case")]
 enum ToolAccessInput {
     /// Inherit all tools from parent
@@ -35,20 +52,23 @@ impl From<ToolAccessInput> for ToolAccessPolicy {
 }
 
 /// Parameters for agent_fork tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ForkParams {
     /// Additional prompt for the forked agent
+    #[schemars(
+        description = "Additional prompt/instruction for the forked agent. This is appended to the inherited conversation history."
+    )]
     prompt: String,
-    /// LLM provider to use (anthropic, openai, gemini)
+    /// LLM provider to use (anthropic, openai, gemini).
     #[serde(default)]
-    provider: Option<String>,
-    /// Model name (provider-specific)
+    provider: Option<ProviderName>,
+    /// Model name (provider-specific).
     #[serde(default)]
     model: Option<String>,
     /// Tool access policy
     #[serde(default)]
     tool_access: Option<ToolAccessInput>,
-    /// Budget allocation policy
+    /// Budget allocation policy.
     #[serde(default)]
     budget_policy: Option<String>,
 }
@@ -94,8 +114,15 @@ impl AgentForkTool {
         Self { state }
     }
 
-    fn resolve_provider(&self, provider_str: Option<&str>) -> Result<LlmProvider, SubAgentError> {
-        let provider_name = provider_str.unwrap_or(&self.state.config.default_provider);
+    fn resolve_provider(
+        &self,
+        provider: Option<ProviderName>,
+    ) -> Result<LlmProvider, SubAgentError> {
+        if let Some(provider) = provider {
+            return Ok(provider.to_provider());
+        }
+
+        let provider_name = self.state.config.default_provider.as_str();
         LlmProvider::parse(provider_name)
             .ok_or_else(|| SubAgentError::invalid_provider(provider_name))
     }
@@ -155,7 +182,7 @@ impl AgentForkTool {
 
         // Resolve provider and model
         let provider = self
-            .resolve_provider(params.provider.as_deref())
+            .resolve_provider(params.provider)
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
         let model = self.resolve_model(provider, params.model.as_deref());
 
@@ -234,60 +261,9 @@ impl BuiltinTool for AgentForkTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "agent_fork".to_string(),
-            description: "Fork the current agent with continued context. The forked agent inherits the full conversation history and continues from the same state. Useful for exploring alternative approaches or parallel execution.".to_string(),
-            input_schema: SchemaBuilder::new()
-                .property(
-                    "prompt",
-                    json!({
-                        "type": "string",
-                        "description": "Additional prompt/instruction for the forked agent. This is appended to the inherited conversation history."
-                    }),
-                )
-                .property(
-                    "provider",
-                    json!({
-                        "type": "string",
-                        "description": "LLM provider to use for the fork: 'anthropic', 'openai', or 'gemini'. Defaults to same provider as parent.",
-                        "enum": ["anthropic", "openai", "gemini"]
-                    }),
-                )
-                .property(
-                    "model",
-                    json!({
-                        "type": "string",
-                        "description": "Model name (provider-specific). Defaults to same model as parent."
-                    }),
-                )
-                .property(
-                    "tool_access",
-                    json!({
-                        "type": "object",
-                        "description": "Tool access policy for the forked agent",
-                        "properties": {
-                            "policy": {
-                                "type": "string",
-                                "enum": ["inherit", "allow_list", "deny_list"],
-                                "description": "Policy type: 'inherit' (all parent tools), 'allow_list' (only specified tools), 'deny_list' (all except specified)"
-                            },
-                            "tools": {
-                                "type": "array",
-                                "items": { "type": "string" },
-                                "description": "Tool names for allow_list or deny_list policies"
-                            }
-                        }
-                    }),
-                )
-                .property(
-                    "budget_policy",
-                    json!({
-                        "type": "string",
-                        "description": "How to allocate budget to the fork: 'equal' (split remaining equally), 'remaining' (give all remaining), 'fixed:N' (fixed N tokens)",
-                        "enum": ["equal", "remaining", "fixed:10000", "fixed:50000"]
-                    }),
-                )
-                .required("prompt")
-                .build(),
+            name: "agent_fork".into(),
+            description: "Fork the current agent with continued context. The forked agent inherits the full conversation history and continues from the same state. Useful for exploring alternative approaches or parallel execution.".into(),
+            input_schema: crate::schema::schema_for::<ForkParams>(),
         }
     }
 
@@ -318,6 +294,7 @@ mod tests {
     use meerkat_core::sub_agent::SubAgentManager;
     use meerkat_core::types::{Message, UserMessage};
     use meerkat_core::{AgentSessionStore, AgentToolDispatcher};
+    use serde_json::json;
     use tokio::sync::RwLock;
 
     struct MockClientFactory {
@@ -360,8 +337,8 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for MockToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            vec![]
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([])
         }
 
         async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -384,7 +361,7 @@ mod tests {
 
     fn create_test_state() -> Arc<SubAgentToolState> {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory = Arc::new(MockClientFactory::new());
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);
@@ -404,7 +381,7 @@ mod tests {
 
     fn create_test_state_with_messages() -> Arc<SubAgentToolState> {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory = Arc::new(MockClientFactory::new());
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);
@@ -433,7 +410,7 @@ mod tests {
 
     fn create_failing_state() -> Arc<SubAgentToolState> {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory = Arc::new(MockClientFactory::failing());
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);
@@ -575,7 +552,7 @@ mod tests {
 
         assert_eq!(tool.resolve_provider(None).unwrap(), LlmProvider::Anthropic);
         assert_eq!(
-            tool.resolve_provider(Some("openai")).unwrap(),
+            tool.resolve_provider(Some(ProviderName::Openai)).unwrap(),
             LlmProvider::OpenAi
         );
     }

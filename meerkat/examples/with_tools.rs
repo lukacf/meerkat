@@ -15,41 +15,38 @@ use meerkat::{
 };
 use meerkat_store::JsonlStore;
 use meerkat_store::StoreAdapter;
+use schemars::JsonSchema;
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+#[derive(Debug, Clone, JsonSchema)]
+#[allow(dead_code)]
+struct BinaryMathArgs {
+    #[schemars(description = "First number")]
+    a: f64,
+    #[schemars(description = "Second number")]
+    b: f64,
+}
 
 // Custom tool dispatcher that handles our tools
 struct MathToolDispatcher;
 
 #[async_trait]
 impl AgentToolDispatcher for MathToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "add".to_string(),
                 description: "Add two numbers together".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "a": {"type": "number", "description": "First number"},
-                        "b": {"type": "number", "description": "Second number"}
-                    },
-                    "required": ["a", "b"]
-                }),
-            },
-            ToolDef {
+                input_schema: meerkat_tools::schema_for::<BinaryMathArgs>(),
+            }),
+            Arc::new(ToolDef {
                 name: "multiply".to_string(),
                 description: "Multiply two numbers".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "a": {"type": "number", "description": "First number"},
-                        "b": {"type": "number", "description": "Second number"}
-                    },
-                    "required": ["a", "b"]
-                }),
-            },
+                input_schema: meerkat_tools::schema_for::<BinaryMathArgs>(),
+            }),
         ]
+        .into()
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -90,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create components using shared factory helpers
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
@@ -103,7 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .model("claude-sonnet-4")
         .system_prompt("You are a math assistant. Use the provided tools to perform calculations.")
         .max_tokens_per_turn(1024)
-        .build(Arc::new(llm), tools, store);
+        .build(Arc::new(llm), tools, store)
+        .await;
 
     let result = agent
         .run("What is 25 + 17, and then multiply the result by 3?".to_string())

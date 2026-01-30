@@ -13,14 +13,13 @@ use serde_json::Value;
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::TaskStatus;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
-use crate::schema::SchemaBuilder;
 
 /// Parameters for the task_list tool
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct TaskListParams {
     /// Filter by status: "pending", "in_progress", "completed"
     #[serde(default)]
-    status: Option<String>,
+    status: Option<TaskStatus>,
     /// Filter by labels (any match)
     #[serde(default)]
     labels: Option<Vec<String>>,
@@ -30,7 +29,7 @@ struct TaskListParams {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use std::sync::Arc;
 /// use meerkat_tools::builtin::{MemoryTaskStore, TaskStore};
 /// use meerkat_tools::builtin::tools::TaskListTool;
@@ -63,27 +62,10 @@ impl BuiltinTool for TaskListTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "task_list".to_string(),
+            name: "task_list".into(),
             description: "List tasks in the project, optionally filtered by status or labels"
-                .to_string(),
-            input_schema: SchemaBuilder::new()
-                .property(
-                    "status",
-                    serde_json::json!({
-                        "type": "string",
-                        "enum": ["pending", "in_progress", "completed"],
-                        "description": "Filter by task status"
-                    }),
-                )
-                .property(
-                    "labels",
-                    serde_json::json!({
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Filter by labels (returns tasks with any matching label)"
-                    }),
-                )
-                .build(),
+                .into(),
+            input_schema: crate::schema::schema_for::<TaskListParams>(),
         }
     }
 
@@ -102,19 +84,8 @@ impl BuiltinTool for TaskListTool {
             .map_err(|e| BuiltinToolError::TaskError(e.to_string()))?;
 
         // Filter by status
-        if let Some(status_str) = &params.status {
-            let status = match status_str.as_str() {
-                "pending" => TaskStatus::Pending,
-                "in_progress" => TaskStatus::InProgress,
-                "completed" => TaskStatus::Completed,
-                other => {
-                    return Err(BuiltinToolError::InvalidArgs(format!(
-                        "Invalid status: {}. Must be pending, in_progress, or completed",
-                        other
-                    )));
-                }
-            };
-            tasks.retain(|t| t.status == status);
+        if let Some(status) = &params.status {
+            tasks.retain(|t| &t.status == status);
         }
 
         // Filter by labels
@@ -133,6 +104,45 @@ mod tests {
     use crate::builtin::MemoryTaskStore;
     use crate::builtin::types::{NewTask, Task, TaskPriority, TaskStatus};
     use serde_json::json;
+
+    fn schema_resolve_ref<'a>(root: &'a Value, ref_path: &str) -> Option<&'a Value> {
+        let path = ref_path.strip_prefix("#/")?;
+        let mut current = root;
+        for part in path.split('/') {
+            current = current.get(part)?;
+        }
+        Some(current)
+    }
+
+    fn schema_allows_value(root: &Value, schema: &Value, expected: &Value) -> bool {
+        if let Some(const_value) = schema.get("const") {
+            return const_value == expected;
+        }
+
+        if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+            return values.contains(expected);
+        }
+
+        if let Some(ref_path) = schema.get("$ref").and_then(Value::as_str) {
+            if let Some(resolved) = schema_resolve_ref(root, ref_path) {
+                return schema_allows_value(root, resolved, expected);
+            }
+        }
+
+        for key in ["anyOf", "oneOf", "allOf"] {
+            let Some(options) = schema.get(key).and_then(Value::as_array) else {
+                continue;
+            };
+            if options
+                .iter()
+                .any(|option| schema_allows_value(root, option, expected))
+            {
+                return true;
+            }
+        }
+
+        false
+    }
 
     /// Helper to create a test store with sample tasks
     async fn create_test_store() -> Arc<MemoryTaskStore> {
@@ -253,20 +263,21 @@ mod tests {
         assert!(schema["properties"]["labels"].is_object());
 
         // Verify status enum
-        let status_enum = &schema["properties"]["status"]["enum"];
-        assert!(status_enum.as_array().unwrap().contains(&json!("pending")));
-        assert!(
-            status_enum
-                .as_array()
-                .unwrap()
-                .contains(&json!("in_progress"))
-        );
-        assert!(
-            status_enum
-                .as_array()
-                .unwrap()
-                .contains(&json!("completed"))
-        );
+        assert!(schema_allows_value(
+            &schema,
+            &schema["properties"]["status"],
+            &json!("pending")
+        ));
+        assert!(schema_allows_value(
+            &schema,
+            &schema["properties"]["status"],
+            &json!("in_progress")
+        ));
+        assert!(schema_allows_value(
+            &schema,
+            &schema["properties"]["status"],
+            &json!("completed")
+        ));
     }
 
     #[tokio::test]

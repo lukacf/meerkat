@@ -268,7 +268,7 @@ impl CommsAgentBuilder {
     }
 
     /// Build the CommsAgent.
-    pub fn build<C, T, S>(
+    pub async fn build<C, T, S>(
         self,
         client: Arc<C>,
         tools: Arc<T>,
@@ -301,7 +301,7 @@ impl CommsAgentBuilder {
             builder = builder.resume_session(session);
         }
 
-        let agent = builder.build(client, tools, store);
+        let agent = builder.build(client, tools, store).await;
         CommsAgent::new(agent, comms_manager)
     }
 }
@@ -350,7 +350,7 @@ mod tests {
         async fn stream_response(
             &self,
             messages: &[meerkat_core::types::Message],
-            _tools: &[ToolDef],
+            _tools: &[Arc<ToolDef>],
             _max_tokens: u32,
             _temperature: Option<f32>,
             _provider_params: Option<&serde_json::Value>,
@@ -368,12 +368,12 @@ mod tests {
 
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
-                Ok(LlmStreamResult {
-                    content: "Default response".to_string(),
-                    tool_calls: vec![],
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                })
+                Ok(LlmStreamResult::new(
+                    "Default response".to_string(),
+                    vec![],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ))
             } else {
                 Ok(responses.remove(0))
             }
@@ -389,8 +389,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentToolDispatcher for MockToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            vec![]
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            vec![].into()
         }
 
         async fn dispatch(
@@ -430,8 +430,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_comms_agent_struct() {
+    #[tokio::test]
+    async fn test_comms_agent_struct() {
         let config = CommsManagerConfig::new();
         let comms_manager = CommsManager::new(config).unwrap();
 
@@ -441,7 +441,8 @@ mod tests {
 
         let agent = AgentBuilder::new()
             .model("test")
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         let comms_agent = CommsAgent::new(agent, comms_manager);
 
@@ -479,19 +480,20 @@ mod tests {
             .unwrap();
 
         // Create mock LLM that records prompts
-        let client = Arc::new(MockLlmClient::new(vec![LlmStreamResult {
-            content: "I received the message".to_string(),
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-        }]));
+        let client = Arc::new(MockLlmClient::new(vec![LlmStreamResult::new(
+            "I received the message".to_string(),
+            vec![],
+            StopReason::EndTurn,
+            Usage::default(),
+        )]));
 
         let tools = Arc::new(MockToolDispatcher);
         let store = Arc::new(MockSessionStore);
 
         let agent = AgentBuilder::new()
             .model("test")
-            .build(client.clone(), tools, store);
+            .build(client.clone(), tools, store)
+            .await;
 
         let mut comms_agent = CommsAgent::new(agent, comms_manager);
 
@@ -509,8 +511,8 @@ mod tests {
         assert!(prompt.contains("Process this"));
     }
 
-    #[test]
-    fn test_comms_agent_builder() {
+    #[tokio::test]
+    async fn test_comms_agent_builder() {
         let config = CommsManagerConfig::new();
         let comms_manager = CommsManager::new(config).unwrap();
 
@@ -522,7 +524,8 @@ mod tests {
             .model("test-model")
             .system_prompt("You are a helpful assistant")
             .max_tokens_per_turn(1000)
-            .build(client, tools, store, comms_manager);
+            .build(client, tools, store, comms_manager)
+            .await;
 
         // Should compile and create agent
         let _ = comms_agent.agent();

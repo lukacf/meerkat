@@ -1258,6 +1258,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 name = "mcp-test-server"
 version = "0.1.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
  "tokio",
@@ -1278,6 +1279,7 @@ dependencies = [
  "meerkat-mcp-client",
  "meerkat-store",
  "meerkat-tools",
+ "schemars",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1332,9 +1334,11 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "axum",
  "futures",
  "meerkat-core",
  "reqwest",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1347,8 +1351,10 @@ name = "meerkat-comms"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytes",
  "ciborium",
  "ed25519-dalek",
+ "futures",
  "parking_lot",
  "rand 0.8.5",
  "serde",
@@ -1357,7 +1363,9 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1386,6 +1394,7 @@ dependencies = [
  "async-trait",
  "ciborium",
  "meerkat-comms",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -1404,6 +1413,7 @@ dependencies = [
  "futures",
  "humantime-serde",
  "meerkat-comms",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -1411,6 +1421,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "ulid",
  "uuid",
 ]
 
@@ -1457,6 +1468,7 @@ dependencies = [
  "meerkat-client",
  "meerkat-core",
  "meerkat-tools",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -1501,6 +1513,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "meerkat-core",
+ "redb",
  "serde",
  "serde_json",
  "tempfile",
@@ -1523,6 +1536,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-mcp-client",
  "nix 0.29.0",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -1930,6 +1944,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

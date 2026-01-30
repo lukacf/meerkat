@@ -2,7 +2,6 @@
 
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
-use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::ops::SubAgentState;
@@ -83,7 +82,7 @@ impl AgentListTool {
 
             agent_list.push(SubAgentInfoView {
                 id: info.id.to_string(),
-                name: info.name.clone(),
+                name: info.name,
                 state: state_str.to_string(),
                 depth: info.depth,
                 running_ms: info.running_ms,
@@ -112,9 +111,9 @@ impl BuiltinTool for AgentListTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "agent_list".to_string(),
-            description: "List all sub-agents spawned by this agent with their current states. Shows running, completed, and failed agents with their IDs, names, and execution times.".to_string(),
-            input_schema: SchemaBuilder::new().build(),
+            name: "agent_list".into(),
+            description: "List all sub-agents spawned by this agent with their current states. Shows running, completed, and failed agents with their IDs, names, and execution times.".into(),
+            input_schema: crate::schema::empty_object_schema(),
         }
     }
 
@@ -164,8 +163,8 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for MockToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            vec![]
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([])
         }
 
         async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -188,7 +187,7 @@ mod tests {
 
     fn create_test_state() -> Arc<SubAgentToolState> {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory = Arc::new(MockClientFactory);
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);

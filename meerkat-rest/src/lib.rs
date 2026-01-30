@@ -42,6 +42,7 @@ use meerkat_tools::builtin::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,9 +52,9 @@ use tokio::sync::{broadcast, mpsc};
 #[derive(Clone)]
 pub struct AppState {
     pub store_path: PathBuf,
-    pub default_model: String,
+    pub default_model: Cow<'static, str>,
     pub max_tokens: u32,
-    pub rest_host: String,
+    pub rest_host: Cow<'static, str>,
     pub rest_port: u16,
     /// Whether to enable built-in tools (task management, shell)
     pub enable_builtins: bool,
@@ -65,19 +66,61 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<SessionEvent>,
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        let (event_tx, _) = broadcast::channel(256);
+        let instance_root = rest_instance_root();
+        let config_store: Arc<dyn ConfigStore> =
+            Arc::new(FileConfigStore::new(instance_root.join("config.toml")));
+
+        let config = Config::default();
+        let store_path = config
+            .store
+            .sessions_path
+            .clone()
+            .or_else(|| config.storage.directory.clone())
+            .unwrap_or_else(|| {
+                dirs::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("meerkat")
+                    .join("sessions")
+            });
+
+        Self {
+            store_path,
+            default_model: Cow::Owned(config.agent.model.to_string()),
+            max_tokens: config.agent.max_tokens_per_turn,
+            rest_host: Cow::Owned(config.rest.host.clone()),
+            rest_port: config.rest.port,
+            enable_builtins: config.tools.builtins_enabled,
+            enable_shell: config.tools.shell_enabled,
+            project_root: Some(instance_root),
+            config_store,
+            event_tx,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionEvent {
     session_id: SessionId,
     event: AgentEvent,
 }
 
-impl Default for AppState {
-    fn default() -> Self {
-        let (event_tx, _) = broadcast::channel(256);
-        let instance_root = rest_instance_root();
-        let config_store = Arc::new(FileConfigStore::new(instance_root.join("config.toml")));
+impl AppState {
+    pub async fn load() -> Self {
+        Self::load_from(rest_instance_root()).await
+    }
 
-        let mut config = config_store.get().unwrap_or_else(|_| Config::default());
+    async fn load_from(instance_root: PathBuf) -> Self {
+        let (event_tx, _) = broadcast::channel(256);
+        let config_store: Arc<dyn ConfigStore> =
+            Arc::new(FileConfigStore::new(instance_root.join("config.toml")));
+
+        let mut config = config_store
+            .get()
+            .await
+            .unwrap_or_else(|_| Config::default());
         if let Err(err) = config.apply_env_overrides() {
             tracing::warn!("Failed to apply env overrides: {}", err);
         }
@@ -97,9 +140,9 @@ impl Default for AppState {
         let enable_builtins = config.tools.builtins_enabled;
         let enable_shell = config.tools.shell_enabled;
 
-        let default_model = config.agent.model.clone();
+        let default_model = Cow::Owned(config.agent.model.to_string());
         let max_tokens = config.agent.max_tokens_per_turn;
-        let rest_host = config.rest.host.clone();
+        let rest_host = Cow::Owned(config.rest.host.clone());
         let rest_port = config.rest.port;
 
         Self {
@@ -124,21 +167,12 @@ fn rest_instance_root() -> PathBuf {
         .join("rest")
 }
 
-fn load_config_from_store(store: &dyn ConfigStore) -> Config {
-    let mut config = store.get().unwrap_or_else(|_| Config::default());
+async fn load_config_from_store(store: &dyn ConfigStore) -> Config {
+    let mut config = store.get().await.unwrap_or_else(|_| Config::default());
     if let Err(err) = config.apply_env_overrides() {
         tracing::warn!("Failed to apply env overrides: {}", err);
     }
     config
-}
-
-async fn load_config_from_store_async(store: Arc<dyn ConfigStore>) -> Config {
-    tokio::task::spawn_blocking(move || load_config_from_store(store.as_ref()))
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("Config load task failed: {}", err);
-            Config::default()
-        })
 }
 
 fn resolve_provider(input: Option<Provider>, model: &str) -> Provider {
@@ -167,7 +201,7 @@ pub struct CreateSessionRequest {
     #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default)]
-    pub model: Option<String>,
+    pub model: Option<Cow<'static, str>>,
     #[serde(default)]
     pub provider: Option<Provider>,
     #[serde(default)]
@@ -201,7 +235,7 @@ pub struct ContinueSessionRequest {
     #[serde(default)]
     pub verbose: bool,
     #[serde(default)]
-    pub model: Option<String>,
+    pub model: Option<Cow<'static, str>>,
     #[serde(default)]
     pub provider: Option<Provider>,
     #[serde(default)]
@@ -265,10 +299,10 @@ async fn health_check() -> &'static str {
 
 /// Get the current config
 async fn get_config(State(state): State<AppState>) -> Result<Json<Config>, ApiError> {
-    let store = state.config_store.clone();
-    let config = tokio::task::spawn_blocking(move || store.get())
+    let config = state
+        .config_store
+        .get()
         .await
-        .map_err(|e| ApiError::Internal(format!("Config load task failed: {}", e)))?
         .map_err(|e| ApiError::Configuration(e.to_string()))?;
     Ok(Json(config))
 }
@@ -278,11 +312,10 @@ async fn set_config(
     State(state): State<AppState>,
     Json(config): Json<Config>,
 ) -> Result<Json<Config>, ApiError> {
-    let store = state.config_store.clone();
-    let config_clone = config.clone();
-    tokio::task::spawn_blocking(move || store.set(config_clone))
+    state
+        .config_store
+        .set(config.clone())
         .await
-        .map_err(|e| ApiError::Internal(format!("Config save task failed: {}", e)))?
         .map_err(|e| ApiError::Configuration(e.to_string()))?;
     Ok(Json(config))
 }
@@ -292,10 +325,10 @@ async fn patch_config(
     State(state): State<AppState>,
     Json(delta): Json<Value>,
 ) -> Result<Json<Config>, ApiError> {
-    let store = state.config_store.clone();
-    let updated = tokio::task::spawn_blocking(move || store.patch(ConfigDelta(delta)))
+    let updated = state
+        .config_store
+        .patch(ConfigDelta(delta))
         .await
-        .map_err(|e| ApiError::Internal(format!("Config patch task failed: {}", e)))?
         .map_err(|e| ApiError::Configuration(e.to_string()))?;
     Ok(Json(updated))
 }
@@ -371,9 +404,9 @@ async fn create_session(
         ));
     }
 
-    let model = req.model.unwrap_or(state.default_model.clone());
+    let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
-    let config = load_config_from_store_async(state.config_store.clone()).await;
+    let config = load_config_from_store(state.config_store.as_ref()).await;
     let provider = resolve_provider(req.provider, &model);
     if ProviderResolver::api_key_for(provider).is_none() {
         return Err(ApiError::Configuration(format!(
@@ -398,7 +431,7 @@ async fn create_session(
     let verbose = req.verbose;
     let llm_adapter = Arc::new(LlmClientAdapter::with_event_channel(
         llm_client,
-        model.clone(),
+        model.to_string(),
         agent_event_tx.clone(),
     ));
     if state.enable_builtins {
@@ -443,11 +476,11 @@ async fn create_session(
     }
 
     let mut builder = AgentBuilder::new()
-        .model(&model)
+        .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits());
 
-    let mut system_prompt = SystemPromptConfig::new().compose();
+    let mut system_prompt = SystemPromptConfig::new().compose().await;
     if !tool_usage_instructions.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);
@@ -459,7 +492,7 @@ async fn create_session(
         builder = builder.with_comms_runtime(runtime);
     }
 
-    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+    let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
     let session_id = agent.session().id().clone();
     let broadcast_tx = state.event_tx.clone();
     let forward_task = tokio::spawn(async move {
@@ -476,7 +509,7 @@ async fn create_session(
         }
     });
     let metadata = SessionMetadata {
-        model: model.clone(),
+        model: model.to_string(),
         max_tokens,
         provider,
         tooling: SessionTooling {
@@ -582,7 +615,7 @@ async fn continue_session(
         .map_err(|e| ApiError::Internal(format!("Failed to load session: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("Session not found: {}", id)))?;
 
-    let config = load_config_from_store_async(state.config_store.clone()).await;
+    let config = load_config_from_store(state.config_store.as_ref()).await;
     let stored_metadata = session.session_metadata();
     let tooling = stored_metadata
         .as_ref()
@@ -595,8 +628,11 @@ async fn continue_session(
         });
     let model = req
         .model
-        .clone()
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
+        .or_else(|| {
+            stored_metadata
+                .as_ref()
+                .map(|meta| meta.model.clone().into())
+        })
         .unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req
         .max_tokens
@@ -640,7 +676,7 @@ async fn continue_session(
     let verbose = req.verbose;
     let llm_adapter = Arc::new(LlmClientAdapter::with_event_channel(
         llm_client,
-        model.clone(),
+        model.to_string(),
         agent_event_tx.clone(),
     ));
     if tooling.builtins {
@@ -680,15 +716,15 @@ async fn continue_session(
     }
 
     let mut builder = AgentBuilder::new()
-        .model(&model)
+        .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits())
         .resume_session(session);
 
-    let mut system_prompt = req
-        .system_prompt
-        .clone()
-        .unwrap_or_else(|| SystemPromptConfig::new().compose());
+    let mut system_prompt = match req.system_prompt.clone() {
+        Some(prompt) => prompt,
+        None => SystemPromptConfig::new().compose().await,
+    };
     if !tool_usage_instructions.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);
@@ -699,7 +735,7 @@ async fn continue_session(
         builder = builder.with_comms_runtime(runtime);
     }
 
-    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+    let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
     let session_id = agent.session().id().clone();
     let broadcast_tx = state.event_tx.clone();
     let forward_task = tokio::spawn(async move {
@@ -716,7 +752,7 @@ async fn continue_session(
         }
     });
     let metadata = SessionMetadata {
-        model: model.clone(),
+        model: model.to_string(),
         max_tokens,
         provider,
         tooling,
@@ -865,8 +901,8 @@ pub struct EmptyToolDispatcher;
 
 #[async_trait]
 impl AgentToolDispatcher for EmptyToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        Vec::new()
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from([])
     }
 
     async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -882,10 +918,12 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
-    #[test]
-    fn test_app_state_default() {
-        let state = AppState::default();
+    #[tokio::test]
+    async fn test_app_state_default() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf()).await;
         assert!(!state.default_model.is_empty());
         assert!(state.max_tokens > 0);
     }
@@ -901,24 +939,17 @@ mod tests {
         assert!(json.contains("TEST_ERROR"));
     }
 
-    #[test]
-    fn test_app_state_builtins_disabled_by_default() {
-        let state = AppState::default();
+    #[tokio::test]
+    async fn test_app_state_builtins_disabled_by_default() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf()).await;
         assert!(!state.enable_builtins);
         assert!(!state.enable_shell);
     }
 
     #[test]
     fn test_create_tool_dispatcher_without_builtins() {
-        let state = AppState {
-            enable_builtins: false,
-            ..Default::default()
-        };
-        let result = create_tool_dispatcher(
-            state.project_root.as_ref(),
-            state.enable_builtins,
-            state.enable_shell,
-        );
+        let result = create_tool_dispatcher(None, false, false);
         assert!(result.is_ok());
         let (dispatcher, _) = result.unwrap();
         // Empty dispatcher should have no tools
@@ -927,25 +958,15 @@ mod tests {
 
     #[test]
     fn test_create_tool_dispatcher_with_builtins() {
-        let temp_dir = std::env::temp_dir().join("meerkat-rest-test");
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp = TempDir::new().unwrap();
+        let temp_dir = temp.path().to_path_buf();
 
-        let state = AppState {
-            enable_builtins: true,
-            enable_shell: false,
-            project_root: Some(temp_dir.clone()),
-            ..Default::default()
-        };
-        let result = create_tool_dispatcher(
-            state.project_root.as_ref(),
-            state.enable_builtins,
-            state.enable_shell,
-        );
+        let result = create_tool_dispatcher(Some(&temp_dir), true, false);
         assert!(result.is_ok());
         let (dispatcher, _) = result.unwrap();
         // Should have task tools
         let tools = dispatcher.tools();
-        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert!(tool_names.contains(&"task_create"));
         assert!(tool_names.contains(&"task_list"));
         // Should not have shell tools (not enabled)
@@ -975,7 +996,7 @@ mod tests {
         let (dispatcher, _) = result.unwrap();
         // Should have both task and shell tools
         let tools = dispatcher.tools();
-        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert!(tool_names.contains(&"task_create"));
         assert!(tool_names.contains(&"shell"));
         assert!(tool_names.contains(&"shell_job_status"));

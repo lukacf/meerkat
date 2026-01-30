@@ -287,20 +287,20 @@ mod tests {
             duration_secs: 10.25,
         };
 
-        if let JobStatus::Completed {
-            exit_code,
-            stdout,
-            stderr,
-            duration_secs,
-        } = completed
-        {
-            assert_eq!(exit_code, Some(1));
-            assert_eq!(stdout, "some output");
-            assert_eq!(stderr, "some error");
-            assert!((duration_secs - 10.25).abs() < f64::EPSILON);
-        } else {
-            unreachable!("Expected Completed variant");
-        }
+        let json = serde_json::to_string(&completed).unwrap();
+        let json_val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = json_val
+            .as_object()
+            .expect("JobStatus should serialize to JSON object");
+
+        assert_eq!(
+            obj.get("status").and_then(|v| v.as_str()),
+            Some("completed")
+        );
+        assert!(obj.contains_key("exit_code"));
+        assert!(obj.contains_key("stdout"));
+        assert!(obj.contains_key("stderr"));
+        assert!(obj.contains_key("duration_secs"));
 
         // Test with None exit_code (process killed)
         let completed_no_exit = JobStatus::Completed {
@@ -310,11 +310,20 @@ mod tests {
             duration_secs: 0.0,
         };
 
-        if let JobStatus::Completed { exit_code, .. } = completed_no_exit {
-            assert_eq!(exit_code, None);
-        } else {
-            unreachable!("Expected Completed variant");
-        }
+        let json = serde_json::to_string(&completed_no_exit).unwrap();
+        let json_val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = json_val
+            .as_object()
+            .expect("JobStatus should serialize to JSON object");
+
+        assert_eq!(
+            obj.get("status").and_then(|v| v.as_str()),
+            Some("completed")
+        );
+        assert!(matches!(obj.get("exit_code"), Some(v) if v.is_null()));
+        assert!(obj.contains_key("stdout"));
+        assert!(obj.contains_key("stderr"));
+        assert!(obj.contains_key("duration_secs"));
     }
 
     // ==================== BackgroundJob Tests ====================

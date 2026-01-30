@@ -6,7 +6,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```text
 //! use meerkat_core::ToolGateway;
 //! use meerkat_tools::builtin::comms::CommsToolSurface;
 //!

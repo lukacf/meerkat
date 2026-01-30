@@ -4,11 +4,13 @@
 
 mod connection;
 mod error;
+mod protocol;
 mod router;
 mod transport;
 
 pub use connection::McpConnection;
 pub use error::McpError;
+pub use protocol::McpProtocol;
 pub use router::McpRouter;
 
 // Re-export McpServerConfig from meerkat-core for backwards compatibility

@@ -2,6 +2,20 @@
 
 use crate::types::SessionId;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum LlmFailureReason {
+    RateLimited {
+        retry_after: Option<std::time::Duration>,
+    },
+    ContextExceeded {
+        max: u32,
+        requested: u32,
+    },
+    AuthError,
+    InvalidModel(String),
+    ProviderError(serde_json::Value),
+}
+
 /// Error returned by tool dispatch operations.
 ///
 /// This type represents errors that occur during tool execution, distinguishing
@@ -124,8 +138,12 @@ impl From<&str> for ToolError {
 /// Errors that can occur during agent execution
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
-    #[error("LLM error: {0}")]
-    LlmError(String),
+    #[error("LLM error ({provider}): {message}")]
+    Llm {
+        provider: &'static str,
+        reason: LlmFailureReason,
+        message: String,
+    },
 
     #[error("Storage error: {0}")]
     StoreError(String),
@@ -195,6 +213,18 @@ pub enum AgentError {
 }
 
 impl AgentError {
+    pub fn llm(
+        provider: &'static str,
+        reason: LlmFailureReason,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Llm {
+            provider,
+            reason,
+            message: message.into(),
+        }
+    }
+
     /// Check if this error should trigger graceful shutdown (vs immediate fail)
     pub fn is_graceful(&self) -> bool {
         matches!(
@@ -208,7 +238,16 @@ impl AgentError {
 
     /// Check if this error is recoverable (can retry)
     pub fn is_recoverable(&self) -> bool {
-        matches!(self, Self::LlmError(_))
+        match self {
+            Self::Llm { reason, .. } => match reason {
+                LlmFailureReason::RateLimited { .. } => true,
+                LlmFailureReason::ProviderError(value) => {
+                    value.get("retryable").and_then(|v| v.as_bool()) == Some(true)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 }
 
@@ -232,6 +271,7 @@ pub fn invalid_session_id_message(err: impl std::fmt::Display) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_error_display() {
@@ -256,12 +296,26 @@ mod tests {
         assert!(AgentError::MaxTurnsReached { turns: 10 }.is_graceful());
 
         assert!(!AgentError::Cancelled.is_graceful());
-        assert!(!AgentError::LlmError("test".to_string()).is_graceful());
+        assert!(
+            !AgentError::llm(
+                "mock",
+                LlmFailureReason::ProviderError(json!({"retryable": false})),
+                "test",
+            )
+            .is_graceful()
+        );
     }
 
     #[test]
     fn test_recoverable_errors() {
-        assert!(AgentError::LlmError("rate limited".to_string()).is_recoverable());
+        assert!(
+            AgentError::llm(
+                "mock",
+                LlmFailureReason::RateLimited { retry_after: None },
+                "rate limited",
+            )
+            .is_recoverable()
+        );
         assert!(!AgentError::Cancelled.is_recoverable());
         assert!(!AgentError::TokenBudgetExceeded { used: 0, limit: 0 }.is_recoverable());
     }

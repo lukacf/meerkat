@@ -2,7 +2,9 @@
 //!
 //! Categorized by whether they're retryable.
 
+use meerkat_core::error::LlmFailureReason;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::time::Duration;
 
 /// Errors from LLM providers
@@ -91,6 +93,71 @@ impl LlmError {
             s if s >= 500 => Self::ServerError { status: s, message },
             s if s >= 400 => Self::InvalidRequest { message },
             _ => Self::Unknown { message },
+        }
+    }
+
+    pub fn failure_reason(&self) -> LlmFailureReason {
+        fn as_u32(value: usize) -> u32 {
+            u32::try_from(value).unwrap_or(u32::MAX)
+        }
+
+        match self {
+            Self::RateLimited { retry_after_ms } => LlmFailureReason::RateLimited {
+                retry_after: retry_after_ms.map(Duration::from_millis),
+            },
+            Self::ContextLengthExceeded { max, requested } => LlmFailureReason::ContextExceeded {
+                max: as_u32(*max),
+                requested: as_u32(*requested),
+            },
+            Self::AuthenticationFailed { .. } | Self::InvalidApiKey => LlmFailureReason::AuthError,
+            Self::ModelNotFound { model } => LlmFailureReason::InvalidModel(model.clone()),
+            Self::InvalidRequest { message } => LlmFailureReason::ProviderError(json!({
+                "kind": "invalid_request",
+                "retryable": false,
+                "message": message,
+            })),
+            Self::ContentFiltered { reason } => LlmFailureReason::ProviderError(json!({
+                "kind": "content_filtered",
+                "retryable": false,
+                "message": reason,
+            })),
+            Self::ServerError { status, message } => LlmFailureReason::ProviderError(json!({
+                "kind": "server_error",
+                "retryable": *status >= 500,
+                "status": status,
+                "message": message,
+            })),
+            Self::ServerOverloaded => LlmFailureReason::ProviderError(json!({
+                "kind": "server_overloaded",
+                "retryable": true,
+                "message": self.to_string(),
+            })),
+            Self::NetworkTimeout { duration_ms } => LlmFailureReason::ProviderError(json!({
+                "kind": "network_timeout",
+                "retryable": true,
+                "duration_ms": duration_ms,
+                "message": self.to_string(),
+            })),
+            Self::ConnectionReset => LlmFailureReason::ProviderError(json!({
+                "kind": "connection_reset",
+                "retryable": true,
+                "message": self.to_string(),
+            })),
+            Self::Unknown { message } => LlmFailureReason::ProviderError(json!({
+                "kind": "unknown",
+                "retryable": self.is_retryable(),
+                "message": message,
+            })),
+            Self::StreamParseError { message } => LlmFailureReason::ProviderError(json!({
+                "kind": "stream_parse_error",
+                "retryable": self.is_retryable(),
+                "message": message,
+            })),
+            Self::IncompleteResponse { message } => LlmFailureReason::ProviderError(json!({
+                "kind": "incomplete_response",
+                "retryable": self.is_retryable(),
+                "message": message,
+            })),
         }
     }
 }

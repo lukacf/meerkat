@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use futures::Stream;
 use meerkat_client::error::LlmError;
-use meerkat_client::types::{LlmClient, LlmEvent, LlmRequest};
+use meerkat_client::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
 use meerkat_core::{AgentEvent, AgentLlmClient, Provider, StopReason};
 use serde_json::json;
@@ -55,7 +55,9 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
             thought_signature: Some("sig-123".to_string()),
         },
         LlmEvent::Done {
-            stop_reason: StopReason::EndTurn,
+            outcome: LlmDoneOutcome::Success {
+                stop_reason: StopReason::EndTurn,
+            },
         },
     ];
 
@@ -65,12 +67,12 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
 
     let result = adapter.stream_response(&[], &[], 128, None, None).await?;
 
-    assert_eq!(result.content, "hello");
-    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(result.content(), "hello");
+    assert_eq!(result.stop_reason(), StopReason::EndTurn);
 
     let mut tc1 = None;
     let mut tc2 = None;
-    for tc in result.tool_calls {
+    for tc in result.tool_calls() {
         match tc.id.as_str() {
             "tc1" => tc1 = Some(tc),
             "tc2" => tc2 = Some(tc),

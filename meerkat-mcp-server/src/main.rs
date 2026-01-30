@@ -6,32 +6,54 @@
 
 use meerkat_mcp_server::{EventNotifier, handle_tools_call_with_notifier, tools_list};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, oneshot};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let stdout_lock = Arc::new(Mutex::new(()));
-    let (notify_tx, notify_rx) = mpsc::sync_channel::<Value>(256);
-    let notify_lock = stdout_lock.clone();
-    std::thread::spawn(move || {
-        let mut notify_stdout = std::io::stdout();
-        while let Ok(message) = notify_rx.recv() {
-            let Ok(line) = serde_json::to_string(&message) else {
-                continue;
-            };
-            if let Ok(_guard) = notify_lock.lock() {
-                let _ = writeln!(notify_stdout, "{line}");
-                let _ = notify_stdout.flush();
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+
+    let writer_handle = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+
+        loop {
+            tokio::select! {
+                maybe_line = out_rx.recv() => {
+                    let Some(line) = maybe_line else {
+                        break;
+                    };
+
+                    if stdout.write_all(line.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if stdout.write_all(b"\n").await.is_err() {
+                        break;
+                    }
+                    let _ = stdout.flush().await;
+                }
+                _ = &mut shutdown_rx => {
+                    while let Ok(line) = out_rx.try_recv() {
+                        if stdout.write_all(line.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        if stdout.write_all(b"\n").await.is_err() {
+                            return;
+                        }
+                        let _ = stdout.flush().await;
+                    }
+                    break;
+                }
             }
         }
     });
+
     let notifier: EventNotifier = {
-        let notify_tx = notify_tx.clone();
+        let out_tx = out_tx.clone();
         Arc::new(move |session_id, event| {
             let event_value =
                 serde_json::to_value(event).unwrap_or_else(|_| json!({ "type": "unknown" }));
@@ -43,20 +65,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "event": event_value
                 }
             });
-            let _ = notify_tx.try_send(payload);
+            let _ = out_tx.try_send(payload.to_string());
         })
     };
-    let reader = BufReader::new(stdin.lock());
+    let stdin = tokio::io::stdin();
+    let mut reader = BufReader::new(stdin).lines();
 
-    // Initialize runtime for async operations
-    let rt = tokio::runtime::Runtime::new()?;
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-
+    while let Some(line) = reader.next_line().await? {
         if line.is_empty() {
             continue;
         }
@@ -73,9 +88,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 });
                 {
-                    if let Ok(_guard) = stdout_lock.lock() {
-                        let _ = writeln!(stdout, "{}", error);
-                        let _ = stdout.flush();
+                    if out_tx.send(error.to_string()).await.is_err() {
+                        break;
                     }
                 }
                 continue;
@@ -91,22 +105,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match method {
                 "notifications/initialized" | "notifications/cancelled" => {}
                 _ => {
-                    eprintln!("Unknown notification: {}", method);
+                    tracing::warn!("Unknown notification: {}", method);
                 }
             }
             continue;
         }
 
         // This is a request, send a response
-        let response = rt.block_on(handle_request(&request, Some(notifier.clone())));
-        {
-            if let Ok(_guard) = stdout_lock.lock() {
-                let _ = writeln!(stdout, "{}", response);
-                let _ = stdout.flush();
-            }
+        let response = handle_request(&request, Some(notifier.clone())).await;
+        if out_tx.send(response.to_string()).await.is_err() {
+            break;
         }
     }
 
+    let _ = shutdown_tx.send(());
+    let _ = writer_handle.await;
     Ok(())
 }
 

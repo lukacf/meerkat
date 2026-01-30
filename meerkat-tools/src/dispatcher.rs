@@ -43,8 +43,8 @@ pub struct EmptyToolDispatcher;
 
 #[async_trait]
 impl AgentToolDispatcher for EmptyToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        Vec::new()
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from([])
     }
 
     async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -129,8 +129,8 @@ impl ToolDispatcher {
 
 #[async_trait]
 impl AgentToolDispatcher for ToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        self.tool_defs()
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        self.tool_defs_arc().into()
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -193,12 +193,15 @@ impl FilteredToolDispatcher {
 
 #[async_trait]
 impl AgentToolDispatcher for FilteredToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        self.inner
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        let tools: Vec<Arc<ToolDef>> = self
+            .inner
             .tools()
-            .into_iter()
+            .iter()
             .filter(|t| !self.denied_tools.contains(&t.name))
-            .collect()
+            .cloned()
+            .collect();
+        tools.into()
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
@@ -214,6 +217,19 @@ impl AgentToolDispatcher for FilteredToolDispatcher {
 mod tests {
     use super::*;
     use meerkat_core::AgentToolDispatcher;
+    use schemars::JsonSchema;
+
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct TestToolInput {
+        message: Option<String>,
+    }
+
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct CountToolInput {
+        count: i64,
+    }
 
     fn create_test_dispatcher() -> ToolDispatcher {
         let router = Arc::new(McpRouter::new());
@@ -224,7 +240,7 @@ mod tests {
     fn test_tools_returns_empty_vec_for_new_dispatcher() {
         let dispatcher = create_test_dispatcher();
         // Use the AgentToolDispatcher trait method
-        let tools: Vec<ToolDef> = AgentToolDispatcher::tools(&dispatcher);
+        let tools: Arc<[Arc<ToolDef>]> = AgentToolDispatcher::tools(&dispatcher);
         assert!(tools.is_empty());
     }
 
@@ -237,13 +253,7 @@ mod tests {
         dispatcher.registry.register(ToolDef {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string"}
-                },
-                "required": []
-            }),
+            input_schema: crate::schema_for::<TestToolInput>(),
         });
 
         // Use the AgentToolDispatcher trait method
@@ -260,13 +270,7 @@ mod tests {
         dispatcher.registry.register(ToolDef {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "count": {"type": "integer"}
-                },
-                "required": ["count"]
-            }),
+            input_schema: crate::schema_for::<CountToolInput>(),
         });
 
         // Invalid args (missing required field) should fail validation

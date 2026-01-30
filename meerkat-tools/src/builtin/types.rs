@@ -3,6 +3,7 @@
 //! This module defines the core types for task management including
 //! [`Task`], [`TaskId`], [`TaskStatus`], and [`TaskPriority`].
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -41,8 +42,8 @@ impl AsRef<str> for TaskId {
 }
 
 /// Status of a task in its lifecycle
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")] // for Serialize
 pub enum TaskStatus {
     /// Task is waiting to be started
     #[default]
@@ -53,9 +54,27 @@ pub enum TaskStatus {
     Completed,
 }
 
+impl<'de> Deserialize<'de> for TaskStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.as_str() {
+            "pending" => Ok(Self::Pending),
+            "in_progress" => Ok(Self::InProgress),
+            "completed" => Ok(Self::Completed),
+            other => Err(serde::de::Error::custom(format!(
+                "Invalid status: {}. Must be pending, in_progress, or completed",
+                other
+            ))),
+        }
+    }
+}
+
 /// Priority level for a task
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")] // for Serialize
 pub enum TaskPriority {
     /// Low priority task
     Low,
@@ -64,6 +83,24 @@ pub enum TaskPriority {
     Medium,
     /// High priority task
     High,
+}
+
+impl<'de> Deserialize<'de> for TaskPriority {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.as_str() {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            other => Err(serde::de::Error::custom(format!(
+                "Invalid priority: {}. Must be low, medium, or high",
+                other
+            ))),
+        }
+    }
 }
 
 /// A task in the task management system

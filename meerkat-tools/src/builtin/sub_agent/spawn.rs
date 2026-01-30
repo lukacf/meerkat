@@ -6,14 +6,14 @@ use super::runner::{
 };
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
-use crate::schema::SchemaBuilder;
 use async_trait::async_trait;
 use meerkat_client::LlmProvider;
 use meerkat_core::ToolDef;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::ops::{OperationId, ToolAccessPolicy};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 
 /// Allowed models per provider
@@ -45,7 +45,7 @@ pub mod allowed_models {
 }
 
 /// Tool access policy for spawned agents
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "policy", rename_all = "snake_case")]
 enum ToolAccessInput {
     /// Inherit all tools from parent
@@ -67,7 +67,7 @@ impl From<ToolAccessInput> for ToolAccessPolicy {
 }
 
 /// Budget limits for spawned agents
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[allow(dead_code)] // Fields reserved for future use
 struct BudgetInput {
     /// Maximum tokens for the sub-agent
@@ -82,7 +82,7 @@ struct BudgetInput {
 }
 
 /// Parameters for agent_spawn tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct SpawnParams {
     /// Initial prompt/task for the sub-agent
     prompt: String,
@@ -364,92 +364,28 @@ impl BuiltinTool for AgentSpawnTool {
     }
 
     fn def(&self) -> ToolDef {
+        let mut schema = crate::schema::schema_for::<SpawnParams>();
+
+        // Enrich model description with allowed values
+        if let Some(model_prop) = schema
+            .get_mut("properties")
+            .and_then(|p| p.get_mut("model"))
+        {
+            if let Some(obj) = model_prop.as_object_mut() {
+                obj.insert(
+                    "description".to_string(),
+                    Value::String(format!(
+                        "Model name (provider-specific). {}",
+                        allowed_models::description()
+                    )),
+                );
+            }
+        }
+
         ToolDef {
             name: "agent_spawn".to_string(),
             description: "Spawn a new sub-agent with clean context. The sub-agent starts fresh with only the provided prompt - it does not inherit conversation history. Useful for delegating independent tasks.".to_string(),
-            input_schema: SchemaBuilder::new()
-                .property(
-                    "prompt",
-                    json!({
-                        "type": "string",
-                        "description": "Initial prompt/task for the sub-agent. This is the only context the sub-agent will have."
-                    }),
-                )
-                .property(
-                    "provider",
-                    json!({
-                        "type": "string",
-                        "description": "LLM provider to use: 'anthropic', 'openai', or 'gemini'. Defaults to the configured default provider.",
-                        "enum": ["anthropic", "openai", "gemini"]
-                    }),
-                )
-                .property(
-                    "model",
-                    json!({
-                        "type": "string",
-                        "description": format!(
-                            "Model to use (must be from allowlist). {}. Defaults to provider's first allowed model.",
-                            allowed_models::description()
-                        )
-                    }),
-                )
-                .property(
-                    "tool_access",
-                    json!({
-                        "type": "object",
-                        "description": "Tool access policy for the sub-agent",
-                        "properties": {
-                            "policy": {
-                                "type": "string",
-                                "enum": ["inherit", "allow_list", "deny_list"],
-                                "description": "Policy type: 'inherit' (all parent tools), 'allow_list' (only specified tools), 'deny_list' (all except specified)"
-                            },
-                            "tools": {
-                                "type": "array",
-                                "items": { "type": "string" },
-                                "description": "Tool names for allow_list or deny_list policies"
-                            }
-                        }
-                    }),
-                )
-                .property(
-                    "budget",
-                    json!({
-                        "type": "object",
-                        "description": "Budget limits for the sub-agent",
-                        "properties": {
-                            "max_tokens": {
-                                "type": "integer",
-                                "description": "Maximum tokens the sub-agent can use"
-                            },
-                            "max_turns": {
-                                "type": "integer",
-                                "description": "Maximum conversation turns"
-                            },
-                            "max_tool_calls": {
-                                "type": "integer",
-                                "description": "Maximum tool calls"
-                            }
-                        }
-                    }),
-                )
-                .property(
-                    "system_prompt",
-                    json!({
-                        "type": "string",
-                        "description": "Override the system prompt for the sub-agent"
-                    }),
-                )
-                .property(
-                    "host_mode",
-                    json!({
-                        "type": "boolean",
-                        "description": "If true, the sub-agent stays alive after completing the initial prompt, processing incoming comms messages. Requires comms to be enabled. Use this for long-running sub-agents that need to receive instructions or report findings over time.",
-                        "default": false
-                    }),
-                )
-                .required("prompt")
-                .build(),
+            input_schema: schema,
         }
     }
 
@@ -479,6 +415,7 @@ mod tests {
     use meerkat_core::session::Session;
     use meerkat_core::sub_agent::SubAgentManager;
     use meerkat_core::{AgentSessionStore, AgentToolDispatcher};
+    use serde_json::json;
     use tokio::sync::RwLock;
 
     struct MockClientFactory {
@@ -522,8 +459,8 @@ mod tests {
 
     #[async_trait]
     impl AgentToolDispatcher for MockToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            vec![]
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([])
         }
 
         async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -546,7 +483,7 @@ mod tests {
 
     fn create_test_state() -> Arc<SubAgentToolState> {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory = Arc::new(MockClientFactory::new());
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);
@@ -566,7 +503,7 @@ mod tests {
 
     fn create_failing_state() -> Arc<SubAgentToolState> {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory = Arc::new(MockClientFactory::failing());
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);
@@ -778,7 +715,7 @@ mod tests {
     #[test]
     fn test_resolve_budget_capped() {
         let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits.clone(), 0));
+        let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory = Arc::new(MockClientFactory::new());
         let tool_dispatcher = Arc::new(MockToolDispatcher);
         let session_store = Arc::new(MockSessionStore);
@@ -888,6 +825,7 @@ mod tests {
     // Host mode tests
     mod host_mode {
         use super::*;
+        use serde_json::json;
 
         #[test]
         fn test_spawn_params_host_mode_default_false() {

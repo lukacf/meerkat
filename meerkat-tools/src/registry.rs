@@ -82,7 +82,27 @@ impl Default for ToolRegistry {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use schemars::JsonSchema;
     use std::sync::Arc;
+
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct NameCountInput {
+        name: String,
+        count: Option<i64>,
+    }
+
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct NameInput {
+        name: String,
+    }
+
+    #[derive(Debug, Clone, JsonSchema)]
+    #[allow(dead_code)]
+    struct CountOptionalInput {
+        count: Option<i64>,
+    }
 
     #[test]
     fn test_validate_valid_args() {
@@ -90,14 +110,7 @@ mod tests {
         registry.register(ToolDef {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "count": {"type": "integer"}
-                },
-                "required": ["name"]
-            }),
+            input_schema: crate::schema_for::<NameCountInput>(),
         });
 
         // Valid args
@@ -114,13 +127,7 @@ mod tests {
         registry.register(ToolDef {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"}
-                },
-                "required": ["name"]
-            }),
+            input_schema: crate::schema_for::<NameInput>(),
         });
 
         // Missing required field
@@ -138,13 +145,7 @@ mod tests {
         registry.register(ToolDef {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "count": {"type": "integer"}
-                },
-                "required": []
-            }),
+            input_schema: crate::schema_for::<CountOptionalInput>(),
         });
 
         // Wrong type (string instead of integer)
@@ -171,11 +172,7 @@ mod tests {
         let tool = ToolDef {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
+            input_schema: crate::empty_object_schema(),
         };
         registry.register(tool);
 
@@ -197,13 +194,7 @@ mod tests {
         registry.register(ToolDef {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"}
-                },
-                "required": ["name"]
-            }),
+            input_schema: crate::schema_for::<NameInput>(),
         });
 
         // Valid args should return Ok quickly without collecting errors

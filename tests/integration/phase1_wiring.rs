@@ -14,6 +14,7 @@ async fn test_agent_factory_builds_builtin_dispatcher() {
 
     let dispatcher = factory
         .build_builtin_dispatcher(store, config, None, None, None)
+        .await
         .expect("builtin dispatcher should build");
 
     let tools = dispatcher.tools();

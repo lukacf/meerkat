@@ -74,7 +74,7 @@ impl AgentFactory {
     }
 
     /// Build an LLM adapter for the provided client/model.
-    pub fn build_llm_adapter(
+    pub async fn build_llm_adapter(
         &self,
         client: Arc<dyn LlmClient>,
         model: impl Into<String>,
@@ -83,7 +83,7 @@ impl AgentFactory {
     }
 
     /// Build an LLM adapter, optionally wiring an event channel for streaming.
-    pub fn build_llm_adapter_with_events(
+    pub async fn build_llm_adapter_with_events(
         &self,
         client: Arc<dyn LlmClient>,
         model: impl Into<String>,
@@ -96,7 +96,7 @@ impl AgentFactory {
     }
 
     /// Build an LLM client for a provider with optional base URL override.
-    pub fn build_llm_client(
+    pub async fn build_llm_client(
         &self,
         provider: Provider,
         api_key: Option<String>,
@@ -123,12 +123,15 @@ impl AgentFactory {
     }
 
     /// Wrap a session store in the shared adapter.
-    pub fn build_store_adapter<S: SessionStore + 'static>(&self, store: Arc<S>) -> StoreAdapter<S> {
+    pub async fn build_store_adapter<S: SessionStore + 'static>(
+        &self,
+        store: Arc<S>,
+    ) -> StoreAdapter<S> {
         StoreAdapter::new(store)
     }
 
     /// Build a composite dispatcher so callers can register sub-agent tools.
-    pub fn build_composite_dispatcher(
+    pub async fn build_composite_dispatcher(
         &self,
         store: Arc<dyn TaskStore>,
         config: &BuiltinToolConfig,
@@ -151,7 +154,7 @@ impl AgentFactory {
     }
 
     /// Build a shared builtin dispatcher using the provided config.
-    pub fn build_builtin_dispatcher(
+    pub async fn build_builtin_dispatcher(
         &self,
         store: Arc<dyn TaskStore>,
         config: BuiltinToolConfig,
@@ -181,13 +184,9 @@ impl AgentFactory {
         } = builder;
 
         let shell_config_for_subagents = shell_config.clone();
-        let mut composite = self.build_composite_dispatcher(
-            store,
-            &config,
-            shell_config,
-            external.clone(),
-            session_id,
-        )?;
+        let mut composite = self
+            .build_composite_dispatcher(store, &config, shell_config, external.clone(), session_id)
+            .await?;
 
         let wait_interrupt_tx = composite.wait_interrupt_sender();
 
@@ -201,15 +200,17 @@ impl AgentFactory {
                 let mut rx = completion_rx;
                 while rx.changed().await.is_ok() {
                     if let Some(completion) = rx.borrow().clone() {
+                        let meerkat_core::sub_agent::SubAgentCompletion {
+                            agent_name,
+                            is_error,
+                            summary,
+                            ..
+                        } = completion;
                         let reason = format!(
                             "Sub-agent '{}' {} with: {}",
-                            completion.agent_name,
-                            if completion.is_error {
-                                "failed"
-                            } else {
-                                "completed"
-                            },
-                            completion.summary
+                            agent_name,
+                            if is_error { "failed" } else { "completed" },
+                            summary
                         );
                         let _ = interrupt_tx.send(Some(WaitInterrupt { reason }));
                     }
@@ -219,17 +220,22 @@ impl AgentFactory {
 
         let sub_agent_task_store = MemoryTaskStore::new();
         let sub_agent_factory = self.clone().subagents(false).comms(false);
-        let sub_agent_dispatcher = sub_agent_factory.build_composite_dispatcher(
-            Arc::new(sub_agent_task_store),
-            &config,
-            shell_config_for_subagents,
-            external,
-            None,
-        )?;
+        let sub_agent_dispatcher = sub_agent_factory
+            .build_composite_dispatcher(
+                Arc::new(sub_agent_task_store),
+                &config,
+                shell_config_for_subagents,
+                external,
+                None,
+            )
+            .await?;
         let sub_agent_tools: Arc<dyn AgentToolDispatcher> = Arc::new(sub_agent_dispatcher);
 
-        let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> =
-            Arc::new(sub_agent_factory.build_store_adapter(Arc::new(MemoryStore::new())));
+        let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+            sub_agent_factory
+                .build_store_adapter(Arc::new(MemoryStore::new()))
+                .await,
+        );
 
         let parent_session = Arc::new(RwLock::new(Session::new()));
         let sub_agent_config = SubAgentConfig::default();

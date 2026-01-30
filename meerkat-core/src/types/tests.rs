@@ -7,6 +7,23 @@
 use super::*;
 use serde_json::json;
 
+fn schema_for<T: schemars::JsonSchema>() -> Value {
+    let schema = schemars::schema_for!(T);
+    let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
+
+    // Ensure object schemas always have `properties` and `required` keys.
+    if let Value::Object(ref mut obj) = value {
+        if obj.get("type").and_then(Value::as_str) == Some("object") {
+            obj.entry("properties".to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            obj.entry("required".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
+    }
+
+    value
+}
+
 #[test]
 fn test_session_id_encoding() {
     // UUID v7 format test
@@ -255,16 +272,16 @@ fn test_run_result_json_schema() {
 
 #[test]
 fn test_tool_def_serialization() {
+    #[derive(schemars::JsonSchema)]
+    #[allow(dead_code)]
+    struct TestToolDefInput {
+        arg1: String,
+    }
+
     let tool_def = ToolDef {
         name: "test_tool".to_string(),
         description: "A test tool".to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "arg1": { "type": "string" }
-            },
-            "required": ["arg1"]
-        }),
+        input_schema: schema_for::<TestToolDefInput>(),
     };
 
     let json = serde_json::to_string(&tool_def).unwrap();
@@ -278,14 +295,13 @@ fn test_tool_def_serialization() {
 
 #[test]
 fn test_tool_def_empty_schema_serialization() {
+    #[derive(schemars::JsonSchema)]
+    struct EmptyObject {}
+
     let tool_def = ToolDef {
         name: "empty_tool".to_string(),
         description: "An empty tool".to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {},
-            "required": []
-        }),
+        input_schema: schema_for::<EmptyObject>(),
     };
 
     let json = serde_json::to_string(&tool_def).unwrap();

@@ -109,11 +109,13 @@ fn default_max_concurrent_processes() -> usize {
 impl Default for ShellConfig {
     fn default() -> Self {
         let defaults = ShellDefaults::default();
+        let timeout_secs = defaults.timeout_secs;
+        let program = defaults.program;
         Self {
             enabled: false,
-            default_timeout_secs: defaults.timeout_secs,
+            default_timeout_secs: timeout_secs,
             restrict_to_project: true,
-            shell: defaults.program,
+            shell: program,
             shell_path: None,
             project_root: PathBuf::new(),
             max_completed_jobs: default_max_completed_jobs(),

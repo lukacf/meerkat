@@ -44,7 +44,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&serde_json::Value>,
@@ -93,12 +93,25 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
+                    LlmEvent::Done { outcome } => match outcome {
+                        LlmDoneOutcome::Success { stop_reason: sr } => {
+                            stop_reason = sr;
+                        }
+                        LlmDoneOutcome::Error { error } => {
+                            return Err(AgentError::llm(
+                                self.client.provider(),
+                                error.failure_reason(),
+                                error.to_string(),
+                            ));
+                        }
+                    },
                 },
                 Err(e) => {
-                    return Err(AgentError::LlmError(e.to_string()));
+                    return Err(AgentError::llm(
+                        self.client.provider(),
+                        e.failure_reason(),
+                        e.to_string(),
+                    ));
                 }
             }
         }
@@ -112,12 +125,12 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
             }
         }
 
-        Ok(LlmStreamResult {
+        Ok(LlmStreamResult::new(
             content,
             tool_calls,
             stop_reason,
             usage,
-        })
+        ))
     }
 
     fn provider(&self) -> &'static str {
@@ -184,7 +197,12 @@ impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
 // ============================================================================
 
 fn skip_if_no_anthropic_key() -> Option<String> {
-    std::env::var("ANTHROPIC_API_KEY").ok()
+    if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
+        return None;
+    }
+    std::env::var("RKAT_ANTHROPIC_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
 }
 
 /// Get the Anthropic model to use in tests (configurable via ANTHROPIC_MODEL env var)
@@ -269,12 +287,6 @@ async fn create_agent_pair(
         .comms_config(CommsConfig::default());
     let comms_manager_b = CommsManager::new(config_b).unwrap();
 
-    // Extract secrets for listeners
-    let secret_a =
-        meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair()).unwrap();
-    let secret_b =
-        meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair()).unwrap();
-
     // Create shared trusted peers (allows dynamic updates)
     let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a));
     let trusted_b_shared = Arc::new(RwLock::new(trusted_for_b));
@@ -282,7 +294,7 @@ async fn create_agent_pair(
     // Start TCP listeners
     let handle_a = spawn_tcp_listener(
         &addr_a.to_string(),
-        secret_a,
+        comms_manager_a.keypair_arc(),
         trusted_a_shared.clone(),
         comms_manager_a.inbox_sender().clone(),
     )
@@ -291,7 +303,7 @@ async fn create_agent_pair(
 
     let handle_b = spawn_tcp_listener(
         &addr_b.to_string(),
-        secret_b,
+        comms_manager_b.keypair_arc(),
         trusted_b_shared.clone(),
         comms_manager_b.inbox_sender().clone(),
     )
@@ -332,7 +344,8 @@ async fn create_agent_pair(
              When you receive a message from another agent, acknowledge it and respond appropriately. \
              Use the list_peers tool to see available peers.",
         )
-        .build(llm_adapter_a, tools_a, store_adapter_a);
+        .build(llm_adapter_a, tools_a, store_adapter_a)
+        .await;
 
     let agent_b_inner = AgentBuilder::new()
         .model(anthropic_model())
@@ -342,7 +355,8 @@ async fn create_agent_pair(
              When you receive a message from another agent, acknowledge it and respond appropriately. \
              Use the list_peers tool to see available peers.",
         )
-        .build(llm_adapter_b, tools_b, store_adapter_b);
+        .build(llm_adapter_b, tools_b, store_adapter_b)
+        .await;
 
     let agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
     let agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
@@ -361,7 +375,7 @@ mod two_agent_message {
     #[tokio::test]
     async fn test_e2e_llm_message_exchange() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -421,7 +435,7 @@ mod request_response {
     #[tokio::test]
     async fn test_e2e_llm_request_response() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -484,7 +498,7 @@ mod multi_turn_comms {
     #[tokio::test]
     async fn test_e2e_llm_multi_turn() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -552,7 +566,7 @@ mod three_agent_coordination {
     #[tokio::test]
     async fn test_e2e_llm_three_agent_coordination() {
         let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
             return;
         };
 
@@ -636,21 +650,14 @@ mod three_agent_coordination {
             CommsManagerConfig::with_keypair(keypair_c).trusted_peers(trusted_for_c.clone());
         let comms_manager_c = CommsManager::new(config_c).unwrap();
 
-        // Extract secrets and create shared trusted peers
-        let secret_a =
-            meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair()).unwrap();
-        let secret_b =
-            meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair()).unwrap();
-        let secret_c =
-            meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_c.keypair()).unwrap();
-
+        // Create shared trusted peers (allows dynamic updates)
         let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a));
         let trusted_b_shared = Arc::new(RwLock::new(trusted_for_b));
         let trusted_c_shared = Arc::new(RwLock::new(trusted_for_c));
 
         let handle_a = spawn_tcp_listener(
             &addr_a.to_string(),
-            secret_a,
+            comms_manager_a.keypair_arc(),
             trusted_a_shared.clone(),
             comms_manager_a.inbox_sender().clone(),
         )
@@ -659,7 +666,7 @@ mod three_agent_coordination {
 
         let handle_b = spawn_tcp_listener(
             &addr_b.to_string(),
-            secret_b,
+            comms_manager_b.keypair_arc(),
             trusted_b_shared.clone(),
             comms_manager_b.inbox_sender().clone(),
         )
@@ -668,7 +675,7 @@ mod three_agent_coordination {
 
         let handle_c = spawn_tcp_listener(
             &addr_c.to_string(),
-            secret_c,
+            comms_manager_c.keypair_arc(),
             trusted_c_shared.clone(),
             comms_manager_c.inbox_sender().clone(),
         )
@@ -712,7 +719,8 @@ mod three_agent_coordination {
                 "You are Agent A, the coordinator. You can communicate with Agent B and Agent C. \
                  Use list_peers to see available peers and send_message to communicate.",
             )
-            .build(llm_adapter_a, tools_a, store_adapter_a);
+            .build(llm_adapter_a, tools_a, store_adapter_a)
+            .await;
 
         let agent_b_inner = AgentBuilder::new()
             .model(anthropic_model())
@@ -720,7 +728,8 @@ mod three_agent_coordination {
             .system_prompt(
                 "You are Agent B, a worker. You can communicate with Agent A and Agent C.",
             )
-            .build(llm_adapter_b, tools_b, store_adapter_b);
+            .build(llm_adapter_b, tools_b, store_adapter_b)
+            .await;
 
         let agent_c_inner = AgentBuilder::new()
             .model(anthropic_model())
@@ -728,7 +737,8 @@ mod three_agent_coordination {
             .system_prompt(
                 "You are Agent C, a worker. You can communicate with Agent A and Agent B.",
             )
-            .build(llm_adapter_c, tools_c, store_adapter_c);
+            .build(llm_adapter_c, tools_c, store_adapter_c)
+            .await;
 
         let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
         let mut agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);

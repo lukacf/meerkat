@@ -33,8 +33,8 @@ impl BuiltinTool for DateTimeTool {
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "datetime".to_string(),
-            description: "Get the current date and time. Returns ISO 8601 formatted datetime and Unix timestamp.".to_string(),
+            name: "datetime".into(),
+            description: "Get the current date and time. Returns ISO 8601 formatted datetime and Unix timestamp.".into(),
             input_schema: empty_object_schema(),
         }
     }

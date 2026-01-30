@@ -4,6 +4,7 @@
 
 pub mod adapter;
 mod error;
+pub mod index;
 
 #[cfg(feature = "jsonl")]
 pub mod jsonl;
@@ -13,6 +14,7 @@ pub mod memory;
 
 pub use adapter::StoreAdapter;
 pub use error::StoreError;
+pub use index::SessionIndex;
 
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};

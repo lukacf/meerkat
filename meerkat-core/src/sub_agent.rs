@@ -11,6 +11,7 @@ use crate::ops::{
 use crate::session::Session;
 use crate::types::{Message, ToolDef, UserMessage};
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use uuid::Uuid;
@@ -244,9 +245,9 @@ impl SubAgentManager {
     /// Apply ToolAccessPolicy to filter tools
     pub fn apply_tool_access_policy(
         &self,
-        all_tools: &[ToolDef],
+        all_tools: &[Arc<ToolDef>],
         policy: &ToolAccessPolicy,
-    ) -> Vec<ToolDef> {
+    ) -> Vec<Arc<ToolDef>> {
         match policy {
             ToolAccessPolicy::Inherit => all_tools.to_vec(),
             ToolAccessPolicy::AllowList(allowed) => all_tools
@@ -599,6 +600,20 @@ mod tests {
     use super::*;
     use crate::types::SystemMessage;
 
+    fn empty_object_schema() -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String("object".to_string()),
+        );
+        obj.insert(
+            "properties".to_string(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        );
+        obj.insert("required".to_string(), serde_json::Value::Array(Vec::new()));
+        serde_json::Value::Object(obj)
+    }
+
     #[test]
     fn test_context_strategy_full_history() {
         let manager = SubAgentManager::new(ConcurrencyLimits::default(), 0);
@@ -640,16 +655,16 @@ mod tests {
     fn test_tool_access_policy_inherit() {
         let manager = SubAgentManager::new(ConcurrencyLimits::default(), 0);
         let tools = vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "tool1".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
-            ToolDef {
+                input_schema: empty_object_schema(),
+            }),
+            Arc::new(ToolDef {
                 name: "tool2".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
+                input_schema: empty_object_schema(),
+            }),
         ];
 
         let filtered = manager.apply_tool_access_policy(&tools, &ToolAccessPolicy::Inherit);
@@ -660,16 +675,16 @@ mod tests {
     fn test_tool_access_policy_allow_list() {
         let manager = SubAgentManager::new(ConcurrencyLimits::default(), 0);
         let tools = vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "tool1".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
-            ToolDef {
+                input_schema: empty_object_schema(),
+            }),
+            Arc::new(ToolDef {
                 name: "tool2".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
+                input_schema: empty_object_schema(),
+            }),
         ];
 
         let filtered = manager.apply_tool_access_policy(
@@ -684,16 +699,16 @@ mod tests {
     fn test_tool_access_policy_deny_list() {
         let manager = SubAgentManager::new(ConcurrencyLimits::default(), 0);
         let tools = vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "tool1".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
-            ToolDef {
+                input_schema: empty_object_schema(),
+            }),
+            Arc::new(ToolDef {
                 name: "tool2".to_string(),
                 description: "".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-            },
+                input_schema: empty_object_schema(),
+            }),
         ];
 
         let filtered = manager.apply_tool_access_policy(

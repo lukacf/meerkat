@@ -23,7 +23,7 @@ use meerkat_tools::builtin::{
     shell::ShellConfig,
     sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState},
 };
-use meerkat_tools::{ensure_rkat_dir, find_project_root};
+use meerkat_tools::{ensure_rkat_dir_async, find_project_root};
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -87,17 +87,17 @@ fn spawn_event_handler(
     })
 }
 
-fn init_project_config() -> anyhow::Result<()> {
+async fn init_project_config() -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let rkat_dir = cwd.join(".rkat");
-    std::fs::create_dir_all(&rkat_dir)?;
+    tokio::fs::create_dir_all(&rkat_dir).await?;
 
     let global_path = meerkat_core::Config::global_config_path().ok_or_else(|| {
         anyhow::anyhow!("Unable to resolve global config path (~/.rkat/config.toml)")
     })?;
 
     if !global_path.exists() {
-        let _ = meerkat_core::FileConfigStore::global()?;
+        let _ = meerkat_core::FileConfigStore::global().await?;
     }
 
     let project_config = rkat_dir.join("config.toml");
@@ -108,7 +108,7 @@ fn init_project_config() -> anyhow::Result<()> {
         ));
     }
 
-    let content = std::fs::read_to_string(&global_path).map_err(|e| {
+    let content = tokio::fs::read_to_string(&global_path).await.map_err(|e| {
         anyhow::anyhow!(
             "Failed to read global config at {}: {}",
             global_path.display(),
@@ -116,13 +116,15 @@ fn init_project_config() -> anyhow::Result<()> {
         )
     })?;
 
-    std::fs::write(&project_config, content).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to write project config at {}: {}",
-            project_config.display(),
-            e
-        )
-    })?;
+    tokio::fs::write(&project_config, content)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to write project config at {}: {}",
+                project_config.display(),
+                e
+            )
+        })?;
 
     println!("Initialized {}", project_config.display());
     Ok(())
@@ -412,7 +414,7 @@ async fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Init => init_project_config(),
+        Commands::Init => init_project_config().await,
         Commands::Run {
             prompt,
             model,
@@ -433,9 +435,9 @@ async fn main() -> anyhow::Result<ExitCode> {
             verbose,
             host,
         } => {
-            let (config, config_base_dir) = load_config()?;
+            let (config, config_base_dir) = load_config().await?;
 
-            let model = model.unwrap_or_else(|| config.agent.model.clone());
+            let model = model.unwrap_or_else(|| config.agent.model.to_string());
             let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
 
             // Resolve provider: explicit flag > infer from model > default
@@ -498,11 +500,11 @@ async fn main() -> anyhow::Result<ExitCode> {
             SessionCommands::Show { id } => show_session(&id).await,
             SessionCommands::Delete { session_id } => delete_session(&session_id).await,
         },
-        Commands::Mcp { command } => handle_mcp_command(command),
+        Commands::Mcp { command } => handle_mcp_command(command).await,
         Commands::Config { command } => match command {
-            ConfigCommands::Get { format } => handle_config_get(format),
-            ConfigCommands::Set { file, json, toml } => handle_config_set(file, json, toml),
-            ConfigCommands::Patch { file, json } => handle_config_patch(file, json),
+            ConfigCommands::Get { format } => handle_config_get(format).await,
+            ConfigCommands::Set { file, json, toml } => handle_config_set(file, json, toml).await,
+            ConfigCommands::Patch { file, json } => handle_config_patch(file, json).await,
         },
     };
 
@@ -559,7 +561,7 @@ struct CommsOverrides {
     disabled: bool,
 }
 
-fn resolve_config_store() -> anyhow::Result<(Box<dyn ConfigStore>, PathBuf)> {
+async fn resolve_config_store() -> anyhow::Result<(Box<dyn ConfigStore>, PathBuf)> {
     let cwd = std::env::current_dir()?;
     if let Some(project_root) = meerkat_tools::builtin::find_project_root(&cwd) {
         Ok((
@@ -568,15 +570,17 @@ fn resolve_config_store() -> anyhow::Result<(Box<dyn ConfigStore>, PathBuf)> {
         ))
     } else {
         let store = FileConfigStore::global()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to open global config store: {e}"))?;
         Ok((Box::new(store), cwd))
     }
 }
 
-fn load_config() -> anyhow::Result<(Config, PathBuf)> {
-    let (store, base_dir) = resolve_config_store()?;
+async fn load_config() -> anyhow::Result<(Config, PathBuf)> {
+    let (store, base_dir) = resolve_config_store().await?;
     let mut config = store
         .get()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     config
         .apply_env_overrides()
@@ -584,10 +588,11 @@ fn load_config() -> anyhow::Result<(Config, PathBuf)> {
     Ok((config, base_dir))
 }
 
-fn handle_config_get(format: ConfigFormat) -> anyhow::Result<()> {
-    let (store, _) = resolve_config_store()?;
+async fn handle_config_get(format: ConfigFormat) -> anyhow::Result<()> {
+    let (store, _) = resolve_config_store().await?;
     let config = store
         .get()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     match format {
         ConfigFormat::Toml => {
@@ -604,13 +609,14 @@ fn handle_config_get(format: ConfigFormat) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_config_set(
+async fn handle_config_set(
     file: Option<PathBuf>,
     json: Option<String>,
     toml_payload: Option<String>,
 ) -> anyhow::Result<()> {
     let config = if let Some(path) = file {
-        let content = std::fs::read_to_string(&path)
+        let content = tokio::fs::read_to_string(&path)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to read config file: {e}"))?;
         match path.extension().and_then(|ext| ext.to_str()) {
             Some("json") => serde_json::from_str(&content)
@@ -629,16 +635,18 @@ fn handle_config_set(
         ));
     };
 
-    let (store, _) = resolve_config_store()?;
+    let (store, _) = resolve_config_store().await?;
     store
         .set(config)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
     Ok(())
 }
 
-fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> anyhow::Result<()> {
+async fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> anyhow::Result<()> {
     let patch_value: serde_json::Value = if let Some(path) = file {
-        let content = std::fs::read_to_string(&path)
+        let content = tokio::fs::read_to_string(&path)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to read patch file: {e}"))?;
         serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Failed to parse JSON patch: {e}"))?
@@ -649,9 +657,10 @@ fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> anyhow::R
         return Err(anyhow::anyhow!("Provide --file or --json to patch config"));
     };
 
-    let (store, _) = resolve_config_store()?;
+    let (store, _) = resolve_config_store().await?;
     store
         .patch(ConfigDelta(patch_value))
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to patch config: {e}"))?;
     Ok(())
 }
@@ -683,7 +692,7 @@ fn build_comms_config(config: &Config, overrides: &CommsOverrides) -> Option<Cor
         CommsRuntimeMode::Uds => {
             enabled = true;
             if let Some(addr) = &config.comms.address {
-                comms.listen_uds = Some(PathBuf::from(addr));
+                comms.listen_uds = Some(PathBuf::from(addr.as_str()));
             }
         }
     }
@@ -703,8 +712,8 @@ fn build_comms_config(config: &Config, overrides: &CommsOverrides) -> Option<Cor
 }
 
 /// Get the default session store directory
-fn get_session_store_dir() -> std::path::PathBuf {
-    let config = meerkat_core::Config::load().unwrap_or_default();
+async fn get_session_store_dir() -> std::path::PathBuf {
+    let config: meerkat_core::Config = meerkat_core::Config::load().await.unwrap_or_default();
     config
         .storage
         .directory
@@ -712,8 +721,8 @@ fn get_session_store_dir() -> std::path::PathBuf {
 }
 
 /// Create the session store (persistent)
-fn create_session_store() -> Arc<JsonlStore> {
-    let dir = get_session_store_dir();
+async fn create_session_store() -> Arc<JsonlStore> {
+    let dir = get_session_store_dir().await;
     Arc::new(JsonlStore::new(dir))
 }
 
@@ -723,8 +732,9 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
     use meerkat_mcp_client::McpRouter;
 
     // Load MCP config with scope info for security warnings
-    let servers_with_scope =
-        McpConfig::load_with_scopes().map_err(|e| anyhow::anyhow!("MCP config error: {}", e))?;
+    let servers_with_scope = McpConfig::load_with_scopes()
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP config error: {}", e))?;
 
     if servers_with_scope.is_empty() {
         return Ok(None);
@@ -803,7 +813,7 @@ async fn build_tooling(
     let mut comms_runtime = if let Some(ref config) = comms_config {
         if config.enabled {
             let resolved = config.resolve_paths(&comms_base_dir);
-            match meerkat_core::CommsRuntime::new(resolved) {
+            match meerkat_core::CommsRuntime::new(resolved).await {
                 Ok(mut runtime) => {
                     tracing::info!(
                         "Comms enabled for agent '{}' (peer ID: {})",
@@ -811,7 +821,7 @@ async fn build_tooling(
                         runtime.public_key().to_peer_id()
                     );
                     // Start listeners
-                    if let Err(e) = futures::executor::block_on(runtime.start_listeners()) {
+                    if let Err(e) = runtime.start_listeners().await {
                         tracing::warn!("Failed to start comms listeners: {}", e);
                     }
                     Some(runtime)
@@ -931,7 +941,7 @@ async fn build_tooling(
                 enabled: true,
                 default_timeout_secs: config.shell.timeout_secs,
                 restrict_to_project: true,
-                shell: config.shell.program.clone(),
+                shell: config.shell.program.to_string(),
                 shell_path: None,
                 project_root: project_root.clone(),
                 max_completed_jobs: 100,
@@ -944,7 +954,8 @@ async fn build_tooling(
 
         // Use file-backed task store when builtins are enabled; otherwise fall back to memory.
         let task_store: Arc<dyn TaskStore> = if enable_builtins {
-            ensure_rkat_dir(&project_root)
+            ensure_rkat_dir_async(&project_root)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to create .rkat directory: {}", e))?;
             Arc::new(FileTaskStore::in_project(&project_root))
         } else {
@@ -970,6 +981,7 @@ async fn build_tooling(
                 mcp_adapter.clone(),
                 None, // session_id - will be set later
             )
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to create composite dispatcher: {}", e))?;
 
         // Get wait interrupt sender before registering sub-agents
@@ -993,15 +1005,17 @@ async fn build_tooling(
                     let mut rx = completion_rx;
                     while rx.changed().await.is_ok() {
                         if let Some(completion) = rx.borrow().clone() {
+                            let meerkat_core::sub_agent::SubAgentCompletion {
+                                agent_name,
+                                is_error,
+                                summary,
+                                ..
+                            } = completion;
                             let reason = format!(
                                 "Sub-agent '{}' {} with: {}",
-                                completion.agent_name,
-                                if completion.is_error {
-                                    "failed"
-                                } else {
-                                    "completed"
-                                },
-                                completion.summary
+                                agent_name,
+                                if is_error { "failed" } else { "completed" },
+                                summary
                             );
                             let _ = interrupt_tx.send(Some(WaitInterrupt { reason }));
                         }
@@ -1019,7 +1033,7 @@ async fn build_tooling(
             // Comms tools are added later in spawn_sub_agent_dyn via CommsBootstrap,
             // ensuring uniform comms setup for all agents.
             let sub_agent_task_store = MemoryTaskStore::new();
-            let sub_agent_factory = factory.clone().subagents(false).comms(false);
+            let sub_agent_factory = factory.subagents(false).comms(false);
             let sub_agent_dispatcher = sub_agent_factory
                 .build_composite_dispatcher(
                     Arc::new(sub_agent_task_store),
@@ -1028,6 +1042,7 @@ async fn build_tooling(
                     mcp_adapter.clone(),
                     None,
                 )
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to create sub-agent dispatcher: {}", e))?;
 
             let sub_agent_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
@@ -1035,7 +1050,9 @@ async fn build_tooling(
 
             // Use a memory store for sub-agent sessions (wrapped in adapter)
             let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-                sub_agent_factory.build_store_adapter(Arc::new(meerkat_store::MemoryStore::new())),
+                sub_agent_factory
+                    .build_store_adapter(Arc::new(meerkat_store::MemoryStore::new()))
+                    .await,
             );
 
             let parent_session = Arc::new(RwLock::new(Session::new()));
@@ -1180,7 +1197,7 @@ async fn run_agent(
 
     let api_key = resolve_api_key(provider)?;
 
-    let base_factory = AgentFactory::new(get_session_store_dir());
+    let base_factory = AgentFactory::new(get_session_store_dir().await);
     let base_url = config
         .providers
         .base_urls
@@ -1200,11 +1217,13 @@ async fn run_agent(
     // Create the LLM client based on provider
     let llm_client = base_factory
         .build_llm_client(provider.as_core(), Some(api_key), base_url)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to create LLM client: {}", e))?;
 
     // Create LLM adapter - with event channel if streaming/verbose is enabled
     let llm_adapter = base_factory
         .build_llm_adapter_with_events(llm_client, model.to_string(), event_tx.clone())
+        .await
         .with_provider_params(provider_params);
     let llm_adapter = Arc::new(llm_adapter);
 
@@ -1228,11 +1247,11 @@ async fn run_agent(
     } = tooling;
 
     // Create persistent session store
-    let store = create_session_store();
-    let store_adapter = Arc::new(base_factory.build_store_adapter(store));
+    let store = create_session_store().await;
+    let store_adapter = Arc::new(base_factory.build_store_adapter(store).await);
 
     // Compose system prompt (with AGENTS.md and tool usage instructions)
-    let mut system_prompt = SystemPromptConfig::new().compose();
+    let mut system_prompt = SystemPromptConfig::new().compose().await;
     if !tool_usage_instructions.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);
@@ -1241,7 +1260,7 @@ async fn run_agent(
     // Build the agent with budget limits (clone tools Arc so we can shutdown later)
     let tools_for_shutdown = tools.clone();
     let mut builder = AgentBuilder::new()
-        .model(model)
+        .model(model.to_string())
         .max_tokens_per_turn(max_tokens)
         .system_prompt(system_prompt)
         .budget(limits);
@@ -1254,7 +1273,7 @@ async fn run_agent(
         builder = builder.with_comms_runtime(runtime);
     }
 
-    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+    let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
 
     let metadata = SessionMetadata {
         model: model.to_string(),
@@ -1395,14 +1414,14 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", session_id, e))?;
 
     // Load the session from store
-    let store = create_session_store();
+    let store = create_session_store().await;
     let session = store
         .load(&session_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
 
-    let (config, config_base_dir) = load_config()?;
+    let (config, config_base_dir) = load_config().await?;
     let stored_metadata = session.session_metadata();
     let tooling = stored_metadata
         .as_ref()
@@ -1424,7 +1443,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     let model = stored_metadata
         .as_ref()
         .map(|meta| meta.model.clone())
-        .unwrap_or_else(|| config.agent.model.clone());
+        .unwrap_or_else(|| config.agent.model.to_string());
     let max_tokens = stored_metadata
         .as_ref()
         .map(|meta| meta.max_tokens)
@@ -1450,7 +1469,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
 
     let api_key = resolve_api_key(provider)?;
 
-    let base_factory = AgentFactory::new(get_session_store_dir());
+    let base_factory = AgentFactory::new(get_session_store_dir().await);
 
     let base_url = config
         .providers
@@ -1462,8 +1481,13 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     // Create the LLM client based on restored provider
     let llm_client = base_factory
         .build_llm_client(provider.as_core(), Some(api_key), base_url)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to create LLM client: {}", e))?;
-    let llm_adapter = Arc::new(base_factory.build_llm_adapter(llm_client, model.clone()));
+    let llm_adapter = Arc::new(
+        base_factory
+            .build_llm_adapter(llm_client, model.clone())
+            .await,
+    );
 
     let comms_requested = tooling.comms || host_mode;
     let comms_overrides = CommsOverrides {
@@ -1491,10 +1515,10 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     } = tooling_setup;
 
     // Create session store adapter
-    let store_adapter = Arc::new(base_factory.build_store_adapter(store));
+    let store_adapter = Arc::new(base_factory.build_store_adapter(store).await);
 
     // Compose system prompt (with AGENTS.md and tool usage instructions)
-    let mut system_prompt = SystemPromptConfig::new().compose();
+    let mut system_prompt = SystemPromptConfig::new().compose().await;
     if !tool_usage_instructions.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);
@@ -1504,7 +1528,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     let tools_for_shutdown = tools.clone();
     let limits = config.budget_limits();
     let mut builder = AgentBuilder::new()
-        .model(&model)
+        .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .system_prompt(system_prompt)
         .budget(limits)
@@ -1514,7 +1538,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         builder = builder.with_comms_runtime(runtime);
     }
 
-    let mut agent = builder.build(llm_adapter, tools, store_adapter);
+    let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
 
     let metadata = SessionMetadata {
         model: model.clone(),
@@ -1551,7 +1575,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
 
 /// List sessions
 async fn list_sessions(limit: usize) -> anyhow::Result<()> {
-    let store = create_session_store();
+    let store = create_session_store().await;
     let filter = SessionFilter {
         limit: Some(limit),
         ..Default::default()
@@ -1596,7 +1620,7 @@ async fn show_session(id: &str) -> anyhow::Result<()> {
     let session_id =
         SessionId::parse(id).map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", id, e))?;
 
-    let store = create_session_store();
+    let store = create_session_store().await;
     let session = store
         .load(&session_id)
         .await
@@ -1664,7 +1688,7 @@ async fn delete_session(id: &str) -> anyhow::Result<()> {
     let session_id =
         SessionId::parse(id).map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", id, e))?;
 
-    let store = create_session_store();
+    let store = create_session_store().await;
 
     // Check if session exists first
     if !store
@@ -1686,7 +1710,7 @@ async fn delete_session(id: &str) -> anyhow::Result<()> {
 }
 
 /// Handle MCP subcommands
-fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
+async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
     match command {
         McpCommands::Add {
             name,
@@ -1711,27 +1735,28 @@ fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
                 env,
                 !user,
             )
+            .await
         }
         McpCommands::Remove { name, scope } => {
             let scope = scope.map(|s| match s {
                 CliMcpScope::User => McpScope::User,
                 CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
             });
-            mcp::remove_server(name, scope)
+            mcp::remove_server(name, scope).await
         }
         McpCommands::List { scope, json } => {
             let scope = scope.map(|s| match s {
                 CliMcpScope::User => McpScope::User,
                 CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
             });
-            mcp::list_servers(scope, json)
+            mcp::list_servers(scope, json).await
         }
         McpCommands::Get { name, scope, json } => {
             let scope = scope.map(|s| match s {
                 CliMcpScope::User => McpScope::User,
                 CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
             });
-            mcp::get_server(name, scope, json)
+            mcp::get_server(name, scope, json).await
         }
     }
 }
@@ -1986,7 +2011,7 @@ mod tests {
 
         // Verify comms tools are available
         let tools = dispatcher.tools();
-        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
 
         assert!(tool_names.contains(&"send_message"));
         assert!(tool_names.contains(&"send_request"));

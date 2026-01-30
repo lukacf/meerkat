@@ -65,7 +65,7 @@ impl Config {
 
     /// Parse the config template into a Config value.
     pub fn template() -> Result<Self, ConfigError> {
-        toml::from_str(CONFIG_TEMPLATE_TOML).map_err(|e| ConfigError::ParseError(e.to_string()))
+        toml::from_str(CONFIG_TEMPLATE_TOML).map_err(ConfigError::Parse)
     }
 
     /// Load configuration from all sources with proper layering
@@ -119,12 +119,9 @@ impl Config {
 
     /// Merge configuration from a TOML file
     pub async fn merge_file(&mut self, path: &PathBuf) -> Result<(), ConfigError> {
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| ConfigError::IoError(e.to_string()))?;
+        let content = tokio::fs::read_to_string(path).await?;
 
-        let file_config: Config =
-            toml::from_str(&content).map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        let file_config: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
 
         // Merge (file values override defaults)
         self.merge(file_config);
@@ -672,10 +669,19 @@ pub struct ConfigDelta(pub serde_json::Value);
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("IO error: {0}")]
-    IoError(String),
+    Io(#[from] std::io::Error),
 
     #[error("Parse error: {0}")]
-    ParseError(String),
+    Parse(#[from] toml::de::Error),
+
+    #[error("TOML serialization error: {0}")]
+    TomlSerialize(#[from] toml::ser::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("UTF-8 error: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
 
     #[allow(dead_code)]
     #[error("Invalid value for {0}")]

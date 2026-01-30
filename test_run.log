@@ -1,0 +1,308 @@
+warning: struct `McpProtocol` is never constructed
+  --> meerkat-mcp-client/src/protocol.rs:16:12
+   |
+16 | pub struct McpProtocol {
+   |            ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new`, `server_info`, `list_tools`, `call_tool_text`, and `close` are never used
+  --> meerkat-mcp-client/src/protocol.rs:21:12
+   |
+20 | impl McpProtocol {
+   | ---------------- associated items in this implementation
+21 |     pub fn new(service: RunningService<RoleClient, ()>) -> Self {
+   |            ^^^
+...
+25 |     pub fn server_info(&self) -> Option<&rmcp::model::ServerInfo> {
+   |            ^^^^^^^^^^^
+...
+29 |     pub async fn list_tools(&self) -> Result<Vec<ToolDef>, McpError> {
+   |                  ^^^^^^^^^^
+...
+57 |     pub async fn call_tool_text(&self, name: &str, args: &Value) -> Result<String, McpError> {
+   |                  ^^^^^^^^^^^^^^
+...
+86 |     pub async fn close(self) -> Result<(), McpError> {
+   |                  ^^^^^
+
+warning: function `extract_text_content_strict` is never used
+  --> meerkat-mcp-client/src/protocol.rs:97:4
+   |
+97 | fn extract_text_content_strict(contents: Vec<Content>) -> Result<String, String> {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `meerkat-mcp-client` (lib) generated 3 warnings
+warning: `meerkat-mcp-client` (lib test) generated 2 warnings (2 duplicates)
+warning: function `description` is never used
+  --> meerkat-tools/src/builtin/sub_agent/spawn.rs:37:12
+   |
+37 |     pub fn description() -> String {
+   |            ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: `meerkat-tools` (lib) generated 1 warning
+warning: `meerkat-tools` (lib test) generated 1 warning (1 duplicate)
+   Compiling meerkat-integration-tests v0.1.0 (/Users/luka/src/raik/tests/integration)
+   Compiling meerkat v0.1.0 (/Users/luka/src/raik/meerkat)
+   Compiling meerkat-rest v0.1.0 (/Users/luka/src/raik/meerkat-rest)
+   Compiling meerkat-mcp-server v0.1.0 (/Users/luka/src/raik/meerkat-mcp-server)
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/examples/comms_verbose.rs:297:51
+    |
+297 |     let secret_a = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair())?;
+    |                                                   ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/examples/comms_verbose.rs:298:51
+    |
+298 |     let secret_b = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair())?;
+    |                                                   ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0053]: method `stream_response` has an incompatible type for trait
+  --> meerkat/examples/comms_verbose.rs:54:16
+   |
+54 |         tools: &[ToolDef],
+   |                ^^^^^^^^^^ expected `Arc<meerkat::ToolDef>`, found `meerkat::ToolDef`
+   |
+   = note: expected signature `fn(&'life0 LoggingLlmAdapter, &'life1 _, &'life2 [Arc<meerkat::ToolDef>], _, Option<_>, Option<_>) -> Pin<_>`
+              found signature `fn(&'life0 LoggingLlmAdapter, &'life1 _, &'life2 [meerkat::ToolDef], _, Option<_>, Option<_>) -> Pin<_>`
+help: change the parameter type to match the trait
+   |
+54 -         tools: &[ToolDef],
+54 +         tools: &'life2 [Arc<meerkat::ToolDef>],
+   |
+
+error[E0053]: method `tools` has an incompatible type for trait
+   --> meerkat/examples/comms_verbose.rs:184:24
+    |
+184 |     fn tools(&self) -> Vec<ToolDef> {
+    |                        ^^^^^^^^^^^^ expected `Arc<[Arc<meerkat::ToolDef>]>`, found `Vec<meerkat::ToolDef>`
+    |
+    = note: expected signature `fn(&LoggingToolDispatcher) -> Arc<[Arc<meerkat::ToolDef>]>`
+               found signature `fn(&LoggingToolDispatcher) -> Vec<meerkat::ToolDef>`
+help: change the output type to match the trait
+    |
+184 -     fn tools(&self) -> Vec<ToolDef> {
+184 +     fn tools(&self) -> Arc<[Arc<meerkat::ToolDef>]> {
+    |
+
+error[E0053]: method `tools` has an incompatible type for trait
+  --> meerkat/examples/with_tools.rs:26:24
+   |
+26 |     fn tools(&self) -> Vec<ToolDef> {
+   |                        ^^^^^^^^^^^^ expected `Arc<[Arc<ToolDef>]>`, found `Vec<ToolDef>`
+   |
+   = note: expected signature `fn(&MathToolDispatcher) -> Arc<[Arc<ToolDef>]>`
+              found signature `fn(&MathToolDispatcher) -> Vec<ToolDef>`
+help: change the output type to match the trait
+   |
+26 -     fn tools(&self) -> Vec<ToolDef> {
+26 +     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+   |
+
+error[E0053]: method `tools` has an incompatible type for trait
+  --> meerkat/examples/multi_turn_tools.rs:44:24
+   |
+44 |     fn tools(&self) -> Vec<ToolDef> {
+   |                        ^^^^^^^^^^^^ expected `Arc<[Arc<ToolDef>]>`, found `Vec<ToolDef>`
+   |
+   = note: expected signature `fn(&MultiToolDispatcher) -> Arc<[Arc<ToolDef>]>`
+              found signature `fn(&MultiToolDispatcher) -> Vec<ToolDef>`
+help: change the output type to match the trait
+   |
+44 -     fn tools(&self) -> Vec<ToolDef> {
+44 +     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+   |
+
+error[E0308]: mismatched types
+  --> meerkat/examples/comms_verbose.rs:84:20
+   |
+84 |             tools: tools.to_vec(),
+   |                    ^^^^^^^^^^^^^^ expected `Vec<Arc<ToolDef>>`, found `Vec<ToolDef>`
+   |
+   = note: expected struct `Vec<Arc<meerkat::ToolDef>>`
+              found struct `Vec<meerkat::ToolDef>`
+
+error[E0277]: the trait bound `impl Future<Output = meerkat_client::adapter::LlmClientAdapter>: AgentLlmClient` is not satisfied
+   --> meerkat/examples/with_tools.rs:106:16
+    |
+106 |         .build(Arc::new(llm), tools, store);
+    |          ----- ^^^^^^^^^^^^^ the trait `AgentLlmClient` is not implemented for `impl Future<Output = meerkat_client::adapter::LlmClientAdapter>`
+    |          |
+    |          required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `AgentLlmClient`:
+              meerkat_client::adapter::LlmClientAdapter
+              meerkat_tools::builtin::sub_agent::runner::DynLlmClientAdapter
+              meerkat_tools::builtin::sub_agent::runner::LlmClientAdapter<C>
+note: required by a bound in `AgentBuilder::build`
+   --> /Users/luka/src/raik/meerkat-core/src/agent.rs:362:12
+    |
+360 |     pub async fn build<C, T, S>(self, client: Arc<C>, tools: Arc<T>, store: Arc<S>) -> Agent<C, T, S>
+    |                  ----- required by a bound in this associated function
+361 |     where
+362 |         C: AgentLlmClient + ?Sized,
+    |            ^^^^^^^^^^^^^^ required by this bound in `AgentBuilder::build`
+
+error[E0277]: the trait bound `impl Future<Output = meerkat_client::adapter::LlmClientAdapter>: AgentLlmClient` is not satisfied
+   --> meerkat/examples/multi_turn_tools.rs:203:16
+    |
+203 |         .build(Arc::new(llm), tools, store);
+    |          ----- ^^^^^^^^^^^^^ the trait `AgentLlmClient` is not implemented for `impl Future<Output = meerkat_client::adapter::LlmClientAdapter>`
+    |          |
+    |          required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `AgentLlmClient`:
+              meerkat_client::adapter::LlmClientAdapter
+              meerkat_tools::builtin::sub_agent::runner::DynLlmClientAdapter
+              meerkat_tools::builtin::sub_agent::runner::LlmClientAdapter<C>
+note: required by a bound in `AgentBuilder::build`
+   --> /Users/luka/src/raik/meerkat-core/src/agent.rs:362:12
+    |
+360 |     pub async fn build<C, T, S>(self, client: Arc<C>, tools: Arc<T>, store: Arc<S>) -> Agent<C, T, S>
+    |                  ----- required by a bound in this associated function
+361 |     where
+362 |         C: AgentLlmClient + ?Sized,
+    |            ^^^^^^^^^^^^^^ required by this bound in `AgentBuilder::build`
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<impl Future<Output = ...>, ..., ...>>` in the current scope
+   --> meerkat/examples/with_tools.rs:109:10
+    |
+108 |       let result = agent
+    |  __________________-
+109 | |         .run("What is 25 + 17, and then multiply the result by 3?".to_string())
+    | |         -^^^ method not found in `impl Future<Output = Agent<impl Future<Output = ...>, ..., ...>>`
+    | |_________|
+    |
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<impl Future<Output = ...>, ..., ...>>` in the current scope
+   --> meerkat/examples/multi_turn_tools.rs:210:10
+    |
+209 |       let result = agent
+    |  __________________-
+210 | |         .run("Calculate 15 * 8, then save a note about the result.".to_string())
+    | |         -^^^ method not found in `impl Future<Output = Agent<impl Future<Output = ...>, ..., ...>>`
+    | |_________|
+    |
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<impl Future<Output = ...>, ..., ...>>` in the current scope
+   --> meerkat/examples/multi_turn_tools.rs:219:10
+    |
+218 |       let result = agent
+    |  __________________-
+219 | |         .run("Now calculate 100 / 4 and 25 + 37.".to_string())
+    | |         -^^^ method not found in `impl Future<Output = Agent<impl Future<Output = ...>, ..., ...>>`
+    | |_________|
+    |
+
+Some errors have detailed explanations: E0053, E0277, E0599.
+For more information about an error, try `rustc --explain E0053`.
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<impl Future<Output = ...>, ..., ...>>` in the current scope
+   --> meerkat/examples/multi_turn_tools.rs:228:10
+    |
+227 |       let result = agent
+    |  __________________-
+228 | |         .run("Show me all the calculations we've done and any notes we've saved.".to_string())
+    | |         -^^^ method not found in `impl Future<Output = Agent<impl Future<Output = ...>, ..., ...>>`
+    | |_________|
+    |
+
+error[E0599]: no variant or associated item named `LlmError` found for enum `meerkat::AgentError` in the current scope
+   --> meerkat/examples/comms_verbose.rs:136:44
+    |
+136 |                     return Err(AgentError::LlmError(e.to_string()));
+    |                                            ^^^^^^^^ variant or associated item not found in `meerkat::AgentError`
+    |
+note: if you're trying to build a new `meerkat::AgentError`, consider using `meerkat::AgentError::llm` which returns `meerkat::AgentError`
+   --> /Users/luka/src/raik/meerkat-core/src/error.rs:216:5
+    |
+216 | /     pub fn llm(
+217 | |         provider: &'static str,
+218 | |         reason: LlmFailureReason,
+219 | |         message: impl Into<String>,
+220 | |     ) -> Self {
+    | |_____________^
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<impl Future<Output = ...>, ..., ...>>` in the current scope
+   --> meerkat/examples/multi_turn_tools.rs:237:10
+    |
+236 |       let result = agent
+    |  __________________-
+237 | |         .run("Save a note summarizing our calculation session.".to_string())
+    | |         -^^^ method not found in `impl Future<Output = Agent<impl Future<Output = ...>, ..., ...>>`
+    | |_________|
+    |
+
+error[E0308]: mismatched types
+   --> meerkat/examples/comms_verbose.rs:185:9
+    |
+184 |     fn tools(&self) -> Vec<ToolDef> {
+    |                        ------------ expected `Vec<meerkat::ToolDef>` because of return type
+185 |         self.inner.tools()
+    |         ^^^^^^^^^^^^^^^^^^ expected `Vec<ToolDef>`, found `Arc<[Arc<ToolDef>]>`
+    |
+    = note: expected struct `Vec<meerkat::ToolDef>`
+               found struct `Arc<[Arc<meerkat::ToolDef>]>`
+
+error[E0277]: `Arc<[Arc<meerkat::ToolDef>]>` is not an iterator
+   --> meerkat/examples/comms_verbose.rs:328:17
+    |
+328 |     for tool in tools_check.tools() {
+    |                 ^^^^^^^^^^^^^^^^^^^ `Arc<[Arc<meerkat::ToolDef>]>` is not an iterator
+    |
+    = help: the trait `Iterator` is not implemented for `Arc<[Arc<meerkat::ToolDef>]>`
+    = note: required for `Arc<[Arc<meerkat::ToolDef>]>` to implement `IntoIterator`
+
+error[E0308]: mismatched types
+   --> meerkat/examples/comms_verbose.rs:385:39
+    |
+385 |     let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+    |                       --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                       |
+    |                       arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/examples/comms_verbose.rs:385:39
+    |
+385 |     let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+    |                                       ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+385 |     let mut agent_a = CommsAgent::new(agent_a_inner.await, comms_manager_a);
+    |                                                    ++++++
+
+error[E0308]: mismatched types
+   --> meerkat/examples/comms_verbose.rs:386:39
+    |
+386 |     let mut agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
+    |                       --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                       |
+    |                       arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/examples/comms_verbose.rs:386:39
+    |
+386 |     let mut agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
+    |                                       ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+386 |     let mut agent_b = CommsAgent::new(agent_b_inner.await, comms_manager_b);
+    |                                                    ++++++
+
+Some errors have detailed explanations: E0053, E0277, E0308, E0425, E0599.
+error: could not compile `meerkat` (example "with_tools") due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `meerkat` (example "multi_turn_tools") due to 6 previous errors
+error: could not compile `meerkat` (example "comms_verbose") due to 10 previous errors

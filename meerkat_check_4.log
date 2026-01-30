@@ -1,0 +1,278 @@
+warning: struct `McpProtocol` is never constructed
+  --> meerkat-mcp-client/src/protocol.rs:16:12
+   |
+16 | pub struct McpProtocol {
+   |            ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new`, `server_info`, `list_tools`, `call_tool_text`, and `close` are never used
+  --> meerkat-mcp-client/src/protocol.rs:21:12
+   |
+20 | impl McpProtocol {
+   | ---------------- associated items in this implementation
+21 |     pub fn new(service: RunningService<RoleClient, ()>) -> Self {
+   |            ^^^
+...
+25 |     pub fn server_info(&self) -> Option<&rmcp::model::ServerInfo> {
+   |            ^^^^^^^^^^^
+...
+29 |     pub async fn list_tools(&self) -> Result<Vec<ToolDef>, McpError> {
+   |                  ^^^^^^^^^^
+...
+57 |     pub async fn call_tool_text(&self, name: &str, args: &Value) -> Resul...
+   |                  ^^^^^^^^^^^^^^
+...
+86 |     pub async fn close(self) -> Result<(), McpError> {
+   |                  ^^^^^
+
+warning: function `extract_text_content_strict` is never used
+  --> meerkat-mcp-client/src/protocol.rs:97:4
+   |
+97 | fn extract_text_content_strict(contents: Vec<Content>) -> Result<String, ...
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `meerkat-mcp-client` (lib) generated 3 warnings
+warning: function `description` is never used
+  --> meerkat-tools/src/builtin/sub_agent/spawn.rs:37:12
+   |
+37 |     pub fn description() -> String {
+   |            ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: `meerkat-tools` (lib) generated 1 warning
+    Checking meerkat v0.1.0 (/Users/luka/src/raik/meerkat)
+error[E0425]: cannot find value `MockClient` in this scope
+    --> meerkat/tests/e2e.rs:1531:31
+     |
+1531 |         let client = Arc::new(MockClient);
+     |                               ^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/tests/e2e_comms.rs:273:40
+    |
+273 |         meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair()).unwrap();
+    |                                        ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/tests/e2e_comms.rs:275:40
+    |
+275 |         meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair()).unwrap();
+    |                                        ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/tests/e2e_comms.rs:644:44
+    |
+644 |             meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair()).unwrap();
+    |                                            ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/tests/e2e_comms.rs:646:44
+    |
+646 |             meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair()).unwrap();
+    |                                            ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/tests/e2e_comms.rs:648:44
+    |
+648 |             meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_c.keypair()).unwrap();
+    |                                            ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0053]: method `tools` has an incompatible type for trait
+  --> meerkat/tests/e2e_sdk_agentfactory.rs:76:24
+   |
+76 |     fn tools(&self) -> Vec<Arc<ToolDef>> {
+   |                        ^^^^^^^^^^^^^^^^^ expected `Arc<[Arc<ToolDef>]>`, found `Vec<Arc<ToolDef>>`
+   |
+   = note: expected signature `fn(&RecordingDispatcher) -> Arc<[Arc<ToolDef>]>`
+              found signature `fn(&RecordingDispatcher) -> Vec<Arc<ToolDef>>`
+help: change the output type to match the trait
+   |
+76 -     fn tools(&self) -> Vec<Arc<ToolDef>> {
+76 +     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+   |
+
+error[E0283]: type annotations needed
+  --> meerkat/tests/e2e_sdk_config_ephemeral.rs:17:55
+   |
+17 |     assert_eq!(patched.agent.model, "ephemeral-model".into());
+   |                                                       ^^^^
+   |
+   = note: multiple `impl`s satisfying `_: From<&str>` found in the following crates: `bytes`, `reqwest`, `winnow`:
+           - impl From<&'static str> for bytes::bytes::Bytes;
+           - impl From<&'static str> for reqwest::async_impl::body::Body;
+           - impl From<&'static str> for reqwest::blocking::body::Body;
+           - impl From<&'static str> for winnow::error::StrContextValue;
+   = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+   |
+17 -     assert_eq!(patched.agent.model, "ephemeral-model".into());
+17 +     assert_eq!(patched.agent.model, <&str as Into<T>>::into("ephemeral-model"));
+   |
+
+error[E0283]: type annotations needed
+  --> meerkat/tests/e2e_sdk_config_ephemeral.rs:17:55
+   |
+17 |     assert_eq!(patched.agent.model, "ephemeral-model".into());
+   |     --------------------------------------------------^^^^--- type must be known at this point
+   |
+   = note: multiple `impl`s satisfying `std::string::String: PartialEq<_>` found in the following crates: `alloc`, `bytes`, `core_foundation`, `http`, `iri_string`, `serde_json`:
+           - impl PartialEq for std::string::String;
+           - impl PartialEq<Value> for std::string::String;
+           - impl PartialEq<bytes::bytes::Bytes> for std::string::String;
+           - impl PartialEq<bytes::bytes_mut::BytesMut> for std::string::String;
+           - impl PartialEq<core_foundation::string::CFString> for std::string::String;
+           - impl PartialEq<http::header::value::HeaderValue> for std::string::String;
+           - impl PartialEq<http::uri::authority::Authority> for std::string::String;
+           - impl PartialEq<http::uri::path::PathAndQuery> for std::string::String;
+           - impl PartialEq<iri_string::template::string::owned::UriTemplateString> for std::string::String;
+help: try using a fully qualified path to specify the expected types
+   |
+17 -     assert_eq!(patched.agent.model, "ephemeral-model".into());
+17 +     assert_eq!(patched.agent.model, <&str as Into<T>>::into("ephemeral-model"));
+   |
+
+error[E0308]: mismatched types
+   --> meerkat/tests/e2e_comms.rs:346:35
+    |
+346 |     let agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+    |                   --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                   |
+    |                   arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/tests/e2e_comms.rs:346:35
+    |
+346 |     let agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+    |                                   ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+346 |     let agent_a = CommsAgent::new(agent_a_inner.await, comms_manager_a);
+    |                                                ++++++
+
+error[E0308]: mismatched types
+   --> meerkat/tests/e2e_comms.rs:347:35
+    |
+347 |     let agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
+    |                   --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                   |
+    |                   arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/tests/e2e_comms.rs:347:35
+    |
+347 |     let agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
+    |                                   ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+347 |     let agent_b = CommsAgent::new(agent_b_inner.await, comms_manager_b);
+    |                                                ++++++
+
+For more information about this error, try `rustc --explain E0053`.
+error[E0308]: mismatched types
+   --> meerkat/tests/e2e_comms.rs:736:43
+    |
+736 |         let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+    |                           --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                           |
+    |                           arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/tests/e2e_comms.rs:736:43
+    |
+736 |         let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+    |                                           ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+736 |         let mut agent_a = CommsAgent::new(agent_a_inner.await, comms_manager_a);
+    |                                                        ++++++
+
+error[E0308]: mismatched types
+   --> meerkat/tests/e2e_comms.rs:737:43
+    |
+737 |         let mut agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
+    |                           --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                           |
+    |                           arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/tests/e2e_comms.rs:737:43
+    |
+737 |         let mut agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
+    |                                           ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+737 |         let mut agent_b = CommsAgent::new(agent_b_inner.await, comms_manager_b);
+    |                                                        ++++++
+
+error[E0308]: mismatched types
+   --> meerkat/tests/e2e_comms.rs:738:43
+    |
+738 |         let mut agent_c = CommsAgent::new(agent_c_inner, comms_manager_c);
+    |                           --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                           |
+    |                           arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/tests/e2e_comms.rs:738:43
+    |
+738 |         let mut agent_c = CommsAgent::new(agent_c_inner, comms_manager_c);
+    |                                           ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+738 |         let mut agent_c = CommsAgent::new(agent_c_inner.await, comms_manager_c);
+    |                                                        ++++++
+
+error[E0308]: mismatched types
+    --> meerkat/tests/integration.rs:1102:21
+     |
+1102 |         .with_tools(tools.clone())
+     |          ---------- ^^^^^^^^^^^^^ expected `Vec<Arc<ToolDef>>`, found `Vec<ToolDef>`
+     |          |
+     |          arguments to this method are incorrect
+     |
+     = note: expected struct `Vec<std::sync::Arc<meerkat::ToolDef>>`
+                found struct `Vec<meerkat::ToolDef>`
+note: method defined here
+    --> /Users/luka/src/raik/meerkat-client/src/types.rs:83:12
+     |
+83   |     pub fn with_tools(mut self, tools: Vec<Arc<ToolDef>>) -> Self {
+     |            ^^^^^^^^^^
+
+error: could not compile `meerkat` (test "e2e_sdk_agentfactory") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+Some errors have detailed explanations: E0308, E0425.
+For more information about an error, try `rustc --explain E0308`.
+For more information about this error, try `rustc --explain E0283`.
+For more information about this error, try `rustc --explain E0308`.
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `meerkat` (test "e2e_comms") due to 10 previous errors
+error: could not compile `meerkat` (test "e2e_sdk_config_ephemeral") due to 2 previous errors
+error: could not compile `meerkat` (test "integration") due to 1 previous error
+error: could not compile `meerkat` (test "e2e") due to 1 previous error

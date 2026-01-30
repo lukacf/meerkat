@@ -17,6 +17,7 @@ thiserror = "1.0"
 base64 = "0.22"
 rand = "0.8"
 parking_lot = "0.12"
+tracing = "0.1"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 zeroize = "1"

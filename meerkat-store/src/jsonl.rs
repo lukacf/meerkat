@@ -158,10 +158,10 @@ impl JsonlStore {
                 match retry {
                     Ok(Ok(index)) => Arc::new(index),
                     Ok(Err(err)) => return Err(err),
-                    Err(err) => return Err(StoreError::Internal(err.to_string())),
+                    Err(err) => return Err(StoreError::Join(err)),
                 }
             }
-            Err(err) => return Err(StoreError::Internal(err.to_string())),
+            Err(err) => return Err(StoreError::Join(err)),
         };
 
         let is_empty = {
@@ -171,7 +171,7 @@ impl JsonlStore {
         let is_empty = match is_empty {
             Ok(Ok(is_empty)) => is_empty,
             Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(StoreError::Internal(err.to_string())),
+            Err(err) => return Err(StoreError::Join(err)),
         };
 
         if is_empty {
@@ -182,7 +182,7 @@ impl JsonlStore {
                 match result {
                     Ok(Ok(())) => {}
                     Ok(Err(err)) => return Err(err),
-                    Err(err) => return Err(StoreError::Internal(err.to_string())),
+                    Err(err) => return Err(StoreError::Join(err)),
                 }
             }
         }
@@ -230,12 +230,11 @@ impl SessionStore for JsonlStore {
         } else {
             serde_json::to_string(session)
         }
-        .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        .map_err(StoreError::Serialization)?;
 
         // Create metadata for the sidecar file
         let meta = SessionMeta::from(session);
-        let meta_json =
-            serde_json::to_string(&meta).map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let meta_json = serde_json::to_string(&meta).map_err(StoreError::Serialization)?;
 
         // Write session atomically (write to temp, then rename)
         let temp_path = path.with_extension("jsonl.tmp");
@@ -262,7 +261,7 @@ impl SessionStore for JsonlStore {
         match result {
             Ok(Ok(())) => {}
             Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(StoreError::Internal(err.to_string())),
+            Err(err) => return Err(StoreError::Join(err)),
         }
 
         Ok(())
@@ -281,8 +280,8 @@ impl SessionStore for JsonlStore {
         let mut contents = String::new();
         file.read_to_string(&mut contents).await?;
 
-        let session: Session = serde_json::from_str(&contents)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let session: Session =
+            serde_json::from_str(&contents).map_err(StoreError::Serialization)?;
 
         Ok(Some(session))
     }
@@ -293,7 +292,7 @@ impl SessionStore for JsonlStore {
         match result {
             Ok(Ok(sessions)) => Ok(sessions),
             Ok(Err(err)) => Err(err),
-            Err(err) => Err(StoreError::Internal(err.to_string())),
+            Err(err) => Err(StoreError::Join(err)),
         }
     }
 
@@ -320,7 +319,7 @@ impl SessionStore for JsonlStore {
         match result {
             Ok(Ok(())) => {}
             Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(StoreError::Internal(err.to_string())),
+            Err(err) => return Err(StoreError::Join(err)),
         }
 
         Ok(())

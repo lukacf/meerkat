@@ -8,13 +8,19 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
 
     #[error("Serialization error: {0}")]
-    Serialization(String),
+    Serialization(#[from] serde_json::Error),
+
+    #[error("Database error: {0}")]
+    Database(#[from] Box<redb::Error>),
 
     #[error("Session not found: {0}")]
     NotFound(SessionId),
 
     #[error("Session corrupted: {0}")]
     Corrupted(SessionId),
+
+    #[error("Task join error: {0}")]
+    Join(#[from] tokio::task::JoinError),
 
     #[error("Internal error: {0}")]
     Internal(String),

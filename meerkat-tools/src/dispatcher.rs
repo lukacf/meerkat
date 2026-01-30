@@ -199,7 +199,7 @@ impl AgentToolDispatcher for FilteredToolDispatcher {
             .tools()
             .iter()
             .filter(|t| !self.denied_tools.contains(&t.name))
-            .cloned()
+            .map(Arc::clone)
             .collect();
         tools.into()
     }

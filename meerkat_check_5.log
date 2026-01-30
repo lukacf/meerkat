@@ -1,0 +1,122 @@
+warning: struct `McpProtocol` is never constructed
+  --> meerkat-mcp-client/src/protocol.rs:16:12
+   |
+16 | pub struct McpProtocol {
+   |            ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new`, `server_info`, `list_tools`, `call_tool_text`, and `close` are never used
+  --> meerkat-mcp-client/src/protocol.rs:21:12
+   |
+20 | impl McpProtocol {
+   | ---------------- associated items in this implementation
+21 |     pub fn new(service: RunningService<RoleClient, ()>) -> Self {
+   |            ^^^
+...
+25 |     pub fn server_info(&self) -> Option<&rmcp::model::ServerInfo> {
+   |            ^^^^^^^^^^^
+...
+29 |     pub async fn list_tools(&self) -> Result<Vec<ToolDef>, McpError> {
+   |                  ^^^^^^^^^^
+...
+57 |     pub async fn call_tool_text(&self, name: &str, args: &Value) -> Resul...
+   |                  ^^^^^^^^^^^^^^
+...
+86 |     pub async fn close(self) -> Result<(), McpError> {
+   |                  ^^^^^
+
+warning: function `extract_text_content_strict` is never used
+  --> meerkat-mcp-client/src/protocol.rs:97:4
+   |
+97 | fn extract_text_content_strict(contents: Vec<Content>) -> Result<String, ...
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `meerkat-mcp-client` (lib) generated 3 warnings
+warning: function `description` is never used
+  --> meerkat-tools/src/builtin/sub_agent/spawn.rs:37:12
+   |
+37 |     pub fn description() -> String {
+   |            ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: `meerkat-tools` (lib) generated 1 warning
+    Checking meerkat v0.1.0 (/Users/luka/src/raik/meerkat)
+error[E0053]: method `tools` has an incompatible type for trait
+  --> meerkat/tests/e2e_sdk_agentfactory.rs:76:24
+   |
+76 |     fn tools(&self) -> Vec<Arc<ToolDef>> {
+   |                        ^^^^^^^^^^^^^^^^^ expected `Arc<[Arc<ToolDef>]>`, found `Vec<Arc<ToolDef>>`
+   |
+   = note: expected signature `fn(&RecordingDispatcher) -> Arc<[Arc<ToolDef>]>`
+              found signature `fn(&RecordingDispatcher) -> Vec<Arc<ToolDef>>`
+help: change the output type to match the trait
+   |
+76 -     fn tools(&self) -> Vec<Arc<ToolDef>> {
+76 +     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+   |
+
+error[E0283]: type annotations needed
+  --> meerkat/tests/e2e_sdk_config_ephemeral.rs:17:55
+   |
+17 |     assert_eq!(patched.agent.model, "ephemeral-model".into());
+   |                                                       ^^^^
+   |
+   = note: multiple `impl`s satisfying `_: From<&str>` found in the following crates: `bytes`, `reqwest`, `winnow`:
+           - impl From<&'static str> for bytes::bytes::Bytes;
+           - impl From<&'static str> for reqwest::async_impl::body::Body;
+           - impl From<&'static str> for reqwest::blocking::body::Body;
+           - impl From<&'static str> for winnow::error::StrContextValue;
+   = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+   |
+17 -     assert_eq!(patched.agent.model, "ephemeral-model".into());
+17 +     assert_eq!(patched.agent.model, <&str as Into<T>>::into("ephemeral-model"));
+   |
+
+error[E0283]: type annotations needed
+  --> meerkat/tests/e2e_sdk_config_ephemeral.rs:17:55
+   |
+17 |     assert_eq!(patched.agent.model, "ephemeral-model".into());
+   |     --------------------------------------------------^^^^--- type must be known at this point
+   |
+   = note: multiple `impl`s satisfying `std::string::String: PartialEq<_>` found in the following crates: `alloc`, `bytes`, `core_foundation`, `http`, `iri_string`, `serde_json`:
+           - impl PartialEq for std::string::String;
+           - impl PartialEq<Value> for std::string::String;
+           - impl PartialEq<bytes::bytes::Bytes> for std::string::String;
+           - impl PartialEq<bytes::bytes_mut::BytesMut> for std::string::String;
+           - impl PartialEq<core_foundation::string::CFString> for std::string::String;
+           - impl PartialEq<http::header::value::HeaderValue> for std::string::String;
+           - impl PartialEq<http::uri::authority::Authority> for std::string::String;
+           - impl PartialEq<http::uri::path::PathAndQuery> for std::string::String;
+           - impl PartialEq<iri_string::template::string::owned::UriTemplateString> for std::string::String;
+help: try using a fully qualified path to specify the expected types
+   |
+17 -     assert_eq!(patched.agent.model, "ephemeral-model".into());
+17 +     assert_eq!(patched.agent.model, <&str as Into<T>>::into("ephemeral-model"));
+   |
+
+For more information about this error, try `rustc --explain E0053`.
+error: could not compile `meerkat` (test "e2e_sdk_agentfactory") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error[E0308]: mismatched types
+    --> meerkat/tests/integration.rs:1102:21
+     |
+1102 |         .with_tools(tools.clone())
+     |          ---------- ^^^^^^^^^^^^^ expected `Vec<Arc<ToolDef>>`, found `Vec<ToolDef>`
+     |          |
+     |          arguments to this method are incorrect
+     |
+     = note: expected struct `Vec<std::sync::Arc<meerkat::ToolDef>>`
+                found struct `Vec<meerkat::ToolDef>`
+note: method defined here
+    --> /Users/luka/src/raik/meerkat-client/src/types.rs:83:12
+     |
+83   |     pub fn with_tools(mut self, tools: Vec<Arc<ToolDef>>) -> Self {
+     |            ^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0283`.
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `meerkat` (test "e2e_sdk_config_ephemeral") due to 2 previous errors
+error: could not compile `meerkat` (test "integration") due to 1 previous error

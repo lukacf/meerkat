@@ -1,0 +1,944 @@
+warning: struct `McpProtocol` is never constructed
+  --> meerkat-mcp-client/src/protocol.rs:16:12
+   |
+16 | pub struct McpProtocol {
+   |            ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new`, `server_info`, `list_tools`, `call_tool_text`, and `close` are never used
+  --> meerkat-mcp-client/src/protocol.rs:21:12
+   |
+20 | impl McpProtocol {
+   | ---------------- associated items in this implementation
+21 |     pub fn new(service: RunningService<RoleClient, ()>) -> Self {
+   |            ^^^
+...
+25 |     pub fn server_info(&self) -> Option<&rmcp::model::ServerInfo> {
+   |            ^^^^^^^^^^^
+...
+29 |     pub async fn list_tools(&self) -> Result<Vec<ToolDef>, McpError> {
+   |                  ^^^^^^^^^^
+...
+57 |     pub async fn call_tool_text(&self, name: &str, args: &Value) -> Resul...
+   |                  ^^^^^^^^^^^^^^
+...
+86 |     pub async fn close(self) -> Result<(), McpError> {
+   |                  ^^^^^
+
+warning: function `extract_text_content_strict` is never used
+  --> meerkat-mcp-client/src/protocol.rs:97:4
+   |
+97 | fn extract_text_content_strict(contents: Vec<Content>) -> Result<String, ...
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `meerkat-mcp-client` (lib) generated 3 warnings
+warning: `meerkat-mcp-client` (lib test) generated 2 warnings (2 duplicates)
+warning: function `description` is never used
+  --> meerkat-tools/src/builtin/sub_agent/spawn.rs:37:12
+   |
+37 |     pub fn description() -> String {
+   |            ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: `meerkat-tools` (lib) generated 1 warning
+warning: `meerkat-tools` (lib test) generated 1 warning (1 duplicate)
+    Checking meerkat-comms-agent v0.1.0 (/Users/luka/src/raik/meerkat-comms-agent)
+    Checking meerkat-tools v0.1.0 (/Users/luka/src/raik/meerkat-tools)
+    Checking meerkat-mcp-server v0.1.0 (/Users/luka/src/raik/meerkat-mcp-server)
+    Checking meerkat-rest v0.1.0 (/Users/luka/src/raik/meerkat-rest)
+    Checking meerkat v0.1.0 (/Users/luka/src/raik/meerkat)
+    Checking meerkat-cli v0.1.0 (/Users/luka/src/raik/meerkat-cli)
+error[E0053]: method `stream_response` has an incompatible type for trait
+  --> meerkat/tests/e2e.rs:41:16
+   |
+41 |         tools: &[ToolDef],
+   |                ^^^^^^^^^^ expected `std::sync::Arc<meerkat::ToolDef>`, found `meerkat::ToolDef`
+   |
+   = note: expected signature `fn(&'life0 LlmClientAdapter<_>, &'life1 _, &'life2 [std::sync::Arc<meerkat::ToolDef>], _, Option<_>, Option<_>) -> Pin<_>`
+              found signature `fn(&'life0 LlmClientAdapter<_>, &'life1 _, &'life2 [meerkat::ToolDef], _, Option<_>, Option<_>) -> Pin<_>`
+help: change the parameter type to match the trait
+   |
+41 -         tools: &[ToolDef],
+41 +         tools: &'life2 [std::sync::Arc<meerkat::ToolDef>],
+   |
+
+error[E0053]: method `tools` has an incompatible type for trait
+   --> meerkat/tests/e2e.rs:181:24
+    |
+181 |     fn tools(&self) -> Vec<ToolDef> {
+    |                        ^^^^^^^^^^^^ expected `Arc<[Arc<ToolDef>]>`, found `Vec<meerkat::ToolDef>`
+    |
+    = note: expected signature `fn(&EmptyToolDispatcher) -> std::sync::Arc<[std::sync::Arc<meerkat::ToolDef>]>`
+               found signature `fn(&EmptyToolDispatcher) -> Vec<meerkat::ToolDef>`
+help: change the output type to match the trait
+    |
+181 -     fn tools(&self) -> Vec<ToolDef> {
+181 +     fn tools(&self) -> std::sync::Arc<[std::sync::Arc<meerkat::ToolDef>]> {
+    |
+
+error[E0053]: method `tools` has an incompatible type for trait
+   --> meerkat/tests/e2e.rs:219:24
+    |
+219 |     fn tools(&self) -> Vec<ToolDef> {
+    |                        ^^^^^^^^^^^^ expected `Arc<[Arc<ToolDef>]>`, found `Vec<meerkat::ToolDef>`
+    |
+    = note: expected signature `fn(&MockToolDispatcher) -> std::sync::Arc<[std::sync::Arc<meerkat::ToolDef>]>`
+               found signature `fn(&MockToolDispatcher) -> Vec<meerkat::ToolDef>`
+help: change the output type to match the trait
+    |
+219 -     fn tools(&self) -> Vec<ToolDef> {
+219 +     fn tools(&self) -> std::sync::Arc<[std::sync::Arc<meerkat::ToolDef>]> {
+    |
+
+error[E0053]: method `tools` has an incompatible type for trait
+   --> meerkat/tests/e2e.rs:454:28
+    |
+454 |         fn tools(&self) -> Vec<ToolDef> {
+    |                            ^^^^^^^^^^^^ expected `Arc<[Arc<ToolDef>]>`, found `Vec<meerkat::ToolDef>`
+    |
+    = note: expected signature `fn(&DispatcherWrapper) -> std::sync::Arc<[std::sync::Arc<meerkat::ToolDef>]>`
+               found signature `fn(&DispatcherWrapper) -> Vec<meerkat::ToolDef>`
+help: change the output type to match the trait
+    |
+454 -         fn tools(&self) -> Vec<ToolDef> {
+454 +         fn tools(&self) -> std::sync::Arc<[std::sync::Arc<meerkat::ToolDef>]> {
+    |
+
+error[E0053]: method `tools` has an incompatible type for trait
+   --> meerkat/tests/e2e.rs:977:28
+    |
+977 |         fn tools(&self) -> Vec<ToolDef> {
+    |                            ^^^^^^^^^^^^ expected `Arc<[Arc<ToolDef>]>`, found `Vec<meerkat::ToolDef>`
+    |
+    = note: expected signature `fn(&TimedToolDispatcher) -> std::sync::Arc<[std::sync::Arc<meerkat::ToolDef>]>`
+               found signature `fn(&TimedToolDispatcher) -> Vec<meerkat::ToolDef>`
+help: change the output type to match the trait
+    |
+977 -         fn tools(&self) -> Vec<ToolDef> {
+977 +         fn tools(&self) -> std::sync::Arc<[std::sync::Arc<meerkat::ToolDef>]> {
+    |
+
+error[E0053]: method `tools` has an incompatible type for trait
+    --> meerkat/tests/e2e.rs:1178:32
+     |
+1178 |             fn tools(&self) -> Vec<ToolDef> {
+     |                                ^^^^^^^^^^^^ expected `Arc<[Arc<ToolDef>]>`, found `Vec<meerkat::ToolDef>`
+     |
+     = note: expected signature `fn(&PartialFailureDispatcher) -> std::sync::Arc<[std::sync::Arc<meerkat::ToolDef>]>`
+                found signature `fn(&PartialFailureDispatcher) -> Vec<meerkat::ToolDef>`
+help: change the output type to match the trait
+     |
+1178 -             fn tools(&self) -> Vec<ToolDef> {
+1178 +             fn tools(&self) -> std::sync::Arc<[std::sync::Arc<meerkat::ToolDef>]> {
+     |
+
+error[E0053]: method `stream_response` has an incompatible type for trait
+    --> meerkat/tests/e2e.rs:1527:25
+     |
+1527 |                 _tools: &[ToolDef],
+     |                         ^^^^^^^^^^ expected `std::sync::Arc<meerkat::ToolDef>`, found `meerkat::ToolDef`
+     |
+     = note: expected signature `fn(&'life0 MockClient, &'life1 _, &'life2 [std::sync::Arc<meerkat::ToolDef>], _, Option<_>, Option<_>) -> Pin<_>`
+                found signature `fn(&'life0 MockClient, &'life1 _, &'life2 [meerkat::ToolDef], _, Option<_>, Option<_>) -> Pin<_>`
+help: change the parameter type to match the trait
+     |
+1527 -                 _tools: &[ToolDef],
+1527 +                 _tools: &'life2 [std::sync::Arc<meerkat::ToolDef>],
+     |
+
+error[E0053]: method `tools` has an incompatible type for trait
+  --> meerkat/tests/e2e_sdk_agentfactory.rs:76:24
+   |
+76 |     fn tools(&self) -> Vec<Arc<ToolDef>> {
+   |                        ^^^^^^^^^^^^^^^^^ expected `Arc<[Arc<ToolDef>]>`, found `Vec<Arc<ToolDef>>`
+   |
+   = note: expected signature `fn(&RecordingDispatcher) -> Arc<[Arc<ToolDef>]>`
+              found signature `fn(&RecordingDispatcher) -> Vec<Arc<ToolDef>>`
+help: change the output type to match the trait
+   |
+76 -     fn tools(&self) -> Vec<Arc<ToolDef>> {
+76 +     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+   |
+
+error[E0283]: type annotations needed
+  --> meerkat/tests/e2e_sdk_config_ephemeral.rs:17:55
+   |
+17 |     assert_eq!(patched.agent.model, "ephemeral-model".into());
+   |                                                       ^^^^
+   |
+   = note: multiple `impl`s satisfying `_: From<&str>` found in the following crates: `bytes`, `reqwest`, `winnow`:
+           - impl From<&'static str> for bytes::bytes::Bytes;
+           - impl From<&'static str> for reqwest::async_impl::body::Body;
+           - impl From<&'static str> for reqwest::blocking::body::Body;
+           - impl From<&'static str> for winnow::error::StrContextValue;
+   = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+   |
+17 -     assert_eq!(patched.agent.model, "ephemeral-model".into());
+17 +     assert_eq!(patched.agent.model, <&str as Into<T>>::into("ephemeral-model"));
+   |
+
+error[E0283]: type annotations needed
+  --> meerkat/tests/e2e_sdk_config_ephemeral.rs:17:55
+   |
+17 |     assert_eq!(patched.agent.model, "ephemeral-model".into());
+   |     --------------------------------------------------^^^^--- type must be known at this point
+   |
+   = note: multiple `impl`s satisfying `std::string::String: PartialEq<_>` found in the following crates: `alloc`, `bytes`, `core_foundation`, `http`, `iri_string`, `serde_json`:
+           - impl PartialEq for std::string::String;
+           - impl PartialEq<Value> for std::string::String;
+           - impl PartialEq<bytes::bytes::Bytes> for std::string::String;
+           - impl PartialEq<bytes::bytes_mut::BytesMut> for std::string::String;
+           - impl PartialEq<core_foundation::string::CFString> for std::string::String;
+           - impl PartialEq<http::header::value::HeaderValue> for std::string::String;
+           - impl PartialEq<http::uri::authority::Authority> for std::string::String;
+           - impl PartialEq<http::uri::path::PathAndQuery> for std::string::String;
+           - impl PartialEq<iri_string::template::string::owned::UriTemplateString> for std::string::String;
+help: try using a fully qualified path to specify the expected types
+   |
+17 -     assert_eq!(patched.agent.model, "ephemeral-model".into());
+17 +     assert_eq!(patched.agent.model, <&str as Into<T>>::into("ephemeral-model"));
+   |
+
+error[E0308]: mismatched types
+  --> meerkat/tests/e2e.rs:49:20
+   |
+49 |             tools: tools.to_vec(),
+   |                    ^^^^^^^^^^^^^^ expected `Vec<Arc<ToolDef>>`, found `Vec<ToolDef>`
+   |
+   = note: expected struct `Vec<std::sync::Arc<meerkat::ToolDef>>`
+              found struct `Vec<meerkat::ToolDef>`
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/tests/e2e_comms.rs:274:40
+    |
+274 |         meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair()).unwrap();
+    |                                        ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/tests/e2e_comms.rs:276:40
+    |
+276 |         meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair()).unwrap();
+    |                                        ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/tests/e2e_comms.rs:645:44
+    |
+645 |             meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair()).unwrap();
+    |                                            ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/tests/e2e_comms.rs:647:44
+    |
+647 |             meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair()).unwrap();
+    |                                            ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+error[E0425]: cannot find function `keypair_to_secret` in module `meerkat_comms_agent::listener`
+   --> meerkat/tests/e2e_comms.rs:649:44
+    |
+649 |             meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_c.keypair()).unwrap();
+    |                                            ^^^^^^^^^^^^^^^^^ not found in `meerkat_comms_agent::listener`
+
+For more information about this error, try `rustc --explain E0053`.
+error[E0053]: method `stream_response` has an incompatible type for trait
+  --> meerkat/tests/e2e_comms.rs:47:16
+   |
+47 |         tools: &[ToolDef],
+   |                ^^^^^^^^^^ expected `std::sync::Arc<meerkat::ToolDef>`, found `meerkat::ToolDef`
+   |
+   = note: expected signature `fn(&'life0 LlmClientAdapter<_>, &'life1 _, &'life2 [std::sync::Arc<meerkat::ToolDef>], _, Option<_>, Option<_>) -> Pin<_>`
+              found signature `fn(&'life0 LlmClientAdapter<_>, &'life1 _, &'life2 [meerkat::ToolDef], _, Option<_>, Option<_>) -> Pin<_>`
+help: change the parameter type to match the trait
+   |
+47 -         tools: &[ToolDef],
+47 +         tools: &'life2 [std::sync::Arc<meerkat::ToolDef>],
+   |
+
+error[E0599]: no variant or associated item named `LlmError` found for enum `meerkat::AgentError` in the current scope
+   --> meerkat/tests/e2e.rs:95:44
+    |
+95  |                     return Err(AgentError::LlmError(e.to_string()));
+    |                                            ^^^^^^^^ variant or associated item not found in `meerkat::AgentError`
+    |
+note: if you're trying to build a new `meerkat::AgentError`, consider using `meerkat::AgentError::llm` which returns `meerkat::AgentError`
+   --> /Users/luka/src/raik/meerkat-core/src/error.rs:216:5
+    |
+216 | /     pub fn llm(
+217 | |         provider: &'static str,
+218 | |         reason: LlmFailureReason,
+219 | |         message: impl Into<String>,
+220 | |     ) -> Self {
+    | |_____________^
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:324:14
+    |
+323 |           let result = agent
+    |  ______________________-
+324 | |             .run("What is 2+2? Answer with just the number.".to_string())
+    | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_____________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+324 |             .await.run("What is 2+2? Answer with just the number.".to_string())
+    |              ++++++
+
+error[E0599]: no method named `session` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:347:19
+    |
+347 |             agent.session().messages().len(),
+    |                   ^^^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+347 |             agent.await.session().messages().len(),
+    |                   ++++++
+
+error[E0308]: mismatched types
+   --> meerkat/tests/e2e_comms.rs:347:35
+    |
+347 |     let agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+    |                   --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                   |
+    |                   arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/tests/e2e_comms.rs:347:35
+    |
+347 |     let agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+    |                                   ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+347 |     let agent_a = CommsAgent::new(agent_a_inner.await, comms_manager_a);
+    |                                                ++++++
+
+error[E0308]: mismatched types
+   --> meerkat/tests/e2e_comms.rs:348:35
+    |
+348 |     let agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
+    |                   --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                   |
+    |                   arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/tests/e2e_comms.rs:348:35
+    |
+348 |     let agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
+    |                                   ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+348 |     let agent_b = CommsAgent::new(agent_b_inner.await, comms_manager_b);
+    |                                                ++++++
+
+error[E0308]: mismatched types
+    --> meerkat/tests/integration.rs:1102:21
+     |
+1102 |         .with_tools(tools.clone())
+     |          ---------- ^^^^^^^^^^^^^ expected `Vec<Arc<ToolDef>>`, found `Vec<ToolDef>`
+     |          |
+     |          arguments to this method are incorrect
+     |
+     = note: expected struct `Vec<std::sync::Arc<meerkat::ToolDef>>`
+                found struct `Vec<meerkat::ToolDef>`
+note: method defined here
+    --> /Users/luka/src/raik/meerkat-client/src/types.rs:83:12
+     |
+83   |     pub fn with_tools(mut self, tools: Vec<Arc<ToolDef>>) -> Self {
+     |            ^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> meerkat/tests/e2e_comms.rs:55:20
+   |
+55 |             tools: tools.to_vec(),
+   |                    ^^^^^^^^^^^^^^ expected `Vec<Arc<ToolDef>>`, found `Vec<ToolDef>`
+   |
+   = note: expected struct `Vec<std::sync::Arc<meerkat::ToolDef>>`
+              found struct `Vec<meerkat::ToolDef>`
+
+error[E0599]: no variant or associated item named `LlmError` found for enum `meerkat::AgentError` in the current scope
+   --> meerkat/tests/e2e_comms.rs:101:44
+    |
+101 |                     return Err(AgentError::LlmError(e.to_string()));
+    |                                            ^^^^^^^^ variant or associated item not found in `meerkat::AgentError`
+    |
+note: if you're trying to build a new `meerkat::AgentError`, consider using `meerkat::AgentError::llm` which returns `meerkat::AgentError`
+   --> /Users/luka/src/raik/meerkat-core/src/error.rs:216:5
+    |
+216 | /     pub fn llm(
+217 | |         provider: &'static str,
+218 | |         reason: LlmFailureReason,
+219 | |         message: impl Into<String>,
+220 | |     ) -> Self {
+    | |_____________^
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:530:14
+    |
+529 |           let result = agent
+    |  ______________________-
+530 | |             .run("Please use the echo tool to echo 'Hello from E2E test'".to_string())
+    | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_____________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+530 |             .await.run("Please use the echo tool to echo 'Hello from E2E test'".to_string())
+    |              ++++++
+
+error[E0308]: mismatched types
+  --> meerkat-rest/tests/e2e_resume.rs:52:20
+   |
+52 |         rest_host: config.rest.host.clone(),
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^ expected `Cow<'_, str>`, found `String`
+   |
+   = note: expected enum `Cow<'static, str>`
+            found struct `std::string::String`
+help: call `Into::into` on this expression to convert `std::string::String` into `Cow<'static, str>`
+   |
+52 |         rest_host: config.rest.host.clone().into(),
+   |                                            +++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:577:14
+    |
+576 |           let result1 = agent
+    |  _______________________-
+577 | |             .run("My name is Alice and my favorite color is blue.".to_string())
+    | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_____________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+577 |             .await.run("My name is Alice and my favorite color is blue.".to_string())
+    |              ++++++
+
+error[E0308]: mismatched types
+   --> meerkat/tests/e2e_comms.rs:737:43
+    |
+737 |         let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+    |                           --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                           |
+    |                           arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/tests/e2e_comms.rs:737:43
+    |
+737 |         let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+    |                                           ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+737 |         let mut agent_a = CommsAgent::new(agent_a_inner.await, comms_manager_a);
+    |                                                        ++++++
+
+error[E0308]: mismatched types
+   --> meerkat/tests/e2e_comms.rs:738:43
+    |
+738 |         let mut agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
+    |                           --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                           |
+    |                           arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/tests/e2e_comms.rs:738:43
+    |
+738 |         let mut agent_b = CommsAgent::new(agent_b_inner, comms_manager_b);
+    |                                           ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+738 |         let mut agent_b = CommsAgent::new(agent_b_inner.await, comms_manager_b);
+    |                                                        ++++++
+
+error[E0308]: mismatched types
+   --> meerkat/tests/e2e_comms.rs:739:43
+    |
+739 |         let mut agent_c = CommsAgent::new(agent_c_inner, comms_manager_c);
+    |                           --------------- ^^^^^^^^^^^^^ expected `Agent<_, _, _>`, found future
+    |                           |
+    |                           arguments to this function are incorrect
+    |
+note: calling an async function returns a future
+   --> meerkat/tests/e2e_comms.rs:739:43
+    |
+739 |         let mut agent_c = CommsAgent::new(agent_c_inner, comms_manager_c);
+    |                                           ^^^^^^^^^^^^^
+note: associated function defined here
+   --> /Users/luka/src/raik/meerkat-comms-agent/src/comms_agent.rs:44:12
+    |
+44  |     pub fn new(agent: Agent<C, T, S>, comms_manager: CommsManager) -> Self {
+    |            ^^^
+help: consider `await`ing on the `Future`
+    |
+739 |         let mut agent_c = CommsAgent::new(agent_c_inner.await, comms_manager_c);
+    |                                                        ++++++
+
+error[E0308]: mismatched types
+   --> meerkat-rest/tests/e2e_resume.rs:111:20
+    |
+111 |         rest_host: config.rest.host.clone(),
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^ expected `Cow<'_, str>`, found `String`
+    |
+    = note: expected enum `Cow<'static, str>`
+             found struct `std::string::String`
+help: call `Into::into` on this expression to convert `std::string::String` into `Cow<'static, str>`
+    |
+111 |         rest_host: config.rest.host.clone().into(),
+    |                                            +++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:584:14
+    |
+583 |           let result2 = agent
+    |  _______________________-
+584 | |             .run("I also like the number 42.".to_string())
+    | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_____________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+584 |             .await.run("I also like the number 42.".to_string())
+    |              ++++++
+
+error: could not compile `meerkat` (test "e2e_sdk_agentfactory") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:591:14
+    |
+590 |           let result3 = agent
+    |  _______________________-
+591 | |             .run("What is my name?".to_string())
+    | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_____________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+591 |             .await.run("What is my name?".to_string())
+    |              ++++++
+
+For more information about this error, try `rustc --explain E0308`.
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:602:14
+    |
+601 |           let result4 = agent
+    |  _______________________-
+602 | |             .run("What is my favorite color?".to_string())
+    | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_____________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+602 |             .await.run("What is my favorite color?".to_string())
+    |              ++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:613:14
+    |
+612 |           let result5 = agent
+    |  _______________________-
+613 | |             .run("What number do I like?".to_string())
+    | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_____________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+613 |             .await.run("What number do I like?".to_string())
+    |              ++++++
+
+Some errors have detailed explanations: E0053, E0308, E0425, E0599.
+For more information about an error, try `rustc --explain E0053`.
+error[E0599]: no method named `session` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:625:19
+    |
+625 |             agent.session().messages().len() >= 10,
+    |                   ^^^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+625 |             agent.await.session().messages().len() >= 10,
+    |                   ++++++
+
+For more information about this error, try `rustc --explain E0283`.
+error[E0599]: no method named `session` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:627:19
+    |
+627 |             agent.session().messages().len()
+    |                   ^^^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+627 |             agent.await.session().messages().len()
+    |                   ++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:669:18
+    |
+668 |               let _ = agent
+    |  _____________________-
+669 | |                 .run("Remember this secret code: ALPHA-BRAVO-7".to_string())
+    | |                 -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_________________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+669 |                 .await.run("Remember this secret code: ALPHA-BRAVO-7".to_string())
+    |                  ++++++
+
+error[E0599]: no method named `session` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:675:19
+    |
+675 |             agent.session().id().clone()
+    |                   ^^^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+675 |             agent.await.session().id().clone()
+    |                   ++++++
+
+error: could not compile `meerkat-rest` (test "e2e_resume") due to 2 previous errors
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:701:18
+    |
+700 |               let result = agent
+    |  __________________________-
+701 | |                 .run("What was the secret code I told you?".to_string())
+    | |                 -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_________________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+701 |                 .await.run("What was the secret code I told you?".to_string())
+    |                  ++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:752:14
+    |
+751 |           let result1 = agent
+    |  _______________________-
+752 | |             .run("Say hello briefly.".to_string())
+    | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_____________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+752 |             .await.run("Say hello briefly.".to_string())
+    |              ++++++
+
+error: could not compile `meerkat` (test "integration") due to 1 previous error
+error[E0599]: no method named `budget` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:760:28
+    |
+760 |         let budget = agent.budget();
+    |                            ^^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+760 |         let budget = agent.await.budget();
+    |                            ++++++
+
+error: could not compile `meerkat` (test "e2e_comms") due to 13 previous errors
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:770:18
+    |
+769 |               let result2 = agent
+    |  ___________________________-
+770 | |                 .run("Tell me more.".to_string())
+    | |                 -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_________________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+770 |                 .await.run("Tell me more.".to_string())
+    |                  ++++++
+
+error: could not compile `meerkat` (test "e2e_sdk_config_ephemeral") due to 2 previous errors
+error[E0599]: no method named `state` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:781:19
+    |
+781 |             agent.state().is_terminal() || *agent.state() == LoopState::CallingLlm,
+    |                   ^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+781 |             agent.await.state().is_terminal() || *agent.state() == LoopState::CallingLlm,
+    |                   ++++++
+
+error[E0599]: no method named `state` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:781:51
+    |
+781 |             agent.state().is_terminal() || *agent.state() == LoopState::CallingLlm,
+    |                                                   ^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+781 |             agent.state().is_terminal() || *agent.await.state() == LoopState::CallingLlm,
+    |                                                   ++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:820:14
+    |
+819 |           let result = agent
+    |  ______________________-
+820 | |             .run("Please use the tools to get and process some data.".to_string())
+    | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_____________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+820 |             .await.run("Please use the tools to get and process some data.".to_string())
+    |              ++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+   --> meerkat/tests/e2e.rs:905:14
+    |
+904 |           let result = agent
+    |  ______________________-
+905 | |             .run("Calculate 1+2 and 3+4 using the add tool".to_string())
+    | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+    | |_____________|
+    |
+    |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+905 |             .await.run("Calculate 1+2 and 3+4 using the add tool".to_string())
+    |              ++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+    --> meerkat/tests/e2e.rs:1050:14
+     |
+1049 |           let result = agent
+     |  ______________________-
+1050 | |             .run("I need the weather in Tokyo, the time in London, and the stock price for AAPL. Get all three.".to_string())
+     | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+     | |_____________|
+     |
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1050 |             .await.run("I need the weather in Tokyo, the time in London, and the stock price for AAPL. Get all three.".to_string())
+     |              ++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+    --> meerkat/tests/e2e.rs:1126:14
+     |
+1125 |           let result1 = agent
+     |  _______________________-
+1126 | |             .run("Get the weather in Paris and the stock price for MSFT".to_string())
+     | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+     | |_____________|
+     |
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1126 |             .await.run("Get the weather in Paris and the stock price for MSFT".to_string())
+     |              ++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+    --> meerkat/tests/e2e.rs:1137:14
+     |
+1136 |           let result2 = agent
+     |  _______________________-
+1137 | |             .run("Now also get the time in New York".to_string())
+     | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+     | |_____________|
+     |
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1137 |             .await.run("Now also get the time in New York".to_string())
+     |              ++++++
+
+error[E0599]: no method named `session` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+    --> meerkat/tests/e2e.rs:1156:29
+     |
+1156 |         let session = agent.session();
+     |                             ^^^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1156 |         let session = agent.await.session();
+     |                             ++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+    --> meerkat/tests/e2e.rs:1236:14
+     |
+1235 |           let result = agent
+     |  ______________________-
+1236 | |             .run(
+     | |             -^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+     | |_____________|
+     |
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1236 |             .await.run(
+     |              ++++++
+
+error[E0599]: no method named `fork` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+    --> meerkat/tests/e2e.rs:1321:28
+     |
+1321 |         let op_ids = agent.fork(branches, ForkBudgetPolicy::Equal).await.unwrap();
+     |                            ^^^^
+     |
+help: there is a method `or` with a similar name, but with different arguments
+    --> /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tower-http-0.6.8/src/follow_redirect/policy/mod.rs:165:5
+     |
+165  | /     fn or<P, B, E>(self, other: P) -> Or<Self, P>
+166  | |     where
+167  | |         Self: Policy<B, E> + Sized,
+168  | |         P: Policy<B, E>;
+     | |________________________^
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1321 |         let op_ids = agent.await.fork(branches, ForkBudgetPolicy::Equal).await.unwrap();
+     |                            ++++++
+
+error[E0599]: no method named `depth` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+    --> meerkat/tests/e2e.rs:1325:26
+     |
+1325 |         assert_eq!(agent.depth(), 0);
+     |                          ^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1325 |         assert_eq!(agent.await.depth(), 0);
+     |                          ++++++
+
+error[E0599]: no method named `run` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+    --> meerkat/tests/e2e.rs:1328:28
+     |
+1328 |         let result = agent.run("Say hello briefly.".to_string()).await.unwrap();
+     |                            ^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1328 |         let result = agent.await.run("Say hello briefly.".to_string()).await.unwrap();
+     |                            ++++++
+
+error[E0599]: no method named `spawn` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+    --> meerkat/tests/e2e.rs:1366:27
+     |
+1366 |         let op_id = agent.spawn(spec).await.unwrap();
+     |                           ^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1366 |         let op_id = agent.await.spawn(spec).await.unwrap();
+     |                           ++++++
+
+error[E0308]: mismatched types
+    --> meerkat/tests/e2e.rs:1424:56
+     |
+1424 |         let inherit = manager.apply_tool_access_policy(&tools, &ToolAccessPolicy::Inherit);
+     |                               ------------------------ ^^^^^^ expected `&[Arc<ToolDef>]`, found `&Vec<ToolDef>`
+     |                               |
+     |                               arguments to this method are incorrect
+     |
+     = note: expected reference `&[std::sync::Arc<meerkat::ToolDef>]`
+                found reference `&Vec<meerkat::ToolDef>`
+note: method defined here
+    --> /Users/luka/src/raik/meerkat-core/src/sub_agent.rs:246:12
+     |
+246  |     pub fn apply_tool_access_policy(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> meerkat/tests/e2e.rs:1429:13
+     |
+1428 |         let allow = manager.apply_tool_access_policy(
+     |                             ------------------------ arguments to this method are incorrect
+1429 |             &tools,
+     |             ^^^^^^ expected `&[Arc<ToolDef>]`, found `&Vec<ToolDef>`
+     |
+     = note: expected reference `&[std::sync::Arc<meerkat::ToolDef>]`
+                found reference `&Vec<meerkat::ToolDef>`
+note: method defined here
+    --> /Users/luka/src/raik/meerkat-core/src/sub_agent.rs:246:12
+     |
+246  |     pub fn apply_tool_access_policy(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> meerkat/tests/e2e.rs:1437:13
+     |
+1436 |         let deny = manager.apply_tool_access_policy(
+     |                            ------------------------ arguments to this method are incorrect
+1437 |             &tools,
+     |             ^^^^^^ expected `&[Arc<ToolDef>]`, found `&Vec<ToolDef>`
+     |
+     = note: expected reference `&[std::sync::Arc<meerkat::ToolDef>]`
+                found reference `&Vec<meerkat::ToolDef>`
+note: method defined here
+    --> /Users/luka/src/raik/meerkat-core/src/sub_agent.rs:246:12
+     |
+246  |     pub fn apply_tool_access_policy(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `spawn` found for opaque type `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>` in the current scope
+    --> meerkat/tests/e2e.rs:1478:28
+     |
+1478 |         let result = agent.spawn(spec).await;
+     |                            ^^^^^ method not found in `impl Future<Output = Agent<LlmClientAdapter<...>, ..., ...>>`
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1478 |         let result = agent.await.spawn(spec).await;
+     |                            ++++++
+
+error[E0599]: no method named `state` found for opaque type `impl futures::Future<Output = Agent<MockClient, EmptyToolDispatcher, MockStore>>` in the current scope
+    --> meerkat/tests/e2e.rs:1567:26
+     |
+1567 |         assert_eq!(agent.state(), &LoopState::CallingLlm);
+     |                          ^^^^^ method not found in `impl futures::Future<Output = Agent<MockClient, EmptyToolDispatcher, MockStore>>`
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1567 |         assert_eq!(agent.await.state(), &LoopState::CallingLlm);
+     |                          ++++++
+
+error[E0599]: no method named `session` found for opaque type `impl futures::Future<Output = Agent<MockClient, EmptyToolDispatcher, MockStore>>` in the current scope
+    --> meerkat/tests/e2e.rs:1569:24
+     |
+1569 |         assert!(!agent.session().messages().is_empty());
+     |                        ^^^^^^^ method not found in `impl futures::Future<Output = Agent<MockClient, EmptyToolDispatcher, MockStore>>`
+     |
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+     |
+1569 |         assert!(!agent.await.session().messages().is_empty());
+     |                        ++++++
+
+Some errors have detailed explanations: E0053, E0308, E0599.
+error: could not compile `meerkat` (test "e2e") due to 44 previous errors

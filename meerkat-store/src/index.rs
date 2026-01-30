@@ -36,10 +36,6 @@ fn updated_key(id: &SessionId, updated_at: SystemTime) -> [u8; 24] {
     key
 }
 
-fn map_redb_err<E: std::fmt::Display>(err: E) -> StoreError {
-    StoreError::Internal(err.to_string())
-}
-
 /// redb-backed [`SessionIndex`] implementation.
 ///
 /// This is a write-through index used by JsonlStore to avoid per-list directory scans and
@@ -50,71 +46,103 @@ pub struct RedbSessionIndex {
 
 impl RedbSessionIndex {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let db = Database::create(path).map_err(map_redb_err)?;
+        let db = Database::create(path).map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
         // Ensure required tables exist.
-        let write_txn = db.begin_write().map_err(map_redb_err)?;
+        let write_txn = db
+            .begin_write()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         {
-            let _ = write_txn.open_table(SESSIONS_BY_ID).map_err(map_redb_err)?;
+            let _ = write_txn
+                .open_table(SESSIONS_BY_ID)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
             let _ = write_txn
                 .open_table(SESSIONS_BY_UPDATED)
-                .map_err(map_redb_err)?;
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         }
-        write_txn.commit().map_err(map_redb_err)?;
+        write_txn
+            .commit()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
         Ok(Self { db })
     }
 
     pub fn is_empty(&self) -> Result<bool, StoreError> {
-        let read_txn = self.db.begin_read().map_err(map_redb_err)?;
-        let table = read_txn.open_table(SESSIONS_BY_ID).map_err(map_redb_err)?;
-        let mut iter = table.iter().map_err(map_redb_err)?;
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        let table = read_txn
+            .open_table(SESSIONS_BY_ID)
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        let mut iter = table
+            .iter()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         Ok(iter.next().is_none())
     }
 
     pub fn lookup_meta(&self, id: &SessionId) -> Result<Option<SessionMeta>, StoreError> {
-        let read_txn = self.db.begin_read().map_err(map_redb_err)?;
-        let table = read_txn.open_table(SESSIONS_BY_ID).map_err(map_redb_err)?;
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        let table = read_txn
+            .open_table(SESSIONS_BY_ID)
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         let key = session_id_key(id);
-        let Some(meta_bytes) = table.get(key.as_ref()).map_err(map_redb_err)? else {
+        let Some(meta_bytes) = table
+            .get(key.as_ref())
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?
+        else {
             return Ok(None);
         };
-        let meta: SessionMeta = serde_json::from_slice(meta_bytes.value())
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let meta: SessionMeta =
+            serde_json::from_slice(meta_bytes.value()).map_err(StoreError::Serialization)?;
         Ok(Some(meta))
     }
 
     pub fn insert_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
-        let meta_bytes =
-            serde_json::to_vec(&meta).map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let meta_bytes = serde_json::to_vec(&meta).map_err(StoreError::Serialization)?;
 
-        let write_txn = self.db.begin_write().map_err(map_redb_err)?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         {
-            let mut by_id = write_txn.open_table(SESSIONS_BY_ID).map_err(map_redb_err)?;
+            let mut by_id = write_txn
+                .open_table(SESSIONS_BY_ID)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
             let mut by_updated = write_txn
                 .open_table(SESSIONS_BY_UPDATED)
-                .map_err(map_redb_err)?;
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
             let id_key = session_id_key(&meta.id);
 
             // If this session already exists, remove the old updated_at index entry.
-            if let Some(existing) = by_id.get(id_key.as_ref()).map_err(map_redb_err)? {
-                let existing_meta: SessionMeta = serde_json::from_slice(existing.value())
-                    .map_err(|e| StoreError::Serialization(e.to_string()))?;
+            if let Some(existing) = by_id
+                .get(id_key.as_ref())
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?
+            {
+                let existing_meta: SessionMeta =
+                    serde_json::from_slice(existing.value()).map_err(StoreError::Serialization)?;
                 let old_key = updated_key(&existing_meta.id, existing_meta.updated_at);
-                let _ = by_updated.remove(old_key.as_ref()).map_err(map_redb_err)?;
+                let _ = by_updated
+                    .remove(old_key.as_ref())
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
             }
 
             by_id
                 .insert(id_key.as_ref(), meta_bytes.as_slice())
-                .map_err(map_redb_err)?;
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
             let new_key = updated_key(&meta.id, meta.updated_at);
             by_updated
                 .insert(new_key.as_ref(), EMPTY_VALUE)
-                .map_err(map_redb_err)?;
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         }
-        write_txn.commit().map_err(map_redb_err)?;
+        write_txn
+            .commit()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         Ok(())
     }
 
@@ -123,51 +151,71 @@ impl RedbSessionIndex {
             return Ok(());
         }
 
-        let write_txn = self.db.begin_write().map_err(map_redb_err)?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         {
-            let mut by_id = write_txn.open_table(SESSIONS_BY_ID).map_err(map_redb_err)?;
+            let mut by_id = write_txn
+                .open_table(SESSIONS_BY_ID)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
             let mut by_updated = write_txn
                 .open_table(SESSIONS_BY_UPDATED)
-                .map_err(map_redb_err)?;
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
             for meta in metas {
-                let meta_bytes = serde_json::to_vec(&meta)
-                    .map_err(|e| StoreError::Serialization(e.to_string()))?;
+                let meta_bytes = serde_json::to_vec(&meta).map_err(StoreError::Serialization)?;
                 let id_key = session_id_key(&meta.id);
 
                 by_id
                     .insert(id_key.as_ref(), meta_bytes.as_slice())
-                    .map_err(map_redb_err)?;
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
                 let new_key = updated_key(&meta.id, meta.updated_at);
                 by_updated
                     .insert(new_key.as_ref(), EMPTY_VALUE)
-                    .map_err(map_redb_err)?;
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
             }
         }
-        write_txn.commit().map_err(map_redb_err)?;
+        write_txn
+            .commit()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         Ok(())
     }
 
     pub fn remove(&self, id: &SessionId) -> Result<(), StoreError> {
-        let write_txn = self.db.begin_write().map_err(map_redb_err)?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         {
-            let mut by_id = write_txn.open_table(SESSIONS_BY_ID).map_err(map_redb_err)?;
+            let mut by_id = write_txn
+                .open_table(SESSIONS_BY_ID)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
             let mut by_updated = write_txn
                 .open_table(SESSIONS_BY_UPDATED)
-                .map_err(map_redb_err)?;
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
             let id_key = session_id_key(id);
-            if let Some(existing) = by_id.get(id_key.as_ref()).map_err(map_redb_err)? {
-                let existing_meta: SessionMeta = serde_json::from_slice(existing.value())
-                    .map_err(|e| StoreError::Serialization(e.to_string()))?;
+            if let Some(existing) = by_id
+                .get(id_key.as_ref())
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?
+            {
+                let existing_meta: SessionMeta =
+                    serde_json::from_slice(existing.value()).map_err(StoreError::Serialization)?;
                 let old_key = updated_key(&existing_meta.id, existing_meta.updated_at);
-                let _ = by_updated.remove(old_key.as_ref()).map_err(map_redb_err)?;
+                let _ = by_updated
+                    .remove(old_key.as_ref())
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
             }
 
-            let _ = by_id.remove(id_key.as_ref()).map_err(map_redb_err)?;
+            let _ = by_id
+                .remove(id_key.as_ref())
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         }
-        write_txn.commit().map_err(map_redb_err)?;
+        write_txn
+            .commit()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         Ok(())
     }
 
@@ -175,16 +223,24 @@ impl RedbSessionIndex {
         let limit = filter.limit.unwrap_or(usize::MAX);
         let mut offset = filter.offset.unwrap_or(0);
 
-        let read_txn = self.db.begin_read().map_err(map_redb_err)?;
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         let by_updated = read_txn
             .open_table(SESSIONS_BY_UPDATED)
-            .map_err(map_redb_err)?;
-        let by_id = read_txn.open_table(SESSIONS_BY_ID).map_err(map_redb_err)?;
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        let by_id = read_txn
+            .open_table(SESSIONS_BY_ID)
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
         let mut results = Vec::new();
 
-        for row in by_updated.iter().map_err(map_redb_err)? {
-            let (key, _value) = row.map_err(map_redb_err)?;
+        for row in by_updated
+            .iter()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?
+        {
+            let (key, _value) = row.map_err(|e| StoreError::Database(Box::new(e.into())))?;
             let key_bytes = key.value();
             if key_bytes.len() != 24 {
                 continue;
@@ -192,11 +248,14 @@ impl RedbSessionIndex {
 
             let mut id_bytes = [0u8; 16];
             id_bytes.copy_from_slice(&key_bytes[8..]);
-            let Some(meta_bytes) = by_id.get(id_bytes.as_ref()).map_err(map_redb_err)? else {
+            let Some(meta_bytes) = by_id
+                .get(id_bytes.as_ref())
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?
+            else {
                 continue;
             };
-            let meta: SessionMeta = serde_json::from_slice(meta_bytes.value())
-                .map_err(|e| StoreError::Serialization(e.to_string()))?;
+            let meta: SessionMeta =
+                serde_json::from_slice(meta_bytes.value()).map_err(StoreError::Serialization)?;
 
             if let Some(updated_after) = filter.updated_after {
                 // Because the index is ordered by descending updated_at, we can stop early.

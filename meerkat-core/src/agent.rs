@@ -1122,7 +1122,7 @@ mod tests {
     #[async_trait]
     impl AgentToolDispatcher for TimingToolDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            let tools: Vec<Arc<ToolDef>> = self.tools.iter().map(|t| Arc::new(t.clone())).collect();
+            let tools: Vec<Arc<ToolDef>> = self.tools.iter().cloned().map(Arc::new).collect();
             Arc::from(tools)
         }
 
@@ -1272,7 +1272,7 @@ mod tests {
     #[async_trait]
     impl AgentToolDispatcher for FailingToolDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            let tools: Vec<Arc<ToolDef>> = self.tools.iter().map(|t| Arc::new(t.clone())).collect();
+            let tools: Vec<Arc<ToolDef>> = self.tools.iter().cloned().map(Arc::new).collect();
             Arc::from(tools)
         }
 

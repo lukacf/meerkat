@@ -162,8 +162,7 @@ impl Router {
         };
 
         // Parse peer address
-        let addr =
-            PeerAddr::parse(&peer_addr).map_err(|e| SendError::InvalidAddress(e.to_string()))?;
+        let addr = PeerAddr::parse(&peer_addr)?;
 
         // Determine if we should wait for ack
         let wait_for_ack = should_wait_for_ack(&kind);

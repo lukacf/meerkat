@@ -54,19 +54,33 @@ where
 
     // Verify signature
     if !envelope.verify() {
-        // Drop silently - no ack, no inbox
+        tracing::warn!(
+            "Dropped message {} from {:?}: invalid signature",
+            envelope.id,
+            envelope.from
+        );
         return Ok(());
     }
 
     // Check trust
     if !trusted.is_trusted(&envelope.from) {
-        // Drop silently - no ack, no inbox
+        tracing::warn!(
+            "Dropped message {} from {:?}: sender not trusted",
+            envelope.id,
+            envelope.from
+        );
         return Ok(());
     }
 
     // Verify envelope is addressed to us
     if envelope.to != keypair.public_key() {
-        // Drop silently - misaddressed message
+        tracing::warn!(
+            "Dropped message {} from {:?}: misaddressed (to {:?}, we are {:?})",
+            envelope.id,
+            envelope.from,
+            envelope.to,
+            keypair.public_key()
+        );
         return Ok(());
     }
 

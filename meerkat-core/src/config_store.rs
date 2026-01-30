@@ -44,11 +44,9 @@ impl ConfigStore for MemoryConfigStore {
 
     async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
         let mut config = self.config.write().await;
-        let mut value =
-            serde_json::to_value(&*config).map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        let mut value = serde_json::to_value(&*config).map_err(ConfigError::Json)?;
         merge_patch(&mut value, delta.0);
-        let updated: Config =
-            serde_json::from_value(value).map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        let updated: Config = serde_json::from_value(value).map_err(ConfigError::Json)?;
         *config = updated.clone();
         Ok(updated)
     }
@@ -93,21 +91,14 @@ impl FileConfigStore {
     }
 
     async fn ensure_exists(&self) -> Result<(), ConfigError> {
-        if tokio::fs::try_exists(&self.path)
-            .await
-            .map_err(|e| ConfigError::IoError(e.to_string()))?
-        {
+        if tokio::fs::try_exists(&self.path).await? {
             return Ok(());
         }
         if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| ConfigError::IoError(e.to_string()))?;
+            tokio::fs::create_dir_all(parent).await?;
         }
         let content = Config::template_toml();
-        tokio::fs::write(&self.path, content)
-            .await
-            .map_err(|e| ConfigError::IoError(e.to_string()))?;
+        tokio::fs::write(&self.path, content).await?;
         Ok(())
     }
 }
@@ -119,41 +110,28 @@ impl ConfigStore for FileConfigStore {
             self.ensure_exists().await?;
         }
 
-        if !tokio::fs::try_exists(&self.path)
-            .await
-            .map_err(|e| ConfigError::IoError(e.to_string()))?
-        {
+        if !tokio::fs::try_exists(&self.path).await? {
             return Ok(Config::default());
         }
 
-        let bytes = tokio::fs::read(&self.path)
-            .await
-            .map_err(|e| ConfigError::IoError(e.to_string()))?;
-        let content =
-            String::from_utf8(bytes).map_err(|e| ConfigError::ParseError(e.to_string()))?;
-        toml::from_str(&content).map_err(|e| ConfigError::ParseError(e.to_string()))
+        let bytes = tokio::fs::read(&self.path).await?;
+        let content = String::from_utf8(bytes).map_err(ConfigError::Utf8)?;
+        toml::from_str(&content).map_err(ConfigError::Parse)
     }
 
     async fn set(&self, config: Config) -> Result<(), ConfigError> {
         if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| ConfigError::IoError(e.to_string()))?;
+            tokio::fs::create_dir_all(parent).await?;
         }
-        let content =
-            toml::to_string_pretty(&config).map_err(|e| ConfigError::ParseError(e.to_string()))?;
-        tokio::fs::write(&self.path, content)
-            .await
-            .map_err(|e| ConfigError::IoError(e.to_string()))?;
+        let content = toml::to_string_pretty(&config).map_err(ConfigError::TomlSerialize)?;
+        tokio::fs::write(&self.path, content).await?;
         Ok(())
     }
 
     async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
-        let mut value = serde_json::to_value(self.get().await?)
-            .map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        let mut value = serde_json::to_value(self.get().await?).map_err(ConfigError::Json)?;
         merge_patch(&mut value, delta.0);
-        let updated: Config =
-            serde_json::from_value(value).map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        let updated: Config = serde_json::from_value(value).map_err(ConfigError::Json)?;
         self.set(updated.clone()).await?;
         Ok(updated)
     }

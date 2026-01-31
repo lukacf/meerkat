@@ -100,17 +100,22 @@ impl Config {
     }
 
     /// Find project config by walking up directories (.rkat/config.toml)
+    ///
+    /// Only returns a path if both `.rkat/` directory AND `config.toml` exist.
+    /// This allows `.rkat/` to be created for session storage without requiring
+    /// a config file.
     async fn find_project_config() -> Option<PathBuf> {
         let mut current = std::env::current_dir().ok()?;
         loop {
             let marker_dir = current.join(".rkat");
-            let is_project_root = match tokio::fs::metadata(&marker_dir).await {
-                Ok(meta) => meta.is_dir(),
-                Err(_) => false,
-            };
-            if is_project_root {
-                return Some(marker_dir.join("config.toml"));
+            let config_path = marker_dir.join("config.toml");
+
+            // Only treat as project config if config.toml actually exists
+            let config_exists = tokio::fs::try_exists(&config_path).await.unwrap_or(false);
+            if config_exists {
+                return Some(config_path);
             }
+
             if !current.pop() {
                 return None;
             }
@@ -897,5 +902,37 @@ mod tests {
 
         assert_eq!(policy.max_retries, 3);
         assert_eq!(policy.initial_delay, Duration::from_millis(500));
+    }
+
+    /// Regression test: Config::load() should succeed when .rkat/ directory exists
+    /// but config.toml is missing. This is a common first-run state where .rkat/
+    /// is created for session storage.
+    #[tokio::test]
+    async fn test_regression_load_succeeds_without_config_toml() {
+        use tempfile::TempDir;
+
+        // Create temp dir with .rkat/ but NO config.toml
+        let temp_dir = TempDir::new().unwrap();
+        let rkat_dir = temp_dir.path().join(".rkat");
+        std::fs::create_dir(&rkat_dir).unwrap();
+
+        // Verify .rkat exists but config.toml doesn't
+        assert!(rkat_dir.exists());
+        assert!(!rkat_dir.join("config.toml").exists());
+
+        // Change to temp dir and verify load() succeeds
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        let result = Config::load().await;
+
+        // Restore original directory before asserting
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert!(
+            result.is_ok(),
+            "Config::load() should succeed when .rkat/ exists without config.toml: {:?}",
+            result.err()
+        );
     }
 }

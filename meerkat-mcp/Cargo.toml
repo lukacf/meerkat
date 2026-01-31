@@ -1,5 +1,5 @@
 [package]
-name = "meerkat-mcp-client"
+name = "meerkat-mcp"
 description = "MCP client for Meerkat (connect to tool servers)"
 version.workspace = true
 edition.workspace = true
@@ -10,7 +10,12 @@ repository.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
-rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+rmcp = { workspace = true, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest"
+] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

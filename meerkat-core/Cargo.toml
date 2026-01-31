@@ -21,8 +21,6 @@ tracing = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 humantime-serde = { workspace = true }
-ulid = { workspace = true }
-meerkat-comms = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

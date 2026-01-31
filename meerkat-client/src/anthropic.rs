@@ -232,10 +232,27 @@ impl AnthropicClient {
 
     /// Parse an SSE event from the response
     fn parse_sse_line(line: &str) -> Option<AnthropicEvent> {
-        if let Some(data) = line.strip_prefix("data: ") {
+        if let Some(data) = Self::strip_data_prefix(line) {
             serde_json::from_str(data).ok()
         } else {
             None
+        }
+    }
+
+    fn strip_data_prefix(line: &str) -> Option<&str> {
+        line.strip_prefix("data: ")
+            .or_else(|| line.strip_prefix("data:"))
+            .map(str::trim_start)
+    }
+
+    fn map_stop_reason(reason: &str) -> StopReason {
+        match reason {
+            "end_turn" => StopReason::EndTurn,
+            "tool_use" => StopReason::ToolUse,
+            "max_tokens" => StopReason::MaxTokens,
+            "stop_sequence" => StopReason::StopSequence,
+            "content_filter" => StopReason::ContentFilter,
+            _ => StopReason::EndTurn,
         }
     }
 }
@@ -272,6 +289,120 @@ impl LlmClient for AnthropicClient {
                 let mut stream = stream_result?;
                 let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
                 let mut current_tool_id: Option<String> = None;
+                let mut last_stop_reason: Option<StopReason> = None;
+                let mut saw_done = false;
+
+                macro_rules! handle_event {
+                    ($event:expr) => {
+                        match $event.event_type.as_str() {
+                            "content_block_delta" => {
+                                if let Some(delta) = $event.delta {
+                                    match delta.delta_type.as_str() {
+                                        "text_delta" => {
+                                            if let Some(text) = delta.text {
+                                                yield LlmEvent::TextDelta { delta: text };
+                                            }
+                                        }
+                                        "input_json_delta" => {
+                                            if let Some(partial_json) = delta.partial_json {
+                                                yield LlmEvent::ToolCallDelta {
+                                                    id: current_tool_id.clone().unwrap_or_default(),
+                                                    name: None,
+                                                    args_delta: partial_json,
+                                                };
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            "content_block_start" => {
+                                if let Some(content_block) = $event.content_block {
+                                    if content_block.block_type == "tool_use" {
+                                        let id = content_block.id.unwrap_or_default();
+                                        current_tool_id = Some(id.clone());
+                                        yield LlmEvent::ToolCallDelta {
+                                            id,
+                                            name: content_block.name,
+                                            args_delta: String::new(),
+                                        };
+                                    }
+                                }
+                            }
+                            "message_delta" => {
+                                if let Some(usage) = $event.usage {
+                                    yield LlmEvent::UsageUpdate {
+                                        usage: Usage {
+                                            input_tokens: 0, // already reported in message_start
+                                            output_tokens: usage.output_tokens.unwrap_or(0),
+                                            cache_creation_tokens: None,
+                                            cache_read_tokens: None,
+                                        }
+                                    };
+                                }
+                                if let Some(finish_reason) = $event.delta.and_then(|d| d.stop_reason) {
+                                    let reason = Self::map_stop_reason(finish_reason.as_str());
+                                    last_stop_reason = Some(reason);
+                                    if !saw_done {
+                                        yield LlmEvent::Done {
+                                            outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                                        };
+                                        saw_done = true;
+                                    }
+                                }
+                            }
+                            "message_start" => {
+                                if let Some(usage) = $event.message.and_then(|m| m.usage) {
+                                    yield LlmEvent::UsageUpdate {
+                                        usage: Usage {
+                                            input_tokens: usage.input_tokens.unwrap_or(0),
+                                            output_tokens: 0,
+                                            cache_creation_tokens: usage.cache_creation_input_tokens,
+                                            cache_read_tokens: usage.cache_read_input_tokens,
+                                        }
+                                    };
+                                }
+                            }
+                            "message_stop" => {
+                                if !saw_done {
+                                    let finish_reason = $event.delta.and_then(|d| d.stop_reason);
+                                    let reason = finish_reason
+                                        .as_deref()
+                                        .map(Self::map_stop_reason)
+                                        .or(last_stop_reason)
+                                        .unwrap_or(StopReason::EndTurn);
+                                    last_stop_reason = Some(reason);
+                                    yield LlmEvent::Done {
+                                        outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                                    };
+                                    saw_done = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    };
+                }
+
+                macro_rules! handle_line {
+                    ($line:expr) => {
+                        if !$line.is_empty() {
+                            if let Some(data) = Self::strip_data_prefix($line) {
+                                if data == "[DONE]" {
+                                    if !saw_done {
+                                        let reason =
+                                            last_stop_reason.unwrap_or(StopReason::EndTurn);
+                                        yield LlmEvent::Done {
+                                            outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                                        };
+                                        saw_done = true;
+                                    }
+                                } else if let Some(event) = Self::parse_sse_line($line) {
+                                    handle_event!(event);
+                                }
+                            }
+                        }
+                    };
+                }
 
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
@@ -279,88 +410,15 @@ impl LlmClient for AnthropicClient {
 
                     while let Some(newline_pos) = buffer.find('\n') {
                         let line = buffer[..newline_pos].trim();
-                        let parsed_event = if !line.is_empty() {
-                            Self::parse_sse_line(line)
-                        } else {
-                            None
-                        };
-
+                        handle_line!(line);
                         buffer.drain(..=newline_pos);
+                    }
+                }
 
-                        if let Some(event) = parsed_event {
-                            match event.event_type.as_str() {
-                                "content_block_delta" => {
-                                    if let Some(delta) = event.delta {
-                                        match delta.delta_type.as_str() {
-                                            "text_delta" => {
-                                                if let Some(text) = delta.text {
-                                                    yield LlmEvent::TextDelta { delta: text };
-                                                }
-                                            }
-                                            "input_json_delta" => {
-                                                if let Some(partial_json) = delta.partial_json {
-                                                    yield LlmEvent::ToolCallDelta {
-                                                        id: current_tool_id.clone().unwrap_or_default(),
-                                                        name: None,
-                                                        args_delta: partial_json,
-                                                    };
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                "content_block_start" => {
-                                    if let Some(content_block) = event.content_block {
-                                        if content_block.block_type == "tool_use" {
-                                            let id = content_block.id.unwrap_or_default();
-                                            current_tool_id = Some(id.clone());
-                                            yield LlmEvent::ToolCallDelta {
-                                                id,
-                                                name: content_block.name,
-                                                args_delta: String::new(),
-                                            };
-                                        }
-                                    }
-                                }
-                                "message_delta" => {
-                                    if let Some(usage) = event.usage {
-                                        yield LlmEvent::UsageUpdate {
-                                            usage: Usage {
-                                                input_tokens: 0, // already reported in message_start
-                                                output_tokens: usage.output_tokens.unwrap_or(0),
-                                                cache_creation_tokens: None,
-                                                cache_read_tokens: None,
-                                            }
-                                        };
-                                    }
-                                    if let Some(finish_reason) = event.delta.and_then(|d| d.stop_reason) {
-                                        let reason = match finish_reason.as_str() {
-                                            "end_turn" => StopReason::EndTurn,
-                                            "tool_use" => StopReason::ToolUse,
-                                            "max_tokens" => StopReason::MaxTokens,
-                                            _ => StopReason::EndTurn,
-                                        };
-                                        yield LlmEvent::Done {
-                                            outcome: LlmDoneOutcome::Success { stop_reason: reason },
-                                        };
-                                    }
-                                }
-                                "message_start" => {
-                                    if let Some(usage) = event.message.and_then(|m| m.usage) {
-                                        yield LlmEvent::UsageUpdate {
-                                            usage: Usage {
-                                                input_tokens: usage.input_tokens.unwrap_or(0),
-                                                output_tokens: 0,
-                                                cache_creation_tokens: usage.cache_creation_input_tokens,
-                                                cache_read_tokens: usage.cache_read_input_tokens,
-                                            }
-                                        };
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
+                if !buffer.is_empty() {
+                    for line in buffer.lines() {
+                        let line = line.trim();
+                        handle_line!(line);
                     }
                 }
             },

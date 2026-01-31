@@ -188,7 +188,7 @@ impl ShellTool {
     ///
     /// Returns [`ShellError::ShellNotInstalled`] if no shell can be found.
     pub fn find_shell(&self) -> Result<std::path::PathBuf, ShellError> {
-        self.config.resolve_shell_path()
+        self.config.resolve_shell_path_auto()
     }
 
     async fn resolved_shell_path(&self) -> Result<PathBuf, ShellError> {
@@ -199,7 +199,18 @@ impl ShellTool {
             }
         }
 
-        let path = self.config.resolve_shell_path_async().await?;
+        let path = self.config.resolve_shell_path_auto_async().await?;
+        if self.config.shell == "nu" {
+            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                if name != "nu" {
+                    warn!(
+                        configured_shell = %self.config.shell,
+                        fallback_shell = %path.display(),
+                        "Nushell not found; falling back to available shell"
+                    );
+                }
+            }
+        }
         let mut guard = self.resolved_shell_path.lock().await;
         *guard = Some(path.clone());
         Ok(path)
@@ -354,7 +365,9 @@ impl BuiltinTool for ShellTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "shell".into(),
-            description: "Execute a shell command using Nushell".into(),
+            description:
+                "Execute a shell command using Nushell (or a fallback shell if Nushell is unavailable)"
+                    .into(),
             input_schema: crate::schema::schema_for::<ShellInput>(),
         }
     }
@@ -556,21 +569,54 @@ mod tests {
         let config = ShellConfig::default();
         let tool = ShellTool::new(config);
 
-        // If nu is installed, it should be found. Otherwise return ShellNotInstalled.
+        // If nu is installed, it should be found. Otherwise fall back or return ShellNotInstalled.
         match tool.find_shell() {
             Ok(path) => {
-                let path_str = path.to_string_lossy();
-                assert!(
-                    path_str.contains("nu"),
-                    "Expected nushell, got: {}",
-                    path_str
-                );
+                assert!(path.exists(), "Resolved shell path should exist");
             }
             Err(ShellError::ShellNotInstalled(details)) => {
                 assert!(details.contains("nu"));
             }
             Err(e) => unreachable!("Unexpected error: {}", e),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_shell_tool_falls_back_when_nu_missing() {
+        if std::env::var("RUN_TEST_SHELL_FALLBACK_INNER").is_ok() {
+            let expected = PathBuf::from(
+                std::env::var("TEST_FALLBACK_SHELL").expect("missing TEST_FALLBACK_SHELL"),
+            );
+            let tool = ShellTool::new(ShellConfig::default());
+            let result = tool
+                .find_shell()
+                .expect("Expected fallback shell to resolve");
+            assert_eq!(result, expected);
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let fake_shell = temp_dir.path().join("fallback_shell");
+        std::fs::write(&fake_shell, "#!/bin/sh\necho test").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+            .arg("test_shell_tool_falls_back_when_nu_missing")
+            .env("RUN_TEST_SHELL_FALLBACK_INNER", "1")
+            .env("PATH", "")
+            .env("SHELL", fake_shell.to_string_lossy().to_string())
+            .env(
+                "TEST_FALLBACK_SHELL",
+                fake_shell.to_string_lossy().to_string(),
+            )
+            .status()
+            .expect("failed to spawn test child process");
+        assert!(status.success());
     }
 
     #[test]

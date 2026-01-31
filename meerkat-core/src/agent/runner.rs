@@ -4,8 +4,7 @@ use crate::budget::Budget;
 use crate::error::AgentError;
 use crate::event::AgentEvent;
 use crate::ops::{
-    ForkBranch, ForkBudgetPolicy, OperationId, OperationResult, SpawnSpec, SteeringHandle,
-    ToolAccessPolicy,
+    ForkBranch, ForkBudgetPolicy, OperationId, OperationResult, SpawnSpec, ToolAccessPolicy,
 };
 use crate::retry::RetryPolicy;
 use crate::session::Session;
@@ -73,11 +72,6 @@ where
         self.depth
     }
 
-    /// Get the steering sender (for parent to use when spawning this agent)
-    pub fn steering_sender(&self) -> mpsc::Sender<crate::ops::SteeringMessage> {
-        self.steering_tx.clone()
-    }
-
     /// Spawn a new sub-agent with minimal context
     ///
     /// The sub-agent runs independently with its own budget and tool access.
@@ -129,12 +123,9 @@ where
         // Generate operation ID
         let op_id = OperationId::new();
 
-        // Create steering channel for this sub-agent
-        let (steering_tx, _steering_rx) = mpsc::channel(16);
-
         // Register the sub-agent
         self.sub_agent_manager
-            .register(op_id.clone(), "spawn".to_string(), steering_tx)
+            .register(op_id.clone(), "spawn".to_string())
             .await?;
 
         // Clone components for the spawned task
@@ -251,12 +242,9 @@ where
                 }
             }
 
-            // Create steering channel
-            let (steering_tx, _steering_rx) = mpsc::channel(16);
-
             // Register the branch as a sub-agent
             self.sub_agent_manager
-                .register(op_id.clone(), branch.name.clone(), steering_tx)
+                .register(op_id.clone(), branch.name.clone())
                 .await?;
 
             // Apply tool access policy for this branch
@@ -340,15 +328,6 @@ where
         }
 
         Ok(op_ids)
-    }
-
-    /// Send a steering message to a running sub-agent
-    pub async fn steer(
-        &self,
-        op_id: &OperationId,
-        message: String,
-    ) -> Result<SteeringHandle, AgentError> {
-        self.sub_agent_manager.steer(op_id, message).await
     }
 
     /// Cancel a running sub-agent

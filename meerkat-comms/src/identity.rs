@@ -1,6 +1,6 @@
 //! Cryptographic identity types for Meerkat comms.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -144,6 +144,7 @@ impl Signature {
 }
 
 /// Ed25519 keypair for signing messages.
+#[derive(Debug, Clone)]
 pub struct Keypair {
     signing_key: SigningKey,
 }
@@ -294,9 +295,11 @@ mod tests {
         assert!(peer_id.starts_with("ed25519:"));
         let base64_part = &peer_id["ed25519:".len()..];
         // Base64 alphabet check (alphanumeric + / + = for padding)
-        assert!(base64_part
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(
+            base64_part
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 
     #[test]

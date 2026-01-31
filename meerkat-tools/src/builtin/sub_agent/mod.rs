@@ -31,7 +31,7 @@ mod status;
 mod tool_set;
 
 pub use config::{SubAgentConfig, SubAgentError};
-pub use meerkat_core::ParentCommsContext;
+pub use meerkat_comms::runtime::ParentCommsContext;
 pub use runner::{
     DynLlmClientAdapter, DynSubAgentSpec, LlmClientAdapter, SubAgentCommsConfig, SubAgentHandle,
     SubAgentRunnerError, SubAgentSpec, create_child_comms_config, create_child_peer_entry,

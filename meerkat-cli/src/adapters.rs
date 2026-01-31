@@ -241,7 +241,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
     }
 }
 
-use meerkat_mcp_client::McpRouter;
+use meerkat_mcp::McpRouter;
 use meerkat_tools::builtin::CompositeDispatcher;
 use tokio::sync::RwLock;
 
@@ -265,13 +265,7 @@ impl McpRouterAdapter {
     pub async fn refresh_tools(&self) -> Result<(), String> {
         let router = self.router.read().await;
         if let Some(router) = router.as_ref() {
-            let tools: Arc<[Arc<ToolDef>]> = router
-                .list_tools()
-                .iter()
-                .cloned()
-                .map(Arc::new)
-                .collect::<Vec<_>>()
-                .into();
+            let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
             let mut cached = self.cached_tools.write().await;
             *cached = tools;
         }

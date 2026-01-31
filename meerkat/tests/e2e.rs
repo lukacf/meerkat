@@ -532,12 +532,7 @@ mod tool_invocation {
             "Should have echo tool"
         );
 
-        let tools: Arc<[Arc<ToolDef>]> = tools
-            .iter()
-            .cloned()
-            .map(Arc::new)
-            .collect::<Vec<_>>()
-            .into();
+        let tools: Arc<[Arc<ToolDef>]> = tools.to_vec().into();
         let router = Arc::new(router);
         let dispatcher = Arc::new(DispatcherWrapper::new(
             tools,
@@ -937,12 +932,7 @@ mod parallel_tools {
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
 
-        let tools: Arc<[Arc<ToolDef>]> = tools
-            .iter()
-            .cloned()
-            .map(Arc::new)
-            .collect::<Vec<_>>()
-            .into();
+        let tools: Arc<[Arc<ToolDef>]> = tools.to_vec().into();
         let router = Arc::new(router);
         let dispatcher = Arc::new(tool_invocation::DispatcherWrapper::new(
             tools,

@@ -8,8 +8,8 @@ use tokio_util::codec::{Decoder, Encoder};
 use uuid::Uuid;
 
 use meerkat_comms::{
-    transport::MAX_PAYLOAD_SIZE, Envelope, EnvelopeFrame, Keypair, MessageKind, PubKey, Signature,
-    TransportCodec,
+    Envelope, EnvelopeFrame, Keypair, MessageKind, PubKey, Signature, TransportCodec,
+    transport::MAX_PAYLOAD_SIZE,
 };
 
 fn make_test_envelope(body: String) -> Envelope {
@@ -71,7 +71,7 @@ fn test_rct_contracts_transport_codec_roundtrip() {
         raw: Arc::new(Bytes::new()),
     };
 
-    let mut codec = TransportCodec::new();
+    let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
     let mut dst = BytesMut::new();
     codec.encode(frame, &mut dst).unwrap();
 
@@ -86,7 +86,7 @@ fn test_rct_contracts_transport_codec_roundtrip() {
 
 #[test]
 fn test_rct_contracts_transport_codec_rejects_oversize_len_prefix_on_decode() {
-    let mut codec = TransportCodec::new();
+    let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
     let mut src = BytesMut::new();
     src.put_u32(MAX_PAYLOAD_SIZE + 1);
 
@@ -104,7 +104,7 @@ fn test_rct_contracts_transport_codec_rejects_oversize_payload_on_encode() {
         raw: Arc::new(Bytes::new()),
     };
 
-    let mut codec = TransportCodec::new();
+    let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
     let mut dst = BytesMut::new();
     let err = codec.encode(frame, &mut dst).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);

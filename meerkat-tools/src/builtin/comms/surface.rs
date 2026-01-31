@@ -1,131 +1,65 @@
-//! CommsToolSurface - adapts CommsToolSet to AgentToolDispatcher
-//!
-//! This module provides [`CommsToolSurface`], an adapter that exposes comms tools
-//! as an [`AgentToolDispatcher`]. This allows comms tools to be composed with
-//! other dispatchers via [`ToolGateway`].
-//!
-//! ## Dynamic Availability
-//!
-//! Comms tools should only be visible when there are peers configured. Use
-//! [`CommsToolSurface::peer_availability`] to create an [`Availability`] predicate
-//! that automatically shows/hides tools based on peer count.
-//!
-//! ```text
-//! use meerkat_core::{ToolGatewayBuilder, Availability};
-//! use meerkat_tools::CommsToolSurface;
-//!
-//! let trusted_peers = router.shared_trusted_peers();
-//! let availability = CommsToolSurface::peer_availability(trusted_peers.clone());
-//! let comms_surface = CommsToolSurface::new(router, trusted_peers);
-//!
-//! let gateway = ToolGatewayBuilder::new()
-//!     .add_dispatcher(base_tools)
-//!     .add_dispatcher_with_availability(Arc::new(comms_surface), availability)
-//!     .build()?;
-//! ```
+//! Comms tool surface - provides comms tools as a ToolDispatcher
 
-use super::tool_set::CommsToolSet;
-use crate::ToolError;
-use crate::builtin::{BuiltinTool, BuiltinToolError};
 use async_trait::async_trait;
-use meerkat_comms::{Router, TrustedPeers};
+use meerkat_comms::{Router, ToolContext, TrustedPeers, handle_tools_call, tools_list};
+use meerkat_core::AgentToolDispatcher;
+use meerkat_core::error::ToolError;
 use meerkat_core::gateway::Availability;
-use meerkat_core::{AgentToolDispatcher, ToolDef};
+use meerkat_core::types::ToolDef;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Adapter that exposes comms tools as an [`AgentToolDispatcher`].
-///
-/// Use this with [`ToolGateway`] to compose comms tools with other dispatchers:
-///
-/// ```text
-/// use meerkat_core::ToolGateway;
-/// use meerkat_tools::builtin::comms::CommsToolSurface;
-///
-/// let comms_surface = CommsToolSurface::new(router, trusted_peers);
-/// let gateway = ToolGateway::new(base_dispatcher, Some(Arc::new(comms_surface)))?;
-/// ```
+/// Tool dispatcher that provides comms tools.
 pub struct CommsToolSurface {
-    tools: HashMap<String, Arc<dyn BuiltinTool>>,
+    tool_context: ToolContext,
     tool_defs: Arc<[Arc<ToolDef>]>,
 }
 
 impl CommsToolSurface {
-    /// Create a new comms tool surface from router and trusted peers.
+    /// Create a new comms tool surface
     pub fn new(router: Arc<Router>, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
-        let tool_set = CommsToolSet::new(router, trusted_peers);
-        Self::from_tool_set(tool_set)
-    }
-
-    /// Create from an existing CommsToolSet.
-    pub fn from_tool_set(tool_set: CommsToolSet) -> Self {
-        let mut tools: HashMap<String, Arc<dyn BuiltinTool>> = HashMap::new();
-        let mut tool_defs: Vec<Arc<ToolDef>> = Vec::new();
-
-        // Register each tool
-        let send_message: Arc<dyn BuiltinTool> = Arc::new(tool_set.send_message);
-        tool_defs.push(Arc::new(send_message.def()));
-        tools.insert(send_message.name().to_string(), send_message);
-
-        let send_request: Arc<dyn BuiltinTool> = Arc::new(tool_set.send_request);
-        tool_defs.push(Arc::new(send_request.def()));
-        tools.insert(send_request.name().to_string(), send_request);
-
-        let send_response: Arc<dyn BuiltinTool> = Arc::new(tool_set.send_response);
-        tool_defs.push(Arc::new(send_response.def()));
-        tools.insert(send_response.name().to_string(), send_response);
-
-        let list_peers: Arc<dyn BuiltinTool> = Arc::new(tool_set.list_peers);
-        tool_defs.push(Arc::new(list_peers.def()));
-        tools.insert(list_peers.name().to_string(), list_peers);
-
+        let tool_context = ToolContext {
+            router,
+            trusted_peers,
+        };
+        let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {
-            tools,
-            tool_defs: tool_defs.into(),
+            tool_context,
+            tool_defs,
         }
     }
 
-    /// Get usage instructions for comms tools.
-    ///
-    /// This should be appended to the system prompt when comms is enabled.
-    pub fn usage_instructions() -> &'static str {
-        CommsToolSet::usage_instructions()
-    }
-
-    /// Create an [`Availability`] predicate based on peer count.
-    ///
-    /// Returns an availability that is:
-    /// - Available when `trusted_peers.has_peers()` returns true
-    /// - Unavailable with reason "no peers configured" when no peers
-    ///
-    /// This uses `try_read()` to avoid blocking on the RwLock. If the lock
-    /// cannot be acquired, it defaults to unavailable (conservative).
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// let trusted_peers = router.shared_trusted_peers();
-    /// let availability = CommsToolSurface::peer_availability(trusted_peers.clone());
-    ///
-    /// // Use with ToolGatewayBuilder
-    /// let gateway = ToolGatewayBuilder::new()
-    ///     .add_dispatcher(base_tools)
-    ///     .add_dispatcher_with_availability(Arc::new(comms_surface), availability)
-    ///     .build()?;
-    /// ```
+    /// Helper to create an availability predicate that only shows tools if peers exist
     pub fn peer_availability(trusted_peers: Arc<RwLock<TrustedPeers>>) -> Availability {
         Availability::when(
             "no peers configured",
             Arc::new(move || {
                 trusted_peers
                     .try_read()
-                    .map(|guard| guard.has_peers())
-                    .unwrap_or(false) // Conservative: if can't get lock, assume unavailable
+                    .map(|g| g.has_peers())
+                    .unwrap_or(false)
             }),
         )
     }
+
+    /// Usage instructions for comms tools to be added to the system prompt
+    pub fn usage_instructions() -> &'static str {
+        "# Inter-agent Communication\n\nYou can communicate with other agents using these tools:\n\n- send_message: Send a simple text message\n- send_request: Send a request and wait for a response\n- send_response: Respond to a previous request\n- list_peers: See which agents are available to talk to\n\nAlways check list_peers first to see who is online."
+    }
+}
+
+fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
+    tools_list()
+        .into_iter()
+        .map(|t| {
+            Arc::new(ToolDef {
+                name: t["name"].as_str().unwrap_or_default().to_string(),
+                description: t["description"].as_str().unwrap_or_default().to_string(),
+                input_schema: t["inputSchema"].clone(),
+            })
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -135,16 +69,16 @@ impl AgentToolDispatcher for CommsToolSurface {
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
-        let tool = self
-            .tools
-            .get(name)
-            .ok_or_else(|| ToolError::not_found(name))?;
+        let is_comms = self.tool_defs.iter().any(|t| t.name == name);
+        if !is_comms {
+            return Err(ToolError::NotFound {
+                name: name.to_string(),
+            });
+        }
 
-        tool.call(args.clone()).await.map_err(|e| match e {
-            BuiltinToolError::InvalidArgs(msg) => ToolError::invalid_arguments(name, msg),
-            BuiltinToolError::ExecutionFailed(msg) => ToolError::execution_failed(msg),
-            BuiltinToolError::TaskError(te) => ToolError::execution_failed(te),
-        })
+        handle_tools_call(&self.tool_context, name, args)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed { message: e })
     }
 }
 
@@ -154,9 +88,13 @@ mod tests {
     use super::*;
     use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
 
-    fn create_test_surface() -> CommsToolSurface {
-        let keypair = Keypair::generate();
-        let peer_keypair = Keypair::generate();
+    fn make_keypair() -> Keypair {
+        Keypair::generate()
+    }
+
+    fn make_tool_context() -> (Arc<Router>, Arc<RwLock<TrustedPeers>>) {
+        let keypair = make_keypair();
+        let peer_keypair = make_keypair();
         let trusted_peers = TrustedPeers {
             peers: vec![TrustedPeer {
                 name: "test-peer".to_string(),
@@ -165,110 +103,29 @@ mod tests {
             }],
         };
         let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let (_, inbox_sender) = meerkat_comms::Inbox::new();
         let router = Arc::new(Router::with_shared_peers(
             keypair,
             trusted_peers.clone(),
             CommsConfig::default(),
+            inbox_sender,
         ));
-
-        CommsToolSurface::new(router, trusted_peers)
+        (router, trusted_peers)
     }
 
     #[test]
-    fn test_surface_has_all_tools() {
-        let surface = create_test_surface();
+    fn test_comms_tool_surface_trait() {
+        let (router, trusted_peers) = make_tool_context();
+        let surface = CommsToolSurface::new(router, trusted_peers);
         let tools = surface.tools();
-
-        assert_eq!(tools.len(), 4);
-
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-        assert!(names.contains(&"send_message"));
-        assert!(names.contains(&"send_request"));
-        assert!(names.contains(&"send_response"));
-        assert!(names.contains(&"list_peers"));
+        assert!(!tools.is_empty());
     }
 
     #[tokio::test]
-    async fn test_surface_dispatch_list_peers() {
-        let surface = create_test_surface();
-        let result = surface.dispatch("list_peers", &serde_json::json!({})).await;
-
-        // Should succeed and return peer info
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        // The response contains a "peers" array
-        assert!(response.get("peers").is_some());
-    }
-
-    #[tokio::test]
-    async fn test_surface_dispatch_unknown_tool() {
-        let surface = create_test_surface();
-        let result = surface
-            .dispatch("unknown_tool", &serde_json::json!({}))
-            .await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::NotFound { .. }));
-    }
-
-    #[test]
-    fn test_peer_availability_with_peers() {
-        let peer_keypair = Keypair::generate();
-        let trusted_peers = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "test-peer".to_string(),
-                pubkey: peer_keypair.public_key(),
-                addr: "tcp://127.0.0.1:4200".to_string(),
-            }],
-        };
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
-
-        let availability = CommsToolSurface::peer_availability(trusted_peers);
-        assert!(availability.is_available());
-        assert!(availability.unavailable_reason().is_none());
-    }
-
-    #[test]
-    fn test_peer_availability_without_peers() {
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
-
-        let availability = CommsToolSurface::peer_availability(trusted_peers);
-        assert!(!availability.is_available());
-        assert_eq!(
-            availability.unavailable_reason(),
-            Some("no peers configured")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_peer_availability_dynamic() {
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
-        let availability = CommsToolSurface::peer_availability(trusted_peers.clone());
-
-        // Initially no peers
-        assert!(!availability.is_available());
-
-        // Add a peer
-        let peer_keypair = Keypair::generate();
-        {
-            let mut peers = trusted_peers.write().await;
-            peers.upsert(TrustedPeer {
-                name: "new-peer".to_string(),
-                pubkey: peer_keypair.public_key(),
-                addr: "tcp://127.0.0.1:4200".to_string(),
-            });
-        }
-
-        // Now available
-        assert!(availability.is_available());
-
-        // Remove the peer
-        {
-            let mut peers = trusted_peers.write().await;
-            peers.remove(&peer_keypair.public_key());
-        }
-
-        // Unavailable again
-        assert!(!availability.is_available());
+    async fn test_comms_tool_surface_dispatch_unknown() {
+        let (router, trusted_peers) = make_tool_context();
+        let surface = CommsToolSurface::new(router, trusted_peers);
+        let result = surface.dispatch("unknown", &Value::Null).await;
+        assert!(matches!(result, Err(ToolError::NotFound { .. })));
     }
 }

@@ -4,10 +4,10 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
-use meerkat_comms::{Keypair, TrustedPeer, TrustedPeers};
-use meerkat_comms_agent::{
+use meerkat_comms::agent::{
     CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
 };
+use meerkat_comms::{Keypair, TrustedPeer, TrustedPeers};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -465,7 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 from: msg.from_pubkey,
                 to: agent_b.comms_manager().keypair().public_key(),
                 kind: match msg.content {
-                    meerkat_comms_agent::CommsContent::Message { body } => {
+                    meerkat_comms::agent::CommsContent::Message { body } => {
                         meerkat_comms::MessageKind::Message { body }
                     }
                     _ => continue,
@@ -476,16 +476,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = agent_b.comms_manager().inbox_sender().send(item);
     }
 
-    let result_b = agent_b.run_inbox_only().await?;
+    let result_b = agent_b.run(String::new()).await?;
 
-    if let Some(result) = result_b {
-        println!("\n═══════════════════════════════════════════════════════════════");
-        println!("AGENT B FINAL RESULT:");
-        println!("  Response text: {}", result.text);
-        println!("  Tool calls executed: {}", result.tool_calls);
-        println!("  Turns: {}", result.turns);
-        println!("═══════════════════════════════════════════════════════════════");
-    }
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("AGENT B FINAL RESULT:");
+    println!("  Response text: {}", result_b.text);
+    println!("  Tool calls executed: {}", result_b.tool_calls);
+    println!("  Turns: {}", result_b.turns);
+    println!("═══════════════════════════════════════════════════════════════");
 
     println!("\n");
     println!("╔══════════════════════════════════════════════════════════════╗");

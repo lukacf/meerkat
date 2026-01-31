@@ -70,10 +70,12 @@ mod tests {
             }],
         };
         let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let (_, inbox_sender) = meerkat_comms::Inbox::new();
         let router = Arc::new(Router::with_shared_peers(
             keypair,
             trusted_peers.clone(),
             CommsConfig::default(),
+            inbox_sender,
         ));
 
         let tool_set = CommsToolSet::new(router, trusted_peers);

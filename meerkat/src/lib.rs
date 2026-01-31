@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! use meerkat::prelude::*;
-//! use meerkat_agent::AgentFactory;
+//! use meerkat::AgentFactory;
 //! use meerkat::AnthropicClient;
 //! use meerkat_store::{JsonlStore, StoreAdapter};
 //! use std::sync::Arc;
@@ -55,18 +55,11 @@ pub use meerkat_core::{
     BudgetLimits,
     BudgetPool,
     BudgetType,
-    // Comms
-    CommsContent,
-    CommsMessage,
-    CommsRuntime,
-    CommsRuntimeError,
-    CommsStatus,
     ConcurrencyLimits,
     // Config
     Config,
     ConfigDelta,
     ContextStrategy,
-    CoreCommsConfig,
     ForkBranch,
     ForkBudgetPolicy,
     LlmStreamResult,
@@ -91,9 +84,6 @@ pub use meerkat_core::{
     SessionId,
     SessionMeta,
     SpawnSpec,
-    SteeringHandle,
-    SteeringMessage,
-    SteeringStatus,
     StopReason,
     StorageConfig,
     // Sub-agents
@@ -112,12 +102,17 @@ pub use meerkat_core::{
     WorkKind,
 };
 
+// Re-export comms types from meerkat_comms
+pub use meerkat_comms::agent::{CommsContent, CommsMessage, CommsStatus};
+pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CoreCommsConfig};
+
 // Re-export client types
 pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};
 pub use meerkat_tools::ToolError;
 
 // AgentFactory
-pub use meerkat_agent::AgentFactory;
+mod factory;
+pub use factory::AgentFactory;
 
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;
@@ -149,7 +144,7 @@ pub use meerkat_tools::{
 };
 
 // Re-export MCP client
-pub use meerkat_mcp_client::{McpConnection, McpError, McpRouter, McpServerConfig};
+pub use meerkat_mcp::{McpConnection, McpError, McpRouter, McpServerConfig};
 
 // SDK module
 mod sdk;

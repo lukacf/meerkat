@@ -5,15 +5,12 @@ members = [
     "meerkat-client",
     "meerkat-store",
     "meerkat-tools",
-    "meerkat-agent",
-    "meerkat-mcp-client",
+    "meerkat-mcp",
     "meerkat-mcp-server",
     "meerkat-cli",
     "meerkat-rest",
     "meerkat",
     "meerkat-comms",
-    "meerkat-comms-mcp",
-    "meerkat-comms-agent",
     "test-fixtures/mcp-test-server",
     "tests/integration",
 ]
@@ -47,7 +44,6 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Utilities
-ulid = "1"
 nix = { version = "0.29", features = ["signal", "process"] }
 which = "7"
 uuid = { version = "1.11", features = ["v7", "serde"] }
@@ -84,15 +80,13 @@ meerkat-core = { path = "meerkat-core" }
 meerkat-client = { path = "meerkat-client" }
 meerkat-store = { path = "meerkat-store" }
 meerkat-tools = { path = "meerkat-tools" }
-meerkat-agent = { path = "meerkat-agent" }
-meerkat-mcp-client = { path = "meerkat-mcp-client" }
+meerkat-mcp = { path = "meerkat-mcp" }
 meerkat-mcp-server = { path = "meerkat-mcp-server" }
 meerkat-cli = { path = "meerkat-cli" }
 meerkat-rest = { path = "meerkat-rest" }
 meerkat = { path = "meerkat" }
 meerkat-comms = { path = "meerkat-comms" }
-meerkat-comms-mcp = { path = "meerkat-comms-mcp" }
-meerkat-comms-agent = { path = "meerkat-comms-agent" }
+
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

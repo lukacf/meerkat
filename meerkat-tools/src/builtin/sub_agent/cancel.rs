@@ -242,11 +242,10 @@ mod tests {
         let state = create_test_state();
 
         // Register an agent
-        let (tx, _rx) = tokio::sync::mpsc::channel(10);
         let op_id = meerkat_core::ops::OperationId::new();
         state
             .manager
-            .register(op_id.clone(), "test-agent".to_string(), tx)
+            .register(op_id.clone(), "test-agent".to_string())
             .await
             .unwrap();
 
@@ -278,11 +277,10 @@ mod tests {
         let state = create_test_state();
 
         // Register and cancel an agent
-        let (tx, _rx) = tokio::sync::mpsc::channel(10);
         let op_id = meerkat_core::ops::OperationId::new();
         state
             .manager
-            .register(op_id.clone(), "test-agent".to_string(), tx)
+            .register(op_id.clone(), "test-agent".to_string())
             .await
             .unwrap();
         state.manager.cancel(&op_id).await;

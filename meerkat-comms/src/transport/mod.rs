@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn test_transport_codec_encode_format() {
         let envelope = make_test_envelope();
-        let mut codec = TransportCodec::new();
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
         let mut buf = BytesMut::new();
         codec
             .encode(
@@ -295,7 +295,7 @@ mod tests {
         let envelope = make_test_envelope();
         let envelope_id = envelope.id;
         let envelope_from = envelope.from;
-        let mut codec = TransportCodec::new();
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
         let mut buf = BytesMut::new();
         codec
             .encode(
@@ -319,7 +319,7 @@ mod tests {
         buf.extend_from_slice(&2_000_000u32.to_be_bytes());
         buf.extend_from_slice(&[0u8; 100]); // partial payload
 
-        let mut codec = TransportCodec::new();
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
         let err = codec.decode(&mut buf).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("message too large"));
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn test_transport_codec_envelope_roundtrip() {
         let envelope = make_test_envelope();
-        let mut codec = TransportCodec::new();
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
         let mut buf = BytesMut::new();
         codec
             .encode(

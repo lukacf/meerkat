@@ -1,5 +1,6 @@
 //! Core message types for Meerkat comms.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
@@ -8,7 +9,7 @@ use crate::identity::{Keypair, PubKey, Signature};
 use ciborium::value::{CanonicalValue, Value};
 
 /// Response status for Request messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Accepted,

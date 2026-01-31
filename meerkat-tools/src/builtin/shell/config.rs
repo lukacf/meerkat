@@ -126,6 +126,28 @@ impl Default for ShellConfig {
 }
 
 impl ShellConfig {
+    fn fallback_shell_candidates(&self) -> Vec<String> {
+        if self.shell != "nu" {
+            return Vec::new();
+        }
+
+        let mut candidates = Vec::new();
+
+        if let Ok(shell_env) = std::env::var("SHELL") {
+            let trimmed = shell_env.trim();
+            if !trimmed.is_empty() && trimmed != self.shell {
+                candidates.push(trimmed.to_string());
+            }
+        }
+
+        for candidate in ["bash", "zsh", "sh"] {
+            if candidate != self.shell && !candidates.iter().any(|c| c == candidate) {
+                candidates.push(candidate.to_string());
+            }
+        }
+
+        candidates
+    }
     fn resolve_working_dir_candidate(&self, dir: &Path) -> PathBuf {
         if dir.is_absolute() {
             dir.to_path_buf()
@@ -139,6 +161,7 @@ impl ShellConfig {
     /// All other fields use default values.
     pub fn with_project_root(path: PathBuf) -> Self {
         Self {
+            enabled: true,
             project_root: path,
             ..Default::default()
         }
@@ -208,6 +231,25 @@ impl ShellConfig {
         self.resolve_shell_path_with_fallbacks(&[])
     }
 
+    pub(crate) fn resolve_shell_path_auto(&self) -> Result<PathBuf, ShellError> {
+        if self.shell != "nu" {
+            return self.resolve_shell_path();
+        }
+
+        match self.resolve_shell_path() {
+            Ok(path) => Ok(path),
+            Err(err @ ShellError::ShellNotInstalled(_)) => {
+                let fallbacks = self.fallback_shell_candidates();
+                if fallbacks.is_empty() {
+                    return Err(err);
+                }
+                let fallback_refs: Vec<&str> = fallbacks.iter().map(String::as_str).collect();
+                self.resolve_shell_path_with_fallbacks(&fallback_refs)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     pub(crate) fn resolve_shell_path_with_fallbacks(
         &self,
         fallbacks: &[&str],
@@ -270,6 +312,17 @@ impl ShellConfig {
     pub async fn resolve_shell_path_async(&self) -> Result<PathBuf, ShellError> {
         let config = self.clone();
         tokio::task::spawn_blocking(move || config.resolve_shell_path())
+            .await
+            .map_err(|err| {
+                ShellError::Io(std::io::Error::other(format!(
+                    "Shell path resolution task failed: {err}"
+                )))
+            })?
+    }
+
+    pub async fn resolve_shell_path_auto_async(&self) -> Result<PathBuf, ShellError> {
+        let config = self.clone();
+        tokio::task::spawn_blocking(move || config.resolve_shell_path_auto())
             .await
             .map_err(|err| {
                 ShellError::Io(std::io::Error::other(format!(
@@ -423,8 +476,10 @@ mod tests {
         // project_root should be set
         assert_eq!(config.project_root, path);
 
-        // All other fields should have defaults
-        assert!(!config.enabled);
+        // enabled should be true (intent of with_project_root is to create usable config)
+        assert!(config.enabled);
+
+        // Other fields should have defaults
         assert_eq!(config.default_timeout_secs, 30);
         assert!(config.restrict_to_project);
         assert_eq!(config.shell, "nu");

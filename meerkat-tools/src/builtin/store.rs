@@ -3,7 +3,7 @@
 //! This module defines the [`TaskStore`] trait that abstracts over
 //! different storage backends for tasks.
 
-use super::types::{NewTask, Task, TaskError, TaskId, TaskUpdate};
+use crate::builtin::types::{NewTask, Task, TaskError, TaskId, TaskUpdate};
 use async_trait::async_trait;
 
 /// Trait for task storage backends

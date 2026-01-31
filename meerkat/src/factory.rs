@@ -14,7 +14,6 @@ use meerkat_store::MemoryStore;
 use meerkat_store::{SessionStore, StoreAdapter};
 use meerkat_tools::builtin::shell::ShellConfig;
 use meerkat_tools::builtin::sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState};
-use meerkat_tools::builtin::utility::WaitInterrupt;
 use meerkat_tools::builtin::{BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, TaskStore};
 use meerkat_tools::{BuiltinDispatcherConfig, CompositeDispatcherError, build_builtin_dispatcher};
 use tokio::sync::{RwLock, mpsc};
@@ -139,18 +138,7 @@ impl AgentFactory {
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
     ) -> Result<CompositeDispatcher, CompositeDispatcherError> {
-        if self.enable_subagents || self.enable_comms {
-            CompositeDispatcher::new_with_interrupt(
-                store,
-                config,
-                shell_config,
-                external,
-                session_id,
-                true,
-            )
-        } else {
-            CompositeDispatcher::new(store, config, shell_config, external, session_id)
-        }
+        CompositeDispatcher::new(store, config, shell_config, external, session_id)
     }
 
     /// Build a shared builtin dispatcher using the provided config.
@@ -168,7 +156,6 @@ impl AgentFactory {
             shell_config,
             external,
             session_id,
-            enable_wait_interrupt: self.enable_subagents || self.enable_comms,
         };
         if !self.enable_subagents {
             return build_builtin_dispatcher(builder);
@@ -180,7 +167,6 @@ impl AgentFactory {
             shell_config,
             external,
             session_id,
-            enable_wait_interrupt: _,
         } = builder;
 
         let shell_config_for_subagents = shell_config.clone();
@@ -188,35 +174,9 @@ impl AgentFactory {
             .build_composite_dispatcher(store, &config, shell_config, external.clone(), session_id)
             .await?;
 
-        let wait_interrupt_tx = composite.wait_interrupt_sender();
-
         let limits = ConcurrencyLimits::default();
         let manager = Arc::new(SubAgentManager::new(limits, 0));
         let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
-
-        if let Some(interrupt_tx) = wait_interrupt_tx {
-            let completion_rx = manager.completion_receiver();
-            tokio::spawn(async move {
-                let mut rx = completion_rx;
-                while rx.changed().await.is_ok() {
-                    if let Some(completion) = rx.borrow().clone() {
-                        let meerkat_core::sub_agent::SubAgentCompletion {
-                            agent_name,
-                            is_error,
-                            summary,
-                            ..
-                        } = completion;
-                        let reason = format!(
-                            "Sub-agent '{}' {} with: {}",
-                            agent_name,
-                            if is_error { "failed" } else { "completed" },
-                            summary
-                        );
-                        let _ = interrupt_tx.send(Some(WaitInterrupt { reason }));
-                    }
-                }
-            });
-        }
 
         let sub_agent_task_store = MemoryTaskStore::new();
         let sub_agent_factory = self.clone().subagents(false).comms(false);

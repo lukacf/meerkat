@@ -3,165 +3,132 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::comms_dispatcher::DynCommsToolDispatcher;
+use meerkat_comms::agent::DynCommsToolDispatcher;
 use meerkat_comms::{Router, TrustedPeers};
 use meerkat_core::AgentToolDispatcher;
-use meerkat_mcp_client::McpRouter;
+use meerkat_mcp::McpRouter;
 use tokio::sync::RwLock;
 
 use crate::builtin::shell::ShellConfig;
 use crate::builtin::{BuiltinToolConfig, CompositeDispatcher, CompositeDispatcherError, TaskStore};
-use crate::dispatcher::{
-    EmptyToolDispatcher, ToolDispatcher, ToolDispatcherConfig, ToolDispatcherKind,
-};
+use crate::dispatcher::{EmptyToolDispatcher, ToolDispatcher};
 
-/// Configuration for building a CompositeDispatcher.
-#[derive(Clone)]
+/// Configuration for a specific tool dispatcher source
+pub enum ToolDispatcherSource {
+    /// Empty dispatcher (default)
+    Empty,
+    /// MCP-based tools
+    Mcp(McpDispatcherConfig),
+    /// Built-in and sub-agent tools (boxed to reduce enum size)
+    Composite(Box<BuiltinDispatcherConfig>),
+}
+
+/// Configuration for an MCP-based dispatcher
+pub struct McpDispatcherConfig {
+    pub router: Arc<McpRouter>,
+}
+
+/// Configuration for a built-in and sub-agent dispatcher
 pub struct BuiltinDispatcherConfig {
     pub store: Arc<dyn TaskStore>,
     pub config: BuiltinToolConfig,
     pub shell_config: Option<ShellConfig>,
     pub external: Option<Arc<dyn AgentToolDispatcher>>,
     pub session_id: Option<String>,
-    pub enable_wait_interrupt: bool,
 }
 
-/// Configuration for building an MCP-backed dispatcher.
-#[derive(Clone)]
-pub struct McpDispatcherConfig {
-    pub router: Arc<McpRouter>,
-    pub default_timeout: Duration,
-}
-
-/// Configuration for wrapping a dispatcher with comms tools.
-#[derive(Clone)]
+/// Configuration for a comms-enabled dispatcher
 pub struct CommsDispatcherConfig {
     pub router: Arc<Router>,
     pub trusted_peers: Arc<RwLock<TrustedPeers>>,
 }
 
-/// Errors that can occur while building dispatchers.
-#[derive(Debug, thiserror::Error)]
-pub enum DispatcherBuildError {
-    #[error("missing MCP router config")]
-    MissingMcpConfig,
-
-    #[error("missing builtins config")]
-    MissingBuiltinsConfig,
-
-    #[error("missing comms config")]
-    MissingCommsConfig,
-
-    #[error("composite dispatcher error: {0}")]
-    Composite(#[from] CompositeDispatcherError),
+/// Top-level configuration for building a ToolDispatcher
+pub struct ToolDispatcherConfig {
+    pub source: ToolDispatcherSource,
+    pub comms: Option<CommsDispatcherConfig>,
+    pub default_timeout: Duration,
 }
 
-/// Build a shared builtin dispatcher (CompositeDispatcher) as a trait object.
-pub fn build_builtin_dispatcher(
-    config: BuiltinDispatcherConfig,
-) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
-    let dispatcher = if config.enable_wait_interrupt {
-        CompositeDispatcher::new_with_interrupt(
-            config.store,
-            &config.config,
-            config.shell_config,
-            config.external,
-            config.session_id,
-            true,
-        )?
-    } else {
-        CompositeDispatcher::new(
-            config.store,
-            &config.config,
-            config.shell_config,
-            config.external,
-            config.session_id,
-        )?
-    };
-
-    Ok(Arc::new(dispatcher))
+impl Default for ToolDispatcherConfig {
+    fn default() -> Self {
+        Self {
+            source: ToolDispatcherSource::Empty,
+            comms: None,
+            default_timeout: Duration::from_secs(30),
+        }
+    }
 }
 
-/// Builder for shared tool dispatchers that returns trait objects.
-#[derive(Default)]
+/// Builder for creating a ToolDispatcher
 pub struct ToolDispatcherBuilder {
     config: ToolDispatcherConfig,
-    mcp: Option<McpDispatcherConfig>,
-    builtins: Option<BuiltinDispatcherConfig>,
-    comms: Option<CommsDispatcherConfig>,
 }
 
 impl ToolDispatcherBuilder {
-    /// Create a new builder with the provided dispatcher config.
+    /// Create a new builder with the given config
     pub fn new(config: ToolDispatcherConfig) -> Self {
-        Self {
-            config,
-            mcp: None,
-            builtins: None,
-            comms: None,
-        }
+        Self { config }
     }
 
-    /// Attach MCP router configuration.
-    pub fn with_mcp(mut self, router: Arc<McpRouter>, default_timeout: Duration) -> Self {
-        self.mcp = Some(McpDispatcherConfig {
-            router,
-            default_timeout,
-        });
+    /// Set the dispatcher source
+    pub fn source(mut self, source: ToolDispatcherSource) -> Self {
+        self.config.source = source;
         self
     }
 
-    /// Attach builtin dispatcher configuration.
-    pub fn with_builtins(mut self, builtins: BuiltinDispatcherConfig) -> Self {
-        self.builtins = Some(builtins);
+    /// Add comms tools to the dispatcher
+    pub fn comms(mut self, comms: CommsDispatcherConfig) -> Self {
+        self.config.comms = Some(comms);
         self
     }
 
-    /// Attach comms dispatcher configuration.
-    pub fn with_comms(
-        mut self,
-        router: Arc<Router>,
-        trusted_peers: Arc<RwLock<TrustedPeers>>,
-    ) -> Self {
-        self.comms = Some(CommsDispatcherConfig {
-            router,
-            trusted_peers,
-        });
+    /// Set the default timeout
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.config.default_timeout = timeout;
         self
     }
 
-    /// Build the dispatcher as a trait object.
-    pub fn build(self) -> Result<Arc<dyn AgentToolDispatcher>, DispatcherBuildError> {
-        match self.config.kind {
-            ToolDispatcherKind::Empty => Ok(Arc::new(EmptyToolDispatcher)),
-            ToolDispatcherKind::Mcp => {
-                let mcp = self.mcp.ok_or(DispatcherBuildError::MissingMcpConfig)?;
-                let mut dispatcher = ToolDispatcher::new(mcp.router, mcp.default_timeout);
-                dispatcher.discover_tools();
-                Ok(Arc::new(dispatcher))
-            }
-            ToolDispatcherKind::Composite => {
-                let builtins = self
-                    .builtins
-                    .ok_or(DispatcherBuildError::MissingBuiltinsConfig)?;
-                build_builtin_dispatcher(builtins).map_err(DispatcherBuildError::Composite)
-            }
-            ToolDispatcherKind::WithComms => {
-                let comms = self.comms.ok_or(DispatcherBuildError::MissingCommsConfig)?;
-                let inner: Arc<dyn AgentToolDispatcher> = if let Some(builtins) = self.builtins {
-                    build_builtin_dispatcher(builtins).map_err(DispatcherBuildError::Composite)?
-                } else if let Some(mcp) = self.mcp {
-                    let mut dispatcher = ToolDispatcher::new(mcp.router, mcp.default_timeout);
-                    dispatcher.discover_tools();
-                    Arc::new(dispatcher)
-                } else {
-                    Arc::new(EmptyToolDispatcher)
-                };
+    /// Build the ToolDispatcher
+    pub async fn build(self) -> Result<ToolDispatcher, CompositeDispatcherError> {
+        let registry = crate::registry::ToolRegistry::new();
 
-                let dispatcher =
-                    DynCommsToolDispatcher::new(comms.router, comms.trusted_peers, inner);
-                Ok(Arc::new(dispatcher))
-            }
-        }
+        let router: Arc<dyn AgentToolDispatcher> = match self.config.source {
+            ToolDispatcherSource::Empty => Arc::new(EmptyToolDispatcher),
+            ToolDispatcherSource::Mcp(mcp) => mcp.router,
+            ToolDispatcherSource::Composite(comp) => Arc::new(CompositeDispatcher::new(
+                comp.store,
+                &comp.config,
+                comp.shell_config,
+                comp.external,
+                comp.session_id,
+            )?),
+        };
+
+        // Wrap with comms if enabled
+        let router = if let Some(comms) = self.config.comms {
+            Arc::new(DynCommsToolDispatcher::new(
+                comms.router,
+                comms.trusted_peers,
+                router,
+            ))
+        } else {
+            router
+        };
+
+        Ok(ToolDispatcher::new(registry, router).with_timeout(self.config.default_timeout))
     }
+}
+
+/// Create a builtin tool dispatcher with the given config.
+pub fn build_builtin_dispatcher(
+    config: BuiltinDispatcherConfig,
+) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
+    Ok(Arc::new(CompositeDispatcher::new(
+        config.store,
+        &config.config,
+        config.shell_config,
+        config.external,
+        config.session_id,
+    )?))
 }

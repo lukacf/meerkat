@@ -1,4 +1,4 @@
-//! meerkat-mcp-client - MCP client for Meerkat
+//! meerkat-mcp - MCP client for Meerkat
 //!
 //! Connect to MCP servers and route tool calls.
 

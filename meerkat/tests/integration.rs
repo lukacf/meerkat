@@ -246,19 +246,20 @@ mod tool_dispatch {
         // Registry.register returns () - no error case
         registry.register(valid_tool);
 
-        // Verify tool is registered using contains()
+        // Verify tool is registered using get()
         assert!(
-            registry.contains("test_tool"),
+            registry.get("test_tool").is_some(),
             "Should find registered tool"
         );
     }
 
     #[test]
     fn test_tool_timeout_enforced() {
-        // Create dispatcher with timeout
-        let router = Arc::new(McpRouter::new());
+        // Create dispatcher with registry and router
+        let registry = ToolRegistry::new();
+        let router: Arc<dyn AgentToolDispatcher> = Arc::new(McpRouter::new());
         let timeout = Duration::from_secs(30);
-        let dispatcher = ToolDispatcher::new(router, timeout);
+        let dispatcher = ToolDispatcher::new(registry, router).with_timeout(timeout);
 
         // Dispatcher should be created (existence test)
         assert!(std::mem::size_of_val(&dispatcher) > 0);

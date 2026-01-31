@@ -22,8 +22,6 @@ struct SubAgentInfoView {
     depth: u32,
     /// Duration running in milliseconds
     running_ms: u64,
-    /// Number of pending steering messages
-    pending_steering: usize,
 }
 
 /// Response from agent_list tool
@@ -86,7 +84,6 @@ impl AgentListTool {
                 state: state_str.to_string(),
                 depth: info.depth,
                 running_ms: info.running_ms,
-                pending_steering: info.pending_steering,
             });
         }
 
@@ -254,11 +251,10 @@ mod tests {
         let state = create_test_state();
 
         // Register an agent
-        let (tx, _rx) = tokio::sync::mpsc::channel(10);
         let op_id = meerkat_core::ops::OperationId::new();
         state
             .manager
-            .register(op_id.clone(), "test-agent".to_string(), tx)
+            .register(op_id.clone(), "test-agent".to_string())
             .await
             .unwrap();
 

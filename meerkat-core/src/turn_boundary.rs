@@ -49,9 +49,3 @@ impl TurnBoundaryHook {
         format!("{injected}\n\n---\n\n{user_input}")
     }
 }
-
-impl TurnBoundaryMessage for crate::comms_runtime::CommsMessage {
-    fn render_for_prompt(&self) -> Cow<'_, str> {
-        Cow::Owned(self.to_user_message_text())
-    }
-}

@@ -196,7 +196,7 @@ impl JobManager {
             }
         }
 
-        let path = self.config.resolve_shell_path_async().await?;
+        let path = self.config.resolve_shell_path_auto_async().await?;
         let mut guard = self.resolved_shell_path.lock().await;
         *guard = Some(path.clone());
         Ok(path)
@@ -471,12 +471,7 @@ impl JobManager {
 
                 // For non-running jobs, we need to extract started_at from the job somehow
                 // For now, use 0 as fallback (could be improved by storing started_at in job)
-                let started_at_unix = if started_at > 0 {
-                    started_at
-                } else {
-                    // Try to get from job ID (ULIDs encode timestamp)
-                    0
-                };
+                let started_at_unix = if started_at > 0 { started_at } else { 0 };
 
                 JobSummary {
                     id: job.id.clone(),

@@ -94,6 +94,16 @@ impl TrustedPeers {
         self.peers.len()
     }
 
+    /// Load trusted peers from a JSON file, or return empty if not found.
+    pub fn load_or_default(path: &Path) -> Result<Self, TrustError> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(path)?;
+        let peers = serde_json::from_str(&content)?;
+        Ok(peers)
+    }
+
     /// Load trusted peers from a JSON file.
     pub async fn load(path: &Path) -> Result<Self, TrustError> {
         let content = tokio::fs::read_to_string(path).await?;

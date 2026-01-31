@@ -13,10 +13,10 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
-use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
-use meerkat_comms_agent::{
+use meerkat_comms::agent::{
     CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
 };
+use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -239,8 +239,8 @@ async fn create_agent_pair(
         CommsToolDispatcher,
         SessionStoreAdapter<JsonlStore>,
     >,
-    meerkat_comms_agent::ListenerHandle,
-    meerkat_comms_agent::ListenerHandle,
+    meerkat_comms::agent::ListenerHandle,
+    meerkat_comms::agent::ListenerHandle,
     TempDir,
     TempDir,
 ) {
@@ -399,24 +399,20 @@ mod two_agent_message {
 
         // Agent B processes the incoming message
         let result_b = agent_b
-            .run_inbox_only()
+            .run(String::new())
             .await
             .expect("Agent B inbox processing should succeed");
 
-        if let Some(result) = result_b {
-            eprintln!("Agent B response: {}", result.text);
-            assert!(
-                result.text.to_lowercase().contains("agent a")
-                    || result.text.to_lowercase().contains("hello")
-                    || result.text.to_lowercase().contains("greeting")
-                    || result.text.to_lowercase().contains("acknowledged")
-                    || result.text.to_lowercase().contains("message"),
-                "Agent B should acknowledge the message: {}",
-                result.text
-            );
-        } else {
-            panic!("Agent B should have received a message from Agent A");
-        }
+        eprintln!("Agent B response: {}", result_b.text);
+        assert!(
+            result_b.text.to_lowercase().contains("agent a")
+                || result_b.text.to_lowercase().contains("hello")
+                || result_b.text.to_lowercase().contains("greeting")
+                || result_b.text.to_lowercase().contains("acknowledged")
+                || result_b.text.to_lowercase().contains("message"),
+            "Agent B should acknowledge the message: {}",
+            result_b.text
+        );
 
         // Cleanup
         handle_a.abort();
@@ -463,23 +459,19 @@ mod request_response {
 
         // Agent B processes the request and responds
         let result_b = agent_b
-            .run_inbox_only()
+            .run(String::new())
             .await
             .expect("Agent B inbox processing should succeed");
 
-        if let Some(result) = result_b {
-            eprintln!("Agent B (processing request) response: {}", result.text);
-            // Agent B should acknowledge receiving a request
-            assert!(
-                result.text.to_lowercase().contains("request")
-                    || result.text.to_lowercase().contains("calculate")
-                    || result.text.to_lowercase().contains("received"),
-                "Agent B should acknowledge the request: {}",
-                result.text
-            );
-        } else {
-            panic!("Agent B should have received a request from Agent A");
-        }
+        eprintln!("Agent B (processing request) response: {}", result_b.text);
+        // Agent B should acknowledge receiving a request
+        assert!(
+            result_b.text.to_lowercase().contains("request")
+                || result_b.text.to_lowercase().contains("calculate")
+                || result_b.text.to_lowercase().contains("received"),
+            "Agent B should acknowledge the request: {}",
+            result_b.text
+        );
 
         // Cleanup
         handle_a.abort();
@@ -516,12 +508,10 @@ mod multi_turn_comms {
 
         // Turn 2: Agent B receives and responds
         let result_b1 = agent_b
-            .run_inbox_only()
+            .run(String::new())
             .await
             .expect("Agent B turn 1 should succeed");
-        if let Some(result) = result_b1 {
-            eprintln!("Turn 2 - Agent B: {}", result.text);
-        }
+        eprintln!("Turn 2 - Agent B: {}", result_b1.text);
 
         // Agent B sends a follow-up
         let result_b2 = agent_b
@@ -534,20 +524,18 @@ mod multi_turn_comms {
 
         // Turn 3: Agent A receives and responds
         let result_a2 = agent_a
-            .run_inbox_only()
+            .run(String::new())
             .await
             .expect("Agent A turn 2 should succeed");
-        if let Some(result) = result_a2 {
-            eprintln!("Turn 4 - Agent A: {}", result.text);
-            assert!(
-                result.text.to_lowercase().contains("agent b")
-                    || result.text.to_lowercase().contains("name")
-                    || result.text.to_lowercase().contains("acknowledging")
-                    || result.text.to_lowercase().contains("communication"),
-                "Agent A should acknowledge Agent B's response: {}",
-                result.text
-            );
-        }
+        eprintln!("Turn 4 - Agent A: {}", result_a2.text);
+        assert!(
+            result_a2.text.to_lowercase().contains("agent b")
+                || result_a2.text.to_lowercase().contains("name")
+                || result_a2.text.to_lowercase().contains("acknowledging")
+                || result_a2.text.to_lowercase().contains("communication"),
+            "Agent A should acknowledge Agent B's response: {}",
+            result_a2.text
+        );
 
         // Cleanup
         handle_a.abort();
@@ -764,21 +752,17 @@ mod three_agent_coordination {
 
         // Agent B processes
         let result_b = agent_b
-            .run_inbox_only()
+            .run(String::new())
             .await
             .expect("Agent B should process");
-        if let Some(result) = result_b {
-            eprintln!("Agent B received: {}", result.text);
-        }
+        eprintln!("Agent B received: {}", result_b.text);
 
         // Agent C processes
         let result_c = agent_c
-            .run_inbox_only()
+            .run(String::new())
             .await
             .expect("Agent C should process");
-        if let Some(result) = result_c {
-            eprintln!("Agent C received: {}", result.text);
-        }
+        eprintln!("Agent C received: {}", result_c.text);
 
         // Cleanup
         handle_a.abort();

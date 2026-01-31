@@ -3,8 +3,7 @@
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 use crate::schema::empty_object_schema;
 use async_trait::async_trait;
-use meerkat_comms::{Router, TrustedPeers};
-use meerkat_comms_mcp::tools::{ToolContext, handle_tools_call, tools_list};
+use meerkat_comms::{Router, ToolContext, TrustedPeers, handle_tools_call, tools_list};
 use meerkat_core::ToolDef;
 use serde_json::Value;
 use std::sync::Arc;
@@ -190,10 +189,12 @@ mod tests {
             }],
         };
         let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let (_, inbox_sender) = meerkat_comms::Inbox::new();
         let router = Arc::new(Router::with_shared_peers(
             keypair,
             trusted_peers.clone(),
             CommsConfig::default(),
+            inbox_sender,
         ));
         CommsToolState::new(router, trusted_peers)
     }

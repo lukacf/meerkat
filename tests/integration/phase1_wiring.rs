@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use meerkat_agent::AgentFactory;
+use meerkat::AgentFactory;
 use meerkat_client::ProviderResolver;
 use meerkat_core::{AgentSessionStore, Message, Provider, Session, UserMessage};
 use meerkat_store::{MemoryStore, StoreAdapter};

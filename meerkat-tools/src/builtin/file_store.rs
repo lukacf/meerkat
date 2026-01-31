@@ -79,7 +79,7 @@ impl FileTaskStore {
             return Ok(TaskStoreData {
                 meta: TaskStoreMeta {
                     version: 1,
-                    project_id: ulid::Ulid::new().to_string(),
+                    project_id: uuid::Uuid::now_v7().to_string(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                     store_rev: 0,
                 },
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(created.updated_by_session, Some("session-1".to_string()));
         assert!(!created.created_at.is_empty());
         assert!(!created.updated_at.is_empty());
-        assert_eq!(created.id.0.len(), 26); // ULID format
+        assert_eq!(created.id.0.len(), 36); // UUID format
 
         // Verify we can retrieve it
         let fetched = store.get(&created.id).await.unwrap();

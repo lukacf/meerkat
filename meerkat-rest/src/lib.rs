@@ -30,6 +30,7 @@ use meerkat::{
 };
 use meerkat_client::LlmClientAdapter;
 use meerkat_client::ProviderResolver;
+use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::{
     Config, ConfigDelta, ConfigStore, FileConfigStore, Provider, SessionMetadata, SessionTooling,
@@ -376,7 +377,7 @@ fn create_tool_dispatcher(
     };
 
     // Create composite dispatcher
-    let dispatcher = CompositeDispatcher::builtins_only(task_store, &config, shell_config, None)
+    let dispatcher = CompositeDispatcher::new(task_store, &config, shell_config, None, None)
         .map_err(|e| ApiError::Internal(format!("Failed to create tool dispatcher: {}", e)))?;
 
     let tool_usage_instructions = dispatcher.usage_instructions();
@@ -489,7 +490,7 @@ async fn create_session(
 
     // Add comms runtime if enabled
     if let Some(runtime) = comms_runtime {
-        builder = builder.with_comms_runtime(runtime);
+        builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -732,7 +733,7 @@ async fn continue_session(
     builder = builder.system_prompt(system_prompt);
 
     if let Some(runtime) = comms_runtime {
-        builder = builder.with_comms_runtime(runtime);
+        builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;

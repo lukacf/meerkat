@@ -12,6 +12,7 @@ use meerkat_core::ToolDef;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::ops::{OperationId, ToolAccessPolicy};
 use schemars::JsonSchema;
+use serde::de;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -45,7 +46,7 @@ pub mod allowed_models {
 }
 
 /// Tool access policy for spawned agents
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, JsonSchema)]
 #[serde(tag = "policy", rename_all = "snake_case")]
 enum ToolAccessInput {
     /// Inherit all tools from parent
@@ -54,6 +55,45 @@ enum ToolAccessInput {
     AllowList { tools: Vec<String> },
     /// Block specific tools
     DenyList { tools: Vec<String> },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "policy", rename_all = "snake_case")]
+enum ToolAccessInputRaw {
+    Inherit,
+    AllowList { tools: Vec<String> },
+    DenyList { tools: Vec<String> },
+}
+
+impl From<ToolAccessInputRaw> for ToolAccessInput {
+    fn from(input: ToolAccessInputRaw) -> Self {
+        match input {
+            ToolAccessInputRaw::Inherit => ToolAccessInput::Inherit,
+            ToolAccessInputRaw::AllowList { tools } => ToolAccessInput::AllowList { tools },
+            ToolAccessInputRaw::DenyList { tools } => ToolAccessInput::DenyList { tools },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolAccessInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::String(raw) => {
+                let parsed: ToolAccessInputRaw =
+                    serde_json::from_str(&raw).map_err(de::Error::custom)?;
+                Ok(parsed.into())
+            }
+            other => {
+                let parsed: ToolAccessInputRaw =
+                    serde_json::from_value(other).map_err(de::Error::custom)?;
+                Ok(parsed.into())
+            }
+        }
+    }
 }
 
 impl From<ToolAccessInput> for ToolAccessPolicy {
@@ -333,7 +373,7 @@ impl AgentSpawnTool {
         };
 
         // Spawn the sub-agent (this registers it and starts execution in a background task)
-        let _steering_tx = spawn_sub_agent_dyn(
+        spawn_sub_agent_dyn(
             op_id.clone(),
             name.clone(),
             spec,
@@ -405,7 +445,7 @@ impl BuiltinTool for AgentSpawnTool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::builtin::sub_agent::config::SubAgentConfig;
@@ -870,6 +910,23 @@ mod tests {
                     .contains("stays alive"),
                 "Description should explain host_mode behavior"
             );
+        }
+    }
+
+    #[test]
+    fn test_spawn_params_tool_access_accepts_json_string() {
+        let params: SpawnParams = serde_json::from_value(json!({
+            "prompt": "test",
+            "tool_access": "{\"policy\":\"allow_list\",\"tools\":[\"shell\"]}"
+        }))
+        .unwrap();
+
+        let tool_access = params.tool_access.expect("tool_access should parse");
+        match tool_access {
+            ToolAccessInput::AllowList { tools } => {
+                assert_eq!(tools, vec!["shell"]);
+            }
+            other => panic!("Unexpected tool_access variant: {other:?}"),
         }
     }
 }

@@ -3,7 +3,6 @@
 use crate::error::AgentError;
 use crate::event::{AgentEvent, BudgetType};
 use crate::state::LoopState;
-use crate::sub_agent::inject_steering_messages;
 use crate::types::{AssistantMessage, Message, RunResult, ToolDef, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
@@ -20,20 +19,6 @@ where
     T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized + 'static,
 {
-    /// Drain pending steering messages and inject them into session
-    async fn apply_pending_steering(&mut self) {
-        let mut messages = Vec::new();
-
-        // Drain all pending steering messages from the channel
-        while let Ok(msg) = self.steering_rx.try_recv() {
-            messages.push(msg);
-        }
-
-        if !messages.is_empty() {
-            inject_steering_messages(&mut self.session, messages);
-        }
-    }
-
     /// Call LLM with retry logic
     async fn call_llm_with_retry(
         &self,
@@ -291,10 +276,7 @@ where
                         // Go through DrainingEvents to CallingLlm (state machine requires this)
                         self.state.transition(LoopState::DrainingEvents)?;
 
-                        // === TURN BOUNDARY: Apply steering, drain comms, collect sub-agent results ===
-
-                        // Apply any pending steering messages from parent
-                        self.apply_pending_steering().await;
+                        // === TURN BOUNDARY: drain comms, collect sub-agent results ===
 
                         // Drain comms inbox and inject messages into session
                         self.drain_comms_inbox().await;

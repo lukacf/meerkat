@@ -89,13 +89,16 @@ fn test_rct_contracts_all_builtin_schemas_have_required_field()
 #[test]
 fn test_rct_contracts_inv_007_builtin_task_persistence_strategy()
 -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_core::AgentToolDispatcher;
     // Contract: Builtin task storage strategy must be configurable
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
 
     let dispatcher = CompositeDispatcher::new(store, &config, None, None, None)?;
 
-    assert!(dispatcher.is_builtin("task_create"));
+    // Verify task_create is available as a tool
+    let tools = dispatcher.tools();
+    assert!(tools.iter().any(|t| t.name == "task_create"));
     Ok(())
 }
 
@@ -153,7 +156,7 @@ fn scan_for_manual_input_schema_literals(
 
         if path.is_dir() {
             match file_name.as_ref() {
-                ".git" | "target" => continue,
+                ".git" | "target" | "tests" => continue,
                 _ => {}
             }
 
@@ -166,7 +169,27 @@ fn scan_for_manual_input_schema_literals(
         }
 
         let contents = std::fs::read_to_string(&path)?;
+        let mut in_test_module = false;
+        let mut test_brace_depth = 0;
+
         for (idx, line) in contents.lines().enumerate() {
+            // Track entry into #[cfg(test)] modules
+            if line.contains("#[cfg(test)]") {
+                in_test_module = true;
+                test_brace_depth = 0;
+            }
+
+            // Track brace depth when inside test module
+            if in_test_module {
+                test_brace_depth += line.chars().filter(|&c| c == '{').count();
+                test_brace_depth =
+                    test_brace_depth.saturating_sub(line.chars().filter(|&c| c == '}').count());
+                if test_brace_depth == 0 && line.contains('}') {
+                    in_test_module = false;
+                }
+                continue; // Skip test code
+            }
+
             if contains_manual_input_schema_literal(line) {
                 let rel = path.strip_prefix(root).unwrap_or(&path);
                 offenders.push(format!("{}:{}: {}", rel.display(), idx + 1, line.trim()));

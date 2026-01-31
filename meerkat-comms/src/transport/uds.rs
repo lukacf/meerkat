@@ -9,8 +9,8 @@ use tokio_util::codec::Framed;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 
-use super::codec::{EnvelopeFrame, TransportCodec};
 use super::TransportError;
+use super::codec::{EnvelopeFrame, TransportCodec};
 use crate::types::Envelope;
 
 /// A UDS listener for accepting incoming connections.
@@ -36,7 +36,10 @@ impl UdsListener {
     pub async fn accept(&self) -> Result<UdsConnection, TransportError> {
         let (stream, _) = self.listener.accept().await?;
         Ok(UdsConnection {
-            framed: Framed::new(stream, TransportCodec::new()),
+            framed: Framed::new(
+                stream,
+                TransportCodec::new(crate::transport::MAX_PAYLOAD_SIZE),
+            ),
         })
     }
 }
@@ -51,7 +54,10 @@ impl UdsConnection {
     pub async fn connect(path: &Path) -> Result<Self, TransportError> {
         let stream = UnixStream::connect(path).await?;
         Ok(Self {
-            framed: Framed::new(stream, TransportCodec::new()),
+            framed: Framed::new(
+                stream,
+                TransportCodec::new(crate::transport::MAX_PAYLOAD_SIZE),
+            ),
         })
     }
 
@@ -143,8 +149,7 @@ mod tests {
         // Spawn server
         let server_handle = tokio::spawn(async move {
             let mut conn = listener.accept().await.unwrap();
-            let received = conn.recv().await.unwrap();
-            received
+            conn.recv().await.unwrap()
         });
 
         // Client sends

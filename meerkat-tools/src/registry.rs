@@ -1,80 +1,68 @@
-//! Tool registry for schema validation
+//! Tool registry for tracking and validating tools
 
-use jsonschema::Validator;
-use meerkat_core::ToolDef;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Registry for tool definitions and schema validation
+use crate::error::ToolValidationError;
+use meerkat_core::types::ToolDef;
+
+/// Registry for managing available tools and their schemas
+#[derive(Debug, Clone, Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<ToolDef>>,
-    validators: HashMap<String, Validator>,
 }
 
 impl ToolRegistry {
     /// Create a new empty registry
     pub fn new() -> Self {
-        Self {
-            tools: HashMap::new(),
-            validators: HashMap::new(),
+        Self::default()
+    }
+
+    /// Register a new tool
+    pub fn register(&mut self, def: ToolDef) {
+        self.tools.insert(def.name.clone(), Arc::new(def));
+    }
+
+    /// Register multiple tools
+    pub fn register_many(&mut self, defs: impl IntoIterator<Item = ToolDef>) {
+        for def in defs {
+            self.register(def);
         }
     }
 
-    /// Register a tool definition
-    pub fn register(&mut self, tool: ToolDef) {
-        // Compile the JSON Schema validator for this tool
-        if let Ok(validator) = Validator::new(&tool.input_schema) {
-            self.validators.insert(tool.name.clone(), validator);
-        }
-        self.tools.insert(tool.name.clone(), Arc::new(tool));
+    /// Get a tool definition by name
+    pub fn get(&self, name: &str) -> Option<Arc<ToolDef>> {
+        self.tools.get(name).cloned()
     }
 
-    /// Get tool definitions for LLM requests.
-    /// Returns Arc references to avoid cloning on every request.
-    pub fn tool_defs(&self) -> Vec<Arc<ToolDef>> {
+    /// Get all registered tools
+    pub fn list(&self) -> Vec<Arc<ToolDef>> {
         self.tools.values().cloned().collect()
     }
 
-    /// Validate arguments against a tool's schema
+    /// Validate tool arguments against its schema
     pub fn validate(
         &self,
         name: &str,
-        args: &Value,
-    ) -> Result<(), crate::error::ToolValidationError> {
-        let _tool = self
+        args: &serde_json::Value,
+    ) -> Result<(), ToolValidationError> {
+        let tool = self
             .tools
             .get(name)
-            .ok_or_else(|| crate::error::ToolValidationError::ToolNotFound(name.to_string()))?;
+            .ok_or_else(|| ToolValidationError::not_found(name))?;
 
-        // Validate against compiled schema if available
-        if let Some(validator) = self.validators.get(name) {
-            // Use is_valid() fast-path for the common case of valid input
-            if !validator.is_valid(args) {
-                // Only collect errors when validation fails
-                let errors: Vec<String> = validator
-                    .iter_errors(args)
-                    .map(|e| format!("{}: {}", e.instance_path, e))
-                    .collect();
+        // Basic schema validation using jsonschema
+        let compiled = jsonschema::Validator::new(&tool.input_schema)
+            .map_err(|e| ToolValidationError::invalid_arguments(name, e.to_string()))?;
 
-                return Err(crate::error::ToolValidationError::SchemaValidation(
-                    errors.join("; "),
-                ));
-            }
+        if let Err(error) = compiled.validate(args) {
+            return Err(ToolValidationError::invalid_arguments(
+                name,
+                error.to_string(),
+            ));
         }
 
         Ok(())
-    }
-
-    /// Check if a tool is registered
-    pub fn contains(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
-    }
-}
-
-impl Default for ToolRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -82,123 +70,63 @@ impl Default for ToolRegistry {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use schemars::JsonSchema;
-    use std::sync::Arc;
+    use crate::schema::empty_object_schema;
+    use serde_json::json;
 
-    #[derive(Debug, Clone, JsonSchema)]
-    #[allow(dead_code)]
-    struct NameCountInput {
-        name: String,
-        count: Option<i64>,
-    }
+    #[test]
+    fn test_registry_register_and_get() {
+        let mut registry = ToolRegistry::new();
+        let def = ToolDef {
+            name: "test_tool".to_string(),
+            description: "A test tool".to_string(),
+            input_schema: empty_object_schema(),
+        };
 
-    #[derive(Debug, Clone, JsonSchema)]
-    #[allow(dead_code)]
-    struct NameInput {
-        name: String,
-    }
-
-    #[derive(Debug, Clone, JsonSchema)]
-    #[allow(dead_code)]
-    struct CountOptionalInput {
-        count: Option<i64>,
+        registry.register(def.clone());
+        let fetched = registry.get("test_tool").unwrap();
+        assert_eq!(fetched.name, def.name);
     }
 
     #[test]
-    fn test_validate_valid_args() {
-        let mut registry = ToolRegistry::new();
-        registry.register(ToolDef {
-            name: "test_tool".to_string(),
-            description: "A test tool".to_string(),
-            input_schema: crate::schema_for::<NameCountInput>(),
-        });
-
-        // Valid args
-        let result = registry.validate(
-            "test_tool",
-            &serde_json::json!({"name": "test", "count": 5}),
-        );
-        assert!(result.is_ok());
+    fn test_registry_validate_not_found() {
+        let registry = ToolRegistry::new();
+        let result = registry.validate("missing", &json!({}));
+        assert!(matches!(result, Err(ToolValidationError::NotFound { .. })));
     }
 
     #[test]
-    fn test_validate_missing_required() {
+    fn test_registry_validate_invalid_args() {
         let mut registry = ToolRegistry::new();
-        registry.register(ToolDef {
+        let def = ToolDef {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
-            input_schema: crate::schema_for::<NameInput>(),
-        });
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer" }
+                },
+                "required": ["count"]
+            }),
+        };
+
+        registry.register(def);
 
         // Missing required field
-        let result = registry.validate("test_tool", &serde_json::json!({}));
-        assert!(result.is_err());
+        let result = registry.validate("test_tool", &json!({}));
         assert!(matches!(
-            result.unwrap_err(),
-            crate::error::ToolValidationError::SchemaValidation(_)
+            result,
+            Err(ToolValidationError::InvalidArguments { .. })
         ));
-    }
 
-    #[test]
-    fn test_validate_wrong_type() {
-        let mut registry = ToolRegistry::new();
-        registry.register(ToolDef {
-            name: "test_tool".to_string(),
-            description: "A test tool".to_string(),
-            input_schema: crate::schema_for::<CountOptionalInput>(),
-        });
-
-        // Wrong type (string instead of integer)
-        let result = registry.validate("test_tool", &serde_json::json!({"count": "not a number"}));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validate_tool_not_found() {
-        let registry = ToolRegistry::new();
-        let result = registry.validate("nonexistent", &serde_json::json!({}));
+        // Wrong type
+        let result = registry.validate("test_tool", &json!({"count": "not a number"}));
         assert!(matches!(
-            result.unwrap_err(),
-            crate::error::ToolValidationError::ToolNotFound(_)
+            result,
+            Err(ToolValidationError::InvalidArguments { .. })
         ));
-    }
 
-    // Performance tests for issue fixes
-
-    #[test]
-    fn test_tool_defs_returns_arc_references() {
-        // Test that tool_defs returns Arc references, not clones
-        let mut registry = ToolRegistry::new();
-        let tool = ToolDef {
-            name: "test_tool".to_string(),
-            description: "A test tool".to_string(),
-            input_schema: crate::empty_object_schema(),
-        };
-        registry.register(tool);
-
-        let defs1 = registry.tool_defs();
-        let defs2 = registry.tool_defs();
-
-        // Both calls should return Arc pointing to the same data
-        assert_eq!(defs1.len(), 1);
-        assert_eq!(defs2.len(), 1);
-        assert!(Arc::ptr_eq(&defs1[0], &defs2[0]));
-    }
-
-    #[test]
-    fn test_validate_uses_fast_path_for_valid_input() {
-        // This test verifies that valid input doesn't collect errors.
-        // We can't directly test internal behavior, but we verify the
-        // function works correctly for valid input (fast path case).
-        let mut registry = ToolRegistry::new();
-        registry.register(ToolDef {
-            name: "test_tool".to_string(),
-            description: "A test tool".to_string(),
-            input_schema: crate::schema_for::<NameInput>(),
-        });
-
-        // Valid args should return Ok quickly without collecting errors
-        let result = registry.validate("test_tool", &serde_json::json!({"name": "valid"}));
+        // Valid args
+        let result = registry.validate("test_tool", &json!({"count": 42}));
         assert!(result.is_ok());
     }
 }

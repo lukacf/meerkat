@@ -9,8 +9,8 @@ use tokio_util::codec::Framed;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 
-use super::codec::{EnvelopeFrame, TransportCodec};
 use super::TransportError;
+use super::codec::{EnvelopeFrame, TransportCodec};
 use crate::types::Envelope;
 
 /// A TCP listener for accepting incoming connections.
@@ -34,7 +34,10 @@ impl TcpTransportListener {
     pub async fn accept(&self) -> Result<TcpConnection, TransportError> {
         let (stream, _) = self.listener.accept().await?;
         Ok(TcpConnection {
-            framed: Framed::new(stream, TransportCodec::new()),
+            framed: Framed::new(
+                stream,
+                TransportCodec::new(crate::transport::MAX_PAYLOAD_SIZE),
+            ),
         })
     }
 }
@@ -49,7 +52,10 @@ impl TcpConnection {
     pub async fn connect(addr: SocketAddr) -> Result<Self, TransportError> {
         let stream = TcpStream::connect(addr).await?;
         Ok(Self {
-            framed: Framed::new(stream, TransportCodec::new()),
+            framed: Framed::new(
+                stream,
+                TransportCodec::new(crate::transport::MAX_PAYLOAD_SIZE),
+            ),
         })
     }
 
@@ -136,8 +142,7 @@ mod tests {
         // Spawn server
         let server_handle = tokio::spawn(async move {
             let mut conn = listener.accept().await.unwrap();
-            let received = conn.recv().await.unwrap();
-            received
+            conn.recv().await.unwrap()
         });
 
         // Client sends

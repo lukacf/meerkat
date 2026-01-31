@@ -14,6 +14,15 @@ pub struct EnvelopeFrame {
     pub raw: Arc<Bytes>,
 }
 
+impl EnvelopeFrame {
+    pub fn from_envelope(envelope: Envelope) -> Self {
+        Self {
+            envelope,
+            raw: Arc::new(Bytes::new()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TransportCodec {
     max_payload_size: u32,
@@ -28,11 +37,7 @@ impl Default for TransportCodec {
 }
 
 impl TransportCodec {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_max_payload_size(max_payload_size: u32) -> Self {
+    pub fn new(max_payload_size: u32) -> Self {
         Self {
             max_payload_size: max_payload_size.min(MAX_PAYLOAD_SIZE),
         }

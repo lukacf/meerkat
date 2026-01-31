@@ -6,28 +6,25 @@
 //! - Running the agent loop in a background task
 //! - Reporting results back to the parent
 
-use crate::comms_dispatcher::wrap_with_comms;
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+use meerkat_comms::agent::wrap_with_comms;
+use meerkat_comms::runtime::{CommsBootstrap, CommsRuntime, CoreCommsConfig, ParentCommsContext};
 use meerkat_comms::{PubKey, TrustedPeer, TrustedPeers};
-use meerkat_core::comms_bootstrap::CommsBootstrap;
-use meerkat_core::comms_config::CoreCommsConfig;
-use meerkat_core::comms_runtime::CommsRuntime;
-use meerkat_core::ops::{OperationId, OperationResult, SteeringMessage};
+use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::session::Session;
 use meerkat_core::sub_agent::SubAgentManager;
 use meerkat_core::types::{Message, StopReason, SystemMessage, ToolCall, Usage, UserMessage};
 use meerkat_core::{
     AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, BudgetLimits,
-    LlmStreamResult, ParentCommsContext, ToolDef,
+    LlmStreamResult, ToolDef,
 };
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
-use tokio::sync::mpsc;
 
 /// Configuration for spawning a sub-agent with comms
 #[derive(Debug, Clone)]
@@ -459,7 +456,7 @@ pub async fn spawn_sub_agent_dyn(
     name: String,
     spec: DynSubAgentSpec,
     manager: Arc<SubAgentManager>,
-) -> Result<mpsc::Sender<SteeringMessage>, SubAgentRunnerError> {
+) -> Result<(), SubAgentRunnerError> {
     use meerkat_core::sub_agent::SubAgentCommsInfo;
 
     let started_at = Instant::now();
@@ -517,7 +514,7 @@ pub async fn spawn_sub_agent_dyn(
                 }
 
                 // Pass the comms runtime to the builder
-                builder = builder.with_comms_runtime(prepared.runtime);
+                builder = builder.with_comms_runtime(Arc::new(prepared.runtime));
 
                 (tools_with_comms, comms_info)
             }
@@ -537,13 +534,10 @@ pub async fn spawn_sub_agent_dyn(
     // Pass trait objects directly - no wrappers needed thanks to ?Sized bounds
     let mut agent = builder.build(llm_adapter, tools, spec.store).await;
 
-    // Get the steering sender from the agent
-    let steering_tx = agent.steering_sender();
-
     // Register the sub-agent with the manager BEFORE spawning the task
     // This is critical - without registration, status/steer/cancel won't find the agent
     manager
-        .register_with_comms(id.clone(), name.clone(), steering_tx.clone(), comms_info)
+        .register_with_comms(id.clone(), name.clone(), comms_info)
         .await
         .map_err(|e| {
             SubAgentRunnerError::ExecutionError(format!("Failed to register sub-agent: {}", e))
@@ -557,16 +551,11 @@ pub async fn spawn_sub_agent_dyn(
 
     // Spawn the agent execution task
     tokio::spawn(async move {
-        // The session already has the user prompt, so we use an empty string
-        // to avoid adding a duplicate. The agent will see the existing message
-        // and respond to it.
-        //
-        // If host_mode is enabled, the agent stays alive processing comms messages
-        // after completing the initial prompt. This is the DRY approach - sub-agents
-        // use the same run_host_mode() as the main agent.
         let result = if host_mode {
             agent.run_host_mode(String::new()).await
         } else {
+            // The session already has the user prompt, so we use an empty string
+            // to avoid adding a duplicate.
             agent.run(String::new()).await
         };
 
@@ -593,7 +582,7 @@ pub async fn spawn_sub_agent_dyn(
         }
     });
 
-    Ok(steering_tx)
+    Ok(())
 }
 
 /// Spawn and run a sub-agent in a background task (generic version)
@@ -602,14 +591,12 @@ pub async fn spawn_sub_agent_dyn(
 /// 1. Creates an Agent with the given configuration
 /// 2. Spawns a tokio task that runs the agent loop
 /// 3. Reports results back to the manager when complete
-///
-/// Returns a handle with the operation ID and steering channel sender.
 pub async fn spawn_sub_agent<C, T, S>(
     id: OperationId,
     name: String,
     spec: SubAgentSpec<C, T, S>,
     manager: Arc<SubAgentManager>,
-) -> Result<mpsc::Sender<SteeringMessage>, SubAgentRunnerError>
+) -> Result<(), SubAgentRunnerError>
 where
     C: LlmClient + 'static,
     T: AgentToolDispatcher + 'static,
@@ -636,13 +623,10 @@ where
 
     let mut agent = builder.build(llm_adapter, spec.tools, spec.store).await;
 
-    // Get the steering sender from the agent
-    let steering_tx = agent.steering_sender();
-
     // Register the sub-agent with the manager BEFORE spawning the task
     // This is critical - without registration, status/steer/cancel won't find the agent
     manager
-        .register(id.clone(), name.clone(), steering_tx.clone())
+        .register(id.clone(), name.clone())
         .await
         .map_err(|e| {
             SubAgentRunnerError::ExecutionError(format!("Failed to register sub-agent: {}", e))
@@ -706,7 +690,7 @@ where
         }
     });
 
-    Ok(steering_tx)
+    Ok(())
 }
 
 /// Errors that can occur during sub-agent execution

@@ -85,7 +85,7 @@ You have access to tools for spawning and managing sub-agents. Sub-agents are in
 - `agent_list` - List all sub-agents and their states
 
 ## Communicating with Sub-Agents
-To send messages to running sub-agents, use the `comms_send` tool. Sub-agents automatically
+To send messages to running sub-agents, use the `send_message` tool. Sub-agents automatically
 trust their parent and can receive messages at turn boundaries.
 
 ## Best Practices

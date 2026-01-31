@@ -7,14 +7,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Task ID - ULID string for unique task identification
+/// Task ID - UUID v7 string for unique task identification
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub String);
 
 impl TaskId {
-    /// Create a new TaskId with a generated ULID
+    /// Create a new TaskId with a generated UUID v7
     pub fn new() -> Self {
-        Self(ulid::Ulid::new().to_string())
+        Self(uuid::Uuid::now_v7().to_string())
     }
 
     /// Create a TaskId from an existing string
@@ -229,21 +229,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_task_id_new_generates_ulid() {
+    fn test_task_id_new_generates_uuid() {
         let id1 = TaskId::new();
         let id2 = TaskId::new();
 
-        // Should be 26 characters (ULID format)
-        assert_eq!(id1.0.len(), 26);
-        assert_eq!(id2.0.len(), 26);
+        // Should be 36 characters (UUID format)
+        assert_eq!(id1.0.len(), 36);
+        assert_eq!(id2.0.len(), 36);
 
         // Should be different IDs
         assert_ne!(id1, id2);
 
-        // Should be valid ULID (uppercase alphanumeric, no I, L, O, U)
-        for c in id1.0.chars() {
-            assert!(c.is_ascii_alphanumeric());
-        }
+        // Should be valid UUID
+        assert!(uuid::Uuid::parse_str(&id1.0).is_ok());
     }
 
     #[test]

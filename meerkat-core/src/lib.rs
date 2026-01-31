@@ -5,9 +5,6 @@
 
 pub mod agent;
 pub mod budget;
-pub mod comms_bootstrap;
-pub mod comms_config;
-pub mod comms_runtime;
 pub mod config;
 pub mod config_store;
 pub mod error;
@@ -27,15 +24,9 @@ pub mod types;
 // Re-export main types at crate root
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
-    CALLBACK_TOOL_PREFIX, LlmStreamResult,
+    CALLBACK_TOOL_PREFIX, CommsRuntime, LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
-pub use comms_bootstrap::{
-    CommsAdvertise, CommsBootstrap, CommsBootstrapError, CommsBootstrapMode, ParentCommsContext,
-    PreparedComms,
-};
-pub use comms_config::{CoreCommsConfig, ResolvedCommsConfig};
-pub use comms_runtime::{CommsContent, CommsMessage, CommsRuntime, CommsRuntimeError, CommsStatus};
 pub use config::{
     AgentConfig, BudgetConfig, CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta,
     ConfigScope, LimitsConfig, ModelDefaults, ProviderConfig, ProviderSettings, RetryConfig,
@@ -51,8 +42,8 @@ pub use gateway::{Availability, AvailabilityCheck, ToolGateway, ToolGatewayBuild
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use ops::{
     ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent, OperationId,
-    OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec, SteeringHandle,
-    SteeringMessage, SteeringStatus, SubAgentState, ToolAccessPolicy, WorkKind,
+    OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec, SubAgentState,
+    ToolAccessPolicy, WorkKind,
 };
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;

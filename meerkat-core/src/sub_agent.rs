@@ -1,22 +1,20 @@
 //! Sub-agent management for Meerkat
 //!
-//! Handles fork/spawn operations, steering queues, and result collection.
+//! Handles fork/spawn operations and result collection.
 
 use crate::budget::BudgetLimits;
 use crate::error::AgentError;
 use crate::ops::{
     ConcurrencyLimits, ContextStrategy, ForkBudgetPolicy, OperationId, OperationResult,
-    SteeringHandle, SteeringMessage, SteeringStatus, SubAgentState, ToolAccessPolicy,
+    SubAgentState, ToolAccessPolicy,
 };
 use crate::session::Session;
-use crate::types::{Message, ToolDef, UserMessage};
+use crate::types::{Message, ToolDef};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock, mpsc, watch};
-use uuid::Uuid;
+use tokio::sync::{Mutex, RwLock, watch};
 
-const MAX_STEERING_QUEUE: usize = 256;
 const MAX_COMPLETED_AGENTS: usize = 256;
 
 /// Notification sent when a sub-agent completes
@@ -54,8 +52,6 @@ pub struct SubAgentInfo {
     pub depth: u32,
     /// Duration running in milliseconds
     pub running_ms: u64,
-    /// Number of pending steering messages
-    pub pending_steering: usize,
     /// Result when completed
     pub result: Option<OperationResult>,
     /// Comms info for sending messages to this sub-agent
@@ -71,47 +67,14 @@ pub struct SubAgentHandle {
     pub name: String,
     /// Current state
     pub state: SubAgentState,
-    /// Steering message queue
-    pub steering_queue: VecDeque<SteeringMessage>,
-    /// Next steering sequence number
-    pub steering_seq: u64,
     /// When the sub-agent started
     pub started_at: Instant,
     /// Nesting depth (0 = top-level)
     pub depth: u32,
-    /// Channel to send steering messages
-    steering_tx: mpsc::Sender<SteeringMessage>,
     /// Result when completed
     pub result: Option<OperationResult>,
     /// Comms info for sending messages to this sub-agent
     pub comms: Option<SubAgentCommsInfo>,
-}
-
-impl SubAgentHandle {
-    /// Queue a steering message for this sub-agent
-    pub fn queue_steering(&mut self, content: String) -> SteeringHandle {
-        let id = Uuid::now_v7();
-        let seq = self.steering_seq;
-        self.steering_seq += 1;
-
-        let msg = SteeringMessage {
-            id,
-            seq,
-            content,
-            sent_at: std::time::SystemTime::now(),
-        };
-
-        if self.steering_queue.len() >= MAX_STEERING_QUEUE {
-            self.steering_queue.pop_front();
-        }
-        self.steering_queue.push_back(msg);
-
-        SteeringHandle {
-            id,
-            seq,
-            status: SteeringStatus::Queued,
-        }
-    }
 }
 
 /// Manager for sub-agents
@@ -304,13 +267,8 @@ impl SubAgentManager {
     }
 
     /// Register a new sub-agent
-    pub async fn register(
-        &self,
-        id: OperationId,
-        name: String,
-        steering_tx: mpsc::Sender<SteeringMessage>,
-    ) -> Result<(), AgentError> {
-        self.register_with_comms(id, name, steering_tx, None).await
+    pub async fn register(&self, id: OperationId, name: String) -> Result<(), AgentError> {
+        self.register_with_comms(id, name, None).await
     }
 
     /// Register a new sub-agent with comms info
@@ -318,7 +276,6 @@ impl SubAgentManager {
         &self,
         id: OperationId,
         name: String,
-        steering_tx: mpsc::Sender<SteeringMessage>,
         comms: Option<SubAgentCommsInfo>,
     ) -> Result<(), AgentError> {
         let mut agents = self.agents.write().await;
@@ -333,50 +290,14 @@ impl SubAgentManager {
             id: id.clone(),
             name,
             state: SubAgentState::Running,
-            steering_queue: VecDeque::new(),
-            steering_seq: 0,
             started_at: Instant::now(),
             depth: self.current_depth + 1,
-            steering_tx,
             result: None,
             comms,
         };
 
         agents.insert(id, handle);
         Ok(())
-    }
-
-    /// Send steering message to a running sub-agent
-    pub async fn steer(
-        &self,
-        id: &OperationId,
-        message: String,
-    ) -> Result<SteeringHandle, AgentError> {
-        let mut agents = self.agents.write().await;
-        let handle = agents
-            .get_mut(id)
-            .ok_or_else(|| AgentError::SubAgentNotFound { id: id.to_string() })?;
-
-        if handle.state != SubAgentState::Running {
-            return Err(AgentError::SubAgentNotRunning {
-                id: id.to_string(),
-                state: format!("{:?}", handle.state),
-            });
-        }
-
-        let steering_handle = handle.queue_steering(message.clone());
-
-        // Also send through channel for immediate delivery
-        let steering_msg = SteeringMessage {
-            id: steering_handle.id,
-            seq: steering_handle.seq,
-            content: message,
-            sent_at: std::time::SystemTime::now(),
-        };
-
-        let _ = handle.steering_tx.send(steering_msg).await;
-
-        Ok(steering_handle)
     }
 
     /// Mark a sub-agent as completed
@@ -503,7 +424,6 @@ impl SubAgentManager {
                 state: handle.state.clone(),
                 depth: handle.depth,
                 running_ms: handle.started_at.elapsed().as_millis() as u64,
-                pending_steering: handle.steering_queue.len(),
                 result: handle.result.clone(),
                 comms: handle.comms.clone(),
             })
@@ -528,7 +448,6 @@ impl SubAgentManager {
                     state: h.state.clone(),
                     depth: h.depth,
                     running_ms: h.started_at.elapsed().as_millis() as u64,
-                    pending_steering: h.steering_queue.len(),
                     result: h.result.clone(),
                     comms: h.comms.clone(),
                 })
@@ -565,7 +484,6 @@ impl SubAgentManager {
             state: handle.state,
             depth: handle.depth,
             running_ms,
-            pending_steering: handle.steering_queue.len(),
             result: handle.result,
             comms: handle.comms,
         };
@@ -585,20 +503,11 @@ impl SubAgentManager {
     }
 }
 
-/// Apply steering messages to a session before an LLM call
-pub fn inject_steering_messages(session: &mut Session, messages: Vec<SteeringMessage>) {
-    for msg in messages {
-        session.push(Message::User(UserMessage {
-            content: format!("[STEERING] {}", msg.content),
-        }));
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::types::SystemMessage;
+    use crate::types::{SystemMessage, UserMessage};
 
     fn empty_object_schema() -> serde_json::Value {
         let mut obj = serde_json::Map::new();
@@ -734,27 +643,5 @@ mod tests {
         assert_eq!(budgets.len(), 2);
         assert_eq!(budgets[0].max_tokens, Some(500));
         assert_eq!(budgets[1].max_tokens, Some(500));
-    }
-
-    #[test]
-    fn test_steering_message_injection() {
-        let mut session = Session::new();
-        let messages = vec![SteeringMessage {
-            id: Uuid::now_v7(),
-            seq: 0,
-            content: "Focus on security".to_string(),
-            sent_at: std::time::SystemTime::now(),
-        }];
-
-        inject_steering_messages(&mut session, messages);
-
-        let last = session.messages().last().unwrap();
-        match last {
-            Message::User(u) => {
-                assert!(u.content.starts_with("[STEERING]"));
-                assert!(u.content.contains("Focus on security"));
-            }
-            _ => unreachable!("Expected User message"),
-        }
     }
 }

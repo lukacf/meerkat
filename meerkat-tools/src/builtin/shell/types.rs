@@ -7,20 +7,17 @@ use serde::{Deserialize, Serialize};
 
 /// Unique identifier for background jobs
 ///
-/// Format: "job_" + ULID (26 chars lowercase)
-/// Example: "job_01hx7z8k9m2n3p4q5r6s7t8u9v"
+/// Format: "job_" + UUID v7 (36 chars)
+/// Example: "job_01hx7z8k-9m2n-3p4q-5r6s-7t8u9v"
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct JobId(pub String);
 
 impl JobId {
-    /// Create a new JobId with a generated ULID
+    /// Create a new JobId with a generated UUID v7
     ///
-    /// The format is "job_" followed by a lowercase ULID.
+    /// The format is "job_" followed by a lowercase UUID v7.
     pub fn new() -> Self {
-        Self(format!(
-            "job_{}",
-            ulid::Ulid::new().to_string().to_lowercase()
-        ))
+        Self(format!("job_{}", uuid::Uuid::now_v7()))
     }
 
     /// Create a JobId from an existing string
@@ -137,18 +134,12 @@ mod tests {
         // Should start with "job_"
         assert!(id.0.starts_with("job_"), "JobId should start with 'job_'");
 
-        // Should be job_ (4 chars) + ULID (26 chars) = 30 chars total
-        assert_eq!(id.0.len(), 30, "JobId should be 30 characters");
+        // Should be job_ (4 chars) + UUID (36 chars) = 40 chars total
+        assert_eq!(id.0.len(), 40, "JobId should be 40 characters");
 
-        // The ULID part should be lowercase alphanumeric
-        let ulid_part = &id.0[4..];
-        for c in ulid_part.chars() {
-            assert!(
-                c.is_ascii_lowercase() || c.is_ascii_digit(),
-                "ULID part should be lowercase alphanumeric, got: {}",
-                c
-            );
-        }
+        // The UUID part should be valid
+        let uuid_part = &id.0[4..];
+        assert!(uuid::Uuid::parse_str(uuid_part).is_ok());
     }
 
     #[test]
@@ -190,7 +181,7 @@ mod tests {
     fn test_job_id_default() {
         let id = JobId::default();
         assert!(id.0.starts_with("job_"));
-        assert_eq!(id.0.len(), 30);
+        assert_eq!(id.0.len(), 40);
     }
 
     // ==================== JobStatus Tests ====================

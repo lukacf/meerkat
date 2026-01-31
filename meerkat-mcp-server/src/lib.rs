@@ -8,6 +8,7 @@ use meerkat::{
     build_comms_runtime_from_config, compose_tools_with_comms,
 };
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
+use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::{invalid_session_id, invalid_session_id_message, store_error};
 use meerkat_core::{
     AgentEvent, CALLBACK_TOOL_PREFIX, Config, ConfigDelta, ConfigStore, FileConfigStore, Provider,
@@ -458,7 +459,7 @@ async fn handle_meerkat_run_simple(
 
     // Add comms runtime if enabled
     if let Some(runtime) = comms_runtime {
-        builder = builder.with_comms_runtime(runtime);
+        builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -700,7 +701,7 @@ async fn handle_meerkat_run_with_builtins(
 
     // Add comms runtime if enabled
     if let Some(runtime) = comms_runtime {
-        builder = builder.with_comms_runtime(runtime);
+        builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -929,7 +930,7 @@ async fn handle_meerkat_resume_simple(
     builder = builder.system_prompt(system_prompt);
 
     if let Some(runtime) = comms_runtime {
-        builder = builder.with_comms_runtime(runtime);
+        builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -1200,7 +1201,7 @@ async fn handle_meerkat_resume_with_builtins(
         .resume_session(session);
 
     if let Some(runtime) = comms_runtime {
-        builder = builder.with_comms_runtime(runtime);
+        builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;

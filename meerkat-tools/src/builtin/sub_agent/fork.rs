@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use meerkat_client::LlmProvider;
 use meerkat_core::ToolDef;
 use meerkat_core::ops::{ForkBudgetPolicy, OperationId, ToolAccessPolicy};
+use serde::de;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -30,7 +31,7 @@ impl ProviderName {
 }
 
 /// Tool access policy for forked agents
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, schemars::JsonSchema)]
 #[serde(tag = "policy", rename_all = "snake_case")]
 enum ToolAccessInput {
     /// Inherit all tools from parent
@@ -39,6 +40,45 @@ enum ToolAccessInput {
     AllowList { tools: Vec<String> },
     /// Block specific tools
     DenyList { tools: Vec<String> },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "policy", rename_all = "snake_case")]
+enum ToolAccessInputRaw {
+    Inherit,
+    AllowList { tools: Vec<String> },
+    DenyList { tools: Vec<String> },
+}
+
+impl From<ToolAccessInputRaw> for ToolAccessInput {
+    fn from(input: ToolAccessInputRaw) -> Self {
+        match input {
+            ToolAccessInputRaw::Inherit => ToolAccessInput::Inherit,
+            ToolAccessInputRaw::AllowList { tools } => ToolAccessInput::AllowList { tools },
+            ToolAccessInputRaw::DenyList { tools } => ToolAccessInput::DenyList { tools },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolAccessInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::String(raw) => {
+                let parsed: ToolAccessInputRaw =
+                    serde_json::from_str(&raw).map_err(de::Error::custom)?;
+                Ok(parsed.into())
+            }
+            other => {
+                let parsed: ToolAccessInputRaw =
+                    serde_json::from_value(other).map_err(de::Error::custom)?;
+                Ok(parsed.into())
+            }
+        }
+    }
 }
 
 impl From<ToolAccessInput> for ToolAccessPolicy {
@@ -215,13 +255,10 @@ impl AgentForkTool {
         let op_id_str = op_id.to_string();
         let name = format!("fork-{}{}", &op_id_str[..8], &op_id_str[9..13]);
 
-        // Create steering channel
-        let (tx, _rx) = tokio::sync::mpsc::channel(32);
-
         // Register the forked agent
         self.state
             .manager
-            .register(op_id.clone(), name.clone(), tx)
+            .register(op_id.clone(), name.clone())
             .await
             .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
 
@@ -283,7 +320,7 @@ impl BuiltinTool for AgentForkTool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::builtin::sub_agent::config::SubAgentConfig;
@@ -567,5 +604,22 @@ mod tests {
 
         let model = tool.resolve_model(LlmProvider::Anthropic, Some("custom-model"));
         assert_eq!(model, "custom-model");
+    }
+
+    #[test]
+    fn test_fork_params_tool_access_accepts_json_string() {
+        let params: ForkParams = serde_json::from_value(json!({
+            "prompt": "test",
+            "tool_access": "{\"policy\":\"deny_list\",\"tools\":[\"shell\"]}"
+        }))
+        .unwrap();
+
+        let tool_access = params.tool_access.expect("tool_access should parse");
+        match tool_access {
+            ToolAccessInput::DenyList { tools } => {
+                assert_eq!(tools, vec!["shell"]);
+            }
+            other => panic!("Unexpected tool_access variant: {other:?}"),
+        }
     }
 }

@@ -3,9 +3,10 @@
 use super::config::SubAgentConfig;
 use meerkat_client::LlmClientFactory;
 use meerkat_comms::TrustedPeers;
+use meerkat_comms::runtime::ParentCommsContext;
 use meerkat_core::session::Session;
 use meerkat_core::sub_agent::SubAgentManager;
-use meerkat_core::{AgentSessionStore, AgentToolDispatcher, ParentCommsContext};
+use meerkat_core::{AgentSessionStore, AgentToolDispatcher};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -509,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_state_with_comms_has_parent_comms() {
-        use meerkat_core::ParentCommsContext;
+        use meerkat_comms::runtime::comms_bootstrap::ParentCommsContext;
         use std::path::PathBuf;
 
         let limits = ConcurrencyLimits::default();
@@ -562,7 +563,7 @@ mod tests {
     fn test_spawn_tool_uses_parent_comms_for_subagent() {
         // Verify the spawn tool accesses parent_comms from state
         // This is a compile-time check that the field is public and accessible
-        use meerkat_core::ParentCommsContext;
+        use meerkat_comms::runtime::comms_bootstrap::ParentCommsContext;
         use std::path::PathBuf;
 
         let limits = ConcurrencyLimits::default();
@@ -613,8 +614,8 @@ mod tests {
         // added to the parent's trusted peers. This test verifies the shared
         // trusted peers list can be updated, which is critical for sub-agent
         // communication to work.
+        use meerkat_comms::runtime::comms_bootstrap::ParentCommsContext;
         use meerkat_comms::{PubKey, TrustedPeer};
-        use meerkat_core::ParentCommsContext;
         use std::path::PathBuf;
 
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));

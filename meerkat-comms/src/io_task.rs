@@ -17,8 +17,8 @@ use tokio_util::codec::Framed;
 
 use crate::identity::{Keypair, Signature};
 use crate::inbox::{InboxError, InboxSender};
-use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::TransportError;
+use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::trust::TrustedPeers;
 use crate::types::{Envelope, InboxItem, MessageKind};
 
@@ -40,7 +40,10 @@ pub async fn handle_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut framed = Framed::new(stream, TransportCodec::new());
+    let mut framed = Framed::new(
+        stream,
+        TransportCodec::new(crate::transport::MAX_PAYLOAD_SIZE),
+    );
     let envelope = match framed.next().await {
         Some(Ok(frame)) => frame.envelope,
         Some(Err(err)) => return Err(IoTaskError::Io(err)),
@@ -201,7 +204,10 @@ mod tests {
     where
         R: tokio::io::AsyncRead + Unpin,
     {
-        let mut framed = FramedRead::new(reader, TransportCodec::new());
+        let mut framed = FramedRead::new(
+            reader,
+            TransportCodec::new(crate::transport::MAX_PAYLOAD_SIZE),
+        );
         match framed.next().await {
             Some(Ok(frame)) => Ok(frame.envelope),
             Some(Err(err)) => Err(err),

@@ -6,15 +6,16 @@ mod mcp;
 use adapters::{CliToolDispatcher, EmptyToolDispatcher, McpRouterAdapter};
 use meerkat::AgentFactory;
 use meerkat_client::{DefaultClientFactory, LlmClientFactory};
+use meerkat_comms::{CommsRuntime, CoreCommsConfig, ParentCommsContext};
 use meerkat_core::AgentToolDispatcher;
-use meerkat_core::ParentCommsContext;
 use meerkat_core::ToolGatewayBuilder;
+use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::ops::ConcurrencyLimits;
 use meerkat_core::sub_agent::SubAgentManager;
 use meerkat_core::{AgentEvent, format_verbose_event};
 use meerkat_core::{
-    CommsRuntimeMode, Config, ConfigDelta, ConfigStore, CoreCommsConfig, FileConfigStore,
-    SessionMetadata, SessionTooling,
+    CommsRuntimeMode, Config, ConfigDelta, ConfigStore, FileConfigStore, SessionMetadata,
+    SessionTooling,
 };
 use meerkat_store::SessionStore;
 use meerkat_tools::builtin::{
@@ -729,7 +730,7 @@ async fn create_session_store() -> Arc<JsonlStore> {
 /// Create MCP tool dispatcher from config files
 async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
     use meerkat_core::mcp_config::{McpConfig, McpScope};
-    use meerkat_mcp_client::McpRouter;
+    use meerkat_mcp::McpRouter;
 
     // Load MCP config with scope info for security warnings
     let servers_with_scope = McpConfig::load_with_scopes()
@@ -791,7 +792,7 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
 struct ToolingSetup {
     tools: Arc<CliToolDispatcher>,
     tool_usage_instructions: String,
-    comms_runtime: Option<meerkat_core::CommsRuntime>,
+    comms_runtime: Option<CommsRuntime>,
     comms_config: Option<CoreCommsConfig>,
     comms_base_dir: PathBuf,
 }
@@ -813,7 +814,7 @@ async fn build_tooling(
     let mut comms_runtime = if let Some(ref config) = comms_config {
         if config.enabled {
             let resolved = config.resolve_paths(&comms_base_dir);
-            match meerkat_core::CommsRuntime::new(resolved).await {
+            match CommsRuntime::new(resolved).await {
                 Ok(mut runtime) => {
                     tracing::info!(
                         "Comms enabled for agent '{}' (peer ID: {})",
@@ -846,7 +847,7 @@ async fn build_tooling(
     {
         let session_id = SessionId::new();
         let parent_name = format!("parent-{}", session_id);
-        match meerkat_core::CommsRuntime::inproc_only(&parent_name) {
+        match CommsRuntime::inproc_only(&parent_name) {
             Ok(runtime) => {
                 tracing::info!(
                     "Auto-enabled inproc comms for sub-agents '{}' (peer ID: {})",
@@ -854,9 +855,7 @@ async fn build_tooling(
                     runtime.public_key().to_peer_id()
                 );
                 comms_runtime = Some(runtime);
-                comms_config = Some(meerkat_core::comms_config::CoreCommsConfig::with_name(
-                    &parent_name,
-                ));
+                comms_config = Some(CoreCommsConfig::with_name(&parent_name));
             }
             Err(e) => {
                 tracing::warn!("Failed to auto-enable inproc comms: {}", e);
@@ -984,44 +983,15 @@ async fn build_tooling(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create composite dispatcher: {}", e))?;
 
-        // Get wait interrupt sender before registering sub-agents
-        let wait_interrupt_tx = composite.wait_interrupt_sender();
-
         // Register sub-agent tools if enabled
         if enable_subagents {
             use meerkat_core::Session;
-            use meerkat_tools::builtin::utility::WaitInterrupt;
             use tokio::sync::RwLock;
 
             // Create the dependencies for SubAgentToolState
             let limits = ConcurrencyLimits::default();
             let manager = Arc::new(SubAgentManager::new(limits, 0));
             let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
-
-            // Wire up sub-agent completion to interrupt wait
-            if let Some(interrupt_tx) = wait_interrupt_tx {
-                let completion_rx = manager.completion_receiver();
-                tokio::spawn(async move {
-                    let mut rx = completion_rx;
-                    while rx.changed().await.is_ok() {
-                        if let Some(completion) = rx.borrow().clone() {
-                            let meerkat_core::sub_agent::SubAgentCompletion {
-                                agent_name,
-                                is_error,
-                                summary,
-                                ..
-                            } = completion;
-                            let reason = format!(
-                                "Sub-agent '{}' {} with: {}",
-                                agent_name,
-                                if is_error { "failed" } else { "completed" },
-                                summary
-                            );
-                            let _ = interrupt_tx.send(Some(WaitInterrupt { reason }));
-                        }
-                    }
-                });
-            }
 
             // Create a tool dispatcher for sub-agents that inherits all parent tools
             // EXCEPT sub-agent tools (to prevent infinite nesting).
@@ -1103,11 +1073,6 @@ async fn build_tooling(
             composite
                 .register_sub_agent_tools(tool_set, &builtin_config)
                 .map_err(|e| anyhow::anyhow!("Failed to register sub-agent tools: {}", e))?;
-        }
-
-        // Wire comms notify to interrupt wait when messages arrive
-        if let Some(ref runtime) = comms_runtime {
-            composite.register_comms_notify(runtime.inbox_notify());
         }
 
         // Get tool usage instructions before wrapping
@@ -1268,9 +1233,12 @@ async fn run_agent(
     let comms_enabled = comms_runtime.is_some();
     let comms_name = comms_config.as_ref().map(|config| config.name.clone());
 
+    // Extract peer_id before moving runtime to builder
+    let comms_peer_id = comms_runtime.as_ref().map(|r| r.public_key().to_peer_id());
+
     // Add pre-created comms runtime if present
     if let Some(runtime) = comms_runtime {
-        builder = builder.with_comms_runtime(runtime);
+        builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -1295,8 +1263,7 @@ async fn run_agent(
         .map_err(|e| anyhow::anyhow!("Failed to store session metadata: {e}"))?;
 
     // Display comms status if enabled
-    if let Some(comms_runtime) = agent.comms() {
-        let peer_id = comms_runtime.public_key().to_peer_id();
+    if let Some(peer_id) = comms_peer_id {
         eprintln!("Peer ID: {}", peer_id);
 
         // Display listening addresses
@@ -1535,7 +1502,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         .resume_session(session);
 
     if let Some(runtime) = comms_runtime {
-        builder = builder.with_comms_runtime(runtime);
+        builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -1991,8 +1958,9 @@ mod tests {
 
     #[test]
     fn test_comms_tool_dispatcher_provides_comms_tools() {
+        use meerkat_comms::Inbox;
+        use meerkat_comms::agent::CommsToolDispatcher;
         use meerkat_comms::{CommsConfig, Keypair, TrustedPeers};
-        use meerkat_comms_agent::CommsToolDispatcher;
         use meerkat_core::AgentToolDispatcher;
         use tokio::sync::RwLock;
 
@@ -2000,10 +1968,12 @@ mod tests {
         let keypair = Keypair::generate();
         let trusted_peers = TrustedPeers::new();
         let trusted_peers = std::sync::Arc::new(RwLock::new(trusted_peers));
+        let (_inbox, inbox_sender) = Inbox::new();
         let router = std::sync::Arc::new(meerkat_comms::Router::with_shared_peers(
             keypair,
             trusted_peers.clone(),
             CommsConfig::default(),
+            inbox_sender,
         ));
 
         // Create CommsToolDispatcher with no inner dispatcher

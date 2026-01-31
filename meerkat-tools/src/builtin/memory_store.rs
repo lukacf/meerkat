@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(created.updated_by_session, Some("session-1".to_string()));
         assert!(!created.created_at.is_empty());
         assert!(!created.updated_at.is_empty());
-        assert_eq!(created.id.0.len(), 26); // ULID format
+        assert_eq!(created.id.0.len(), 36); // UUID format
 
         // Verify we can retrieve it
         let fetched = store.get(&created.id).await.unwrap();

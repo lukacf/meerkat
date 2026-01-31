@@ -32,7 +32,7 @@ struct TaskListParams {
 /// ```text
 /// use std::sync::Arc;
 /// use meerkat_tools::builtin::{MemoryTaskStore, TaskStore};
-/// use meerkat_tools::builtin::tools::TaskListTool;
+/// use meerkat_tools::builtin::tasks::TaskListTool;
 ///
 /// let store = Arc::new(MemoryTaskStore::new());
 /// let tool = TaskListTool::new(store);

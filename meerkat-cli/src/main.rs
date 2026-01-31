@@ -905,9 +905,9 @@ async fn build_tooling(
         if enable_shell {
             enabled_tools.extend([
                 "shell".to_string(),
-                "job_status".to_string(),
-                "jobs_list".to_string(),
-                "job_cancel".to_string(),
+                "shell_job_status".to_string(),
+                "shell_jobs".to_string(),
+                "shell_job_cancel".to_string(),
             ]);
         }
 

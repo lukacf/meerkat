@@ -221,3 +221,274 @@ fn contains_manual_input_schema_literal(line: &str) -> bool {
 
     false
 }
+
+// =============================================================================
+// Regression tests for PR review findings
+// =============================================================================
+
+/// Regression test: Shell job tools must use correct names in allowlist.
+/// The tool names are shell_job_status, shell_jobs, shell_job_cancel (not job_*).
+#[tokio::test]
+async fn test_regression_shell_job_tool_names() -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_tools::builtin::shell::ShellConfig;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new()?;
+    let shell_config = ShellConfig {
+        enabled: true,
+        project_root: temp_dir.path().to_path_buf(),
+        ..Default::default()
+    };
+
+    // Enable shell tools via allowlist with CORRECT names
+    let config = BuiltinToolConfig {
+        policy: ToolPolicyLayer::new()
+            .enable_tool("shell")
+            .enable_tool("shell_job_status")
+            .enable_tool("shell_jobs")
+            .enable_tool("shell_job_cancel"),
+        ..Default::default()
+    };
+
+    let store = Arc::new(MemoryTaskStore::new());
+    let dispatcher = CompositeDispatcher::new(store, &config, Some(shell_config), None, None)?;
+
+    let tools = dispatcher.tools();
+    let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+    // Verify all shell tools are exposed with correct names
+    assert!(tool_names.contains(&"shell"), "shell tool missing");
+    assert!(
+        tool_names.contains(&"shell_job_status"),
+        "shell_job_status missing (was 'job_status' exposed instead?)"
+    );
+    assert!(
+        tool_names.contains(&"shell_jobs"),
+        "shell_jobs missing (was 'jobs_list' exposed instead?)"
+    );
+    assert!(
+        tool_names.contains(&"shell_job_cancel"),
+        "shell_job_cancel missing (was 'job_cancel' exposed instead?)"
+    );
+
+    // Verify OLD incorrect names are NOT present
+    assert!(
+        !tool_names.contains(&"job_status"),
+        "job_status should not exist - use shell_job_status"
+    );
+    assert!(
+        !tool_names.contains(&"jobs_list"),
+        "jobs_list should not exist - use shell_jobs"
+    );
+    assert!(
+        !tool_names.contains(&"job_cancel"),
+        "job_cancel should not exist - use shell_job_cancel"
+    );
+
+    Ok(())
+}
+
+/// Regression test: ToolDispatcherBuilder must populate registry from router tools.
+/// Without this, dispatch_call validation always fails with NotFound.
+#[tokio::test]
+async fn test_regression_builder_populates_registry() -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_tools::builder::{
+        BuiltinDispatcherConfig, ToolDispatcherBuilder, ToolDispatcherConfig, ToolDispatcherSource,
+    };
+    use std::time::Duration;
+
+    let store = Arc::new(MemoryTaskStore::new());
+    let config = BuiltinToolConfig::default();
+
+    let dispatcher_config = ToolDispatcherConfig {
+        source: ToolDispatcherSource::Composite(Box::new(BuiltinDispatcherConfig {
+            store,
+            config,
+            shell_config: None,
+            external: None,
+            session_id: None,
+        })),
+        comms: None,
+        default_timeout: Duration::from_secs(30),
+    };
+
+    let dispatcher = ToolDispatcherBuilder::new(dispatcher_config)
+        .build()
+        .await?;
+
+    // The dispatcher should have tools from the router
+    let tools = dispatcher.tools();
+    assert!(!tools.is_empty(), "Registry should have tools from router");
+    assert!(
+        tools.iter().any(|t| t.name == "task_list"),
+        "task_list should be registered"
+    );
+
+    // dispatch_call should succeed for a valid tool (not NotFound)
+    let call = meerkat_core::types::ToolCall {
+        id: "test-1".to_string(),
+        name: "task_list".to_string(),
+        args: json!({}),
+        thought_signature: None,
+    };
+
+    let result = dispatcher.dispatch_call(&call).await;
+    assert!(
+        result.is_ok(),
+        "dispatch_call should succeed, not return NotFound: {:?}",
+        result
+    );
+
+    Ok(())
+}
+
+/// Regression test: ToolDispatcher::dispatch must enforce timeout.
+/// Without timeout, a hanging tool blocks the agent loop indefinitely.
+#[tokio::test]
+async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    use async_trait::async_trait;
+    use meerkat_core::error::ToolError;
+    use meerkat_core::types::ToolDef;
+    use meerkat_tools::dispatcher::ToolDispatcher;
+    use meerkat_tools::registry::ToolRegistry;
+    use meerkat_tools::schema::empty_object_schema;
+    use std::time::Duration;
+
+    /// A tool dispatcher that hangs forever
+    struct HangingDispatcher;
+
+    #[async_trait]
+    impl AgentToolDispatcher for HangingDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::new(ToolDef {
+                name: "hang".to_string(),
+                description: "Hangs forever".to_string(),
+                input_schema: empty_object_schema(),
+            })])
+        }
+
+        async fn dispatch(
+            &self,
+            _name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<serde_json::Value, ToolError> {
+            // Hang forever
+            std::future::pending().await
+        }
+    }
+
+    let router = Arc::new(HangingDispatcher);
+    let mut registry = ToolRegistry::new();
+    registry.register(ToolDef {
+        name: "hang".to_string(),
+        description: "Hangs forever".to_string(),
+        input_schema: empty_object_schema(),
+    });
+
+    // Very short timeout
+    let dispatcher = ToolDispatcher::new(registry, router).with_timeout(Duration::from_millis(50));
+
+    let start = std::time::Instant::now();
+    let result = dispatcher.dispatch("hang", &json!({})).await;
+    let elapsed = start.elapsed();
+
+    // Should timeout quickly, not hang
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "dispatch should timeout quickly, took {:?}",
+        elapsed
+    );
+    assert!(result.is_err(), "dispatch should return timeout error");
+
+    // Verify it's an ExecutionFailed error (timeout)
+    match result {
+        Ok(_) => return Err("Expected timeout error, got Ok".into()),
+        Err(ToolError::ExecutionFailed { message }) => {
+            assert!(
+                message.contains("timed out"),
+                "Error should mention timeout: {}",
+                message
+            );
+        }
+        Err(other) => {
+            return Err(format!("Expected ExecutionFailed timeout error, got: {:?}", other).into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Regression test: CompositeDispatcher must deduplicate external tools.
+/// Without deduplication, LLMs receive duplicate tool definitions and may
+/// generate args for the wrong schema.
+#[tokio::test]
+async fn test_regression_composite_deduplicates_external_tools()
+-> Result<(), Box<dyn std::error::Error>> {
+    use async_trait::async_trait;
+    use meerkat_core::error::ToolError;
+    use meerkat_core::types::ToolDef;
+
+    /// An external dispatcher that provides a tool with the same name as a builtin
+    struct DuplicatingDispatcher;
+
+    #[async_trait]
+    impl AgentToolDispatcher for DuplicatingDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([
+                // Duplicate of builtin
+                Arc::new(ToolDef {
+                    name: "task_list".to_string(),
+                    description: "External task_list (should be shadowed)".to_string(),
+                    input_schema: json!({"type": "object", "properties": {"external": {"type": "boolean"}}}),
+                }),
+                // Unique external tool
+                Arc::new(ToolDef {
+                    name: "external_only".to_string(),
+                    description: "External-only tool".to_string(),
+                    input_schema: json!({"type": "object"}),
+                }),
+            ])
+        }
+
+        async fn dispatch(
+            &self,
+            name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<serde_json::Value, ToolError> {
+            Ok(json!({"from": "external", "tool": name}))
+        }
+    }
+
+    let store = Arc::new(MemoryTaskStore::new());
+    let config = BuiltinToolConfig::default();
+    let external = Arc::new(DuplicatingDispatcher) as Arc<dyn AgentToolDispatcher>;
+
+    let dispatcher = CompositeDispatcher::new(store, &config, None, Some(external), None)?;
+    let tools = dispatcher.tools();
+
+    // Count occurrences of task_list
+    let task_list_count = tools.iter().filter(|t| t.name == "task_list").count();
+    assert_eq!(
+        task_list_count, 1,
+        "task_list should appear exactly once, not duplicated (found {})",
+        task_list_count
+    );
+
+    // Verify the builtin version is kept (check description doesn't say "External")
+    let task_list = tools
+        .iter()
+        .find(|t| t.name == "task_list")
+        .ok_or("task_list should exist")?;
+    assert!(
+        !task_list.description.contains("External"),
+        "Builtin task_list should take precedence over external"
+    );
+
+    // Verify unique external tool is still included
+    assert!(
+        tools.iter().any(|t| t.name == "external_only"),
+        "Unique external tools should still be included"
+    );
+
+    Ok(())
+}

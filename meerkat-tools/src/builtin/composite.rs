@@ -151,21 +151,37 @@ impl CompositeDispatcher {
 impl AgentToolDispatcher for CompositeDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         let mut tools = Vec::new();
+        let mut seen_names = HashSet::new();
+
+        // Add allowed builtin tools first (they take precedence)
         for tool in &self.builtin_tools {
             if self.allowed_tools.contains(tool.name()) {
+                seen_names.insert(tool.name().to_string());
                 tools.push(Arc::new(tool.def()));
             }
         }
+
+        // Add allowed sub-agent tools
         if let Some(ref sub) = self.sub_agent_tools {
             for tool in sub.tools() {
                 if self.allowed_tools.contains(tool.name()) {
+                    seen_names.insert(tool.name().to_string());
                     tools.push(Arc::new(tool.def()));
                 }
             }
         }
+
+        // Add external tools, skipping duplicates to avoid LLM confusion
         if let Some(ref ext) = self.external {
-            tools.extend(ext.tools().iter().map(Arc::clone));
+            for tool in ext.tools().iter() {
+                if !seen_names.contains(&tool.name) {
+                    seen_names.insert(tool.name.clone());
+                    tools.push(Arc::clone(tool));
+                }
+                // Note: duplicates are silently skipped; builtins take precedence
+            }
         }
+
         tools.into()
     }
 

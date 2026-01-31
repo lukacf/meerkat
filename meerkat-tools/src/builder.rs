@@ -91,8 +91,6 @@ impl ToolDispatcherBuilder {
 
     /// Build the ToolDispatcher
     pub async fn build(self) -> Result<ToolDispatcher, CompositeDispatcherError> {
-        let registry = crate::registry::ToolRegistry::new();
-
         let router: Arc<dyn AgentToolDispatcher> = match self.config.source {
             ToolDispatcherSource::Empty => Arc::new(EmptyToolDispatcher),
             ToolDispatcherSource::Mcp(mcp) => mcp.router,
@@ -115,6 +113,12 @@ impl ToolDispatcherBuilder {
         } else {
             router
         };
+
+        // Populate registry from router's tools
+        let mut registry = crate::registry::ToolRegistry::new();
+        for tool_def in router.tools().iter() {
+            registry.register((**tool_def).clone());
+        }
 
         Ok(ToolDispatcher::new(registry, router).with_timeout(self.config.default_timeout))
     }

@@ -76,7 +76,7 @@ impl AgentToolDispatcher for ToolDispatcher {
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
-        // Note: this bypasses high-level DispatchError handling for direct trait usage
+        // Validate arguments against schema
         self.registry.validate(name, args).map_err(|e| match e {
             ToolValidationError::NotFound { name } => ToolError::NotFound { name },
             ToolValidationError::InvalidArguments { name, reason } => {
@@ -84,6 +84,15 @@ impl AgentToolDispatcher for ToolDispatcher {
             }
         })?;
 
-        self.router.dispatch(name, args).await
+        // Dispatch with timeout to prevent hanging tool calls
+        tokio::time::timeout(self.default_timeout, self.router.dispatch(name, args))
+            .await
+            .map_err(|_| ToolError::ExecutionFailed {
+                message: format!(
+                    "Tool '{}' timed out after {}ms",
+                    name,
+                    self.default_timeout.as_millis()
+                ),
+            })?
     }
 }

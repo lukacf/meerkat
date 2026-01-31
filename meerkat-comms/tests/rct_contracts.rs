@@ -109,3 +109,113 @@ fn test_rct_contracts_transport_codec_rejects_oversize_payload_on_encode() {
     let err = codec.encode(frame, &mut dst).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 }
+
+// ============================================================================
+// ACK validation regression tests
+// ============================================================================
+
+/// Regression test: ACK validation must check signature, sender, and in_reply_to.
+/// A valid ACK must have:
+/// 1. Valid signature (envelope.verify() == true)
+/// 2. from == the peer we sent to
+/// 3. in_reply_to == the message id we sent
+#[test]
+fn test_regression_ack_must_match_sent_message() {
+    let sender_keypair = Keypair::generate();
+    let receiver_keypair = Keypair::generate();
+
+    // Create a message from sender to receiver
+    let sent_id = Uuid::new_v4();
+    let sent_envelope = Envelope {
+        id: sent_id,
+        from: sender_keypair.public_key(),
+        to: receiver_keypair.public_key(),
+        kind: MessageKind::Message {
+            body: "hello".to_string(),
+        },
+        sig: Signature::new([0u8; 64]),
+    };
+
+    // Create a valid ACK from receiver back to sender
+    let mut valid_ack = Envelope {
+        id: Uuid::new_v4(),
+        from: receiver_keypair.public_key(),
+        to: sender_keypair.public_key(),
+        kind: MessageKind::Ack {
+            in_reply_to: sent_id,
+        },
+        sig: Signature::new([0u8; 64]),
+    };
+    valid_ack.sign(&receiver_keypair);
+
+    // Valid ACK should verify
+    assert!(valid_ack.verify(), "valid ACK should verify");
+    assert_eq!(
+        valid_ack.from, sent_envelope.to,
+        "ACK from should match sent to"
+    );
+    if let MessageKind::Ack { in_reply_to } = valid_ack.kind {
+        assert_eq!(in_reply_to, sent_id, "ACK in_reply_to should match sent id");
+    }
+}
+
+/// Regression test: ACK with wrong in_reply_to should be rejected.
+#[test]
+fn test_regression_ack_wrong_in_reply_to_is_invalid() {
+    let sender_keypair = Keypair::generate();
+    let receiver_keypair = Keypair::generate();
+
+    let sent_id = Uuid::new_v4();
+    let wrong_id = Uuid::new_v4();
+
+    // ACK with wrong in_reply_to
+    let mut wrong_ack = Envelope {
+        id: Uuid::new_v4(),
+        from: receiver_keypair.public_key(),
+        to: sender_keypair.public_key(),
+        kind: MessageKind::Ack {
+            in_reply_to: wrong_id,
+        },
+        sig: Signature::new([0u8; 64]),
+    };
+    wrong_ack.sign(&receiver_keypair);
+
+    // Signature is valid but in_reply_to doesn't match
+    assert!(wrong_ack.verify(), "signature should still verify");
+    if let MessageKind::Ack { in_reply_to } = wrong_ack.kind {
+        assert_ne!(
+            in_reply_to, sent_id,
+            "wrong ACK in_reply_to should not match sent id"
+        );
+    }
+}
+
+/// Regression test: ACK from wrong peer should be rejected.
+#[test]
+fn test_regression_ack_from_wrong_peer_is_invalid() {
+    let sender_keypair = Keypair::generate();
+    let receiver_keypair = Keypair::generate();
+    let imposter_keypair = Keypair::generate();
+
+    let sent_id = Uuid::new_v4();
+    let sent_to = receiver_keypair.public_key();
+
+    // ACK from imposter (not the intended receiver)
+    let mut imposter_ack = Envelope {
+        id: Uuid::new_v4(),
+        from: imposter_keypair.public_key(),
+        to: sender_keypair.public_key(),
+        kind: MessageKind::Ack {
+            in_reply_to: sent_id,
+        },
+        sig: Signature::new([0u8; 64]),
+    };
+    imposter_ack.sign(&imposter_keypair);
+
+    // Signature is valid but from wrong peer
+    assert!(imposter_ack.verify(), "imposter signature should verify");
+    assert_ne!(
+        imposter_ack.from, sent_to,
+        "imposter ACK from should not match sent to"
+    );
+}

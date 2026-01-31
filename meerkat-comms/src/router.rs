@@ -166,6 +166,9 @@ impl Router {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
+        let sent_id = envelope.id;
+        let sent_to = envelope.to;
+
         let mut framed = Framed::new(stream, TransportCodec::new(self.config.max_message_bytes));
         framed.send(EnvelopeFrame::from_envelope(envelope)).await?;
         if wait_for_ack {
@@ -176,7 +179,17 @@ impl Router {
             .await
             {
                 Ok(Some(Ok(frame))) => {
-                    if let MessageKind::Ack { .. } = frame.envelope.kind {
+                    // Validate ACK: signature, sender matches recipient, in_reply_to matches sent id
+                    if let MessageKind::Ack { in_reply_to } = frame.envelope.kind {
+                        if !frame.envelope.verify() {
+                            return Err(SendError::PeerOffline);
+                        }
+                        if frame.envelope.from != sent_to {
+                            return Err(SendError::PeerOffline);
+                        }
+                        if in_reply_to != sent_id {
+                            return Err(SendError::PeerOffline);
+                        }
                         Ok(())
                     } else {
                         Err(SendError::PeerOffline)

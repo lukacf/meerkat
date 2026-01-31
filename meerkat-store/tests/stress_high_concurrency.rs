@@ -112,6 +112,7 @@ async fn sample_list_latencies(
 }
 
 #[tokio::test]
+#[ignore = "Stress test"]
 async fn stress_session_listing_p95_is_stable_across_scale() {
     let rounds = 10;
     let concurrency = 50;

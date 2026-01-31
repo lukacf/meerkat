@@ -8,10 +8,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::{
-    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CALLBACK_TOOL_PREFIX,
-    LlmStreamResult,
-};
+use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult};
 
 impl<C, T, S> Agent<C, T, S>
 where
@@ -192,7 +189,7 @@ where
 
                         // Process results and emit events
                         let mut tool_results = Vec::with_capacity(num_tool_calls);
-                        for (id, name, args, dispatch_result, duration_ms, thought_signature) in
+                        for (id, name, _args, dispatch_result, duration_ms, thought_signature) in
                             dispatch_results
                         {
                             let (content, is_error) = match dispatch_result {
@@ -204,30 +201,21 @@ where
                                     };
                                     (s, false)
                                 }
-                                Err(crate::error::ToolError::Other(msg))
-                                    if msg.starts_with(CALLBACK_TOOL_PREFIX) =>
-                                {
-                                    let payload = msg
-                                        .strip_prefix(CALLBACK_TOOL_PREFIX)
-                                        .and_then(|suffix| {
-                                            serde_json::from_str::<Value>(suffix).ok()
-                                        })
-                                        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-                                    let mut payload =
-                                        payload.as_object().cloned().unwrap_or_default();
-                                    payload
-                                        .entry("tool_use_id".to_string())
-                                        .or_insert(Value::String(id.clone()));
-                                    payload
-                                        .entry("tool_name".to_string())
-                                        .or_insert(Value::String(name.clone()));
-                                    payload.entry("args".to_string()).or_insert(args.clone());
-                                    let serialized = serde_json::to_string(&Value::Object(payload))
-                                        .unwrap_or_default();
-                                    return Err(AgentError::ToolError(format!(
-                                        "{}{}",
-                                        CALLBACK_TOOL_PREFIX, serialized
-                                    )));
+                                Err(crate::error::ToolError::CallbackPending {
+                                    tool_name: callback_tool,
+                                    args: callback_args,
+                                }) => {
+                                    // Merge tool_use_id into args for external handler
+                                    let mut merged_args =
+                                        callback_args.as_object().cloned().unwrap_or_default();
+                                    merged_args.insert(
+                                        "tool_use_id".to_string(),
+                                        Value::String(id.clone()),
+                                    );
+                                    return Err(AgentError::CallbackPending {
+                                        tool_name: callback_tool,
+                                        args: Value::Object(merged_args),
+                                    });
                                 }
                                 Err(e) => {
                                     let payload = e.to_error_payload();

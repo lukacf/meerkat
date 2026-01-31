@@ -299,3 +299,63 @@ fn test_inv_010_programmatic_overrides_ephemeral() {
     let fresh = Config::default();
     assert_ne!(fresh.agent.model, "override");
 }
+
+// ============================================================================
+// CallbackPending type-safety tests (replaces CALLBACK_TOOL_PREFIX magic string)
+// ============================================================================
+
+#[test]
+fn test_tool_error_callback_pending_creation() -> Result<(), Box<dyn std::error::Error>> {
+    let args = json!({"tool_use_id": "tc-123", "param": "value"});
+    let err = meerkat_core::ToolError::callback_pending("user_input", args.clone());
+
+    assert!(err.is_callback_pending());
+    let (name, extracted_args) = err
+        .as_callback_pending()
+        .ok_or("should be callback pending")?;
+    assert_eq!(name, "user_input");
+    assert_eq!(extracted_args, &args);
+    Ok(())
+}
+
+#[test]
+fn test_tool_error_callback_pending_error_code() {
+    let err = meerkat_core::ToolError::callback_pending("tool_a", json!({}));
+    assert_eq!(err.error_code(), "callback_pending");
+}
+
+#[test]
+fn test_tool_error_callback_pending_display() {
+    let err = meerkat_core::ToolError::callback_pending("my_tool", json!({}));
+    let msg = format!("{err}");
+    assert!(msg.contains("my_tool"));
+    assert!(msg.contains("Callback pending"));
+}
+
+#[test]
+fn test_tool_error_is_callback_pending_false_for_others() {
+    let not_found = meerkat_core::ToolError::not_found("tool");
+    assert!(!not_found.is_callback_pending());
+    assert!(not_found.as_callback_pending().is_none());
+
+    let access_denied = meerkat_core::ToolError::access_denied("tool");
+    assert!(!access_denied.is_callback_pending());
+
+    let timeout = meerkat_core::ToolError::timeout("tool", 1000);
+    assert!(!timeout.is_callback_pending());
+}
+
+#[test]
+fn test_tool_error_payload_for_callback_pending() -> Result<(), Box<dyn std::error::Error>> {
+    let err = meerkat_core::ToolError::callback_pending("external_tool", json!({"key": "val"}));
+    let payload = err.to_error_payload();
+
+    assert_eq!(payload["error"], "callback_pending");
+    assert!(
+        payload["message"]
+            .as_str()
+            .ok_or("no message")?
+            .contains("external_tool")
+    );
+    Ok(())
+}

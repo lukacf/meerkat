@@ -11,6 +11,161 @@ use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
 
+// ============================================================================
+// Provider-specific Parameters
+// ============================================================================
+
+/// Type-safe provider-specific parameters.
+///
+/// Use this enum to pass provider-specific options in a type-safe manner.
+/// Each provider variant contains only the parameters that provider supports.
+///
+/// For extensibility, the `Other` variant allows passing arbitrary JSON
+/// for providers not yet covered or experimental features.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ProviderParams {
+    /// Anthropic-specific parameters
+    Anthropic(AnthropicParams),
+    /// OpenAI-specific parameters
+    OpenAi(OpenAiParams),
+    /// Google Gemini-specific parameters
+    Gemini(GeminiParams),
+    /// Raw JSON for extensibility
+    Other(Value),
+}
+
+impl ProviderParams {
+    /// Convert to raw JSON Value for backward compatibility
+    pub fn to_value(&self) -> Value {
+        match self {
+            ProviderParams::Anthropic(p) => serde_json::to_value(p).unwrap_or_default(),
+            ProviderParams::OpenAi(p) => serde_json::to_value(p).unwrap_or_default(),
+            ProviderParams::Gemini(p) => serde_json::to_value(p).unwrap_or_default(),
+            ProviderParams::Other(v) => v.clone(),
+        }
+    }
+}
+
+/// Anthropic-specific parameters
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnthropicParams {
+    /// Extended thinking configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<AnthropicThinking>,
+}
+
+/// Anthropic extended thinking configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicThinking {
+    /// Budget type for extended thinking
+    #[serde(rename = "type")]
+    pub budget_type: String,
+    /// Token budget for thinking
+    pub budget_tokens: u32,
+}
+
+impl AnthropicParams {
+    /// Create params with extended thinking enabled
+    pub fn with_thinking(budget_tokens: u32) -> Self {
+        Self {
+            thinking: Some(AnthropicThinking {
+                budget_type: "enabled".to_string(),
+                budget_tokens,
+            }),
+        }
+    }
+}
+
+/// OpenAI-specific parameters
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenAiParams {
+    /// Reasoning effort level for o-series models
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Random seed for reproducibility
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// Frequency penalty (-2.0 to 2.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    /// Presence penalty (-2.0 to 2.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+}
+
+/// Reasoning effort levels for OpenAI o-series models
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+}
+
+impl OpenAiParams {
+    /// Create params with reasoning effort
+    pub fn with_reasoning_effort(effort: ReasoningEffort) -> Self {
+        Self {
+            reasoning_effort: Some(effort),
+            ..Default::default()
+        }
+    }
+
+    /// Create params with seed for reproducibility
+    pub fn with_seed(seed: i64) -> Self {
+        Self {
+            seed: Some(seed),
+            ..Default::default()
+        }
+    }
+}
+
+/// Google Gemini-specific parameters
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GeminiParams {
+    /// Thinking configuration for Gemini 3+ models
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<GeminiThinking>,
+    /// Top-K sampling parameter
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    /// Top-P (nucleus) sampling parameter
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+}
+
+/// Gemini thinking configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeminiThinking {
+    /// Whether thinking is enabled
+    pub include_thoughts: bool,
+    /// Budget in tokens for thinking
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
+}
+
+impl GeminiParams {
+    /// Create params with thinking enabled
+    pub fn with_thinking(budget: u32) -> Self {
+        Self {
+            thinking: Some(GeminiThinking {
+                include_thoughts: true,
+                thinking_budget: Some(budget),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Create params with top-k
+    pub fn with_top_k(k: u32) -> Self {
+        Self {
+            top_k: Some(k),
+            ..Default::default()
+        }
+    }
+}
+
 /// Abstraction over LLM providers
 ///
 /// Each provider implementation normalizes its streaming response
@@ -107,6 +262,38 @@ impl LlmRequest {
         }
         self.provider_params = Some(params);
         self
+    }
+
+    /// Set type-safe provider parameters
+    ///
+    /// This is the preferred way to set provider-specific options as it
+    /// prevents passing parameters meant for one provider to another.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let request = LlmRequest::new("o1-preview", messages)
+    ///     .with_typed_params(ProviderParams::OpenAi(
+    ///         OpenAiParams::with_reasoning_effort(ReasoningEffort::High)
+    ///     ));
+    /// ```
+    pub fn with_typed_params(mut self, params: ProviderParams) -> Self {
+        self.provider_params = Some(params.to_value());
+        self
+    }
+
+    /// Set OpenAI-specific parameters
+    pub fn with_openai_params(self, params: OpenAiParams) -> Self {
+        self.with_typed_params(ProviderParams::OpenAi(params))
+    }
+
+    /// Set Anthropic-specific parameters
+    pub fn with_anthropic_params(self, params: AnthropicParams) -> Self {
+        self.with_typed_params(ProviderParams::Anthropic(params))
+    }
+
+    /// Set Gemini-specific parameters
+    pub fn with_gemini_params(self, params: GeminiParams) -> Self {
+        self.with_typed_params(ProviderParams::Gemini(params))
     }
 }
 
@@ -477,5 +664,183 @@ mod tests {
             initial_capacity,
             "Buffer should not reallocate for small args"
         );
+    }
+
+    // =========================================================================
+    // ProviderParams type-safety tests
+    // =========================================================================
+
+    #[test]
+    fn test_provider_params_anthropic_serialization() -> Result<(), Box<dyn std::error::Error>> {
+        let params = ProviderParams::Anthropic(AnthropicParams::with_thinking(10000));
+        let json = serde_json::to_value(&params)?;
+
+        assert_eq!(json["provider"], "anthropic");
+        assert_eq!(json["thinking"]["type"], "enabled");
+        assert_eq!(json["thinking"]["budget_tokens"], 10000);
+
+        // Round-trip
+        let parsed: ProviderParams = serde_json::from_value(json)?;
+        match parsed {
+            ProviderParams::Anthropic(p) => {
+                let thinking = p.thinking.ok_or("missing thinking")?;
+                assert_eq!(thinking.budget_tokens, 10000);
+            }
+            _ => return Err("wrong variant".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_provider_params_openai_serialization() -> Result<(), Box<dyn std::error::Error>> {
+        let params =
+            ProviderParams::OpenAi(OpenAiParams::with_reasoning_effort(ReasoningEffort::High));
+        let json = serde_json::to_value(&params)?;
+
+        assert_eq!(json["provider"], "open_ai");
+        assert_eq!(json["reasoning_effort"], "high");
+
+        // Round-trip
+        let parsed: ProviderParams = serde_json::from_value(json)?;
+        match parsed {
+            ProviderParams::OpenAi(p) => {
+                assert_eq!(p.reasoning_effort, Some(ReasoningEffort::High));
+            }
+            _ => return Err("wrong variant".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_provider_params_gemini_serialization() -> Result<(), Box<dyn std::error::Error>> {
+        let params = ProviderParams::Gemini(GeminiParams::with_thinking(8000));
+        let json = serde_json::to_value(&params)?;
+
+        assert_eq!(json["provider"], "gemini");
+        let thinking = json.get("thinking").ok_or("missing thinking")?;
+        assert_eq!(thinking["include_thoughts"], true);
+        assert_eq!(thinking["thinking_budget"], 8000);
+
+        // Round-trip
+        let parsed: ProviderParams = serde_json::from_value(json)?;
+        match parsed {
+            ProviderParams::Gemini(p) => {
+                let thinking = p.thinking.ok_or("missing thinking")?;
+                assert!(thinking.include_thoughts);
+                assert_eq!(thinking.thinking_budget, Some(8000));
+            }
+            _ => return Err("wrong variant".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_reasoning_effort_variants() -> Result<(), Box<dyn std::error::Error>> {
+        // Test all ReasoningEffort variants serialize correctly
+        for (effort, expected) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+        ] {
+            let json = serde_json::to_value(effort)?;
+            assert_eq!(json.as_str(), Some(expected));
+
+            // Round-trip
+            let parsed: ReasoningEffort = serde_json::from_value(json)?;
+            assert_eq!(parsed, effort);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_provider_params_to_value() {
+        // Test the to_value() method extracts inner params without the tag
+        let anthropic_params = ProviderParams::Anthropic(AnthropicParams::with_thinking(5000));
+        let value = anthropic_params.to_value();
+
+        // Should have thinking but NOT the "provider" tag
+        assert!(value.get("provider").is_none());
+        assert!(value.get("thinking").is_some());
+        assert_eq!(value["thinking"]["budget_tokens"], 5000);
+    }
+
+    #[test]
+    fn test_llm_request_with_typed_params() -> Result<(), Box<dyn std::error::Error>> {
+        let request = LlmRequest::new("o1-preview", vec![]).with_typed_params(
+            ProviderParams::OpenAi(OpenAiParams::with_reasoning_effort(ReasoningEffort::High)),
+        );
+
+        let params = request.provider_params.ok_or("missing params")?;
+        assert_eq!(params["reasoning_effort"], "high");
+        Ok(())
+    }
+
+    #[test]
+    fn test_llm_request_with_anthropic_params() -> Result<(), Box<dyn std::error::Error>> {
+        let request = LlmRequest::new("claude-sonnet-4", vec![])
+            .with_anthropic_params(AnthropicParams::with_thinking(10000));
+
+        let params = request.provider_params.ok_or("missing params")?;
+        assert_eq!(params["thinking"]["type"], "enabled");
+        assert_eq!(params["thinking"]["budget_tokens"], 10000);
+        Ok(())
+    }
+
+    #[test]
+    fn test_llm_request_with_openai_params() -> Result<(), Box<dyn std::error::Error>> {
+        let request = LlmRequest::new("gpt-5.2", vec![])
+            .with_openai_params(OpenAiParams::with_reasoning_effort(ReasoningEffort::Medium));
+
+        let params = request.provider_params.ok_or("missing params")?;
+        assert_eq!(params["reasoning_effort"], "medium");
+        Ok(())
+    }
+
+    #[test]
+    fn test_llm_request_with_gemini_params() -> Result<(), Box<dyn std::error::Error>> {
+        let request = LlmRequest::new("gemini-3-pro", vec![])
+            .with_gemini_params(GeminiParams::with_thinking(16000));
+
+        let params = request.provider_params.ok_or("missing params")?;
+        assert_eq!(params["thinking"]["include_thoughts"], true);
+        assert_eq!(params["thinking"]["thinking_budget"], 16000);
+        Ok(())
+    }
+
+    #[test]
+    fn test_openai_params_with_seed() {
+        let params = OpenAiParams::with_seed(42);
+        assert_eq!(params.seed, Some(42));
+        assert!(params.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn test_gemini_params_with_top_k() {
+        let params = GeminiParams::with_top_k(40);
+        assert_eq!(params.top_k, Some(40));
+        assert!(params.thinking.is_none());
+    }
+
+    #[test]
+    fn test_anthropic_params_default() {
+        let params = AnthropicParams::default();
+        assert!(params.thinking.is_none());
+    }
+
+    #[test]
+    fn test_openai_params_default() {
+        let params = OpenAiParams::default();
+        assert!(params.reasoning_effort.is_none());
+        assert!(params.seed.is_none());
+        assert!(params.frequency_penalty.is_none());
+        assert!(params.presence_penalty.is_none());
+    }
+
+    #[test]
+    fn test_gemini_params_default() {
+        let params = GeminiParams::default();
+        assert!(params.thinking.is_none());
+        assert!(params.top_k.is_none());
+        assert!(params.top_p.is_none());
     }
 }

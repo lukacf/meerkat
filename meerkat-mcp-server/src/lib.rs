@@ -11,8 +11,8 @@ use meerkat_client::{LlmClientAdapter, ProviderResolver};
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::{invalid_session_id, invalid_session_id_message, store_error};
 use meerkat_core::{
-    AgentEvent, CALLBACK_TOOL_PREFIX, Config, ConfigDelta, ConfigStore, FileConfigStore, Provider,
-    SessionMetadata, SessionTooling, SystemPromptConfig, format_verbose_event,
+    AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, Provider, SessionMetadata,
+    SessionTooling, SystemPromptConfig, format_verbose_event,
 };
 use meerkat_tools::find_project_root;
 use schemars::JsonSchema;
@@ -522,11 +522,7 @@ async fn handle_meerkat_run_simple(
             });
             Ok(wrap_tool_payload(payload))
         }
-        Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
-            // Extract pending tool call info from the error
-            let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
-            let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
-
+        Err(AgentError::CallbackPending { tool_name, args }) => {
             // Get session ID from agent state
             let session_id = agent.session().id();
 
@@ -537,7 +533,10 @@ async fn handle_meerkat_run_simple(
                 }],
                 "session_id": session_id.to_string(),
                 "status": "pending_tool_call",
-                "pending_tool_calls": [pending]
+                "pending_tool_calls": [{
+                    "tool_name": tool_name,
+                    "args": args
+                }]
             });
             Ok(wrap_tool_payload(payload))
         }
@@ -748,9 +747,7 @@ async fn handle_meerkat_run_with_builtins(
             });
             Ok(wrap_tool_payload(payload))
         }
-        Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
-            let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
-            let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
+        Err(AgentError::CallbackPending { tool_name, args }) => {
             let session_id = agent.session().id();
 
             let payload = json!({
@@ -760,7 +757,10 @@ async fn handle_meerkat_run_with_builtins(
                 }],
                 "session_id": session_id.to_string(),
                 "status": "pending_tool_call",
-                "pending_tool_calls": [pending]
+                "pending_tool_calls": [{
+                    "tool_name": tool_name,
+                    "args": args
+                }]
             });
             Ok(wrap_tool_payload(payload))
         }
@@ -999,11 +999,7 @@ async fn handle_meerkat_resume_simple(
             });
             Ok(wrap_tool_payload(payload))
         }
-        Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
-            // Extract pending tool call info from the error
-            let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
-            let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
-
+        Err(AgentError::CallbackPending { tool_name, args }) => {
             // Get session ID from agent state
             let session_id = agent.session().id();
 
@@ -1014,7 +1010,10 @@ async fn handle_meerkat_resume_simple(
                 }],
                 "session_id": session_id.to_string(),
                 "status": "pending_tool_call",
-                "pending_tool_calls": [pending]
+                "pending_tool_calls": [{
+                    "tool_name": tool_name,
+                    "args": args
+                }]
             });
             Ok(wrap_tool_payload(payload))
         }
@@ -1269,9 +1268,7 @@ async fn handle_meerkat_resume_with_builtins(
             });
             Ok(wrap_tool_payload(payload))
         }
-        Err(AgentError::ToolError(ref msg)) if msg.starts_with(CALLBACK_TOOL_PREFIX) => {
-            let pending_info = &msg[CALLBACK_TOOL_PREFIX.len()..];
-            let pending: Value = serde_json::from_str(pending_info).unwrap_or(json!({}));
+        Err(AgentError::CallbackPending { tool_name, args }) => {
             let session_id = agent.session().id();
 
             let payload = json!({
@@ -1281,7 +1278,10 @@ async fn handle_meerkat_resume_with_builtins(
                 }],
                 "session_id": session_id.to_string(),
                 "status": "pending_tool_call",
-                "pending_tool_calls": [pending]
+                "pending_tool_calls": [{
+                    "tool_name": tool_name,
+                    "args": args
+                }]
             });
             Ok(wrap_tool_payload(payload))
         }
@@ -1349,16 +1349,7 @@ impl AgentToolDispatcher for MpcToolDispatcher {
         // Check if this is a callback tool
         if self.callback_tools.contains(name) {
             // Return a special error that signals the agent loop should pause
-            // The error contains serialized info about the pending tool call
-            Err(ToolError::other(format!(
-                "{}{}",
-                CALLBACK_TOOL_PREFIX,
-                serde_json::to_string(&json!({
-                    "tool_name": name,
-                    "args": args
-                }))
-                .unwrap_or_default()
-            )))
+            Err(ToolError::callback_pending(name, args.clone()))
         } else {
             Err(ToolError::not_found(name))
         }
@@ -1528,10 +1519,12 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.starts_with(CALLBACK_TOOL_PREFIX));
-        assert!(err.contains("get_weather"));
-        assert!(err.contains("Tokyo"));
+        let err = result.unwrap_err();
+        assert!(err.is_callback_pending(), "Expected CallbackPending error");
+        if let Some((tool_name, args)) = err.as_callback_pending() {
+            assert_eq!(tool_name, "get_weather");
+            assert_eq!(args["city"], "Tokyo");
+        }
     }
 
     #[test]

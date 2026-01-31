@@ -69,6 +69,17 @@ pub enum ToolError {
     /// A generic tool error with a message
     #[error("{0}")]
     Other(String),
+
+    /// Tool call must be routed externally (callback pending)
+    ///
+    /// This variant signals that a tool call cannot be handled internally
+    /// and must be routed to an external handler. The payload contains
+    /// serialized information about the pending tool call.
+    #[error("Callback pending for tool '{tool_name}'")]
+    CallbackPending {
+        tool_name: String,
+        args: serde_json::Value,
+    },
 }
 
 impl ToolError {
@@ -81,6 +92,7 @@ impl ToolError {
             Self::Timeout { .. } => "timeout",
             Self::AccessDenied { .. } => "access_denied",
             Self::Other(_) => "tool_error",
+            Self::CallbackPending { .. } => "callback_pending",
         }
     }
 
@@ -122,6 +134,27 @@ impl ToolError {
     }
     pub fn other(message: impl Into<String>) -> Self {
         Self::Other(message.into())
+    }
+
+    /// Create a callback pending error for external tool routing
+    pub fn callback_pending(tool_name: impl Into<String>, args: serde_json::Value) -> Self {
+        Self::CallbackPending {
+            tool_name: tool_name.into(),
+            args,
+        }
+    }
+
+    /// Check if this is a callback pending error
+    pub fn is_callback_pending(&self) -> bool {
+        matches!(self, Self::CallbackPending { .. })
+    }
+
+    /// Extract callback pending info if this is a CallbackPending error
+    pub fn as_callback_pending(&self) -> Option<(&str, &serde_json::Value)> {
+        match self {
+            Self::CallbackPending { tool_name, args } => Some((tool_name, args)),
+            _ => None,
+        }
     }
 }
 
@@ -189,6 +222,13 @@ pub enum AgentError {
     SubAgentSpawnFailed { reason: String },
     #[error("Internal error: {0}")]
     InternalError(String),
+
+    /// A tool call must be routed externally (callback pending)
+    #[error("Callback pending for tool '{tool_name}'")]
+    CallbackPending {
+        tool_name: String,
+        args: serde_json::Value,
+    },
 }
 
 impl AgentError {

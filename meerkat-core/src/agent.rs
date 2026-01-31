@@ -25,6 +25,13 @@ pub use builder::AgentBuilder;
 pub use runner::AgentRunner;
 
 /// Special error prefix to signal tool calls that must be routed externally.
+///
+/// DEPRECATED: Use `ToolError::CallbackPending` or `AgentError::CallbackPending` instead.
+/// This constant is kept for backward compatibility but will be removed in a future version.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use ToolError::CallbackPending or AgentError::CallbackPending instead"
+)]
 pub const CALLBACK_TOOL_PREFIX: &str = "CALLBACK_TOOL_PENDING:";
 
 /// Trait for LLM clients that can be used with the agent

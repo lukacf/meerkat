@@ -554,9 +554,9 @@ pub async fn spawn_sub_agent_dyn(
         let result = if host_mode {
             agent.run_host_mode(String::new()).await
         } else {
-            // The session already has the user prompt, so we use an empty string
-            // to avoid adding a duplicate.
-            agent.run(String::new()).await
+            // The session already has the user prompt, so use run_pending()
+            // which runs from the existing session without adding a new message.
+            agent.run_pending().await
         };
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -639,33 +639,9 @@ where
 
     // Spawn the agent execution task
     tokio::spawn(async move {
-        // Note: We don't need to call run() with input since the session already has the prompt
-        // We need to trigger the agent loop differently. Let's use run_continue or similar.
-        // Actually, looking at the Agent code, run() adds a user message.
-        // Since our session already has the user message, we should use a different approach.
-        //
-        // The cleanest way is to remove the last user message from the session,
-        // then call run() with that message.
-
-        // For now, we'll use an empty string which just triggers the loop
-        // without adding another message. This works because the session
-        // already has the user prompt.
-
-        // Actually, let me reconsider - the Agent.run() method:
-        // 1. Adds the user_input as a User message
-        // 2. Runs the loop
-        //
-        // Our session already has the user message. So we have two options:
-        // A) Pass empty string and let the session's existing message drive the conversation
-        //    - This won't work because run() always adds a message
-        // B) Extract the last user message, create session without it, call run() with it
-        //    - This is what we should do
-
-        // For simplicity, let's just call with the prompt again
-        // The LLM will see it twice but this is the cleanest approach for now
-        // A proper fix would be to add run_from_session() to Agent
-
-        let result = agent.run(String::new()).await;
+        // The session already has the user prompt via create_spawn_session/create_fork_session.
+        // Use run_pending() to run from the existing session without adding a new message.
+        let result = agent.run_pending().await;
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
 

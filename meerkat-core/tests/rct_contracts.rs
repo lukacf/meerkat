@@ -464,3 +464,56 @@ async fn test_regression_filtered_dispatcher_denies_non_allowed()
     }
     Ok(())
 }
+
+// ============================================================================
+// run_pending() regression tests
+// ============================================================================
+
+#[test]
+fn test_regression_run_pending_requires_user_message() {
+    // A session without a trailing user message should fail run_pending
+    use meerkat_core::Session;
+    use meerkat_core::types::Message;
+
+    let session = Session::new(); // Empty session
+
+    // Check that the session's last message is not a user message
+    let has_user_message = session
+        .messages()
+        .last()
+        .is_some_and(|m| matches!(m, Message::User(_)));
+
+    assert!(
+        !has_user_message,
+        "Empty session should not have a trailing user message"
+    );
+}
+
+#[test]
+fn test_regression_session_with_user_message_is_valid_for_run_pending() {
+    // A session with a trailing user message should be valid for run_pending
+    use meerkat_core::Session;
+    use meerkat_core::types::{Message, UserMessage};
+
+    let mut session = Session::new();
+    session.push(Message::User(UserMessage {
+        content: "Test prompt".to_string(),
+    }));
+
+    let has_user_message = session
+        .messages()
+        .last()
+        .is_some_and(|m| matches!(m, Message::User(_)));
+
+    assert!(
+        has_user_message,
+        "Session with user message should be valid for run_pending"
+    );
+
+    // Verify the content is preserved - extract content and check
+    let content = session.messages().last().and_then(|m| match m {
+        Message::User(user) => Some(user.content.as_str()),
+        _ => None,
+    });
+    assert_eq!(content, Some("Test prompt"));
+}

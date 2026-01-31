@@ -397,6 +397,76 @@ where
         }
     }
 
+    /// Run the agent using the pending user message already in the session.
+    ///
+    /// This is useful when the session has been pre-populated with a user message
+    /// (e.g., via `create_spawn_session` or `create_fork_session`). Unlike `run()`,
+    /// this method does NOT add a new user message - it runs directly from the
+    /// session's current state.
+    ///
+    /// Returns an error if the session doesn't have a pending user message.
+    pub async fn run_pending(&mut self) -> Result<RunResult, AgentError> {
+        let has_pending_user_message = self
+            .session
+            .messages()
+            .last()
+            .is_some_and(|m| matches!(m, Message::User(_)));
+
+        if !has_pending_user_message {
+            return Err(AgentError::ConfigError(
+                "run_pending requires a pending user message in the session".to_string(),
+            ));
+        }
+
+        // Reset state for new run (allows multi-turn on same agent)
+        self.state = LoopState::CallingLlm;
+
+        // Run the loop without adding a message
+        self.run_loop(None).await
+    }
+
+    /// Run the agent using the pending user message, with event streaming.
+    ///
+    /// Like `run_pending()`, but emits events to the provided channel.
+    pub async fn run_pending_with_events(
+        &mut self,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, AgentError> {
+        let pending_prompt = self.session.messages().last().and_then(|m| match m {
+            Message::User(u) => Some(u.content.clone()),
+            _ => None,
+        });
+
+        let Some(prompt) = pending_prompt else {
+            return Err(AgentError::ConfigError(
+                "run_pending_with_events requires a pending user message in the session"
+                    .to_string(),
+            ));
+        };
+
+        // Reset state for new run (allows multi-turn on same agent)
+        self.state = LoopState::CallingLlm;
+
+        let session_id = self.session.id().clone();
+
+        let _ = event_tx
+            .send(AgentEvent::RunStarted { session_id, prompt })
+            .await;
+
+        match self.run_loop(Some(event_tx.clone())).await {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                let _ = event_tx
+                    .send(AgentEvent::RunFailed {
+                        session_id: self.session.id().clone(),
+                        error: err.to_string(),
+                    })
+                    .await;
+                Err(err)
+            }
+        }
+    }
+
     /// Cancel the current run
     pub fn cancel(&mut self) {
         if !self.state.is_terminal() {

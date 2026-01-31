@@ -5,7 +5,7 @@
 
 use crate::{SessionFilter, StoreError};
 use meerkat_core::{SessionId, SessionMeta};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -79,6 +79,21 @@ impl RedbSessionIndex {
             .iter()
             .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         Ok(iter.next().is_none())
+    }
+
+    /// Count the number of sessions in the index
+    pub fn entry_count(&self) -> Result<usize, StoreError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        let table = read_txn
+            .open_table(SESSIONS_BY_ID)
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        let count = table
+            .len()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        Ok(count as usize)
     }
 
     pub fn lookup_meta(&self, id: &SessionId) -> Result<Option<SessionMeta>, StoreError> {

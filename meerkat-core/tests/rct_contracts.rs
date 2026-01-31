@@ -359,3 +359,108 @@ fn test_tool_error_payload_for_callback_pending() -> Result<(), Box<dyn std::err
     );
     Ok(())
 }
+
+// ============================================================================
+// FilteredToolDispatcher regression tests
+// ============================================================================
+
+use async_trait::async_trait;
+use meerkat_core::{AgentToolDispatcher, FilteredToolDispatcher, ToolDef};
+use std::sync::Arc;
+
+/// Mock dispatcher for testing FilteredToolDispatcher
+struct MockDispatcher {
+    tools: Arc<[Arc<ToolDef>]>,
+}
+
+impl MockDispatcher {
+    fn new(tool_names: &[&str]) -> Self {
+        let tools: Vec<Arc<ToolDef>> = tool_names
+            .iter()
+            .map(|name| {
+                Arc::new(ToolDef {
+                    name: name.to_string(),
+                    description: format!("Mock tool {}", name),
+                    input_schema: json!({"type": "object"}),
+                })
+            })
+            .collect();
+        Self {
+            tools: tools.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl AgentToolDispatcher for MockDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.tools)
+    }
+
+    async fn dispatch(
+        &self,
+        name: &str,
+        _args: &serde_json::Value,
+    ) -> Result<serde_json::Value, meerkat_core::ToolError> {
+        Ok(json!({"dispatched": name}))
+    }
+}
+
+/// Regression: FilteredToolDispatcher should filter once at construction
+/// Previously: Used raw pointer caching which could fail under contention
+#[test]
+fn test_regression_filtered_dispatcher_filters_at_construction() {
+    let inner = Arc::new(MockDispatcher::new(&["tool_a", "tool_b", "tool_c"]));
+    let allowed = vec!["tool_a".to_string(), "tool_c".to_string()];
+
+    let filtered = FilteredToolDispatcher::new(inner, allowed);
+    let tools = filtered.tools();
+
+    // Should only expose allowed tools
+    assert_eq!(tools.len(), 2);
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"tool_a"));
+    assert!(names.contains(&"tool_c"));
+    assert!(!names.contains(&"tool_b"));
+}
+
+/// Regression: FilteredToolDispatcher::tools() should return consistent results
+#[test]
+fn test_regression_filtered_dispatcher_tools_consistent() {
+    let inner = Arc::new(MockDispatcher::new(&["x", "y", "z"]));
+    let filtered = FilteredToolDispatcher::new(inner, vec!["y".to_string()]);
+
+    // Call tools() multiple times - should always return same result
+    let tools1 = filtered.tools();
+    let tools2 = filtered.tools();
+    let tools3 = filtered.tools();
+
+    assert_eq!(tools1.len(), 1);
+    assert_eq!(tools2.len(), 1);
+    assert_eq!(tools3.len(), 1);
+    assert_eq!(tools1[0].name, "y");
+    assert_eq!(tools2[0].name, "y");
+    assert_eq!(tools3[0].name, "y");
+}
+
+/// Regression: FilteredToolDispatcher::dispatch() should deny non-allowed tools
+#[tokio::test]
+async fn test_regression_filtered_dispatcher_denies_non_allowed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let inner = Arc::new(MockDispatcher::new(&["allowed", "denied"]));
+    let filtered = FilteredToolDispatcher::new(inner, vec!["allowed".to_string()]);
+
+    // Allowed tool should work
+    let result = filtered.dispatch("allowed", &json!({})).await;
+    assert!(result.is_ok());
+
+    // Non-allowed tool should be denied
+    let result = filtered.dispatch("denied", &json!({})).await;
+    match result {
+        Err(meerkat_core::ToolError::AccessDenied { name }) => {
+            assert_eq!(name, "denied");
+        }
+        _ => return Err("expected AccessDenied error".into()),
+    }
+    Ok(())
+}

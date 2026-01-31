@@ -222,8 +222,16 @@ impl AnthropicClient {
                 }
             }
 
+            // top_k must be a number - coerce strings from CLI --param
             if let Some(top_k) = params.get("top_k") {
-                body["top_k"] = top_k.clone();
+                let numeric_top_k = match top_k {
+                    Value::Number(_) => Some(top_k.clone()),
+                    Value::String(s) => s.parse::<u64>().ok().map(|n| Value::Number(n.into())),
+                    _ => None,
+                };
+                if let Some(v) = numeric_top_k {
+                    body["top_k"] = v;
+                }
             }
         }
 
@@ -591,5 +599,54 @@ mod tests {
             request_timeout >= 60,
             "Request timeout should be at least 60s"
         );
+    }
+
+    /// Regression: CLI --param passes top_k as string; must coerce to number
+    /// Previously: `--param top_k=40` sent `"top_k": "40"` which Anthropic rejects
+    #[test]
+    fn test_regression_top_k_string_coercion() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        // Simulate CLI --param which passes values as strings
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("top_k", "40"); // String, not number!
+
+        let body = client.build_request_body(&request);
+
+        // Should be coerced to a number
+        assert!(
+            body["top_k"].is_number(),
+            "top_k should be a number, not string"
+        );
+        assert_eq!(body["top_k"], 40);
+        Ok(())
+    }
+
+    /// Regression: non-numeric string values for top_k should be ignored
+    #[test]
+    fn test_regression_top_k_invalid_string_ignored() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("top_k", "not_a_number");
+
+        let body = client.build_request_body(&request);
+
+        // Invalid string should be ignored (no top_k in body)
+        assert!(
+            body.get("top_k").is_none(),
+            "invalid top_k should be ignored"
+        );
+        Ok(())
     }
 }

@@ -19,7 +19,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub use builder::AgentBuilder;
 pub use runner::AgentRunner;
@@ -100,37 +99,33 @@ pub trait AgentToolDispatcher: Send + Sync {
 }
 
 /// A tool dispatcher that filters tools based on a policy
+///
+/// Tools are filtered once at construction time based on the allowed_tools list.
+/// The inner dispatcher is used for actual dispatch, but only allowed tools are
+/// exposed via tools() and dispatch() returns AccessDenied for filtered tools.
 pub struct FilteredToolDispatcher<T: AgentToolDispatcher + ?Sized> {
     inner: Arc<T>,
     allowed_tools: HashSet<String>,
-    cache: RwLock<FilteredToolCache>,
+    /// Pre-computed filtered tool list (computed once at construction)
+    filtered_tools: Arc<[Arc<ToolDef>]>,
 }
 
 impl<T: AgentToolDispatcher + ?Sized> FilteredToolDispatcher<T> {
     pub fn new(inner: Arc<T>, allowed_tools: Vec<String>) -> Self {
+        let allowed_set: HashSet<String> = allowed_tools.into_iter().collect();
+
+        // Filter tools once at construction - the tool registry is static for agent lifetime
+        let inner_tools = inner.tools();
+        let filtered: Vec<Arc<ToolDef>> = inner_tools
+            .iter()
+            .filter(|t| allowed_set.contains(t.name.as_str()))
+            .map(Arc::clone)
+            .collect();
+
         Self {
             inner,
-            allowed_tools: allowed_tools.into_iter().collect(),
-            cache: RwLock::new(FilteredToolCache::default()),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct FilteredToolCache {
-    inner_ptr: usize,
-    inner_len: usize,
-    tools: Arc<[Arc<ToolDef>]>,
-    valid: bool,
-}
-
-impl Default for FilteredToolCache {
-    fn default() -> Self {
-        Self {
-            inner_ptr: 0,
-            inner_len: 0,
-            tools: Arc::from([]),
-            valid: false,
+            allowed_tools: allowed_set,
+            filtered_tools: filtered.into(),
         }
     }
 }
@@ -138,28 +133,9 @@ impl Default for FilteredToolCache {
 #[async_trait]
 impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for FilteredToolDispatcher<T> {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        let inner = self.inner.tools();
-        let inner_ptr = inner.as_ptr() as usize;
-        let inner_len = inner.len();
-        if let Ok(cached) = self.cache.try_read() {
-            if cached.valid && cached.inner_ptr == inner_ptr && cached.inner_len == inner_len {
-                return Arc::clone(&cached.tools);
-            }
-        }
-        let filtered: Vec<Arc<ToolDef>> = inner
-            .iter()
-            .filter(|t| self.allowed_tools.contains(t.name.as_str()))
-            .map(Arc::clone)
-            .collect();
-        let filtered: Arc<[Arc<ToolDef>]> = filtered.into();
-        if let Ok(mut cached) = self.cache.try_write() {
-            cached.inner_ptr = inner_ptr;
-            cached.inner_len = inner_len;
-            cached.tools = Arc::clone(&filtered);
-            cached.valid = true;
-        }
-        filtered
+        Arc::clone(&self.filtered_tools)
     }
+
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, crate::error::ToolError> {
         if !self.allowed_tools.contains(name) {
             return Err(crate::error::ToolError::access_denied(name));

@@ -164,26 +164,35 @@ impl JsonlStore {
             Err(err) => return Err(StoreError::Join(err)),
         };
 
-        let is_empty = {
+        // Always reconcile: rebuild from sidecars if index is missing entries
+        // This handles the case where a crash happens after writing session/meta but before index insert
+        let metas = self.read_all_metadata_sidecars().await?;
+        let sidecar_count = metas.len();
+
+        let index_count = {
             let index = Arc::clone(&index);
-            spawn_blocking(move || index.is_empty()).await
+            spawn_blocking(move || index.entry_count()).await
         };
-        let is_empty = match is_empty {
-            Ok(Ok(is_empty)) => is_empty,
+        let index_count = match index_count {
+            Ok(Ok(count)) => count,
             Ok(Err(err)) => return Err(err),
             Err(err) => return Err(StoreError::Join(err)),
         };
 
-        if is_empty {
-            let metas = self.read_all_metadata_sidecars().await?;
-            if !metas.is_empty() {
-                let index = Arc::clone(&index);
-                let result = spawn_blocking(move || index.insert_many(metas)).await;
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => return Err(err),
-                    Err(err) => return Err(StoreError::Join(err)),
-                }
+        // Reconcile if index is missing entries (sidecar count > index count)
+        // This handles partial writes where meta file exists but index wasn't updated
+        if sidecar_count > index_count {
+            tracing::info!(
+                "Reconciling session index: {} sidecars vs {} indexed entries",
+                sidecar_count,
+                index_count
+            );
+            let index = Arc::clone(&index);
+            let result = spawn_blocking(move || index.insert_many(metas)).await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => return Err(err),
+                Err(err) => return Err(StoreError::Join(err)),
             }
         }
 

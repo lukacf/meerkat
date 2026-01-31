@@ -9,6 +9,80 @@ use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use uuid::Uuid;
 
+/// Standard message intents for inter-agent communication.
+///
+/// This enum provides type-safe intent values for common operations,
+/// with a `Custom` variant for user-defined extensibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageIntent {
+    /// Request to delegate a task to another agent
+    Delegate,
+    /// Request status update on a task
+    Status,
+    /// Request to cancel an operation
+    Cancel,
+    /// Request acknowledgment/confirmation
+    Ack,
+    /// Request to review something (code, PR, etc.)
+    Review,
+    /// Request computation or calculation
+    Calculate,
+    /// Request information or query
+    Query,
+    /// Custom intent for user-defined operations
+    #[serde(untagged)]
+    Custom(String),
+}
+
+impl MessageIntent {
+    /// Create a custom intent from a string
+    pub fn custom(s: impl Into<String>) -> Self {
+        Self::Custom(s.into())
+    }
+
+    /// Get the intent as a string (for backward compatibility)
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Delegate => "delegate",
+            Self::Status => "status",
+            Self::Cancel => "cancel",
+            Self::Ack => "ack",
+            Self::Review => "review",
+            Self::Calculate => "calculate",
+            Self::Query => "query",
+            Self::Custom(s) => s.as_str(),
+        }
+    }
+}
+
+impl From<String> for MessageIntent {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "delegate" => Self::Delegate,
+            "status" => Self::Status,
+            "cancel" => Self::Cancel,
+            "ack" => Self::Ack,
+            "review" => Self::Review,
+            "calculate" => Self::Calculate,
+            "query" => Self::Query,
+            _ => Self::Custom(s),
+        }
+    }
+}
+
+impl From<&str> for MessageIntent {
+    fn from(s: &str) -> Self {
+        Self::from(s.to_string())
+    }
+}
+
+impl std::fmt::Display for MessageIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Content variants for comms messages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -22,8 +96,8 @@ pub enum CommsContent {
     Request {
         /// The request ID (for send_response).
         request_id: Uuid,
-        /// The intent/action being requested.
-        intent: String,
+        /// The intent/action being requested (now type-safe).
+        intent: MessageIntent,
         /// Parameters for the request.
         params: JsonValue,
     },
@@ -105,7 +179,7 @@ impl CommsMessage {
             MessageKind::Message { body } => CommsContent::Message { body: body.clone() },
             MessageKind::Request { intent, params } => CommsContent::Request {
                 request_id: envelope.id,
-                intent: intent.clone(),
+                intent: MessageIntent::from(intent.as_str()),
                 params: params.clone(),
             },
             MessageKind::Response {
@@ -263,7 +337,7 @@ mod tests {
         // Request
         let _ = CommsContent::Request {
             request_id: Uuid::new_v4(),
-            intent: "review-pr".to_string(),
+            intent: MessageIntent::Review,
             params: serde_json::json!({"pr": 42}),
         };
         // Response
@@ -306,11 +380,12 @@ mod tests {
         let receiver = make_keypair();
         let trusted = make_trusted_peers("requester", &sender.public_key());
 
+        // Use standard "review" intent to test enum mapping
         let envelope = make_envelope(
             &sender,
             receiver.public_key(),
             MessageKind::Request {
-                intent: "review-pr".to_string(),
+                intent: "review".to_string(),
                 params: serde_json::json!({"pr": 123}),
             },
         );
@@ -326,8 +401,36 @@ mod tests {
                 params,
             } => {
                 assert_eq!(rid, request_id);
-                assert_eq!(intent, "review-pr");
+                assert_eq!(intent, MessageIntent::Review);
                 assert_eq!(params["pr"], 123);
+            }
+            _ => unreachable!("expected Request"),
+        }
+    }
+
+    #[test]
+    fn test_comms_message_from_inbox_item_request_custom_intent() {
+        let sender = make_keypair();
+        let receiver = make_keypair();
+        let trusted = make_trusted_peers("requester", &sender.public_key());
+
+        // Custom intent should be preserved as Custom variant
+        let envelope = make_envelope(
+            &sender,
+            receiver.public_key(),
+            MessageKind::Request {
+                intent: "review-pr".to_string(),
+                params: serde_json::json!({"pr": 456}),
+            },
+        );
+
+        let item = InboxItem::External { envelope };
+        let msg = CommsMessage::from_inbox_item(&item, &trusted).unwrap();
+
+        match msg.content {
+            CommsContent::Request { intent, params, .. } => {
+                assert_eq!(intent, MessageIntent::Custom("review-pr".to_string()));
+                assert_eq!(params["pr"], 456);
             }
             _ => unreachable!("expected Request"),
         }
@@ -451,7 +554,7 @@ mod tests {
             from_pubkey: PubKey::new([1u8; 32]),
             content: CommsContent::Request {
                 request_id,
-                intent: "review-pr".to_string(),
+                intent: MessageIntent::Review,
                 params: serde_json::json!({"pr": 42}),
             },
         };
@@ -459,7 +562,7 @@ mod tests {
         let text = msg.to_user_message_text();
         assert!(text.contains("COMMS REQUEST"));
         assert!(text.contains("coding-agent"));
-        assert!(text.contains("review-pr"));
+        assert!(text.contains("review"));
         assert!(text.contains("550e8400-e29b-41d4-a716-446655440000"));
         assert!(text.contains("send_response"));
     }
@@ -483,5 +586,86 @@ mod tests {
         assert!(text.contains("review-agent"));
         assert!(text.contains("completed"));
         assert!(text.contains("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    // ========================================================================
+    // MessageIntent type-safety tests
+    // ========================================================================
+
+    #[test]
+    fn test_message_intent_standard_variants() {
+        // All standard variants should serialize as snake_case strings
+        assert_eq!(MessageIntent::Delegate.as_str(), "delegate");
+        assert_eq!(MessageIntent::Status.as_str(), "status");
+        assert_eq!(MessageIntent::Cancel.as_str(), "cancel");
+        assert_eq!(MessageIntent::Ack.as_str(), "ack");
+        assert_eq!(MessageIntent::Review.as_str(), "review");
+        assert_eq!(MessageIntent::Calculate.as_str(), "calculate");
+        assert_eq!(MessageIntent::Query.as_str(), "query");
+    }
+
+    #[test]
+    fn test_message_intent_custom_variant() {
+        let custom = MessageIntent::custom("my-custom-intent");
+        assert_eq!(custom.as_str(), "my-custom-intent");
+        assert_eq!(
+            custom,
+            MessageIntent::Custom("my-custom-intent".to_string())
+        );
+    }
+
+    #[test]
+    fn test_message_intent_from_string() {
+        // Standard intents should map to enum variants
+        assert_eq!(MessageIntent::from("delegate"), MessageIntent::Delegate);
+        assert_eq!(MessageIntent::from("status"), MessageIntent::Status);
+        assert_eq!(MessageIntent::from("cancel"), MessageIntent::Cancel);
+        assert_eq!(MessageIntent::from("ack"), MessageIntent::Ack);
+        assert_eq!(MessageIntent::from("review"), MessageIntent::Review);
+        assert_eq!(MessageIntent::from("calculate"), MessageIntent::Calculate);
+        assert_eq!(MessageIntent::from("query"), MessageIntent::Query);
+
+        // Unknown strings should become Custom
+        assert_eq!(
+            MessageIntent::from("unknown-intent"),
+            MessageIntent::Custom("unknown-intent".to_string())
+        );
+    }
+
+    #[test]
+    fn test_message_intent_display() {
+        assert_eq!(format!("{}", MessageIntent::Review), "review");
+        assert_eq!(
+            format!("{}", MessageIntent::Custom("foo".to_string())),
+            "foo"
+        );
+    }
+
+    #[test]
+    fn test_message_intent_serialization() {
+        // Standard variants serialize to their string representations
+        let json = serde_json::to_string(&MessageIntent::Delegate).unwrap();
+        assert_eq!(json, "\"delegate\"");
+
+        let json = serde_json::to_string(&MessageIntent::Review).unwrap();
+        assert_eq!(json, "\"review\"");
+
+        // Custom variant serializes to the inner string
+        let json = serde_json::to_string(&MessageIntent::Custom("custom-op".to_string())).unwrap();
+        assert_eq!(json, "\"custom-op\"");
+    }
+
+    #[test]
+    fn test_message_intent_deserialization() {
+        // Standard strings deserialize to enum variants
+        let intent: MessageIntent = serde_json::from_str("\"delegate\"").unwrap();
+        assert_eq!(intent, MessageIntent::Delegate);
+
+        let intent: MessageIntent = serde_json::from_str("\"review\"").unwrap();
+        assert_eq!(intent, MessageIntent::Review);
+
+        // Unknown strings deserialize to Custom
+        let intent: MessageIntent = serde_json::from_str("\"my-custom\"").unwrap();
+        assert_eq!(intent, MessageIntent::Custom("my-custom".to_string()));
     }
 }

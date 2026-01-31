@@ -10,7 +10,7 @@ pub use dispatcher::{
 };
 pub use listener::{ListenerHandle, spawn_tcp_listener, spawn_uds_listener};
 pub use manager::{CommsManager, CommsManagerConfig};
-pub use types::{CommsContent, CommsMessage, CommsStatus};
+pub use types::{CommsContent, CommsMessage, CommsStatus, MessageIntent};
 
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;

@@ -28,7 +28,7 @@ pub use factory::{
 };
 pub use provider::ProviderResolver;
 pub use test_client::TestClient;
-pub use types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmResponse};
+pub use types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmResponse, ToolCallBuffer};
 
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicClient;

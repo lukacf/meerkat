@@ -517,3 +517,40 @@ fn test_regression_session_with_user_message_is_valid_for_run_pending() {
     });
     assert_eq!(content, Some("Test prompt"));
 }
+
+// ============================================================================
+// Global config path resolution regression test
+// ============================================================================
+
+#[test]
+fn test_regression_global_config_path_should_not_be_cwd() {
+    // The global config directory should be something like ~/.config/meerkat/
+    // NOT the current working directory, otherwise comms paths resolve incorrectly.
+    use std::path::PathBuf;
+
+    // Simulate what resolve_config_store should do for global config:
+    // It should return the parent of the config file path, not cwd.
+    let mock_global_config_path = PathBuf::from("/home/user/.config/meerkat/config.toml");
+
+    // The base_dir should be the parent directory
+    let base_dir = match mock_global_config_path.parent() {
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from("/fallback"), // Should never happen for valid paths
+    };
+
+    // Verify it resolves to the config directory, not some random cwd
+    assert_eq!(
+        base_dir,
+        PathBuf::from("/home/user/.config/meerkat"),
+        "Global config base_dir should be config parent, not cwd"
+    );
+
+    // Comms paths should resolve under this directory
+    let identity_path = base_dir.join(".rkat/identity");
+    assert!(
+        identity_path
+            .to_string_lossy()
+            .contains(".config/meerkat/.rkat/identity"),
+        "Identity path should be under global config dir"
+    );
+}

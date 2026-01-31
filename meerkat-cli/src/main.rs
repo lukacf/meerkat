@@ -573,7 +573,14 @@ async fn resolve_config_store() -> anyhow::Result<(Box<dyn ConfigStore>, PathBuf
         let store = FileConfigStore::global()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open global config store: {e}"))?;
-        Ok((Box::new(store), cwd))
+        // Use the global config directory (e.g., ~/.config/meerkat/) as base_dir
+        // so comms paths resolve correctly instead of using cwd
+        let base_dir = store
+            .path()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| cwd);
+        Ok((Box::new(store), base_dir))
     }
 }
 

@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, ToolCallBuffer};
 use meerkat_comms::agent::wrap_with_comms;
 use meerkat_comms::runtime::{CommsBootstrap, CommsRuntime, CoreCommsConfig, ParentCommsContext};
 use meerkat_comms::{PubKey, TrustedPeer, TrustedPeers};
@@ -21,6 +21,7 @@ use meerkat_core::{
     LlmStreamResult, ToolDef,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -90,6 +91,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
 
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut tool_call_buffers: HashMap<String, ToolCallBuffer> = HashMap::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = Usage::default();
 
@@ -98,6 +100,21 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                 Ok(event) => match event {
                     LlmEvent::TextDelta { delta } => {
                         content.push_str(&delta);
+                    }
+                    LlmEvent::ToolCallDelta {
+                        id,
+                        name,
+                        args_delta,
+                    } => {
+                        // Buffer tool call deltas (Anthropic emits these)
+                        let buffer = tool_call_buffers
+                            .entry(id.clone())
+                            .or_insert_with(|| ToolCallBuffer::new(id));
+
+                        if let Some(n) = name {
+                            buffer.name = Some(n);
+                        }
+                        buffer.push_args(&args_delta);
                     }
                     LlmEvent::ToolCallComplete {
                         id,
@@ -127,7 +144,6 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                             ));
                         }
                     },
-                    _ => {}
                 },
                 Err(e) => {
                     return Err(AgentError::llm(
@@ -135,6 +151,16 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                         e.failure_reason(),
                         e.to_string(),
                     ));
+                }
+            }
+        }
+
+        // Convert buffered deltas to complete tool calls
+        for (_, buffer) in tool_call_buffers {
+            if let Some(tc) = buffer.try_complete() {
+                // Avoid duplicates if ToolCallComplete was also emitted
+                if !tool_calls.iter().any(|t| t.id == tc.id) {
+                    tool_calls.push(tc);
                 }
             }
         }
@@ -192,6 +218,7 @@ impl AgentLlmClient for DynLlmClientAdapter {
 
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut tool_call_buffers: HashMap<String, ToolCallBuffer> = HashMap::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = Usage::default();
 
@@ -200,6 +227,21 @@ impl AgentLlmClient for DynLlmClientAdapter {
                 Ok(event) => match event {
                     LlmEvent::TextDelta { delta } => {
                         content.push_str(&delta);
+                    }
+                    LlmEvent::ToolCallDelta {
+                        id,
+                        name,
+                        args_delta,
+                    } => {
+                        // Buffer tool call deltas (Anthropic emits these)
+                        let buffer = tool_call_buffers
+                            .entry(id.clone())
+                            .or_insert_with(|| ToolCallBuffer::new(id));
+
+                        if let Some(n) = name {
+                            buffer.name = Some(n);
+                        }
+                        buffer.push_args(&args_delta);
                     }
                     LlmEvent::ToolCallComplete {
                         id,
@@ -229,7 +271,6 @@ impl AgentLlmClient for DynLlmClientAdapter {
                             ));
                         }
                     },
-                    _ => {}
                 },
                 Err(e) => {
                     return Err(AgentError::llm(
@@ -237,6 +278,16 @@ impl AgentLlmClient for DynLlmClientAdapter {
                         e.failure_reason(),
                         e.to_string(),
                     ));
+                }
+            }
+        }
+
+        // Convert buffered deltas to complete tool calls
+        for (_, buffer) in tool_call_buffers {
+            if let Some(tc) = buffer.try_complete() {
+                // Avoid duplicates if ToolCallComplete was also emitted
+                if !tool_calls.iter().any(|t| t.id == tc.id) {
+                    tool_calls.push(tc);
                 }
             }
         }

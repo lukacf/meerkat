@@ -666,6 +666,46 @@ mod tests {
         );
     }
 
+    /// Regression test: ToolCallBuffer must be usable for buffering ToolCallDelta events
+    /// from providers like Anthropic that emit deltas instead of complete tool calls.
+    #[test]
+    fn test_regression_tool_call_buffer_delta_streaming() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::collections::HashMap;
+
+        // Simulate streaming deltas as Anthropic would emit them
+        let deltas = vec![
+            ("tc_1", Some("read_file"), r#"{"pa"#),
+            ("tc_1", None, r#"th": ""#),
+            ("tc_1", None, r#"/tmp/test.txt"}"#),
+        ];
+
+        let mut buffers: HashMap<String, ToolCallBuffer> = HashMap::new();
+
+        for (id, name, args_delta) in deltas {
+            let buffer = buffers
+                .entry(id.to_string())
+                .or_insert_with(|| ToolCallBuffer::new(id.to_string()));
+
+            if let Some(n) = name {
+                buffer.name = Some(n.to_string());
+            }
+            buffer.push_args(args_delta);
+        }
+
+        // Convert buffered deltas to tool calls
+        let tool_calls: Vec<_> = buffers
+            .into_values()
+            .filter_map(|b| b.try_complete())
+            .collect();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "read_file");
+        assert_eq!(tool_calls[0].args["path"], "/tmp/test.txt");
+
+        Ok(())
+    }
+
     // =========================================================================
     // ProviderParams type-safety tests
     // =========================================================================

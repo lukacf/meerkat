@@ -265,6 +265,21 @@ impl AnthropicClient {
     }
 }
 
+fn merge_usage(target: &mut Usage, update: &AnthropicUsage) {
+    if let Some(v) = update.input_tokens {
+        target.input_tokens = v;
+    }
+    if let Some(v) = update.output_tokens {
+        target.output_tokens = v;
+    }
+    if let Some(v) = update.cache_creation_input_tokens {
+        target.cache_creation_tokens = Some(v);
+    }
+    if let Some(v) = update.cache_read_input_tokens {
+        target.cache_read_tokens = Some(v);
+    }
+}
+
 #[async_trait]
 impl LlmClient for AnthropicClient {
     fn stream<'a>(
@@ -298,6 +313,7 @@ impl LlmClient for AnthropicClient {
                 let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
                 let mut current_tool_id: Option<String> = None;
                 let mut last_stop_reason: Option<StopReason> = None;
+                let mut usage = Usage::default();
                 let mut saw_done = false;
 
                 macro_rules! handle_event {
@@ -338,14 +354,10 @@ impl LlmClient for AnthropicClient {
                                 }
                             }
                             "message_delta" => {
-                                if let Some(usage) = $event.usage {
+                                if let Some(usage_update) = $event.usage {
+                                    merge_usage(&mut usage, &usage_update);
                                     yield LlmEvent::UsageUpdate {
-                                        usage: Usage {
-                                            input_tokens: 0, // already reported in message_start
-                                            output_tokens: usage.output_tokens.unwrap_or(0),
-                                            cache_creation_tokens: None,
-                                            cache_read_tokens: None,
-                                        }
+                                        usage: usage.clone(),
                                     };
                                 }
                                 if let Some(finish_reason) = $event.delta.and_then(|d| d.stop_reason) {
@@ -360,14 +372,10 @@ impl LlmClient for AnthropicClient {
                                 }
                             }
                             "message_start" => {
-                                if let Some(usage) = $event.message.and_then(|m| m.usage) {
+                                if let Some(usage_update) = $event.message.and_then(|m| m.usage) {
+                                    merge_usage(&mut usage, &usage_update);
                                     yield LlmEvent::UsageUpdate {
-                                        usage: Usage {
-                                            input_tokens: usage.input_tokens.unwrap_or(0),
-                                            output_tokens: 0,
-                                            cache_creation_tokens: usage.cache_creation_input_tokens,
-                                            cache_read_tokens: usage.cache_read_input_tokens,
-                                        }
+                                        usage: usage.clone(),
                                     };
                                 }
                             }
@@ -648,5 +656,37 @@ mod tests {
             "invalid top_k should be ignored"
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_usage_merge_preserves_input_tokens() {
+        let mut usage = Usage::default();
+        let start = AnthropicUsage {
+            input_tokens: Some(120),
+            output_tokens: Some(0),
+            cache_creation_input_tokens: Some(4),
+            cache_read_input_tokens: Some(2),
+        };
+
+        merge_usage(&mut usage, &start);
+
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.cache_creation_tokens, Some(4));
+        assert_eq!(usage.cache_read_tokens, Some(2));
+
+        let delta = AnthropicUsage {
+            input_tokens: None,
+            output_tokens: Some(7),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+
+        merge_usage(&mut usage, &delta);
+
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_creation_tokens, Some(4));
+        assert_eq!(usage.cache_read_tokens, Some(2));
     }
 }

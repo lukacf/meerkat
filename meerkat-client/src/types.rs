@@ -883,4 +883,55 @@ mod tests {
         assert!(params.top_k.is_none());
         assert!(params.top_p.is_none());
     }
+
+    /// Regression: Typed AnthropicParams must be extractable by build_request_body.
+    /// The provider code extracts thinking.budget_tokens from the serialized JSON.
+    #[test]
+    fn test_regression_anthropic_params_extractable() -> Result<(), Box<dyn std::error::Error>> {
+        let params = ProviderParams::Anthropic(AnthropicParams::with_thinking(10000));
+        let json = serde_json::to_value(&params)?;
+
+        // Provider code checks: params["thinking"]["budget_tokens"]
+        let budget = json
+            .get("thinking")
+            .and_then(|t| t.get("budget_tokens"))
+            .and_then(|v| v.as_u64());
+
+        assert_eq!(
+            budget,
+            Some(10000),
+            "thinking.budget_tokens must be extractable"
+        );
+        Ok(())
+    }
+
+    /// Regression: Typed GeminiParams must be extractable by build_request_body.
+    /// The provider code extracts thinking.thinking_budget and top_p from serialized JSON.
+    #[test]
+    fn test_regression_gemini_params_extractable() -> Result<(), Box<dyn std::error::Error>> {
+        let mut params = GeminiParams::with_thinking(8000);
+        params.top_p = Some(0.95);
+        let provider_params = ProviderParams::Gemini(params);
+        let json = serde_json::to_value(&provider_params)?;
+
+        // Provider code checks: params["thinking"]["thinking_budget"]
+        let budget = json
+            .get("thinking")
+            .and_then(|t| t.get("thinking_budget"))
+            .and_then(|v| v.as_u64());
+        assert_eq!(
+            budget,
+            Some(8000),
+            "thinking.thinking_budget must be extractable"
+        );
+
+        // Provider code checks: params["top_p"]
+        let top_p = json.get("top_p").and_then(|v| v.as_f64());
+        assert!(
+            (top_p.unwrap_or(0.0) - 0.95).abs() < 0.001,
+            "top_p must be extractable"
+        );
+
+        Ok(())
+    }
 }

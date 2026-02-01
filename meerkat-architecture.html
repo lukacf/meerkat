@@ -1,0 +1,1573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meerkat Architecture Explorer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-hover: #21262d;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --red: #f85149;
+      --orange: #d29922;
+      --purple: #a371f7;
+      --yellow: #f0c674;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Top Navigation */
+    .top-nav {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      height: 56px;
+      gap: 32px;
+    }
+
+    .logo {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-icon {
+      width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, var(--green), var(--accent));
+      border-radius: 6px;
+    }
+
+    .nav-tabs {
+      display: flex;
+      gap: 4px;
+      height: 100%;
+    }
+
+    .nav-tab {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 0 16px;
+      font-size: 14px;
+      cursor: pointer;
+      height: 100%;
+      border-bottom: 2px solid transparent;
+      transition: all 0.15s;
+    }
+
+    .nav-tab:hover {
+      color: var(--text);
+    }
+
+    .nav-tab.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+    }
+
+    /* Main Content */
+    .main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* View Container */
+    .view {
+      flex: 1;
+      display: none;
+      flex-direction: column;
+    }
+
+    .view.active {
+      display: flex;
+    }
+
+    /* Canvas */
+    .canvas {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .canvas svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Detail Panel */
+    .detail-panel {
+      width: 360px;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .detail-header {
+      padding: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .detail-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .detail-subtitle {
+      font-size: 12px;
+      font-family: monospace;
+      color: var(--accent);
+    }
+
+    .detail-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+    }
+
+    .detail-section {
+      margin-bottom: 24px;
+    }
+
+    .detail-section-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+
+    .detail-text {
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text);
+    }
+
+    .detail-list {
+      list-style: none;
+    }
+
+    .detail-list li {
+      font-size: 13px;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .detail-list li:last-child {
+      border-bottom: none;
+    }
+
+    .tag {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 500;
+    }
+
+    .tag-trait { background: #164430; color: var(--green); }
+    .tag-struct { background: #1e3a5f; color: var(--accent); }
+    .tag-enum { background: #3d2b00; color: var(--yellow); }
+
+    /* Annotation */
+    .annotation-area {
+      border-top: 1px solid var(--border);
+      padding: 16px 20px;
+    }
+
+    .annotation-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .annotation-input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: var(--text);
+      font-size: 13px;
+      resize: none;
+      height: 80px;
+      font-family: inherit;
+    }
+
+    .annotation-input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .annotation-btn {
+      margin-top: 8px;
+      background: var(--accent);
+      border: none;
+      color: #000;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      width: 100%;
+    }
+
+    .annotation-btn:hover {
+      background: #79c0ff;
+    }
+
+    /* SVG Nodes */
+    .node {
+      cursor: pointer;
+    }
+
+    .node rect, .node path {
+      transition: all 0.15s;
+    }
+
+    .node:hover rect, .node:hover path {
+      filter: brightness(1.15);
+    }
+
+    .node.selected rect {
+      stroke: var(--accent);
+      stroke-width: 3;
+    }
+
+    .node-label {
+      font-size: 13px;
+      font-weight: 600;
+      fill: var(--text);
+      pointer-events: none;
+    }
+
+    .node-sublabel {
+      font-size: 10px;
+      fill: var(--text-muted);
+      pointer-events: none;
+    }
+
+    /* Connection arrows */
+    .connection {
+      fill: none;
+      stroke-width: 2;
+    }
+
+    .connection-label {
+      font-size: 10px;
+      fill: var(--text-muted);
+    }
+
+    /* State machine specific */
+    .state-node rect {
+      rx: 24;
+      ry: 24;
+    }
+
+    .state-node.terminal rect {
+      rx: 8;
+      ry: 8;
+    }
+
+    .state-active rect {
+      animation: pulse-state 1.5s infinite;
+    }
+
+    @keyframes pulse-state {
+      0%, 100% { filter: brightness(1); }
+      50% { filter: brightness(1.3); }
+    }
+
+    /* Interface boxes */
+    .interface-box {
+      rx: 12;
+      ry: 12;
+    }
+
+    /* Annotations list */
+    .annotations-panel {
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      width: 300px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .annotations-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .annotations-title {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .annotations-count {
+      background: var(--accent);
+      color: #000;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 600;
+    }
+
+    .annotations-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+    }
+
+    .annotation-item {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 8px;
+    }
+
+    .annotation-target {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 4px;
+    }
+
+    .annotation-text {
+      font-size: 12px;
+      color: var(--text);
+      line-height: 1.4;
+    }
+
+    .annotation-delete {
+      background: transparent;
+      border: none;
+      color: var(--red);
+      font-size: 11px;
+      cursor: pointer;
+      margin-top: 8px;
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+
+    .annotation-delete:hover {
+      background: rgba(248, 81, 73, 0.1);
+    }
+
+    .no-annotations {
+      color: var(--text-muted);
+      font-size: 12px;
+      text-align: center;
+      padding: 40px 20px;
+    }
+
+    /* Prompt output */
+    .prompt-bar {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .prompt-output {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-family: monospace;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .copy-btn {
+      background: var(--accent);
+      border: none;
+      color: #000;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .copy-btn:hover {
+      background: #79c0ff;
+    }
+
+    .copy-btn.copied {
+      background: var(--green);
+    }
+
+    /* View-specific styles */
+    .view-header {
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .view-title {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .view-desc {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    /* Breadcrumb for drill-down */
+    .breadcrumb {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+
+    .breadcrumb-item {
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+
+    .breadcrumb-item:hover {
+      color: var(--text);
+    }
+
+    .breadcrumb-sep {
+      color: var(--border);
+    }
+
+    .breadcrumb-current {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    /* Legend */
+    .legend {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 16px;
+      font-size: 11px;
+    }
+
+    .legend-title {
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: var(--text-muted);
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .legend-color {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+    }
+
+    .legend-line {
+      width: 20px;
+      height: 2px;
+    }
+
+    /* Animation controls for agent loop */
+    .anim-controls {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      display: flex;
+      gap: 8px;
+    }
+
+    .anim-btn {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .anim-btn:hover {
+      background: var(--surface-hover);
+    }
+
+    .anim-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #000;
+    }
+
+    /* Scenario selector */
+    .scenario-select {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="logo">
+      <div class="logo-icon"></div>
+      Meerkat
+    </div>
+    <div class="nav-tabs">
+      <button class="nav-tab active" data-view="interfaces">Interfaces</button>
+      <button class="nav-tab" data-view="agent-loop">Agent Loop</button>
+      <button class="nav-tab" data-view="crates">Crate Map</button>
+      <button class="nav-tab" data-view="data-flow">Data Flow</button>
+    </div>
+  </nav>
+
+  <div class="main">
+    <!-- INTERFACES VIEW -->
+    <div class="view active" id="view-interfaces">
+      <div class="view-header">
+        <div class="view-title">System Interfaces</div>
+        <div class="view-desc">Four ways to use Meerkat: CLI binary, Rust SDK, MCP server, or REST API. All connect to the same core agent.</div>
+      </div>
+      <div style="display: flex; flex: 1; overflow: hidden;">
+        <div class="canvas">
+          <svg id="svg-interfaces" viewBox="0 0 900 600">
+            <defs>
+              <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+                <polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
+              </marker>
+              <marker id="arr-green" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+                <polygon points="0 0, 8 3, 0 6" fill="#3fb950"/>
+              </marker>
+            </defs>
+          </svg>
+          <div class="legend">
+            <div class="legend-title">Legend</div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #3fb950"></div>
+              <span>Interface (entry point)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #58a6ff"></div>
+              <span>Core components</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #a371f7"></div>
+              <span>Pluggable implementations</span>
+            </div>
+          </div>
+        </div>
+        <div class="detail-panel" id="detail-interfaces">
+          <div class="detail-header">
+            <div class="detail-title">Select a component</div>
+            <div class="detail-subtitle">Click any box to see details</div>
+          </div>
+          <div class="detail-content">
+            <div class="detail-section">
+              <div class="detail-section-title">Overview</div>
+              <p class="detail-text">Meerkat provides four interfaces to the same core agent engine. Each interface is a thin adapter over the core crate.</p>
+            </div>
+          </div>
+          <div class="annotation-area">
+            <div class="annotation-label">Add Annotation</div>
+            <textarea class="annotation-input" placeholder="Add feedback or questions about this component..." id="annot-input-interfaces"></textarea>
+            <button class="annotation-btn" onclick="addAnnotation('interfaces')">Save Annotation</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AGENT LOOP VIEW -->
+    <div class="view" id="view-agent-loop">
+      <div class="view-header">
+        <div class="view-title">Agent Execution Loop</div>
+        <div class="view-desc">The state machine that drives every agent run. Watch how states transition based on LLM responses and tool execution.</div>
+      </div>
+      <div style="display: flex; flex: 1; overflow: hidden;">
+        <div class="canvas">
+          <svg id="svg-agent-loop" viewBox="0 0 900 550"></svg>
+          <div class="anim-controls">
+            <select class="scenario-select" id="scenario-select">
+              <option value="simple">Simple: Text response</option>
+              <option value="tool">Tool call flow</option>
+              <option value="multi-tool">Multiple tools</option>
+              <option value="error">Error recovery</option>
+              <option value="spawn">Sub-agent spawn</option>
+            </select>
+            <button class="anim-btn" id="play-btn" onclick="toggleAnimation()">
+              <span id="play-icon">▶</span> Play
+            </button>
+            <button class="anim-btn" onclick="resetAnimation()">↺ Reset</button>
+          </div>
+          <div class="legend">
+            <div class="legend-title">States</div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #3b82f6"></div>
+              <span>Waiting (blocked on I/O)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #f97316"></div>
+              <span>Processing</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #3fb950"></div>
+              <span>Terminal (completed)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #f85149"></div>
+              <span>Error state</span>
+            </div>
+          </div>
+        </div>
+        <div class="detail-panel" id="detail-agent-loop">
+          <div class="detail-header">
+            <div class="detail-title">Agent Loop States</div>
+            <div class="detail-subtitle">meerkat-core/src/state.rs</div>
+          </div>
+          <div class="detail-content">
+            <div class="detail-section">
+              <div class="detail-section-title">Current State</div>
+              <p class="detail-text" id="current-state-desc">Select a scenario and press Play to see the state machine in action.</p>
+            </div>
+            <div class="detail-section">
+              <div class="detail-section-title">State Descriptions</div>
+              <ul class="detail-list" id="state-list"></ul>
+            </div>
+          </div>
+          <div class="annotation-area">
+            <div class="annotation-label">Add Annotation</div>
+            <textarea class="annotation-input" placeholder="Questions about the state machine..." id="annot-input-agent-loop"></textarea>
+            <button class="annotation-btn" onclick="addAnnotation('agent-loop')">Save Annotation</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CRATES VIEW -->
+    <div class="view" id="view-crates">
+      <div class="view-header">
+        <div class="view-title">Crate Architecture</div>
+        <div class="view-desc">Workspace structure showing dependencies between crates. Core is I/O-free; all I/O happens in leaf crates.</div>
+      </div>
+      <div style="display: flex; flex: 1; overflow: hidden;">
+        <div class="canvas">
+          <svg id="svg-crates" viewBox="0 0 900 600"></svg>
+          <div class="legend">
+            <div class="legend-title">Crate Types</div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #fef3c7"></div>
+              <span>Binary (CLI)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #dbeafe"></div>
+              <span>Facade (re-exports)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #dcfce7"></div>
+              <span>Core (I/O-free)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #fce7f3"></div>
+              <span>I/O crates</span>
+            </div>
+          </div>
+        </div>
+        <div class="detail-panel" id="detail-crates">
+          <div class="detail-header">
+            <div class="detail-title">Select a crate</div>
+            <div class="detail-subtitle">Click to see details</div>
+          </div>
+          <div class="detail-content">
+            <div class="detail-section">
+              <div class="detail-section-title">Architecture Principles</div>
+              <p class="detail-text">meerkat-core contains no I/O dependencies. All async I/O (HTTP, filesystem, stdio) lives in leaf crates that implement core traits.</p>
+            </div>
+          </div>
+          <div class="annotation-area">
+            <div class="annotation-label">Add Annotation</div>
+            <textarea class="annotation-input" placeholder="Feedback on crate structure..." id="annot-input-crates"></textarea>
+            <button class="annotation-btn" onclick="addAnnotation('crates')">Save Annotation</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DATA FLOW VIEW -->
+    <div class="view" id="view-data-flow">
+      <div class="view-header">
+        <div class="view-title">Message & Data Flow</div>
+        <div class="view-desc">How messages flow from user input through the agent to LLM and tools, then back as responses.</div>
+      </div>
+      <div style="display: flex; flex: 1; overflow: hidden;">
+        <div class="canvas">
+          <svg id="svg-data-flow" viewBox="0 0 950 550"></svg>
+          <div class="legend">
+            <div class="legend-title">Message Types</div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #3fb950"></div>
+              <span>User / System</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #58a6ff"></div>
+              <span>Assistant</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color" style="background: #f97316"></div>
+              <span>Tool calls / results</span>
+            </div>
+          </div>
+        </div>
+        <div class="detail-panel" id="detail-data-flow">
+          <div class="detail-header">
+            <div class="detail-title">Data Flow</div>
+            <div class="detail-subtitle">Message types and transformations</div>
+          </div>
+          <div class="detail-content">
+            <div class="detail-section">
+              <div class="detail-section-title">Message Enum</div>
+              <ul class="detail-list">
+                <li><span class="tag tag-enum">enum</span> Message::System</li>
+                <li><span class="tag tag-enum">enum</span> Message::User</li>
+                <li><span class="tag tag-enum">enum</span> Message::Assistant</li>
+                <li><span class="tag tag-enum">enum</span> Message::ToolResults</li>
+              </ul>
+            </div>
+          </div>
+          <div class="annotation-area">
+            <div class="annotation-label">Add Annotation</div>
+            <textarea class="annotation-input" placeholder="Questions about data flow..." id="annot-input-data-flow"></textarea>
+            <button class="annotation-btn" onclick="addAnnotation('data-flow')">Save Annotation</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Annotations Panel -->
+    <div class="annotations-panel">
+      <div class="annotations-header">
+        <span class="annotations-title">Annotations</span>
+        <span class="annotations-count" id="annot-count">0</span>
+      </div>
+      <div class="annotations-list" id="annotations-list">
+        <div class="no-annotations">Click components and add annotations to build your review.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Prompt Bar -->
+  <div class="prompt-bar">
+    <div class="prompt-output" id="prompt-output">Add annotations to generate a review prompt...</div>
+    <button class="copy-btn" onclick="copyPrompt()">Copy Prompt</button>
+  </div>
+
+  <script>
+    // ========== STATE ==========
+    const state = {
+      currentView: 'interfaces',
+      selectedNode: null,
+      annotations: [],
+      animation: {
+        playing: false,
+        step: 0,
+        interval: null,
+        scenario: 'simple'
+      }
+    };
+
+    // ========== DATA ==========
+
+    // Interfaces view data
+    const interfacesData = {
+      nodes: [
+        // Interfaces (entry points)
+        { id: 'cli', label: 'CLI', sublabel: 'rkat binary', x: 100, y: 80, w: 120, h: 60, color: '#166534', type: 'interface',
+          desc: 'Command-line interface. Parses arguments, loads config, runs agent with streaming output.',
+          file: 'meerkat-cli/src/main.rs',
+          exports: ['run', 'resume', 'mcp', 'config', 'session'] },
+        { id: 'sdk', label: 'SDK', sublabel: 'meerkat crate', x: 280, y: 80, w: 120, h: 60, color: '#166534', type: 'interface',
+          desc: 'Rust library for embedding agents. Re-exports all crates through a single facade.',
+          file: 'meerkat/src/lib.rs',
+          exports: ['Agent', 'AgentBuilder', 'Session', 'Message'] },
+        { id: 'mcp-server', label: 'MCP Server', sublabel: 'tool provider', x: 460, y: 80, w: 120, h: 60, color: '#166534', type: 'interface',
+          desc: 'Exposes Meerkat as MCP tools (meerkat_run, meerkat_resume) for other agents to use.',
+          file: 'meerkat-mcp-server/src/lib.rs',
+          exports: ['meerkat_run', 'meerkat_resume'] },
+        { id: 'rest', label: 'REST API', sublabel: 'HTTP server', x: 640, y: 80, w: 120, h: 60, color: '#166534', type: 'interface',
+          desc: 'Optional HTTP API for running agents via POST requests. Streaming SSE responses.',
+          file: 'meerkat-rest/src/lib.rs',
+          exports: ['/run', '/resume', '/sessions'] },
+
+        // Core
+        { id: 'core', label: 'Core', sublabel: 'Agent engine', x: 370, y: 220, w: 160, h: 70, color: '#1e3a5f', type: 'core',
+          desc: 'The heart of Meerkat. Contains Agent struct, state machine, budget tracking, retry logic. Zero I/O dependencies.',
+          file: 'meerkat-core/src/agent.rs',
+          exports: ['Agent<C,T,S>', 'AgentBuilder', 'LoopState', 'Budget'] },
+
+        // Trait boxes
+        { id: 'trait-client', label: 'AgentLlmClient', sublabel: 'trait', x: 120, y: 360, w: 150, h: 50, color: '#1e3a5f', type: 'trait',
+          desc: 'Trait for LLM providers. stream_response() returns normalized event stream.',
+          file: 'meerkat-core/src/agent.rs' },
+        { id: 'trait-tools', label: 'AgentToolDispatcher', sublabel: 'trait', x: 320, y: 360, w: 160, h: 50, color: '#1e3a5f', type: 'trait',
+          desc: 'Trait for tool execution. tools() returns definitions, dispatch() executes.',
+          file: 'meerkat-core/src/agent.rs' },
+        { id: 'trait-store', label: 'AgentSessionStore', sublabel: 'trait', x: 530, y: 360, w: 160, h: 50, color: '#1e3a5f', type: 'trait',
+          desc: 'Trait for session persistence. save() and load() for conversation history.',
+          file: 'meerkat-core/src/agent.rs' },
+
+        // Implementations
+        { id: 'anthropic', label: 'Anthropic', sublabel: 'Claude API', x: 60, y: 470, w: 100, h: 45, color: '#581c87', type: 'impl',
+          desc: 'Claude models. Streaming SSE. Extended thinking support.',
+          file: 'meerkat-client/src/anthropic.rs' },
+        { id: 'openai', label: 'OpenAI', sublabel: 'GPT API', x: 170, y: 470, w: 100, h: 45, color: '#581c87', type: 'impl',
+          desc: 'GPT models. Reasoning effort levels for o3. Function calling.',
+          file: 'meerkat-client/src/openai.rs' },
+        { id: 'gemini', label: 'Gemini', sublabel: 'Google API', x: 280, y: 470, w: 100, h: 45, color: '#581c87', type: 'impl',
+          desc: 'Gemini models. Thinking config. Multimodal support.',
+          file: 'meerkat-client/src/gemini.rs' },
+
+        { id: 'builtin', label: 'Built-in', sublabel: 'tools', x: 320, y: 470, w: 100, h: 45, color: '#581c87', type: 'impl',
+          desc: 'Built-in tools: shell, file ops, task store.',
+          file: 'meerkat-tools/src/builtin/' },
+        { id: 'mcp', label: 'MCP Client', sublabel: 'external tools', x: 430, y: 470, w: 100, h: 45, color: '#581c87', type: 'impl',
+          desc: 'Routes tool calls to external MCP servers via stdio or HTTP.',
+          file: 'meerkat-mcp-client/src/router.rs' },
+
+        { id: 'jsonl', label: 'JSONL', sublabel: 'disk store', x: 540, y: 470, w: 100, h: 45, color: '#581c87', type: 'impl',
+          desc: 'Append-only JSON Lines. Fast writes to .rkat/sessions/',
+          file: 'meerkat-store/src/jsonl.rs' },
+        { id: 'memory', label: 'Memory', sublabel: 'ephemeral', x: 650, y: 470, w: 100, h: 45, color: '#581c87', type: 'impl',
+          desc: 'In-memory store for testing.',
+          file: 'meerkat-store/src/memory.rs' },
+      ],
+      connections: [
+        { from: 'cli', to: 'core' },
+        { from: 'sdk', to: 'core' },
+        { from: 'mcp-server', to: 'core' },
+        { from: 'rest', to: 'core' },
+        { from: 'core', to: 'trait-client', label: 'requires' },
+        { from: 'core', to: 'trait-tools', label: 'requires' },
+        { from: 'core', to: 'trait-store', label: 'requires' },
+        { from: 'anthropic', to: 'trait-client', dashed: true },
+        { from: 'openai', to: 'trait-client', dashed: true },
+        { from: 'gemini', to: 'trait-client', dashed: true },
+        { from: 'builtin', to: 'trait-tools', dashed: true },
+        { from: 'mcp', to: 'trait-tools', dashed: true },
+        { from: 'jsonl', to: 'trait-store', dashed: true },
+        { from: 'memory', to: 'trait-store', dashed: true },
+      ]
+    };
+
+    // Agent loop data
+    const agentLoopData = {
+      states: [
+        { id: 'calling', label: 'CallingLlm', x: 200, y: 120, color: '#1e40af',
+          desc: 'Waiting for LLM response. Streaming chunks are collected into AssistantMessage.' },
+        { id: 'waiting', label: 'WaitingForOps', x: 500, y: 120, color: '#1e40af',
+          desc: 'Tool calls dispatched, waiting for results. Operations run concurrently.' },
+        { id: 'draining', label: 'DrainingEvents', x: 350, y: 280, color: '#c2410c',
+          desc: 'Collecting tool results into ToolResults message. Checking if more work needed.' },
+        { id: 'error', label: 'ErrorRecovery', x: 100, y: 280, color: '#991b1b',
+          desc: 'Handling transient errors (rate limits). Retry with exponential backoff.' },
+        { id: 'completed', label: 'Completed', x: 600, y: 280, color: '#166534', terminal: true,
+          desc: 'Terminal state. Agent run finished successfully or with unrecoverable error.' },
+      ],
+      transitions: [
+        { from: 'calling', to: 'draining', label: 'tool_use', condition: 'stop_reason = ToolUse' },
+        { from: 'calling', to: 'completed', label: 'end_turn', condition: 'stop_reason = EndTurn' },
+        { from: 'calling', to: 'error', label: 'error', condition: 'LLM error (rate limit, etc.)' },
+        { from: 'draining', to: 'waiting', label: 'ops pending', condition: 'Operations not yet complete' },
+        { from: 'waiting', to: 'draining', label: 'ops done', condition: 'All operations finished' },
+        { from: 'draining', to: 'calling', label: 'continue', condition: 'More turns needed' },
+        { from: 'draining', to: 'completed', label: 'done', condition: 'No more work' },
+        { from: 'error', to: 'calling', label: 'retry', condition: 'Retry succeeded' },
+        { from: 'error', to: 'completed', label: 'give up', condition: 'Max retries exceeded' },
+      ],
+      scenarios: {
+        simple: ['calling', 'completed'],
+        tool: ['calling', 'draining', 'waiting', 'draining', 'calling', 'completed'],
+        'multi-tool': ['calling', 'draining', 'waiting', 'draining', 'calling', 'draining', 'waiting', 'draining', 'calling', 'completed'],
+        error: ['calling', 'error', 'calling', 'completed'],
+        spawn: ['calling', 'draining', 'waiting', 'draining', 'calling', 'draining', 'waiting', 'draining', 'completed'],
+      }
+    };
+
+    // Crates data
+    const cratesData = {
+      crates: [
+        { id: 'cli', label: 'meerkat-cli', sublabel: 'Binary', x: 400, y: 40, w: 140, h: 50, color: '#fef3c7',
+          desc: 'CLI binary (rkat). Parses args, loads config, orchestrates run/resume/mcp commands.' },
+        { id: 'facade', label: 'meerkat', sublabel: 'Facade', x: 400, y: 130, w: 140, h: 50, color: '#dbeafe',
+          desc: 'SDK entry point. Re-exports all crates. Provides AgentBuilder helpers.' },
+        { id: 'core', label: 'meerkat-core', sublabel: 'Core (I/O-free)', x: 400, y: 230, w: 140, h: 50, color: '#dcfce7',
+          desc: 'Agent loop, state machine, types, budget, retry. No external I/O dependencies.' },
+        { id: 'client', label: 'meerkat-client', sublabel: 'LLM providers', x: 180, y: 340, w: 140, h: 50, color: '#fce7f3',
+          desc: 'Anthropic, OpenAI, Gemini clients. Implements AgentLlmClient trait.' },
+        { id: 'tools', label: 'meerkat-tools', sublabel: 'Tool registry', x: 340, y: 340, w: 140, h: 50, color: '#fce7f3',
+          desc: 'Built-in tools, validation, dispatcher. Implements AgentToolDispatcher.' },
+        { id: 'mcp-client', label: 'meerkat-mcp-client', sublabel: 'MCP protocol', x: 500, y: 340, w: 160, h: 50, color: '#fce7f3',
+          desc: 'MCP client for connecting to external tool servers. McpRouter.' },
+        { id: 'store', label: 'meerkat-store', sublabel: 'Persistence', x: 680, y: 340, w: 140, h: 50, color: '#fce7f3',
+          desc: 'JSONL and Memory stores. Implements AgentSessionStore.' },
+        { id: 'comms', label: 'meerkat-comms', sublabel: 'Inter-agent', x: 180, y: 440, w: 140, h: 50, color: '#fce7f3',
+          desc: 'Inter-agent communication runtime. Inbox, mailbox, message passing.' },
+        { id: 'mcp-server', label: 'meerkat-mcp-server', sublabel: 'MCP tools', x: 500, y: 440, w: 160, h: 50, color: '#fce7f3',
+          desc: 'Exposes Meerkat as MCP tools for other agents.' },
+        { id: 'rest', label: 'meerkat-rest', sublabel: 'HTTP API', x: 680, y: 440, w: 140, h: 50, color: '#fce7f3',
+          desc: 'Optional REST API server with SSE streaming.' },
+      ],
+      deps: [
+        { from: 'cli', to: 'facade' },
+        { from: 'facade', to: 'core' },
+        { from: 'facade', to: 'client' },
+        { from: 'facade', to: 'tools' },
+        { from: 'facade', to: 'mcp-client' },
+        { from: 'facade', to: 'store' },
+        { from: 'facade', to: 'comms' },
+        { from: 'client', to: 'core', dashed: true },
+        { from: 'tools', to: 'core', dashed: true },
+        { from: 'mcp-client', to: 'core', dashed: true },
+        { from: 'store', to: 'core', dashed: true },
+        { from: 'comms', to: 'core', dashed: true },
+        { from: 'mcp-server', to: 'core', dashed: true },
+        { from: 'rest', to: 'facade' },
+      ]
+    };
+
+    // Data flow
+    const dataFlowData = {
+      nodes: [
+        { id: 'user', label: 'User Input', x: 50, y: 250, w: 100, h: 50, color: '#166534' },
+        { id: 'session', label: 'Session', sublabel: 'Arc<Vec<Message>>', x: 200, y: 180, w: 120, h: 50, color: '#1e3a5f' },
+        { id: 'agent', label: 'Agent', sublabel: 'run()', x: 200, y: 280, w: 120, h: 50, color: '#1e3a5f' },
+        { id: 'llm-req', label: 'LLM Request', sublabel: 'messages + tools', x: 380, y: 180, w: 130, h: 50, color: '#1e3a5f' },
+        { id: 'client', label: 'LlmClient', sublabel: 'stream_response()', x: 380, y: 280, w: 130, h: 50, color: '#581c87' },
+        { id: 'stream', label: 'LlmEvent Stream', sublabel: 'TextDelta | ToolCall', x: 560, y: 230, w: 140, h: 50, color: '#c2410c' },
+        { id: 'assistant', label: 'AssistantMessage', sublabel: 'text + tool_calls', x: 560, y: 330, w: 140, h: 50, color: '#1e40af' },
+        { id: 'dispatcher', label: 'ToolDispatcher', sublabel: 'dispatch()', x: 740, y: 230, w: 130, h: 50, color: '#581c87' },
+        { id: 'tool-result', label: 'ToolResults', sublabel: 'Vec<ToolResult>', x: 740, y: 330, w: 130, h: 50, color: '#c2410c' },
+      ],
+      flows: [
+        { from: 'user', to: 'agent', label: 'prompt' },
+        { from: 'agent', to: 'session', label: 'push User msg' },
+        { from: 'session', to: 'llm-req', label: 'messages' },
+        { from: 'agent', to: 'client', label: 'call' },
+        { from: 'llm-req', to: 'client' },
+        { from: 'client', to: 'stream', label: 'yields' },
+        { from: 'stream', to: 'assistant', label: 'collect' },
+        { from: 'assistant', to: 'session', label: 'push' },
+        { from: 'assistant', to: 'dispatcher', label: 'tool_calls' },
+        { from: 'dispatcher', to: 'tool-result', label: 'execute' },
+        { from: 'tool-result', to: 'session', label: 'push' },
+      ]
+    };
+
+    // ========== RENDERING ==========
+
+    function renderInterfaces() {
+      const svg = document.getElementById('svg-interfaces');
+      svg.innerHTML = `
+        <defs>
+          <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
+          </marker>
+          <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#a371f7"/>
+          </marker>
+        </defs>
+      `;
+
+      // Draw connections first
+      interfacesData.connections.forEach(conn => {
+        const from = interfacesData.nodes.find(n => n.id === conn.from);
+        const to = interfacesData.nodes.find(n => n.id === conn.to);
+        if (!from || !to) return;
+
+        const x1 = from.x + from.w / 2;
+        const y1 = from.y + from.h;
+        const x2 = to.x + to.w / 2;
+        const y2 = to.y;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const midY = (y1 + y2) / 2;
+        path.setAttribute('d', `M${x1},${y1} C${x1},${midY} ${x2},${midY} ${x2},${y2}`);
+        path.setAttribute('class', 'connection');
+        path.setAttribute('stroke', conn.dashed ? '#a371f7' : '#58a6ff');
+        path.setAttribute('marker-end', conn.dashed ? 'url(#arr-dash)' : 'url(#arr)');
+        if (conn.dashed) path.setAttribute('stroke-dasharray', '6,4');
+        svg.appendChild(path);
+      });
+
+      // Draw nodes
+      interfacesData.nodes.forEach(node => {
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('class', 'node' + (state.selectedNode === node.id ? ' selected' : ''));
+        g.onclick = () => selectNode('interfaces', node);
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', node.x);
+        rect.setAttribute('y', node.y);
+        rect.setAttribute('width', node.w);
+        rect.setAttribute('height', node.h);
+        rect.setAttribute('fill', node.color);
+        rect.setAttribute('stroke', '#444');
+        rect.setAttribute('rx', 8);
+        g.appendChild(rect);
+
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('class', 'node-label');
+        label.setAttribute('x', node.x + node.w / 2);
+        label.setAttribute('y', node.y + node.h / 2 - (node.sublabel ? 4 : 0));
+        label.setAttribute('text-anchor', 'middle');
+        label.textContent = node.label;
+        g.appendChild(label);
+
+        if (node.sublabel) {
+          const sub = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          sub.setAttribute('class', 'node-sublabel');
+          sub.setAttribute('x', node.x + node.w / 2);
+          sub.setAttribute('y', node.y + node.h / 2 + 12);
+          sub.setAttribute('text-anchor', 'middle');
+          sub.textContent = node.sublabel;
+          g.appendChild(sub);
+        }
+
+        svg.appendChild(g);
+      });
+    }
+
+    function renderAgentLoop() {
+      const svg = document.getElementById('svg-agent-loop');
+      svg.innerHTML = `
+        <defs>
+          <marker id="arr-loop" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#58a6ff"/>
+          </marker>
+        </defs>
+      `;
+
+      const scenario = agentLoopData.scenarios[state.animation.scenario];
+      const currentState = state.animation.playing ? scenario[state.animation.step] : null;
+
+      // Draw transitions
+      agentLoopData.transitions.forEach(t => {
+        const from = agentLoopData.states.find(s => s.id === t.from);
+        const to = agentLoopData.states.find(s => s.id === t.to);
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+
+        // Calculate path based on positions
+        let d;
+        const fromX = from.x + 70;
+        const fromY = from.y + 25;
+        const toX = to.x + 70;
+        const toY = to.y + 25;
+
+        if (from.id === to.id) {
+          // Self-loop (not used currently but handle it)
+          d = `M${fromX + 50},${fromY} C${fromX + 100},${fromY - 50} ${fromX + 100},${fromY + 50} ${fromX + 50},${fromY}`;
+        } else if (Math.abs(fromY - toY) < 50) {
+          // Horizontal
+          const midX = (fromX + toX) / 2;
+          d = `M${fromX + (fromX < toX ? 70 : -70)},${fromY} L${toX + (fromX < toX ? -70 : 70)},${toY}`;
+        } else {
+          // Vertical with curve
+          const startX = from.x + 70;
+          const startY = from.y + 50;
+          const endX = to.x + 70;
+          const endY = to.y;
+          const midY = (startY + endY) / 2;
+          d = `M${startX},${startY} C${startX},${midY} ${endX},${midY} ${endX},${endY}`;
+        }
+
+        path.setAttribute('d', d);
+        path.setAttribute('class', 'connection');
+        path.setAttribute('stroke', '#58a6ff');
+        path.setAttribute('marker-end', 'url(#arr-loop)');
+        path.setAttribute('opacity', '0.6');
+        svg.appendChild(path);
+
+        // Label
+        const labelX = (from.x + to.x) / 2 + 70;
+        const labelY = (from.y + to.y) / 2 + 25;
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('class', 'connection-label');
+        text.setAttribute('x', labelX);
+        text.setAttribute('y', labelY);
+        text.setAttribute('text-anchor', 'middle');
+        text.textContent = t.label;
+        svg.appendChild(text);
+      });
+
+      // Draw states
+      agentLoopData.states.forEach(s => {
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('class', 'node state-node' +
+          (s.terminal ? ' terminal' : '') +
+          (currentState === s.id ? ' state-active' : ''));
+        g.onclick = () => selectState(s);
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', s.x);
+        rect.setAttribute('y', s.y);
+        rect.setAttribute('width', 140);
+        rect.setAttribute('height', 50);
+        rect.setAttribute('fill', s.color);
+        rect.setAttribute('stroke', currentState === s.id ? '#fff' : '#555');
+        rect.setAttribute('stroke-width', currentState === s.id ? 3 : 1);
+        rect.setAttribute('rx', s.terminal ? 8 : 25);
+        g.appendChild(rect);
+
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('class', 'node-label');
+        label.setAttribute('x', s.x + 70);
+        label.setAttribute('y', s.y + 30);
+        label.setAttribute('text-anchor', 'middle');
+        label.textContent = s.label;
+        g.appendChild(label);
+
+        svg.appendChild(g);
+      });
+
+      // Update state description
+      if (currentState) {
+        const s = agentLoopData.states.find(st => st.id === currentState);
+        document.getElementById('current-state-desc').textContent = s.desc;
+      }
+
+      // Populate state list
+      const list = document.getElementById('state-list');
+      list.innerHTML = agentLoopData.states.map(s => `
+        <li style="${currentState === s.id ? 'background: var(--surface-hover)' : ''}">
+          <span class="tag ${s.terminal ? 'tag-enum' : 'tag-struct'}">${s.terminal ? 'terminal' : 'state'}</span>
+          ${s.label}
+        </li>
+      `).join('');
+    }
+
+    function renderCrates() {
+      const svg = document.getElementById('svg-crates');
+      svg.innerHTML = `
+        <defs>
+          <marker id="arr-crate" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
+          </marker>
+          <marker id="arr-impl" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#a371f7"/>
+          </marker>
+        </defs>
+      `;
+
+      // Draw deps
+      cratesData.deps.forEach(dep => {
+        const from = cratesData.crates.find(c => c.id === dep.from);
+        const to = cratesData.crates.find(c => c.id === dep.to);
+        if (!from || !to) return;
+
+        const x1 = from.x + from.w / 2;
+        const y1 = from.y + from.h;
+        const x2 = to.x + to.w / 2;
+        const y2 = to.y;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const midY = (y1 + y2) / 2;
+        path.setAttribute('d', `M${x1},${y1} C${x1},${midY} ${x2},${midY} ${x2},${y2}`);
+        path.setAttribute('class', 'connection');
+        path.setAttribute('stroke', dep.dashed ? '#a371f7' : '#58a6ff');
+        path.setAttribute('marker-end', dep.dashed ? 'url(#arr-impl)' : 'url(#arr-crate)');
+        if (dep.dashed) path.setAttribute('stroke-dasharray', '6,4');
+        svg.appendChild(path);
+      });
+
+      // Draw crates
+      cratesData.crates.forEach(crate => {
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('class', 'node' + (state.selectedNode === crate.id ? ' selected' : ''));
+        g.onclick = () => selectNode('crates', crate);
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', crate.x);
+        rect.setAttribute('y', crate.y);
+        rect.setAttribute('width', crate.w);
+        rect.setAttribute('height', crate.h);
+        rect.setAttribute('fill', crate.color);
+        rect.setAttribute('stroke', '#666');
+        rect.setAttribute('rx', 6);
+        g.appendChild(rect);
+
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', crate.x + crate.w / 2);
+        label.setAttribute('y', crate.y + 20);
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('fill', '#1c1c1c');
+        label.setAttribute('font-size', '12');
+        label.setAttribute('font-weight', '600');
+        label.textContent = crate.label;
+        g.appendChild(label);
+
+        const sub = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        sub.setAttribute('x', crate.x + crate.w / 2);
+        sub.setAttribute('y', crate.y + 36);
+        sub.setAttribute('text-anchor', 'middle');
+        sub.setAttribute('fill', '#555');
+        sub.setAttribute('font-size', '10');
+        sub.textContent = crate.sublabel;
+        g.appendChild(sub);
+
+        svg.appendChild(g);
+      });
+    }
+
+    function renderDataFlow() {
+      const svg = document.getElementById('svg-data-flow');
+      svg.innerHTML = `
+        <defs>
+          <marker id="arr-flow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
+          </marker>
+        </defs>
+      `;
+
+      // Draw flows
+      dataFlowData.flows.forEach(flow => {
+        const from = dataFlowData.nodes.find(n => n.id === flow.from);
+        const to = dataFlowData.nodes.find(n => n.id === flow.to);
+        if (!from || !to) return;
+
+        const x1 = from.x + from.w;
+        const y1 = from.y + from.h / 2;
+        const x2 = to.x;
+        const y2 = to.y + to.h / 2;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', `M${x1},${y1} L${x2},${y2}`);
+        path.setAttribute('class', 'connection');
+        path.setAttribute('stroke', '#58a6ff');
+        path.setAttribute('marker-end', 'url(#arr-flow)');
+        svg.appendChild(path);
+
+        if (flow.label) {
+          const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          text.setAttribute('x', (x1 + x2) / 2);
+          text.setAttribute('y', (y1 + y2) / 2 - 6);
+          text.setAttribute('text-anchor', 'middle');
+          text.setAttribute('class', 'connection-label');
+          text.textContent = flow.label;
+          svg.appendChild(text);
+        }
+      });
+
+      // Draw nodes
+      dataFlowData.nodes.forEach(node => {
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('class', 'node');
+        g.onclick = () => selectNode('data-flow', node);
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', node.x);
+        rect.setAttribute('y', node.y);
+        rect.setAttribute('width', node.w);
+        rect.setAttribute('height', node.h);
+        rect.setAttribute('fill', node.color);
+        rect.setAttribute('stroke', '#444');
+        rect.setAttribute('rx', 6);
+        g.appendChild(rect);
+
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('class', 'node-label');
+        label.setAttribute('x', node.x + node.w / 2);
+        label.setAttribute('y', node.y + (node.sublabel ? 18 : 28));
+        label.setAttribute('text-anchor', 'middle');
+        label.textContent = node.label;
+        g.appendChild(label);
+
+        if (node.sublabel) {
+          const sub = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          sub.setAttribute('class', 'node-sublabel');
+          sub.setAttribute('x', node.x + node.w / 2);
+          sub.setAttribute('y', node.y + 34);
+          sub.setAttribute('text-anchor', 'middle');
+          sub.textContent = node.sublabel;
+          g.appendChild(sub);
+        }
+
+        svg.appendChild(g);
+      });
+    }
+
+    // ========== INTERACTIONS ==========
+
+    function selectNode(view, node) {
+      state.selectedNode = node.id;
+
+      const panel = document.getElementById(`detail-${view}`);
+      panel.querySelector('.detail-title').textContent = node.label;
+      panel.querySelector('.detail-subtitle').textContent = node.file || node.sublabel || '';
+
+      let content = `<div class="detail-section">
+        <div class="detail-section-title">Description</div>
+        <p class="detail-text">${node.desc || 'No description available.'}</p>
+      </div>`;
+
+      if (node.exports) {
+        content += `<div class="detail-section">
+          <div class="detail-section-title">Exports</div>
+          <ul class="detail-list">
+            ${node.exports.map(e => `<li>${e}</li>`).join('')}
+          </ul>
+        </div>`;
+      }
+
+      panel.querySelector('.detail-content').innerHTML = content;
+      render();
+    }
+
+    function selectState(s) {
+      document.getElementById('current-state-desc').textContent = s.desc;
+    }
+
+    // ========== ANIMATION ==========
+
+    function toggleAnimation() {
+      if (state.animation.playing) {
+        stopAnimation();
+      } else {
+        startAnimation();
+      }
+    }
+
+    function startAnimation() {
+      state.animation.playing = true;
+      state.animation.step = 0;
+      document.getElementById('play-btn').classList.add('active');
+      document.getElementById('play-icon').textContent = '⏸';
+
+      const scenario = agentLoopData.scenarios[state.animation.scenario];
+
+      state.animation.interval = setInterval(() => {
+        state.animation.step++;
+        if (state.animation.step >= scenario.length) {
+          stopAnimation();
+          return;
+        }
+        renderAgentLoop();
+      }, 1200);
+
+      renderAgentLoop();
+    }
+
+    function stopAnimation() {
+      state.animation.playing = false;
+      if (state.animation.interval) {
+        clearInterval(state.animation.interval);
+        state.animation.interval = null;
+      }
+      document.getElementById('play-btn').classList.remove('active');
+      document.getElementById('play-icon').textContent = '▶';
+    }
+
+    function resetAnimation() {
+      stopAnimation();
+      state.animation.step = 0;
+      renderAgentLoop();
+    }
+
+    // ========== ANNOTATIONS ==========
+
+    function addAnnotation(view) {
+      const input = document.getElementById(`annot-input-${view}`);
+      const text = input.value.trim();
+      if (!text) return;
+
+      const target = state.selectedNode || state.currentView;
+      const node = findNode(view, target);
+
+      state.annotations.push({
+        id: Date.now(),
+        view: view,
+        target: node?.label || view,
+        file: node?.file || '',
+        text: text
+      });
+
+      input.value = '';
+      renderAnnotations();
+      updatePrompt();
+    }
+
+    function findNode(view, id) {
+      if (view === 'interfaces') return interfacesData.nodes.find(n => n.id === id);
+      if (view === 'crates') return cratesData.crates.find(c => c.id === id);
+      if (view === 'data-flow') return dataFlowData.nodes.find(n => n.id === id);
+      return null;
+    }
+
+    function deleteAnnotation(id) {
+      state.annotations = state.annotations.filter(a => a.id !== id);
+      renderAnnotations();
+      updatePrompt();
+    }
+
+    function renderAnnotations() {
+      const list = document.getElementById('annotations-list');
+      const count = document.getElementById('annot-count');
+
+      count.textContent = state.annotations.length;
+
+      if (state.annotations.length === 0) {
+        list.innerHTML = '<div class="no-annotations">Click components and add annotations to build your review.</div>';
+        return;
+      }
+
+      list.innerHTML = state.annotations.map(a => `
+        <div class="annotation-item">
+          <div class="annotation-target">${a.target}</div>
+          ${a.file ? `<div style="font-size:10px;color:var(--text-muted);font-family:monospace;margin-bottom:4px">${a.file}</div>` : ''}
+          <div class="annotation-text">${a.text}</div>
+          <button class="annotation-delete" onclick="deleteAnnotation(${a.id})">Delete</button>
+        </div>
+      `).join('');
+    }
+
+    function updatePrompt() {
+      const output = document.getElementById('prompt-output');
+
+      if (state.annotations.length === 0) {
+        output.textContent = 'Add annotations to generate a review prompt...';
+        return;
+      }
+
+      let prompt = `Reviewing Meerkat architecture.\n\n`;
+
+      const byView = {};
+      state.annotations.forEach(a => {
+        if (!byView[a.view]) byView[a.view] = [];
+        byView[a.view].push(a);
+      });
+
+      for (const [view, annots] of Object.entries(byView)) {
+        const viewNames = {
+          interfaces: 'System Interfaces',
+          'agent-loop': 'Agent Loop',
+          crates: 'Crate Architecture',
+          'data-flow': 'Data Flow'
+        };
+        prompt += `## ${viewNames[view]}\n\n`;
+        annots.forEach(a => {
+          prompt += `**${a.target}**${a.file ? ` (\`${a.file}\`)` : ''}:\n${a.text}\n\n`;
+        });
+      }
+
+      output.textContent = prompt;
+    }
+
+    function copyPrompt() {
+      const text = document.getElementById('prompt-output').textContent;
+      navigator.clipboard.writeText(text);
+
+      const btn = document.querySelector('.copy-btn');
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+
+      setTimeout(() => {
+        btn.textContent = 'Copy Prompt';
+        btn.classList.remove('copied');
+      }, 2000);
+    }
+
+    // ========== NAVIGATION ==========
+
+    function switchView(view) {
+      state.currentView = view;
+      state.selectedNode = null;
+
+      document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+      document.querySelector(`[data-view="${view}"]`).classList.add('active');
+
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+      document.getElementById(`view-${view}`).classList.add('active');
+
+      if (view === 'agent-loop') {
+        resetAnimation();
+      }
+
+      render();
+    }
+
+    function render() {
+      if (state.currentView === 'interfaces') renderInterfaces();
+      if (state.currentView === 'agent-loop') renderAgentLoop();
+      if (state.currentView === 'crates') renderCrates();
+      if (state.currentView === 'data-flow') renderDataFlow();
+    }
+
+    // ========== INIT ==========
+
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+      tab.addEventListener('click', () => switchView(tab.dataset.view));
+    });
+
+    document.getElementById('scenario-select').addEventListener('change', (e) => {
+      state.animation.scenario = e.target.value;
+      resetAnimation();
+    });
+
+    render();
+  </script>
+</body>
+</html>

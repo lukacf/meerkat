@@ -212,14 +212,24 @@ impl AnthropicClient {
 
         // Extract provider-specific params
         if let Some(ref params) = request.provider_params {
-            // thinking_budget -> Anthropic thinking.budget_tokens (requires thinking.type = "enabled")
-            if let Some(thinking_budget) = params.get("thinking_budget") {
-                if let Some(budget) = thinking_budget.as_u64() {
-                    body["thinking"] = serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": budget
-                    });
-                }
+            // Handle thinking config from both formats:
+            // 1. Legacy flat format: {"thinking_budget": 10000}
+            // 2. Typed AnthropicParams: {"thinking": {"type": "enabled", "budget_tokens": 10000}}
+            let thinking_budget = params
+                .get("thinking_budget")
+                .and_then(|v| v.as_u64())
+                .or_else(|| {
+                    params
+                        .get("thinking")
+                        .and_then(|t| t.get("budget_tokens"))
+                        .and_then(|v| v.as_u64())
+                });
+
+            if let Some(budget) = thinking_budget {
+                body["thinking"] = serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget
+                });
             }
 
             // top_k must be a number - coerce strings from CLI --param

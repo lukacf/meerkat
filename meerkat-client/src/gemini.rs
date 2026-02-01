@@ -148,16 +148,31 @@ impl GeminiClient {
             }
         }
 
-        // Extract provider-specific parameters
+        // Extract provider-specific parameters from both formats:
+        // 1. Legacy flat format: {"thinking_budget": 10000, "top_k": 40}
+        // 2. Typed GeminiParams: {"thinking": {"include_thoughts": true, "thinking_budget": 10000}, "top_k": 40, "top_p": 0.95}
         if let Some(ref params) = request.provider_params {
-            if let Some(thinking_budget) = params.get("thinking_budget") {
+            // Handle thinking config
+            let thinking_budget = params.get("thinking_budget").or_else(|| {
+                params
+                    .get("thinking")
+                    .and_then(|t| t.get("thinking_budget"))
+            });
+
+            if let Some(budget) = thinking_budget {
                 body["generationConfig"]["thinkingConfig"] = serde_json::json!({
-                    "thinkingBudget": thinking_budget
+                    "thinkingBudget": budget
                 });
             }
 
+            // Handle top_k
             if let Some(top_k) = params.get("top_k") {
                 body["generationConfig"]["topK"] = top_k.clone();
+            }
+
+            // Handle top_p (only in typed params)
+            if let Some(top_p) = params.get("top_p") {
+                body["generationConfig"]["topP"] = top_p.clone();
             }
         }
 

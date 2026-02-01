@@ -6,6 +6,7 @@ use super::runner::{
 };
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::dispatcher::FilteredDispatcher;
 use async_trait::async_trait;
 use meerkat_client::LlmProvider;
 use meerkat_core::ToolDef;
@@ -287,11 +288,19 @@ impl AgentSpawnTool {
         self.validate_model(provider, &model)
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
 
-        // Resolve tool access policy
-        let _tool_access: ToolAccessPolicy = params
+        // Resolve tool access policy and apply filtering
+        let tool_access: ToolAccessPolicy = params
             .tool_access
             .map(Into::into)
             .unwrap_or(ToolAccessPolicy::Inherit);
+
+        let filtered_tools: Arc<dyn meerkat_core::AgentToolDispatcher> = match &tool_access {
+            ToolAccessPolicy::Inherit => self.state.tool_dispatcher.clone(),
+            _ => Arc::new(FilteredDispatcher::new(
+                self.state.tool_dispatcher.clone(),
+                &tool_access,
+            )),
+        };
 
         // Resolve budget
         let budget = self.resolve_budget(params.budget);
@@ -361,7 +370,7 @@ impl AgentSpawnTool {
         let spec = DynSubAgentSpec {
             client,
             model: model.clone(),
-            tools: self.state.tool_dispatcher.clone(),
+            tools: filtered_tools,
             store: self.state.session_store.clone(),
             session,
             budget: Some(budget),

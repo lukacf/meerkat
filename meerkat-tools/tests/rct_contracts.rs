@@ -492,3 +492,182 @@ async fn test_regression_composite_deduplicates_external_tools()
 
     Ok(())
 }
+
+/// Regression test: FilteredDispatcher must enforce tool access policies.
+/// Previously, tool_access was parsed but never applied in agent_spawn/agent_fork,
+/// so sub-agents could access all tools regardless of allow/deny configuration.
+#[test]
+fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
+    use async_trait::async_trait;
+    use meerkat_core::error::ToolError;
+    use meerkat_core::ops::ToolAccessPolicy;
+    use meerkat_core::types::ToolDef;
+    use meerkat_tools::dispatcher::FilteredDispatcher;
+
+    /// Mock dispatcher with security-sensitive tools
+    struct MockDispatcherWithSensitiveTools;
+
+    #[async_trait]
+    impl AgentToolDispatcher for MockDispatcherWithSensitiveTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([
+                Arc::new(ToolDef {
+                    name: "shell".to_string(),
+                    description: "Execute shell commands (security sensitive)".to_string(),
+                    input_schema: json!({"type": "object"}),
+                }),
+                Arc::new(ToolDef {
+                    name: "agent_spawn".to_string(),
+                    description: "Spawn sub-agents (nesting sensitive)".to_string(),
+                    input_schema: json!({"type": "object"}),
+                }),
+                Arc::new(ToolDef {
+                    name: "task_list".to_string(),
+                    description: "List tasks (safe)".to_string(),
+                    input_schema: json!({"type": "object"}),
+                }),
+                Arc::new(ToolDef {
+                    name: "wait".to_string(),
+                    description: "Wait (safe)".to_string(),
+                    input_schema: json!({"type": "object"}),
+                }),
+            ])
+        }
+
+        async fn dispatch(
+            &self,
+            name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<serde_json::Value, ToolError> {
+            Ok(json!({"called": name}))
+        }
+    }
+
+    let inner = Arc::new(MockDispatcherWithSensitiveTools);
+
+    // Test 1: DenyList should block specified tools
+    {
+        let policy =
+            ToolAccessPolicy::DenyList(vec!["shell".to_string(), "agent_spawn".to_string()]);
+        let filtered = FilteredDispatcher::new(inner.clone(), &policy);
+
+        let tool_names: Vec<_> = filtered.tools().iter().map(|t| t.name.clone()).collect();
+
+        // Shell and agent_spawn should be blocked
+        assert!(
+            !tool_names.contains(&"shell".to_string()),
+            "shell should be blocked by deny list but tools are: {:?}",
+            tool_names
+        );
+        assert!(
+            !tool_names.contains(&"agent_spawn".to_string()),
+            "agent_spawn should be blocked by deny list"
+        );
+
+        // Safe tools should still be available
+        assert!(
+            tool_names.contains(&"task_list".to_string()),
+            "task_list should be available"
+        );
+        assert!(
+            tool_names.contains(&"wait".to_string()),
+            "wait should be available"
+        );
+    }
+
+    // Test 2: AllowList should only permit specified tools
+    {
+        let policy = ToolAccessPolicy::AllowList(vec!["task_list".to_string()]);
+        let filtered = FilteredDispatcher::new(inner.clone(), &policy);
+
+        let tool_names: Vec<_> = filtered.tools().iter().map(|t| t.name.clone()).collect();
+
+        // Only task_list should be available
+        assert_eq!(
+            tool_names.len(),
+            1,
+            "AllowList should restrict to exactly 1 tool"
+        );
+        assert_eq!(
+            tool_names[0], "task_list",
+            "Only task_list should be in allow list"
+        );
+
+        // Everything else should be blocked
+        assert!(
+            !tool_names.contains(&"shell".to_string()),
+            "shell should be blocked (not in allow list)"
+        );
+        assert!(
+            !tool_names.contains(&"agent_spawn".to_string()),
+            "agent_spawn should be blocked (not in allow list)"
+        );
+        assert!(
+            !tool_names.contains(&"wait".to_string()),
+            "wait should be blocked (not in allow list)"
+        );
+    }
+
+    // Test 3: Inherit should pass through all tools
+    {
+        let policy = ToolAccessPolicy::Inherit;
+        let filtered = FilteredDispatcher::new(inner, &policy);
+
+        let tool_names: Vec<_> = filtered.tools().iter().map(|t| t.name.clone()).collect();
+
+        assert_eq!(
+            tool_names.len(),
+            4,
+            "Inherit should pass all 4 tools through"
+        );
+    }
+}
+
+/// Regression test: Blocked tools must return NotFound on dispatch attempts.
+/// Even if a tool exists in the inner dispatcher, if it's blocked by policy,
+/// dispatch must fail with NotFound (not silently succeed).
+#[tokio::test]
+async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_not_found() {
+    use async_trait::async_trait;
+    use meerkat_core::error::ToolError;
+    use meerkat_core::ops::ToolAccessPolicy;
+    use meerkat_core::types::ToolDef;
+    use meerkat_tools::dispatcher::FilteredDispatcher;
+
+    struct MockDispatcher;
+
+    #[async_trait]
+    impl AgentToolDispatcher for MockDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::new(ToolDef {
+                name: "shell".to_string(),
+                description: "Shell".to_string(),
+                input_schema: json!({"type": "object"}),
+            })])
+        }
+
+        async fn dispatch(
+            &self,
+            _name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<serde_json::Value, ToolError> {
+            // This should NOT be called for blocked tools
+            panic!("Dispatch should not be called for blocked tools!");
+        }
+    }
+
+    let inner = Arc::new(MockDispatcher);
+    let policy = ToolAccessPolicy::DenyList(vec!["shell".to_string()]);
+    let filtered = FilteredDispatcher::new(inner, &policy);
+
+    // Attempting to dispatch a blocked tool should return NotFound
+    let result = filtered.dispatch("shell", &json!({})).await;
+
+    match result {
+        Err(ToolError::NotFound { name }) => {
+            assert_eq!(name, "shell", "NotFound error should name the blocked tool");
+        }
+        Ok(_) => panic!("Dispatch to blocked tool should fail, not succeed!"),
+        Err(other) => panic!("Expected NotFound error, got: {:?}", other),
+    }
+}

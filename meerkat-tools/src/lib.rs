@@ -37,8 +37,7 @@ pub use builtin::{
     MemoryTaskStore, ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
     ensure_rkat_dir_async, find_project_root,
 };
-pub use dispatcher::EmptyToolDispatcher;
-pub use dispatcher::ToolDispatcher;
+pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher, ToolDispatcher};
 pub use error::{DispatchError, ToolError, ToolValidationError};
 pub use meerkat_comms::agent::{
     CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, wrap_with_comms,

@@ -1,8 +1,12 @@
 //! agent_fork tool - Fork current agent with continued context
 
 use super::config::SubAgentError;
+use super::runner::{
+    DynSubAgentSpec, SubAgentCommsConfig, create_fork_session, spawn_sub_agent_dyn,
+};
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::dispatcher::FilteredDispatcher;
 use async_trait::async_trait;
 use meerkat_client::LlmProvider;
 use meerkat_core::ToolDef;
@@ -198,6 +202,35 @@ impl AgentForkTool {
         }
     }
 
+    fn resolve_fork_budget(&self, policy: ForkBudgetPolicy) -> meerkat_core::budget::BudgetLimits {
+        use meerkat_core::budget::BudgetLimits;
+
+        let default_tokens = self.state.config.default_budget.unwrap_or(50000);
+        let max_per_agent = self.state.config.max_budget_per_agent;
+
+        let tokens = match policy {
+            ForkBudgetPolicy::Equal => default_tokens,
+            ForkBudgetPolicy::Remaining => {
+                // For now, treat remaining as equal (would need parent budget tracking)
+                default_tokens
+            }
+            ForkBudgetPolicy::Proportional => {
+                // For now, treat proportional as equal (would need parent budget tracking)
+                default_tokens
+            }
+            ForkBudgetPolicy::Fixed(amount) => {
+                // Apply max cap if configured
+                if let Some(max) = max_per_agent {
+                    amount.min(max)
+                } else {
+                    amount
+                }
+            }
+        };
+
+        BudgetLimits::default().with_max_tokens(tokens)
+    }
+
     async fn fork_agent(&self, params: ForkParams) -> Result<ForkResponse, BuiltinToolError> {
         // Check if we can spawn
         if !self.state.can_spawn().await {
@@ -226,17 +259,26 @@ impl AgentForkTool {
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
         let model = self.resolve_model(provider, params.model.as_deref());
 
-        // Resolve tool access policy
-        let _tool_access: ToolAccessPolicy = params
+        // Resolve tool access policy and apply filtering
+        let tool_access: ToolAccessPolicy = params
             .tool_access
             .map(Into::into)
             .unwrap_or(ToolAccessPolicy::Inherit);
 
-        // Resolve budget policy
-        let _budget_policy = self.resolve_budget_policy(params.budget_policy.as_deref());
+        let filtered_tools: Arc<dyn meerkat_core::AgentToolDispatcher> = match &tool_access {
+            ToolAccessPolicy::Inherit => self.state.tool_dispatcher.clone(),
+            _ => Arc::new(FilteredDispatcher::new(
+                self.state.tool_dispatcher.clone(),
+                &tool_access,
+            )),
+        };
+
+        // Resolve budget policy and calculate budget
+        let budget_policy = self.resolve_budget_policy(params.budget_policy.as_deref());
+        let budget = self.resolve_fork_budget(budget_policy);
 
         // Create client for the forked agent
-        let _client = self
+        let client = self
             .state
             .client_factory
             .create_client(provider, None)
@@ -244,9 +286,10 @@ impl AgentForkTool {
                 BuiltinToolError::execution_failed(format!("Failed to create LLM client: {}", e))
             })?;
 
-        // Get parent session messages count
+        // Get parent session and create forked session
         let parent_session = self.state.parent_session.read().await;
         let messages_inherited = parent_session.messages().len();
+        let session = create_fork_session(&parent_session, &params.prompt);
         drop(parent_session);
 
         // Generate operation ID and name
@@ -255,27 +298,46 @@ impl AgentForkTool {
         let op_id_str = op_id.to_string();
         let name = format!("fork-{}{}", &op_id_str[..8], &op_id_str[9..13]);
 
-        // Register the forked agent
-        self.state
-            .manager
-            .register(op_id.clone(), name.clone())
-            .await
-            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
+        // Build comms config if parent has comms enabled
+        let (comms_config, comms_instructions) =
+            if let Some(parent_comms) = &self.state.parent_comms {
+                let config = SubAgentCommsConfig {
+                    name: name.clone(),
+                    base_dir: parent_comms.comms_base_dir.clone(),
+                    parent_context: parent_comms.clone(),
+                };
+                let instructions = Some(parent_comms_instructions(&name));
+                (Some(config), instructions)
+            } else {
+                (None, None)
+            };
 
-        // Note: The actual forked agent execution would be spawned as a tokio task here.
-        // For now, we just register the agent and return the ID.
-        // The full implementation would:
-        // 1. Fork the parent session (copy all messages)
-        // 2. Append the fork prompt as a new user message
-        // 3. Build an Agent with the forked session
-        // 4. Spawn a task that runs agent.run() and reports results back
+        // Create the sub-agent specification for the fork
+        let spec = DynSubAgentSpec {
+            client,
+            model: model.clone(),
+            tools: filtered_tools,
+            store: self.state.session_store.clone(),
+            session,
+            budget: Some(budget),
+            depth: self.state.depth() + 1,
+            system_prompt: None, // Fork inherits system prompt from session
+            comms_config,
+            parent_trusted_peers: self.state.parent_trusted_peers.clone(),
+            host_mode: false, // Forked agents don't run in host mode
+        };
 
-        // Generate comms instructions for parent if comms is enabled
-        let comms_instructions = self
-            .state
-            .parent_comms
-            .as_ref()
-            .map(|_| parent_comms_instructions(&name));
+        // Spawn the forked agent
+        spawn_sub_agent_dyn(
+            op_id.clone(),
+            name.clone(),
+            spec,
+            self.state.manager.clone(),
+        )
+        .await
+        .map_err(|e| {
+            BuiltinToolError::execution_failed(format!("Failed to spawn forked agent: {}", e))
+        })?;
 
         Ok(ForkResponse {
             agent_id: op_id.to_string(),

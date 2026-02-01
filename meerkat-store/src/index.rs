@@ -182,6 +182,22 @@ impl RedbSessionIndex {
                 let meta_bytes = serde_json::to_vec(&meta).map_err(StoreError::Serialization)?;
                 let id_key = session_id_key(&meta.id);
 
+                // Remove stale updated_at entry if session already exists with different timestamp
+                if let Some(existing) = by_id
+                    .get(id_key.as_ref())
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?
+                {
+                    let existing_meta: SessionMeta = serde_json::from_slice(existing.value())
+                        .map_err(StoreError::Serialization)?;
+                    // Only remove if timestamp changed to avoid duplicate entries
+                    if existing_meta.updated_at != meta.updated_at {
+                        let old_key = updated_key(&existing_meta.id, existing_meta.updated_at);
+                        let _ = by_updated
+                            .remove(old_key.as_ref())
+                            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+                    }
+                }
+
                 by_id
                     .insert(id_key.as_ref(), meta_bytes.as_slice())
                     .map_err(|e| StoreError::Database(Box::new(e.into())))?;

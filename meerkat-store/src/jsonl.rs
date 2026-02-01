@@ -179,14 +179,19 @@ impl JsonlStore {
             Err(err) => return Err(StoreError::Join(err)),
         };
 
-        // Reconcile if index is missing entries (sidecar count > index count)
-        // This handles partial writes where meta file exists but index wasn't updated
-        if sidecar_count > index_count {
-            tracing::info!(
-                "Reconciling session index: {} sidecars vs {} indexed entries",
-                sidecar_count,
-                index_count
-            );
+        // Always reconcile on startup when sidecars exist.
+        // This handles:
+        // 1. Missing index entries (sidecar_count > index_count)
+        // 2. Stale updated_at entries when session was updated but index write failed
+        // 3. Any other partial-write scenarios where counts match but metadata differs
+        if sidecar_count > 0 {
+            if sidecar_count != index_count {
+                tracing::info!(
+                    "Reconciling session index: {} sidecars vs {} indexed entries",
+                    sidecar_count,
+                    index_count
+                );
+            }
             let index = Arc::clone(&index);
             let result = spawn_blocking(move || index.insert_many(metas)).await;
             match result {

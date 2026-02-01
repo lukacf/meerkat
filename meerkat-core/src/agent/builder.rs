@@ -8,6 +8,7 @@ use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
 use crate::sub_agent::SubAgentManager;
+use crate::types::Message;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -119,18 +120,19 @@ impl AgentBuilder {
         T: AgentToolDispatcher + ?Sized,
         S: AgentSessionStore + ?Sized,
     {
-        let session = match self.session {
+        let mut session = match self.session {
             Some(s) => s,
-            None => {
-                let mut s = Session::new();
-                let prompt = match &self.system_prompt {
-                    Some(p) => p.clone(),
-                    None => SystemPromptConfig::new().compose().await,
-                };
-                s.set_system_prompt(prompt);
-                s
-            }
+            None => Session::new(),
         };
+
+        // Apply system prompt: use builder's prompt if set, otherwise compose default for new sessions
+        let has_system_prompt = matches!(session.messages().first(), Some(Message::System(_)));
+        if let Some(prompt) = self.system_prompt {
+            session.set_system_prompt(prompt);
+        } else if !has_system_prompt {
+            // Only set default prompt for new sessions without an existing system prompt
+            session.set_system_prompt(SystemPromptConfig::new().compose().await);
+        }
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
         let sub_agent_manager = Arc::new(SubAgentManager::new(self.concurrency_limits, self.depth));
@@ -147,6 +149,168 @@ impl AgentBuilder {
             sub_agent_manager,
             depth: self.depth,
             comms_runtime: self.comms_runtime,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::LlmStreamResult;
+    use crate::error::{AgentError, ToolError};
+    use crate::types::{StopReason, ToolDef, UserMessage};
+    use async_trait::async_trait;
+
+    struct MockClient;
+
+    #[async_trait]
+    impl AgentLlmClient for MockClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<LlmStreamResult, AgentError> {
+            Ok(LlmStreamResult::new(
+                "Done".to_string(),
+                vec![],
+                StopReason::EndTurn,
+                crate::types::Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    struct MockTools;
+
+    #[async_trait]
+    impl AgentToolDispatcher for MockTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::new([])
+        }
+
+        async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+            Err(ToolError::NotFound {
+                name: name.to_string(),
+            })
+        }
+    }
+
+    struct MockStore;
+
+    #[async_trait]
+    impl AgentSessionStore for MockStore {
+        async fn save(&self, _session: &Session) -> Result<(), AgentError> {
+            Ok(())
+        }
+        async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
+            Ok(None)
+        }
+    }
+
+    /// Regression test: AgentBuilder should apply system_prompt to new sessions
+    #[tokio::test]
+    async fn test_regression_builder_applies_system_prompt_to_new_session() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let agent = AgentBuilder::new()
+            .system_prompt("Custom system prompt")
+            .build(client, tools, store)
+            .await;
+
+        // Check that the system prompt was applied
+        let messages = agent.session().messages();
+        assert!(!messages.is_empty(), "Session should have messages");
+
+        match &messages[0] {
+            Message::System(sys) => {
+                assert_eq!(sys.content, "Custom system prompt");
+            }
+            other => panic!("First message should be System, got: {:?}", other),
+        }
+    }
+
+    /// Regression test: AgentBuilder should apply system_prompt to resumed sessions
+    /// Previously, system_prompt was ignored when resuming a session.
+    #[tokio::test]
+    async fn test_regression_builder_applies_system_prompt_to_resumed_session() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        // Create a session with an existing system prompt
+        let mut existing_session = Session::new();
+        existing_session.set_system_prompt("Original system prompt".to_string());
+        existing_session.push(Message::User(UserMessage {
+            content: "Hello".to_string(),
+        }));
+
+        // Resume the session with a NEW system prompt
+        let agent = AgentBuilder::new()
+            .resume_session(existing_session)
+            .system_prompt("Updated system prompt")
+            .build(client, tools, store)
+            .await;
+
+        // Check that the system prompt was UPDATED
+        let messages = agent.session().messages();
+        assert!(!messages.is_empty(), "Session should have messages");
+
+        match &messages[0] {
+            Message::System(sys) => {
+                assert_eq!(
+                    sys.content, "Updated system prompt",
+                    "System prompt should be updated when resuming with a new prompt"
+                );
+            }
+            other => panic!("First message should be System, got: {:?}", other),
+        }
+
+        // User message should still be preserved
+        assert!(messages.len() >= 2, "Should have system + user messages");
+        match &messages[1] {
+            Message::User(user) => {
+                assert_eq!(user.content, "Hello");
+            }
+            other => panic!("Second message should be User, got: {:?}", other),
+        }
+    }
+
+    /// Regression test: Resumed sessions without explicit system_prompt should keep their original
+    #[tokio::test]
+    async fn test_builder_preserves_existing_system_prompt_on_resume() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        // Create a session with an existing system prompt
+        let mut existing_session = Session::new();
+        existing_session.set_system_prompt("Original system prompt".to_string());
+
+        // Resume WITHOUT specifying a new system prompt
+        let agent = AgentBuilder::new()
+            .resume_session(existing_session)
+            // Note: no .system_prompt() call
+            .build(client, tools, store)
+            .await;
+
+        // Original system prompt should be preserved
+        let messages = agent.session().messages();
+        match &messages[0] {
+            Message::System(sys) => {
+                assert_eq!(
+                    sys.content, "Original system prompt",
+                    "Original system prompt should be preserved when not overridden"
+                );
+            }
+            other => panic!("First message should be System, got: {:?}", other),
         }
     }
 }

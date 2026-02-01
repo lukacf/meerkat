@@ -481,7 +481,11 @@ async fn create_session(
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits());
 
-    let mut system_prompt = SystemPromptConfig::new().compose().await;
+    // Use caller-provided system prompt if set, otherwise use default
+    let mut system_prompt = match req.system_prompt.clone() {
+        Some(prompt) => prompt,
+        None => SystemPromptConfig::new().compose().await,
+    };
     if !tool_usage_instructions.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);

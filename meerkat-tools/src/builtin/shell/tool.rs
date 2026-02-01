@@ -383,6 +383,11 @@ impl BuiltinTool for ShellTool {
 
         info!(command = %input.command, background = %input.background, "Executing shell command");
 
+        // Security validation: check allowlist first
+        self.config
+            .check_allowlist(&input.command)
+            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
+
         // Security validation: check for dangerous patterns and characters
         let validation = validate_command_or_error(&input.command)
             .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;

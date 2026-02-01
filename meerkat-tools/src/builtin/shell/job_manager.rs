@@ -683,6 +683,7 @@ mod tests {
             max_completed_jobs: 100,
             completed_job_ttl_secs: 300,
             max_concurrent_processes: 10,
+            allowlist: vec![],
         };
 
         let manager = JobManager::new(config);

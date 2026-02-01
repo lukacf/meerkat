@@ -953,6 +953,7 @@ async fn build_tooling(
                 max_completed_jobs: 100,
                 completed_job_ttl_secs: 300,
                 max_concurrent_processes: 10,
+                allowlist: config.shell.allowlist.clone(),
             })
         } else {
             None

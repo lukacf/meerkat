@@ -89,13 +89,7 @@ impl AgentToolDispatcher for ToolDispatcher {
         // Dispatch with timeout to prevent hanging tool calls
         tokio::time::timeout(self.default_timeout, self.router.dispatch(name, args))
             .await
-            .map_err(|_| ToolError::ExecutionFailed {
-                message: format!(
-                    "Tool '{}' timed out after {}ms",
-                    name,
-                    self.default_timeout.as_millis()
-                ),
-            })?
+            .map_err(|_| ToolError::timeout(name, self.default_timeout.as_millis() as u64))?
     }
 }
 
@@ -171,6 +165,7 @@ impl AgentToolDispatcher for FilteredDispatcher {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use serde_json::json;

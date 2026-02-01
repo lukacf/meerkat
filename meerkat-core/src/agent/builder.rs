@@ -120,10 +120,7 @@ impl AgentBuilder {
         T: AgentToolDispatcher + ?Sized,
         S: AgentSessionStore + ?Sized,
     {
-        let mut session = match self.session {
-            Some(s) => s,
-            None => Session::new(),
-        };
+        let mut session = self.session.unwrap_or_default();
 
         // Apply system prompt: use builder's prompt if set, otherwise compose default for new sessions
         let has_system_prompt = matches!(session.messages().first(), Some(Message::System(_)));
@@ -154,6 +151,7 @@ impl AgentBuilder {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::LlmStreamResult;

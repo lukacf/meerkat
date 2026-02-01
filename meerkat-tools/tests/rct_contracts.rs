@@ -1,3 +1,5 @@
+#![allow(clippy::panic)]
+
 use meerkat_core::AgentToolDispatcher;
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolPolicyLayer,
@@ -117,6 +119,7 @@ fn test_rct_contracts_shell_defaults_contract() -> Result<(), Box<dyn std::error
         max_completed_jobs: 10,
         completed_job_ttl_secs: 60,
         max_concurrent_processes: 5,
+        allowlist: vec![],
     };
     let json_str = serde_json::to_string(&tool)?;
     let json_val: serde_json::Value = serde_json::from_str(&json_str)?;
@@ -400,20 +403,33 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
     );
     assert!(result.is_err(), "dispatch should return timeout error");
 
-    // Verify it's an ExecutionFailed error (timeout)
+    // Verify it's a Timeout error (not ExecutionFailed)
+    // Regression: Previously timeouts were mapped to ExecutionFailed, which broke
+    // error classification (metrics, retries) that rely on the "timeout" error code.
     match result {
         Ok(_) => return Err("Expected timeout error, got Ok".into()),
-        Err(ToolError::ExecutionFailed { message }) => {
-            assert!(
-                message.contains("timed out"),
-                "Error should mention timeout: {}",
-                message
+        Err(ToolError::Timeout { name, timeout_ms }) => {
+            assert_eq!(name, "hang", "Timeout should include tool name");
+            assert_eq!(
+                timeout_ms, 50,
+                "Timeout should include configured timeout_ms"
             );
         }
+        Err(ToolError::ExecutionFailed { message }) => {
+            return Err(format!(
+                "Regression: Timeout was incorrectly mapped to ExecutionFailed: {}",
+                message
+            )
+            .into());
+        }
         Err(other) => {
-            return Err(format!("Expected ExecutionFailed timeout error, got: {:?}", other).into());
+            return Err(format!("Expected Timeout error, got: {:?}", other).into());
         }
     }
+
+    // Verify the error code is "timeout" (for classification)
+    let err = ToolError::timeout("test", 100);
+    assert_eq!(err.error_code(), "timeout");
 
     Ok(())
 }

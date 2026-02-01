@@ -384,7 +384,11 @@ struct GeminiUsage {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::explicit_counter_loop
+)]
 mod tests {
     use super::*;
     use meerkat_core::UserMessage;

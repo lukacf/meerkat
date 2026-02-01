@@ -92,6 +92,14 @@ pub struct ShellConfig {
     /// Set to 0 for unlimited.
     #[serde(default = "default_max_concurrent_processes")]
     pub max_concurrent_processes: usize,
+
+    /// Allowlist of commands that can be executed (default: empty = all allowed)
+    ///
+    /// If non-empty, only commands whose first word (executable name) matches
+    /// one of these entries will be allowed to execute. An empty allowlist
+    /// means all commands are allowed (subject to other restrictions).
+    #[serde(default)]
+    pub allowlist: Vec<String>,
 }
 
 fn default_max_completed_jobs() -> usize {
@@ -109,18 +117,17 @@ fn default_max_concurrent_processes() -> usize {
 impl Default for ShellConfig {
     fn default() -> Self {
         let defaults = ShellDefaults::default();
-        let timeout_secs = defaults.timeout_secs;
-        let program = defaults.program;
         Self {
             enabled: false,
-            default_timeout_secs: timeout_secs,
+            default_timeout_secs: defaults.timeout_secs,
             restrict_to_project: true,
-            shell: program,
+            shell: defaults.program,
             shell_path: None,
             project_root: PathBuf::new(),
             max_completed_jobs: default_max_completed_jobs(),
             completed_job_ttl_secs: default_completed_job_ttl_secs(),
             max_concurrent_processes: default_max_concurrent_processes(),
+            allowlist: defaults.allowlist,
         }
     }
 }
@@ -164,6 +171,30 @@ impl ShellConfig {
             enabled: true,
             project_root: path,
             ..Default::default()
+        }
+    }
+
+    /// Check if a command is allowed by the allowlist.
+    ///
+    /// Returns `Ok(())` if the command is allowed, or `Err(ShellError::BlockedCommand)`
+    /// if the command's executable is not in the allowlist.
+    ///
+    /// An empty allowlist means all commands are allowed.
+    pub fn check_allowlist(&self, command: &str) -> Result<(), ShellError> {
+        if self.allowlist.is_empty() {
+            return Ok(());
+        }
+
+        // Extract the first word (executable name) from the command
+        let executable = command.split_whitespace().next().unwrap_or("").trim();
+
+        if self.allowlist.iter().any(|allowed| allowed == executable) {
+            Ok(())
+        } else {
+            Err(ShellError::BlockedCommand(format!(
+                "'{}' is not in the allowlist",
+                executable
+            )))
         }
     }
 
@@ -353,6 +384,7 @@ mod tests {
             max_completed_jobs: 50,
             completed_job_ttl_secs: 600,
             max_concurrent_processes: 5,
+            allowlist: vec!["echo".to_string(), "cat".to_string()],
         };
 
         assert!(config.enabled);
@@ -364,6 +396,10 @@ mod tests {
         assert_eq!(config.max_completed_jobs, 50);
         assert_eq!(config.completed_job_ttl_secs, 600);
         assert_eq!(config.max_concurrent_processes, 5);
+        assert_eq!(
+            config.allowlist,
+            vec!["echo".to_string(), "cat".to_string()]
+        );
     }
 
     // ==================== Default Test ====================
@@ -400,6 +436,10 @@ mod tests {
             config.max_concurrent_processes, 10,
             "max_concurrent_processes should default to 10"
         );
+        assert!(
+            config.allowlist.is_empty(),
+            "allowlist should default to empty (all commands allowed)"
+        );
     }
 
     // ==================== Serde Roundtrip Test ====================
@@ -416,6 +456,7 @@ mod tests {
             max_completed_jobs: 200,
             completed_job_ttl_secs: 600,
             max_concurrent_processes: 15,
+            allowlist: vec!["ls".to_string(), "cat".to_string()],
         };
 
         // Serialize to JSON
@@ -429,6 +470,7 @@ mod tests {
         assert!(json.contains("\"shell_path\":\"/usr/bin/bash\""));
         assert!(json.contains("\"project_root\":\"/tmp/test\""));
         assert!(json.contains("\"max_concurrent_processes\":15"));
+        assert!(json.contains("\"allowlist\":[\"ls\",\"cat\"]"));
 
         // Deserialize back
         let parsed: ShellConfig = serde_json::from_str(&json).unwrap();
@@ -445,6 +487,7 @@ mod tests {
             parsed.max_concurrent_processes,
             config.max_concurrent_processes
         );
+        assert_eq!(parsed.allowlist, config.allowlist);
     }
 
     #[test]
@@ -464,6 +507,7 @@ mod tests {
             parsed.max_concurrent_processes,
             config.max_concurrent_processes
         );
+        assert_eq!(parsed.allowlist, config.allowlist);
     }
 
     // ==================== with_project_root Test ====================
@@ -625,5 +669,69 @@ mod tests {
         let io_err = std::io::Error::other("boom");
         let err: ShellError = io_err.into();
         assert!(matches!(err, ShellError::Io(_)));
+    }
+
+    // ==================== Allowlist Tests ====================
+
+    /// Regression test: Empty allowlist allows all commands
+    #[test]
+    fn test_shell_config_allowlist_empty_allows_all() {
+        let config = ShellConfig {
+            allowlist: vec![],
+            ..Default::default()
+        };
+
+        assert!(config.check_allowlist("ls -la").is_ok());
+        assert!(config.check_allowlist("rm -rf /").is_ok());
+        assert!(config.check_allowlist("anything").is_ok());
+    }
+
+    /// Regression test: Non-empty allowlist blocks unlisted commands
+    /// Previously, allowlist was not enforced in ShellTool::call, making
+    /// the config option ineffective for security restrictions.
+    #[test]
+    fn test_regression_shell_config_allowlist_blocks_unlisted() {
+        let config = ShellConfig {
+            allowlist: vec!["ls".to_string(), "cat".to_string(), "echo".to_string()],
+            ..Default::default()
+        };
+
+        // Allowed commands should pass
+        assert!(config.check_allowlist("ls -la").is_ok());
+        assert!(config.check_allowlist("cat file.txt").is_ok());
+        assert!(config.check_allowlist("echo hello world").is_ok());
+
+        // Unlisted commands should be blocked
+        let result = config.check_allowlist("rm -rf /");
+        assert!(matches!(result, Err(ShellError::BlockedCommand(_))));
+
+        let result = config.check_allowlist("wget http://example.com");
+        assert!(matches!(result, Err(ShellError::BlockedCommand(_))));
+    }
+
+    /// Regression test: Allowlist checks first word (executable) only
+    #[test]
+    fn test_shell_config_allowlist_checks_executable_only() {
+        let config = ShellConfig {
+            allowlist: vec!["ls".to_string()],
+            ..Default::default()
+        };
+
+        // "ls" is allowed, even if arguments contain other commands
+        assert!(config.check_allowlist("ls cat rm wget").is_ok());
+
+        // But "cat" is not allowed as an executable
+        assert!(config.check_allowlist("cat ls").is_err());
+    }
+
+    /// Test allowlist is populated from ShellDefaults
+    #[test]
+    fn test_shell_config_default_has_allowlist_from_defaults() {
+        let config = ShellConfig::default();
+        // Default allowlist from config template is empty
+        assert!(
+            config.allowlist.is_empty(),
+            "Default allowlist should be empty (from config template)"
+        );
     }
 }

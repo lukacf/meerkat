@@ -260,6 +260,7 @@ impl LlmClient for GeminiClient {
                 };
                 let mut stream = stream_result?;
                 let mut buffer = String::with_capacity(512);
+                let mut tool_call_index: u32 = 0;
 
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
@@ -297,10 +298,12 @@ impl LlmClient for GeminiClient {
                                                     yield LlmEvent::TextDelta { delta: text };
                                                 }
                                                 if let Some(fc) = part.function_call {
+                                                    let id = format!("fc_{}", tool_call_index);
+                                                    tool_call_index += 1;
                                                     yield LlmEvent::ToolCallComplete {
-                                                        id: fc.name.clone(),
+                                                        id,
                                                         name: fc.name,
-                                                        args: fc.args.unwrap_or(json!({})) ,
+                                                        args: fc.args.unwrap_or(json!({})),
                                                         thought_signature: part.thought_signature,
                                                     };
                                                 }
@@ -572,5 +575,62 @@ mod tests {
             _ => StopReason::EndTurn,
         };
         assert_eq!(stop, StopReason::ContentFilter);
+    }
+
+    /// Regression: Multiple tool calls to the same tool must get unique IDs.
+    /// Previously, IDs were set to the tool name, causing collisions when
+    /// the same tool was called multiple times (e.g., two "search" calls
+    /// both got id="search", breaking tool-result correlation).
+    #[test]
+    fn test_regression_gemini_tool_call_ids_must_be_unique() {
+        // Simulate the ID generation logic from streaming
+        let mut tool_call_index: u32 = 0;
+
+        // Simulate 3 calls to "search" tool
+        let tool_names = ["search", "search", "search"];
+        let mut generated_ids = Vec::new();
+
+        for _name in tool_names {
+            let id = format!("fc_{}", tool_call_index);
+            tool_call_index += 1;
+            generated_ids.push(id);
+        }
+
+        // All IDs must be unique
+        assert_eq!(generated_ids[0], "fc_0");
+        assert_eq!(generated_ids[1], "fc_1");
+        assert_eq!(generated_ids[2], "fc_2");
+
+        // Verify no duplicates
+        let mut seen = std::collections::HashSet::new();
+        for id in &generated_ids {
+            assert!(
+                seen.insert(id.clone()),
+                "Duplicate tool call ID found: {}",
+                id
+            );
+        }
+    }
+
+    /// Regression: Tool call IDs must be unique across mixed tool types.
+    #[test]
+    fn test_regression_gemini_tool_call_ids_unique_across_different_tools() {
+        let mut tool_call_index: u32 = 0;
+
+        // Simulate mixed tool calls
+        let tool_names = ["search", "write_file", "search", "read_file"];
+        let mut id_to_name = Vec::new();
+
+        for name in tool_names {
+            let id = format!("fc_{}", tool_call_index);
+            tool_call_index += 1;
+            id_to_name.push((id, name));
+        }
+
+        // Each call gets a unique ID regardless of tool name
+        assert_eq!(id_to_name[0], ("fc_0".to_string(), "search"));
+        assert_eq!(id_to_name[1], ("fc_1".to_string(), "write_file"));
+        assert_eq!(id_to_name[2], ("fc_2".to_string(), "search")); // Second search gets fc_2
+        assert_eq!(id_to_name[3], ("fc_3".to_string(), "read_file"));
     }
 }

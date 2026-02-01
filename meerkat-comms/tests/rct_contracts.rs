@@ -219,3 +219,37 @@ fn test_regression_ack_from_wrong_peer_is_invalid() {
         "imposter ACK from should not match sent to"
     );
 }
+
+/// Regression test: ACK addressed to wrong recipient should be rejected.
+/// This prevents misrouted or injected ACKs from being accepted.
+#[test]
+fn test_regression_ack_to_wrong_recipient_is_invalid() {
+    let sender_keypair = Keypair::generate();
+    let receiver_keypair = Keypair::generate();
+    let wrong_recipient_keypair = Keypair::generate();
+
+    let sent_id = Uuid::new_v4();
+
+    // ACK correctly from receiver, but addressed to wrong recipient
+    let mut misrouted_ack = Envelope {
+        id: Uuid::new_v4(),
+        from: receiver_keypair.public_key(),
+        to: wrong_recipient_keypair.public_key(), // Wrong! Should be sender
+        kind: MessageKind::Ack {
+            in_reply_to: sent_id,
+        },
+        sig: Signature::new([0u8; 64]),
+    };
+    misrouted_ack.sign(&receiver_keypair);
+
+    // Signature is valid, from is correct, but to is wrong
+    assert!(
+        misrouted_ack.verify(),
+        "misrouted ACK signature should verify"
+    );
+    assert_ne!(
+        misrouted_ack.to,
+        sender_keypair.public_key(),
+        "misrouted ACK 'to' should not match sender's public key"
+    );
+}

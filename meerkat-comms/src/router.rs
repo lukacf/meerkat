@@ -179,12 +179,16 @@ impl Router {
             .await
             {
                 Ok(Some(Ok(frame))) => {
-                    // Validate ACK: signature, sender matches recipient, in_reply_to matches sent id
+                    // Validate ACK: signature, sender, recipient, and in_reply_to
                     if let MessageKind::Ack { in_reply_to } = frame.envelope.kind {
                         if !frame.envelope.verify() {
                             return Err(SendError::PeerOffline);
                         }
                         if frame.envelope.from != sent_to {
+                            return Err(SendError::PeerOffline);
+                        }
+                        // Verify ACK is addressed to us (prevents misrouted/injected ACKs)
+                        if frame.envelope.to != self.keypair.public_key() {
                             return Err(SendError::PeerOffline);
                         }
                         if in_reply_to != sent_id {

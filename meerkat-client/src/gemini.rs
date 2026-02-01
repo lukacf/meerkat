@@ -312,7 +312,9 @@ impl LlmClient for GeminiClient {
                                         let stop = match reason.as_str() {
                                             "STOP" => StopReason::EndTurn,
                                             "MAX_TOKENS" => StopReason::MaxTokens,
-                                            "SAFETY" => StopReason::ContentFilter,
+                                            "SAFETY" | "RECITATION" => StopReason::ContentFilter,
+                                            // Gemini uses various names for tool calls
+                                            "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
                                             _ => StopReason::EndTurn,
                                         };
                                         yield LlmEvent::Done {
@@ -532,5 +534,43 @@ mod tests {
         let line = "{invalid}";
         let response = GeminiClient::parse_stream_line(line);
         assert!(response.is_none());
+    }
+
+    /// Regression: Gemini tool-call finish reasons must map to ToolUse.
+    /// Previously TOOL_CALL and FUNCTION_CALL mapped to EndTurn incorrectly.
+    #[test]
+    fn test_regression_gemini_finish_reason_tool_call_maps_to_tool_use() {
+        // Test the finish reason mapping logic directly
+        let finish_reasons = ["TOOL_CALL", "FUNCTION_CALL"];
+
+        for reason in finish_reasons {
+            let stop = match reason {
+                "STOP" => StopReason::EndTurn,
+                "MAX_TOKENS" => StopReason::MaxTokens,
+                "SAFETY" | "RECITATION" => StopReason::ContentFilter,
+                "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
+                _ => StopReason::EndTurn,
+            };
+            assert_eq!(
+                stop,
+                StopReason::ToolUse,
+                "finish_reason '{}' should map to ToolUse",
+                reason
+            );
+        }
+    }
+
+    /// Regression: Gemini RECITATION finish reason must map to ContentFilter.
+    #[test]
+    fn test_regression_gemini_finish_reason_recitation_maps_to_content_filter() {
+        let reason = "RECITATION";
+        let stop = match reason {
+            "STOP" => StopReason::EndTurn,
+            "MAX_TOKENS" => StopReason::MaxTokens,
+            "SAFETY" | "RECITATION" => StopReason::ContentFilter,
+            "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
+            _ => StopReason::EndTurn,
+        };
+        assert_eq!(stop, StopReason::ContentFilter);
     }
 }

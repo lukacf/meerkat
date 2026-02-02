@@ -25,8 +25,9 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
-    AgentBuilder, AgentEvent, AgentToolDispatcher, JsonlStore, SessionId, SessionMeta,
-    SessionStore, ToolDef, ToolError, build_comms_runtime_from_config, compose_tools_with_comms,
+    AgentBuilder, AgentEvent, AgentToolDispatcher, JsonlStore, OutputSchema, SessionId,
+    SessionMeta, SessionStore, ToolDef, ToolError, build_comms_runtime_from_config,
+    compose_tools_with_comms,
 };
 use meerkat_client::LlmClientAdapter;
 use meerkat_client::ProviderResolver;
@@ -207,6 +208,12 @@ pub struct CreateSessionRequest {
     pub provider: Option<Provider>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// JSON schema for structured output extraction.
+    #[serde(default)]
+    pub output_schema: Option<Value>,
+    /// Max retries for structured output validation (default: 2).
+    #[serde(default = "default_structured_output_retries")]
+    pub structured_output_retries: u32,
     /// Enable verbose event logging (server-side).
     #[serde(default)]
     pub verbose: bool,
@@ -219,6 +226,10 @@ pub struct CreateSessionRequest {
     pub comms_name: Option<String>,
 }
 
+fn default_structured_output_retries() -> u32 {
+    2
+}
+
 /// Continue session request
 #[derive(Debug, Deserialize)]
 pub struct ContinueSessionRequest {
@@ -226,6 +237,12 @@ pub struct ContinueSessionRequest {
     pub prompt: String,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// JSON schema for structured output extraction.
+    #[serde(default)]
+    pub output_schema: Option<Value>,
+    /// Max retries for structured output validation (default: 2).
+    #[serde(default = "default_structured_output_retries")]
+    pub structured_output_retries: u32,
     /// Run in host mode: process prompt then stay alive listening for comms messages.
     #[serde(default)]
     pub host_mode: bool,
@@ -251,6 +268,9 @@ pub struct SessionResponse {
     pub turns: u32,
     pub tool_calls: u32,
     pub usage: UsageResponse,
+    /// Validated structured output (if output_schema was provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<Value>,
 }
 
 /// Usage response
@@ -479,7 +499,13 @@ async fn create_session(
     let mut builder = AgentBuilder::new()
         .model(model.clone())
         .max_tokens_per_turn(max_tokens)
-        .budget(config.budget_limits());
+        .budget(config.budget_limits())
+        .structured_output_retries(req.structured_output_retries);
+
+    // Add output schema if provided
+    if let Some(ref schema) = req.output_schema {
+        builder = builder.output_schema(OutputSchema::new(schema.clone()));
+    }
 
     // Use caller-provided system prompt if set, otherwise use default
     let mut system_prompt = match req.system_prompt.clone() {
@@ -556,6 +582,7 @@ async fn create_session(
             output_tokens: result.usage.output_tokens,
             total_tokens: result.usage.total_tokens(),
         },
+        structured_output: result.structured_output,
     }))
 }
 
@@ -724,7 +751,13 @@ async fn continue_session(
         .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits())
+        .structured_output_retries(req.structured_output_retries)
         .resume_session(session);
+
+    // Add output schema if provided
+    if let Some(ref schema) = req.output_schema {
+        builder = builder.output_schema(OutputSchema::new(schema.clone()));
+    }
 
     let mut system_prompt = match req.system_prompt.clone() {
         Some(prompt) => prompt,
@@ -793,6 +826,7 @@ async fn continue_session(
             output_tokens: result.usage.output_tokens,
             total_tokens: result.usage.total_tokens(),
         },
+        structured_output: result.structured_output,
     }))
 }
 

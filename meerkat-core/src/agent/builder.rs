@@ -8,7 +8,7 @@ use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
 use crate::sub_agent::SubAgentManager;
-use crate::types::Message;
+use crate::types::{Message, OutputSchema};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -93,6 +93,18 @@ impl AgentBuilder {
     /// Set retry policy for LLM calls
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;
+        self
+    }
+
+    /// Set output schema for structured output extraction
+    pub fn output_schema(mut self, schema: OutputSchema) -> Self {
+        self.config.output_schema = Some(schema);
+        self
+    }
+
+    /// Set maximum retries for structured output validation
+    pub fn structured_output_retries(mut self, retries: u32) -> Self {
+        self.config.structured_output_retries = retries;
         self
     }
 

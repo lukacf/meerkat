@@ -148,6 +148,32 @@ impl OpenAiClient {
             if let Some(presence_penalty) = params.get("presence_penalty") {
                 body["presence_penalty"] = presence_penalty.clone();
             }
+
+            // Handle structured output configuration
+            // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
+            if let Some(structured) = params.get("structured_output") {
+                if let Some(schema) = structured.get("schema") {
+                    let name = structured
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("output");
+                    let strict = structured
+                        .get("strict")
+                        .and_then(|s| s.as_bool())
+                        .unwrap_or(false);
+
+                    body["text"] = serde_json::json!({
+                        "format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": name,
+                                "schema": schema,
+                                "strict": strict
+                            }
+                        }
+                    });
+                }
+            }
         }
 
         body
@@ -528,5 +554,91 @@ mod tests {
         let line = "event: message";
         let chunk = OpenAiClient::parse_sse_line(line);
         assert!(chunk.is_none());
+    }
+
+    #[test]
+    fn test_build_request_body_with_structured_output() {
+        let client = OpenAiClient::new("test-key".to_string());
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            },
+            "required": ["name", "age"]
+        });
+
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": schema,
+                "name": "person",
+                "strict": true
+            }),
+        );
+
+        let body = client.build_request_body(&request);
+
+        // Check text.format is present with correct structure
+        assert!(body.get("text").is_some(), "text field should be present");
+        let text = &body["text"];
+        assert_eq!(text["format"]["type"], "json_schema");
+        assert_eq!(text["format"]["json_schema"]["name"], "person");
+        assert_eq!(text["format"]["json_schema"]["strict"], true);
+        assert!(text["format"]["json_schema"]["schema"].is_object());
+    }
+
+    #[test]
+    fn test_build_request_body_with_structured_output_defaults() {
+        let client = OpenAiClient::new("test-key".to_string());
+
+        let schema = serde_json::json!({"type": "object"});
+
+        // No name or strict specified - should use defaults
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": schema
+            }),
+        );
+
+        let body = client.build_request_body(&request);
+
+        let text = &body["text"];
+        assert_eq!(text["format"]["json_schema"]["name"], "output"); // default name
+        assert_eq!(text["format"]["json_schema"]["strict"], false); // default strict
+    }
+
+    #[test]
+    fn test_build_request_body_without_structured_output() {
+        let client = OpenAiClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        );
+
+        let body = client.build_request_body(&request);
+
+        // text field should not be present
+        assert!(
+            body.get("text").is_none(),
+            "text field should not be present without structured_output"
+        );
     }
 }

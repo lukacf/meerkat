@@ -34,6 +34,7 @@ use meerkat_core::agent::AgentBuilder;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
+use meerkat_core::types::OutputSchema;
 use meerkat_store::{JsonlStore, SessionFilter};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -183,6 +184,14 @@ enum Commands {
         /// Provider-specific parameter (KEY=VALUE). Can be repeated.
         #[arg(long = "param", value_name = "KEY=VALUE")]
         params: Vec<String>,
+
+        /// JSON Schema for structured output (file path OR inline JSON starting with '{')
+        #[arg(long, value_name = "SCHEMA")]
+        output_schema: Option<String>,
+
+        /// Max retries for structured output validation (default: 2)
+        #[arg(long, default_value = "2")]
+        structured_output_retries: u32,
 
         // === Comms flags ===
         /// Agent name for inter-agent communication. Enables comms if set.
@@ -427,6 +436,8 @@ async fn main() -> anyhow::Result<ExitCode> {
             output,
             stream,
             params,
+            output_schema,
+            structured_output_retries,
             comms_name,
             comms_listen_tcp,
             no_comms,
@@ -459,6 +470,12 @@ async fn main() -> anyhow::Result<ExitCode> {
                 disabled: no_comms,
             };
 
+            // Parse output schema if provided
+            let parsed_output_schema = output_schema
+                .as_ref()
+                .map(|s| parse_output_schema(s))
+                .transpose()?;
+
             match (duration, provider_params) {
                 (Ok(dur), Ok(parsed_params)) => {
                     let mut limits = config.budget_limits();
@@ -480,6 +497,8 @@ async fn main() -> anyhow::Result<ExitCode> {
                         &output,
                         stream,
                         parsed_params,
+                        parsed_output_schema,
+                        structured_output_retries,
                         comms_overrides,
                         enable_builtins,
                         enable_shell,
@@ -553,6 +572,25 @@ fn parse_provider_params(params: &[String]) -> anyhow::Result<Option<serde_json:
     }
 
     Ok(Some(serde_json::Value::Object(map)))
+}
+
+/// Parse output schema from CLI argument.
+/// If the value starts with '{', treat it as inline JSON.
+/// Otherwise, treat it as a file path.
+fn parse_output_schema(schema_arg: &str) -> anyhow::Result<OutputSchema> {
+    let schema_value: serde_json::Value = if schema_arg.trim().starts_with('{') {
+        // Inline JSON
+        serde_json::from_str(schema_arg)
+            .map_err(|e| anyhow::anyhow!("Invalid inline JSON schema: {}", e))?
+    } else {
+        // File path
+        let content = std::fs::read_to_string(schema_arg)
+            .map_err(|e| anyhow::anyhow!("Failed to read schema file '{}': {}", schema_arg, e))?;
+        serde_json::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON in schema file '{}': {}", schema_arg, e))?
+    };
+
+    Ok(OutputSchema::new(schema_value))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1156,6 +1194,8 @@ async fn run_agent(
     output: &str,
     stream: bool,
     provider_params: Option<serde_json::Value>,
+    output_schema: Option<OutputSchema>,
+    structured_output_retries: u32,
     comms_overrides: CommsOverrides,
     enable_builtins: bool,
     enable_shell: bool,
@@ -1236,7 +1276,13 @@ async fn run_agent(
         .model(model.to_string())
         .max_tokens_per_turn(max_tokens)
         .system_prompt(system_prompt)
-        .budget(limits);
+        .budget(limits)
+        .structured_output_retries(structured_output_retries);
+
+    // Add output schema if provided
+    if let Some(schema) = output_schema {
+        builder = builder.output_schema(schema);
+    }
 
     let comms_enabled = comms_runtime.is_some();
     let comms_name = comms_config.as_ref().map(|config| config.name.clone());

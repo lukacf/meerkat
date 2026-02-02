@@ -6,6 +6,46 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Configuration for structured output extraction.
+///
+/// When provided to an agent, the agent will perform an extraction turn after
+/// completing the agentic work, forcing the LLM to output validated JSON that
+/// conforms to the provided schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputSchema {
+    /// The JSON schema that the output must conform to
+    pub schema: Value,
+    /// Optional name for the schema (used by some providers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Whether to enforce strict schema validation (provider-specific)
+    #[serde(default)]
+    pub strict: bool,
+}
+
+impl OutputSchema {
+    /// Create a new output schema
+    pub fn new(schema: Value) -> Self {
+        Self {
+            schema,
+            name: None,
+            strict: false,
+        }
+    }
+
+    /// Set the schema name
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Enable strict mode for schema validation
+    pub fn strict(mut self) -> Self {
+        self.strict = true;
+        self
+    }
+}
+
 /// Unique identifier for a session (UUID v7 for time-ordering)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub Uuid);
@@ -249,6 +289,9 @@ pub struct RunResult {
     pub turns: u32,
     /// Number of tool calls made
     pub tool_calls: u32,
+    /// Structured output (if output_schema was provided and extraction succeeded)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<Value>,
 }
 
 /// Reference to an artifact stored externally

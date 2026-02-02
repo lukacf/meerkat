@@ -9,6 +9,12 @@ use meerkat_tools::builtin::BuiltinTool;
 use meerkat_tools::builtin::shell::{
     JobId, JobManager, JobStatus, ShellConfig, ShellError, ShellOutput, ShellTool, ShellToolSet,
 };
+#[cfg(unix)]
+use nix::errno::Errno;
+#[cfg(unix)]
+use nix::sys::signal::kill;
+#[cfg(unix)]
+use nix::unistd::Pid;
 use serde_json::json;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -683,6 +689,7 @@ async fn test_regression_timeout_enforced() {
 /// not left running as an orphan.
 #[tokio::test]
 #[ignore = "e2e: spawns shell processes"]
+#[cfg(unix)]
 async fn test_regression_kill_terminates_process() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
@@ -690,9 +697,31 @@ async fn test_regression_kill_terminates_process() {
 
     // Spawn a long-running job
     let job_id = job_manager
-        .spawn_job("sleep 60", None, 120)
+        .spawn_job("echo $$ > pid.txt; while true; do sleep 1; done", None, 120)
         .await
         .expect("Should spawn job");
+
+    // Wait for the PID file to appear and parse it.
+    let pid_path = temp_dir.path().join("pid.txt");
+    let pid: i32 = {
+        let mut parsed = None;
+        for _ in 0..20 {
+            if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+                if let Ok(value) = contents.trim().parse::<i32>() {
+                    parsed = Some(value);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        parsed.expect("PID file should be written by the shell process")
+    };
+
+    let pid = Pid::from_raw(pid);
+    assert!(
+        kill(pid, None).is_ok(),
+        "Shell process should exist before cancellation"
+    );
 
     // Let it start
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -709,6 +738,23 @@ async fn test_regression_kill_terminates_process() {
         .cancel_job(&job_id)
         .await
         .expect("Cancel should succeed");
+
+    // Verify the process is terminated (kill -0 should fail with ESRCH).
+    let mut terminated = false;
+    for _ in 0..30 {
+        match kill(pid, None) {
+            Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            Err(Errno::ESRCH) => {
+                terminated = true;
+                break;
+            }
+            Err(err) => panic!("Unexpected kill check error: {err}"),
+        }
+    }
+    assert!(
+        terminated,
+        "Shell process should be terminated after cancel"
+    );
 
     // Verify it's cancelled
     let job = job_manager.get_status(&job_id).await.unwrap();

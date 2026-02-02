@@ -243,6 +243,21 @@ impl AnthropicClient {
                     body["top_k"] = v;
                 }
             }
+
+            // Handle structured output configuration
+            // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
+            if let Some(structured) = params.get("structured_output") {
+                if let Some(schema) = structured.get("schema") {
+                    body["output_config"] = serde_json::json!({
+                        "format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "schema": schema
+                            }
+                        }
+                    });
+                }
+            }
         }
 
         body
@@ -300,11 +315,21 @@ impl LlmClient for AnthropicClient {
             async_stream::try_stream! {
                 let body = self.build_request_body(request);
 
-                let response = self.http
+                // Check if structured output is enabled (requires beta header)
+                let has_structured_output = body.get("output_config").is_some();
+
+                let mut req = self.http
                     .post(format!("{}/v1/messages", self.base_url))
                     .header("x-api-key", &self.api_key)
                     .header("anthropic-version", "2023-06-01")
-                    .header("Content-Type", "application/json")
+                    .header("Content-Type", "application/json");
+
+                // Add beta header for structured outputs
+                if has_structured_output {
+                    req = req.header("anthropic-beta", "structured-outputs-2025-11-13");
+                }
+
+                let response = req
                     .json(&body)
                     .send()
                     .await
@@ -698,5 +723,68 @@ mod tests {
         assert_eq!(usage.output_tokens, 7);
         assert_eq!(usage.cache_creation_tokens, Some(4));
         assert_eq!(usage.cache_read_tokens, Some(2));
+    }
+
+    #[test]
+    fn test_build_request_body_with_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            },
+            "required": ["name", "age"]
+        });
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": schema,
+                "name": "person",
+                "strict": true
+            }),
+        );
+
+        let body = client.build_request_body(&request);
+
+        // Check output_config is present with correct structure
+        assert!(
+            body.get("output_config").is_some(),
+            "output_config should be present"
+        );
+        let output_config = &body["output_config"];
+        assert_eq!(output_config["format"]["type"], "json_schema");
+        assert!(output_config["format"]["json_schema"]["schema"].is_object());
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_without_structured_output() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        );
+
+        let body = client.build_request_body(&request);
+
+        // output_config should not be present
+        assert!(
+            body.get("output_config").is_none(),
+            "output_config should not be present without structured_output"
+        );
+        Ok(())
     }
 }

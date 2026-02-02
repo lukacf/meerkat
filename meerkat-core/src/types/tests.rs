@@ -253,6 +253,7 @@ fn test_run_result_json_schema() {
         },
         turns: 3,
         tool_calls: 5,
+        structured_output: None,
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -450,4 +451,108 @@ fn test_session_meta_timestamps() {
     // Should parse back
     let parsed = DateTime::parse_from_rfc3339(&iso_string).unwrap();
     assert_eq!(datetime.timestamp(), parsed.timestamp());
+}
+
+#[test]
+fn test_output_schema_new() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"}
+        },
+        "required": ["name", "age"]
+    });
+
+    let output_schema = OutputSchema::new(schema.clone());
+
+    assert_eq!(output_schema.schema, schema);
+    assert!(output_schema.name.is_none());
+    assert!(!output_schema.strict);
+}
+
+#[test]
+fn test_output_schema_with_name() {
+    let schema = json!({"type": "string"});
+    let output_schema = OutputSchema::new(schema).with_name("my_output");
+
+    assert_eq!(output_schema.name, Some("my_output".to_string()));
+}
+
+#[test]
+fn test_output_schema_strict() {
+    let schema = json!({"type": "string"});
+    let output_schema = OutputSchema::new(schema).strict();
+
+    assert!(output_schema.strict);
+}
+
+#[test]
+fn test_output_schema_serde_roundtrip() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"field": {"type": "string"}}
+    });
+    let output_schema = OutputSchema::new(schema.clone())
+        .with_name("test_schema")
+        .strict();
+
+    let json = serde_json::to_string(&output_schema).unwrap();
+    let parsed: OutputSchema = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.schema, schema);
+    assert_eq!(parsed.name, Some("test_schema".to_string()));
+    assert!(parsed.strict);
+}
+
+#[test]
+fn test_output_schema_serde_skip_none_name() {
+    let schema = json!({"type": "string"});
+    let output_schema = OutputSchema::new(schema);
+
+    let json = serde_json::to_value(&output_schema).unwrap();
+
+    // name should be skipped when None
+    assert!(json.get("name").is_none() || json.get("name") == Some(&Value::Null));
+}
+
+#[test]
+fn test_run_result_with_structured_output() {
+    let result = RunResult {
+        text: "Here's the structured data".to_string(),
+        session_id: SessionId::new(),
+        usage: Usage::default(),
+        turns: 2,
+        tool_calls: 0,
+        structured_output: Some(json!({"name": "Alice", "age": 30})),
+    };
+
+    let json = serde_json::to_value(&result).unwrap();
+    assert_eq!(json["structured_output"]["name"], "Alice");
+    assert_eq!(json["structured_output"]["age"], 30);
+
+    // Roundtrip
+    let parsed: RunResult = serde_json::from_value(json).unwrap();
+    assert!(parsed.structured_output.is_some());
+    assert_eq!(parsed.structured_output.unwrap()["name"], "Alice");
+}
+
+#[test]
+fn test_run_result_without_structured_output_skips_field() {
+    let result = RunResult {
+        text: "Regular response".to_string(),
+        session_id: SessionId::new(),
+        usage: Usage::default(),
+        turns: 1,
+        tool_calls: 0,
+        structured_output: None,
+    };
+
+    let json = serde_json::to_value(&result).unwrap();
+
+    // structured_output should be skipped when None
+    assert!(
+        json.get("structured_output").is_none()
+            || json.get("structured_output") == Some(&Value::Null)
+    );
 }

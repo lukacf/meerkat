@@ -290,7 +290,7 @@ where
                         self.state.transition(LoopState::CallingLlm)?;
                         turn_count += 1;
                     } else {
-                        // No tool calls - we're done
+                        // No tool calls - we're done with the agentic loop
                         let final_text = result.content.clone();
                         self.session.push(Message::Assistant(AssistantMessage {
                             content: result.content,
@@ -305,6 +305,35 @@ where
                             usage: result.usage,
                         });
 
+                        // Check if we need to perform extraction turn for structured output
+                        if self.config.output_schema.is_some() {
+                            // Perform extraction turn to get validated JSON
+                            let extraction_result = self
+                                .perform_extraction_turn(turn_count, tool_call_count)
+                                .await;
+
+                            // Transition to completed regardless of extraction result
+                            self.state.transition(LoopState::DrainingEvents)?;
+                            self.state.transition(LoopState::Completed)?;
+
+                            // Save session
+                            if let Err(e) = self.store.save(&self.session).await {
+                                tracing::warn!("Failed to save session: {}", e);
+                            }
+
+                            // Emit run completed (use extraction result text if successful)
+                            if let Ok(ref result) = extraction_result {
+                                emit_event!(AgentEvent::RunCompleted {
+                                    session_id: self.session.id().clone(),
+                                    result: result.text.clone(),
+                                    usage: self.session.total_usage(),
+                                });
+                            }
+
+                            return extraction_result;
+                        }
+
+                        // No extraction needed - complete normally
                         // Transition to completed
                         self.state.transition(LoopState::DrainingEvents)?;
                         self.state.transition(LoopState::Completed)?;
@@ -327,6 +356,7 @@ where
                             usage: self.session.total_usage(),
                             turns: turn_count + 1,
                             tool_calls: tool_call_count,
+                            structured_output: None,
                         });
                     }
                 }
@@ -362,6 +392,7 @@ where
             usage: self.session.total_usage(),
             turns,
             tool_calls,
+            structured_output: None,
         }
     }
 }

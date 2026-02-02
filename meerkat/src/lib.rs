@@ -72,6 +72,7 @@ pub use meerkat_core::{
     OperationPolicy,
     OperationResult,
     OperationSpec,
+    OutputSchema,
     ProviderConfig,
     ResultShape,
     RetryConfig,

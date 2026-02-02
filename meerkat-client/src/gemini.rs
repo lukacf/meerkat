@@ -174,6 +174,18 @@ impl GeminiClient {
             if let Some(top_p) = params.get("top_p") {
                 body["generationConfig"]["topP"] = top_p.clone();
             }
+
+            // Handle structured output configuration
+            // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
+            if let Some(structured) = params.get("structured_output") {
+                if let Some(schema) = structured.get("schema") {
+                    body["generationConfig"]["responseMimeType"] =
+                        Value::String("application/json".to_string());
+                    // Sanitize schema for Gemini (remove $defs, $ref, etc.)
+                    body["generationConfig"]["responseSchema"] =
+                        Self::sanitize_schema_for_gemini(schema);
+                }
+            }
         }
 
         if !request.tools.is_empty() {
@@ -636,5 +648,129 @@ mod tests {
         assert_eq!(id_to_name[1], ("fc_1".to_string(), "write_file"));
         assert_eq!(id_to_name[2], ("fc_2".to_string(), "search")); // Second search gets fc_2
         assert_eq!(id_to_name[3], ("fc_3".to_string(), "read_file"));
+    }
+
+    #[test]
+    fn test_build_request_body_with_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            },
+            "required": ["name", "age"]
+        });
+
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": schema,
+                "name": "person",
+                "strict": true
+            }),
+        );
+
+        let body = client.build_request_body(&request);
+
+        let gen_config = body
+            .get("generationConfig")
+            .ok_or("missing generationConfig")?;
+        assert_eq!(gen_config["responseMimeType"], "application/json");
+        assert!(gen_config.get("responseSchema").is_some());
+
+        // Schema should be sanitized (no $defs, $ref, etc.)
+        let response_schema = &gen_config["responseSchema"];
+        assert!(response_schema.get("$defs").is_none());
+        assert!(response_schema.get("$ref").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_with_structured_output_sanitizes_schema()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+
+        // Schema with $defs and $ref that should be removed
+        let schema = serde_json::json!({
+            "type": "object",
+            "$defs": {
+                "Address": {"type": "object"}
+            },
+            "$ref": "#/$defs/Address",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "additionalProperties": false
+        });
+
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("structured_output", serde_json::json!({"schema": schema}));
+
+        let body = client.build_request_body(&request);
+
+        let gen_config = body
+            .get("generationConfig")
+            .ok_or("missing generationConfig")?;
+        let response_schema = &gen_config["responseSchema"];
+
+        // These should be stripped
+        assert!(
+            response_schema.get("$defs").is_none(),
+            "$defs should be removed"
+        );
+        assert!(
+            response_schema.get("$ref").is_none(),
+            "$ref should be removed"
+        );
+        assert!(
+            response_schema.get("additionalProperties").is_none(),
+            "additionalProperties should be removed"
+        );
+
+        // These should be preserved
+        assert_eq!(response_schema["type"], "object");
+        assert!(response_schema.get("properties").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_without_structured_output() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let client = GeminiClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        );
+
+        let body = client.build_request_body(&request);
+
+        let gen_config = body
+            .get("generationConfig")
+            .ok_or("missing generationConfig")?;
+        assert!(
+            gen_config.get("responseMimeType").is_none(),
+            "responseMimeType should not be present"
+        );
+        assert!(
+            gen_config.get("responseSchema").is_none(),
+            "responseSchema should not be present"
+        );
+        Ok(())
     }
 }

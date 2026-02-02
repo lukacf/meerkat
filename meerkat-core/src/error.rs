@@ -229,6 +229,18 @@ pub enum AgentError {
         tool_name: String,
         args: serde_json::Value,
     },
+
+    /// Structured output validation failed after retries
+    #[error("Structured output validation failed after {attempts} attempts: {reason}")]
+    StructuredOutputValidationFailed {
+        attempts: u32,
+        reason: String,
+        last_output: String,
+    },
+
+    /// Invalid output schema provided
+    #[error("Invalid output schema: {0}")]
+    InvalidOutputSchema(String),
 }
 
 impl AgentError {

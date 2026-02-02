@@ -2,7 +2,9 @@
 //!
 //! Supports layered configuration: defaults → file → env (secrets only) → CLI
 
-use crate::{budget::BudgetLimits, mcp_config::McpServerConfig, retry::RetryPolicy};
+use crate::{
+    budget::BudgetLimits, mcp_config::McpServerConfig, retry::RetryPolicy, types::OutputSchema,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -263,6 +265,10 @@ pub struct CliOverrides {
     pub max_tool_calls: Option<usize>,
 }
 
+fn default_structured_output_retries() -> u32 {
+    2
+}
+
 /// Agent behavior configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -292,6 +298,15 @@ pub struct AgentConfig {
     /// and applying relevant parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
+    /// Output schema for structured output extraction.
+    ///
+    /// When set, the agent will perform an extraction turn after completing
+    /// the agentic work, forcing the LLM to output validated JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<OutputSchema>,
+    /// Maximum retries for structured output validation failures.
+    #[serde(default = "default_structured_output_retries")]
+    pub structured_output_retries: u32,
 }
 
 impl Default for AgentConfig {
@@ -313,6 +328,8 @@ impl Default for AgentConfig {
                 .unwrap_or_default(),
             max_turns: None,
             provider_params: None,
+            output_schema: None,
+            structured_output_retries: default_structured_output_retries(),
         }
     }
 }

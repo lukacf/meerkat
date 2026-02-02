@@ -4,6 +4,7 @@
 
 mod builder;
 pub mod comms_impl;
+mod extraction;
 mod runner;
 mod state;
 

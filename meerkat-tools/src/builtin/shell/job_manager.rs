@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
@@ -159,8 +159,8 @@ pub struct JobManager {
     event_tx: Option<mpsc::Sender<Value>>,
     /// Map of job ID to task handle (for cancellation)
     handles: Arc<Mutex<HashMap<JobId, JoinHandle<()>>>>,
-    /// Map of job ID to child process (for killing)
-    children: Arc<Mutex<HashMap<JobId, Child>>>,
+    /// Map of job ID to cancellation notifier (for killing)
+    cancel_notifiers: Arc<Mutex<HashMap<JobId, Arc<Notify>>>>,
     /// Map of job ID to completion time (for cleanup)
     completed_at: Arc<Mutex<HashMap<JobId, Instant>>>,
 }
@@ -174,7 +174,7 @@ impl JobManager {
             resolved_shell_path: Arc::new(Mutex::new(None)),
             event_tx: None,
             handles: Arc::new(Mutex::new(HashMap::new())),
-            children: Arc::new(Mutex::new(HashMap::new())),
+            cancel_notifiers: Arc::new(Mutex::new(HashMap::new())),
             completed_at: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -292,127 +292,134 @@ impl JobManager {
         let child = cmd.spawn().map_err(ShellError::Io)?;
         debug!("Spawned child process");
 
-        // Store the job and child process
+        // Store the job and cancellation notifier
         let jobs = Arc::clone(&self.jobs);
         let handles = Arc::clone(&self.handles);
-        let children = Arc::clone(&self.children);
+        let cancel_notifiers = Arc::clone(&self.cancel_notifiers);
         let completed_at = Arc::clone(&self.completed_at);
         let event_tx = self.event_tx.clone();
         let command_clone = command.to_string();
         let job_id_clone = job_id.clone();
         let job_id_for_completion = job_id.clone();
-        let job_id_for_child = job_id.clone();
+        let job_id_for_cancel = job_id.clone();
+        let cancel_notify = Arc::new(Notify::new());
 
-        // Insert job and child into maps
+        // Insert job and notifier into maps
         jobs.lock().await.insert(job_id.clone(), job);
-        children.lock().await.insert(job_id.clone(), child);
+        cancel_notifiers
+            .lock()
+            .await
+            .insert(job_id.clone(), Arc::clone(&cancel_notify));
 
         // Spawn the async task to wait for completion
         let handle = tokio::spawn(async move {
             let start = Instant::now();
             let timeout_duration = Duration::from_secs(timeout_secs);
+            let mut child = child;
 
-            // Take the child from the map to wait on it
-            let child = {
-                let mut children_guard = children.lock().await;
-                children_guard.remove(&job_id_for_child)
-            };
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
 
-            let final_status = if let Some(mut child) = child {
-                let stdout = child.stdout.take();
-                let stderr = child.stderr.take();
-
-                let stdout_handle = tokio::spawn(async move {
-                    if let Some(out) = stdout {
-                        read_stream_with_limit(out, DEFAULT_MAX_OUTPUT_BYTES).await
-                    } else {
-                        Ok(Vec::new())
-                    }
-                });
-
-                let stderr_handle = tokio::spawn(async move {
-                    if let Some(err) = stderr {
-                        read_stream_with_limit(err, DEFAULT_MAX_OUTPUT_BYTES).await
-                    } else {
-                        Ok(Vec::new())
-                    }
-                });
-
-                let wait_result = tokio::time::timeout(timeout_duration, child.wait()).await;
-                let duration_secs = start.elapsed().as_secs_f64();
-
-                let mut wait_error: Option<std::io::Error> = None;
-                let (exit_code, timed_out) = match wait_result {
-                    Ok(Ok(status)) => (status.code(), false),
-                    Ok(Err(e)) => {
-                        wait_error = Some(e);
-                        (None, false)
-                    }
-                    Err(_) => {
-                        let _ = graceful_kill(&mut child).await;
-                        (None, true)
-                    }
-                };
-
-                let stdout_bytes = match stdout_handle.await {
-                    Ok(Ok(buf)) => buf,
-                    Ok(Err(err)) => {
-                        warn!("Failed to read job stdout: {}", err);
-                        Vec::new()
-                    }
-                    Err(err) => {
-                        warn!("Job stdout reader task failed: {}", err);
-                        Vec::new()
-                    }
-                };
-
-                let stderr_bytes = match stderr_handle.await {
-                    Ok(Ok(buf)) => buf,
-                    Ok(Err(err)) => {
-                        warn!("Failed to read job stderr: {}", err);
-                        Vec::new()
-                    }
-                    Err(err) => {
-                        warn!("Job stderr reader task failed: {}", err);
-                        Vec::new()
-                    }
-                };
-
-                let stdout = truncate_output_tail(&stdout_bytes, DEFAULT_MAX_OUTPUT_BYTES);
-                let stderr = truncate_output_tail(&stderr_bytes, DEFAULT_MAX_OUTPUT_BYTES);
-
-                if let Some(err) = wait_error {
-                    JobStatus::Failed {
-                        error: err.to_string(),
-                        duration_secs,
-                    }
-                } else if timed_out {
-                    JobStatus::TimedOut {
-                        stdout,
-                        stderr,
-                        duration_secs,
-                    }
+            let stdout_handle = tokio::spawn(async move {
+                if let Some(out) = stdout {
+                    read_stream_with_limit(out, DEFAULT_MAX_OUTPUT_BYTES).await
                 } else {
-                    JobStatus::Completed {
-                        exit_code,
-                        stdout,
-                        stderr,
-                        duration_secs,
+                    Ok(Vec::new())
+                }
+            });
+
+            let stderr_handle = tokio::spawn(async move {
+                if let Some(err) = stderr {
+                    read_stream_with_limit(err, DEFAULT_MAX_OUTPUT_BYTES).await
+                } else {
+                    Ok(Vec::new())
+                }
+            });
+
+            enum WaitOutcome {
+                Completed(Option<i32>),
+                Failed(std::io::Error),
+                TimedOut,
+                Cancelled,
+            }
+
+            let wait_outcome = tokio::select! {
+                _ = cancel_notify.notified() => WaitOutcome::Cancelled,
+                result = tokio::time::timeout(timeout_duration, child.wait()) => {
+                    match result {
+                        Ok(Ok(status)) => WaitOutcome::Completed(status.code()),
+                        Ok(Err(err)) => WaitOutcome::Failed(err),
+                        Err(_) => WaitOutcome::TimedOut,
                     }
                 }
-            } else {
-                // Child was already taken (job was cancelled)
-                let duration_secs = start.elapsed().as_secs_f64();
-                JobStatus::Cancelled { duration_secs }
             };
 
-            // Update job status
-            {
+            if matches!(wait_outcome, WaitOutcome::TimedOut | WaitOutcome::Cancelled) {
+                let _ = graceful_kill(&mut child).await;
+            }
+
+            let duration_secs = start.elapsed().as_secs_f64();
+
+            let stdout_bytes = match stdout_handle.await {
+                Ok(Ok(buf)) => buf,
+                Ok(Err(err)) => {
+                    warn!("Failed to read job stdout: {}", err);
+                    Vec::new()
+                }
+                Err(err) => {
+                    warn!("Job stdout reader task failed: {}", err);
+                    Vec::new()
+                }
+            };
+
+            let stderr_bytes = match stderr_handle.await {
+                Ok(Ok(buf)) => buf,
+                Ok(Err(err)) => {
+                    warn!("Failed to read job stderr: {}", err);
+                    Vec::new()
+                }
+                Err(err) => {
+                    warn!("Job stderr reader task failed: {}", err);
+                    Vec::new()
+                }
+            };
+
+            let stdout = truncate_output_tail(&stdout_bytes, DEFAULT_MAX_OUTPUT_BYTES);
+            let stderr = truncate_output_tail(&stderr_bytes, DEFAULT_MAX_OUTPUT_BYTES);
+
+            let final_status = match wait_outcome {
+                WaitOutcome::Failed(err) => JobStatus::Failed {
+                    error: err.to_string(),
+                    duration_secs,
+                },
+                WaitOutcome::TimedOut => JobStatus::TimedOut {
+                    stdout,
+                    stderr,
+                    duration_secs,
+                },
+                WaitOutcome::Cancelled => JobStatus::Cancelled { duration_secs },
+                WaitOutcome::Completed(exit_code) => JobStatus::Completed {
+                    exit_code,
+                    stdout,
+                    stderr,
+                    duration_secs,
+                },
+            };
+
+            // Update job status (preserve Cancelled if already set)
+            let status_for_event = {
                 let mut jobs_guard = jobs.lock().await;
                 if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
-                    job.status = final_status.clone();
+                    if matches!(job.status, JobStatus::Cancelled { .. }) {
+                        job.status.clone()
+                    } else {
+                        job.status = final_status.clone();
+                        final_status.clone()
+                    }
+                } else {
+                    final_status.clone()
                 }
-            }
+            };
 
             // Record completion time for cleanup
             {
@@ -422,13 +429,18 @@ impl JobManager {
                     .insert(job_id_for_completion, Instant::now());
             }
 
+            // Remove cancellation notifier once the job is done
+            {
+                cancel_notifiers.lock().await.remove(&job_id_for_cancel);
+            }
+
             // Send completion event if configured
             if let Some(tx) = event_tx {
                 let event = json!({
                     "type": "shell_job_completed",
                     "job_id": job_id_clone.0,
                     "command": command_clone,
-                    "result": serde_json::to_value(&final_status).unwrap_or(Value::Null)
+                    "result": serde_json::to_value(&status_for_event).unwrap_or(Value::Null)
                 });
                 let _ = tx.send(event).await;
             }
@@ -498,7 +510,7 @@ impl JobManager {
         // Atomically check if job exists, is running, and update status in a single lock scope.
         // This prevents race conditions where another operation could change the status
         // between checking and modifying.
-        let (command, status_for_event) = {
+        {
             let mut jobs_guard = self.jobs.lock().await;
             let job = jobs_guard.get_mut(job_id).ok_or_else(|| {
                 warn!("Job not found");
@@ -519,40 +531,18 @@ impl JobManager {
 
             // Update status while still holding the lock
             job.status = JobStatus::Cancelled { duration_secs };
-            (job.command.clone(), job.status.clone())
         };
 
-        // Kill the child process (if it's still in the map)
-        {
-            let mut children_guard = self.children.lock().await;
-            if let Some(mut child) = children_guard.remove(job_id) {
-                debug!("Gracefully killing child process (SIGTERM then SIGKILL)");
-                // graceful_kill sends SIGTERM first, waits up to 2 seconds,
-                // then sends SIGKILL if needed. On Unix, uses process groups
-                // to terminate all child processes.
-                let _ = graceful_kill(&mut child).await;
-            }
+        // Signal the background task to terminate the process.
+        let notify = { self.cancel_notifiers.lock().await.get(job_id).cloned() };
+        if let Some(notify) = notify {
+            notify.notify_one();
+        } else {
+            warn!("Cancel notifier missing for running job");
         }
 
-        // Abort the task handle
-        {
-            let mut handles_guard = self.handles.lock().await;
-            if let Some(handle) = handles_guard.remove(job_id) {
-                debug!("Aborting task handle");
-                handle.abort();
-            }
-        }
-
-        // Send cancellation event if configured
-        if let Some(tx) = &self.event_tx {
-            let event = json!({
-                "type": "shell_job_completed",
-                "job_id": job_id.0,
-                "command": command,
-                "result": serde_json::to_value(&status_for_event).unwrap_or(Value::Null)
-            });
-            let _ = tx.send(event).await;
-        }
+        // Detach the task handle; it will finish and emit the completion event.
+        self.handles.lock().await.remove(job_id);
 
         Ok(())
     }
@@ -569,7 +559,7 @@ impl JobManager {
         let removed = self.jobs.lock().await.remove(job_id).is_some();
         if removed {
             self.handles.lock().await.remove(job_id);
-            self.children.lock().await.remove(job_id);
+            self.cancel_notifiers.lock().await.remove(job_id);
             self.completed_at.lock().await.remove(job_id);
         }
         removed
@@ -589,7 +579,7 @@ impl JobManager {
         // This is more efficient than acquiring locks multiple times in a loop.
         let mut jobs_guard = self.jobs.lock().await;
         let mut handles_guard = self.handles.lock().await;
-        let mut children_guard = self.children.lock().await;
+        let mut cancel_notifiers_guard = self.cancel_notifiers.lock().await;
         let mut completed_at_guard = self.completed_at.lock().await;
 
         // First pass: collect job IDs older than TTL
@@ -603,7 +593,7 @@ impl JobManager {
         for job_id in &expired_jobs {
             jobs_guard.remove(job_id);
             handles_guard.remove(job_id);
-            children_guard.remove(job_id);
+            cancel_notifiers_guard.remove(job_id);
             completed_at_guard.remove(job_id);
         }
 
@@ -622,7 +612,7 @@ impl JobManager {
             for (job_id, _) in completed_jobs.into_iter().take(to_remove) {
                 jobs_guard.remove(&job_id);
                 handles_guard.remove(&job_id);
-                children_guard.remove(&job_id);
+                cancel_notifiers_guard.remove(&job_id);
                 completed_at_guard.remove(&job_id);
             }
         }
@@ -1732,10 +1722,9 @@ mod tests {
     /// proper SIGTERM/SIGKILL handling. The full integration test of waiting for
     /// grace period requires more complex setup.
     ///
-    /// Note: The current architecture takes the child out of the children map
-    /// immediately in the async task, so graceful_kill is only used for very
-    /// fast cancellations. A future improvement could keep a reference for
-    /// graceful termination.
+    /// Note: The current architecture owns the child inside the async task,
+    /// so graceful_kill is invoked from the worker when a cancellation or
+    /// timeout signal is received.
     #[tokio::test]
     #[cfg(unix)]
     async fn test_graceful_kill_function_exists() {

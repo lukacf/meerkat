@@ -162,14 +162,12 @@ impl OpenAiClient {
                         .and_then(|s| s.as_bool())
                         .unwrap_or(false);
 
-                    body["text"] = serde_json::json!({
-                        "format": {
-                            "type": "json_schema",
-                            "json_schema": {
-                                "name": name,
-                                "schema": schema,
-                                "strict": strict
-                            }
+                    body["response_format"] = serde_json::json!({
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": name,
+                            "schema": schema,
+                            "strict": strict
                         }
                     });
                 }
@@ -586,13 +584,16 @@ mod tests {
 
         let body = client.build_request_body(&request);
 
-        // Check text.format is present with correct structure
-        assert!(body.get("text").is_some(), "text field should be present");
-        let text = &body["text"];
-        assert_eq!(text["format"]["type"], "json_schema");
-        assert_eq!(text["format"]["json_schema"]["name"], "person");
-        assert_eq!(text["format"]["json_schema"]["strict"], true);
-        assert!(text["format"]["json_schema"]["schema"].is_object());
+        // Check response_format is present with correct structure
+        assert!(
+            body.get("response_format").is_some(),
+            "response_format should be present"
+        );
+        let rf = &body["response_format"];
+        assert_eq!(rf["type"], "json_schema");
+        assert_eq!(rf["json_schema"]["name"], "person");
+        assert_eq!(rf["json_schema"]["strict"], true);
+        assert!(rf["json_schema"]["schema"].is_object());
     }
 
     #[test]
@@ -617,9 +618,9 @@ mod tests {
 
         let body = client.build_request_body(&request);
 
-        let text = &body["text"];
-        assert_eq!(text["format"]["json_schema"]["name"], "output"); // default name
-        assert_eq!(text["format"]["json_schema"]["strict"], false); // default strict
+        let rf = &body["response_format"];
+        assert_eq!(rf["json_schema"]["name"], "output"); // default name
+        assert_eq!(rf["json_schema"]["strict"], false); // default strict
     }
 
     #[test]
@@ -637,8 +638,8 @@ mod tests {
 
         // text field should not be present
         assert!(
-            body.get("text").is_none(),
-            "text field should not be present without structured_output"
+            body.get("response_format").is_none(),
+            "response_format should not be present without structured_output"
         );
     }
 }

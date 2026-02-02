@@ -508,3 +508,132 @@ async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// =============================================================================
+// Structured Output E2E Tests
+// =============================================================================
+//
+// These tests verify structured output works with real API calls.
+// Run with: MEERKAT_LIVE_API_TESTS=1 cargo test -p meerkat-client structured_output
+
+fn person_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"}
+        },
+        "required": ["name", "age"]
+    })
+}
+
+/// Collects all text from a stream and returns the final output
+async fn collect_stream_text(
+    client: &impl LlmClient,
+    request: &LlmRequest,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut stream = client.stream(request);
+    let mut text = String::new();
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(LlmEvent::TextDelta { delta }) => {
+                text.push_str(&delta);
+            }
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success { .. },
+            }) => break,
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            }) => return Err(format!("LLM error: {:?}", error).into()),
+            Ok(_) => {}
+            Err(e) => return Err(format!("Stream error: {:?}", e).into()),
+        }
+    }
+
+    Ok(text)
+}
+
+#[tokio::test]
+async fn test_anthropic_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = skip_if_no_anthropic_key() else {
+        return Ok(());
+    };
+
+    let client = AnthropicClient::new(api_key)?;
+    let request = LlmRequest::new(
+        "claude-sonnet-4-5",
+        vec![Message::User(UserMessage {
+            content: "Generate a person named Alice who is 30 years old.".to_string(),
+        })],
+    )
+    .with_provider_param(
+        "structured_output",
+        serde_json::json!({"schema": person_schema()}),
+    );
+
+    let text = collect_stream_text(&client, &request).await?;
+
+    // Verify it's valid JSON matching the schema
+    let parsed: Value = serde_json::from_str(&text)?;
+    assert!(parsed.get("name").is_some(), "should have name field");
+    assert!(parsed.get("age").is_some(), "should have age field");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_openai_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = skip_if_no_openai_key() else {
+        return Ok(());
+    };
+
+    let client = OpenAiClient::new(api_key);
+    let request = LlmRequest::new(
+        "gpt-4o-mini",
+        vec![Message::User(UserMessage {
+            content: "Generate a person named Bob who is 25 years old.".to_string(),
+        })],
+    )
+    .with_provider_param(
+        "structured_output",
+        serde_json::json!({"schema": person_schema()}),
+    );
+
+    let text = collect_stream_text(&client, &request).await?;
+
+    // Verify it's valid JSON matching the schema
+    let parsed: Value = serde_json::from_str(&text)?;
+    assert!(parsed.get("name").is_some(), "should have name field");
+    assert!(parsed.get("age").is_some(), "should have age field");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = skip_if_no_gemini_key() else {
+        return Ok(());
+    };
+
+    let client = GeminiClient::new(api_key);
+    let request = LlmRequest::new(
+        "gemini-2.0-flash",
+        vec![Message::User(UserMessage {
+            content: "Generate a person named Carol who is 35 years old.".to_string(),
+        })],
+    )
+    .with_provider_param(
+        "structured_output",
+        serde_json::json!({"schema": person_schema()}),
+    );
+
+    let text = collect_stream_text(&client, &request).await?;
+
+    // Verify it's valid JSON matching the schema
+    let parsed: Value = serde_json::from_str(&text)?;
+    assert!(parsed.get("name").is_some(), "should have name field");
+    assert!(parsed.get("age").is_some(), "should have age field");
+
+    Ok(())
+}

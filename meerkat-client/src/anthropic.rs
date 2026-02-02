@@ -248,12 +248,12 @@ impl AnthropicClient {
             // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
             if let Some(structured) = params.get("structured_output") {
                 if let Some(schema) = structured.get("schema") {
+                    // Anthropic requires additionalProperties: false on all objects
+                    let prepared_schema = Self::prepare_schema_for_anthropic(schema);
                     body["output_config"] = serde_json::json!({
                         "format": {
                             "type": "json_schema",
-                            "json_schema": {
-                                "schema": schema
-                            }
+                            "schema": prepared_schema
                         }
                     });
                 }
@@ -261,6 +261,32 @@ impl AnthropicClient {
         }
 
         body
+    }
+
+    /// Prepare a JSON schema for Anthropic's structured output API.
+    ///
+    /// Anthropic requires `additionalProperties: false` on all object types.
+    fn prepare_schema_for_anthropic(schema: &Value) -> Value {
+        match schema {
+            Value::Object(obj) => {
+                let mut result = serde_json::Map::new();
+                for (key, value) in obj {
+                    result.insert(key.clone(), Self::prepare_schema_for_anthropic(value));
+                }
+                // Add additionalProperties: false to objects with properties
+                if obj.get("type") == Some(&Value::String("object".to_string()))
+                    && obj.contains_key("properties")
+                    && !obj.contains_key("additionalProperties")
+                {
+                    result.insert("additionalProperties".to_string(), Value::Bool(false));
+                }
+                Value::Object(result)
+            }
+            Value::Array(arr) => {
+                Value::Array(arr.iter().map(Self::prepare_schema_for_anthropic).collect())
+            }
+            other => other.clone(),
+        }
     }
 
     /// Parse an SSE event from the response
@@ -762,7 +788,7 @@ mod tests {
         );
         let output_config = &body["output_config"];
         assert_eq!(output_config["format"]["type"], "json_schema");
-        assert!(output_config["format"]["json_schema"]["schema"].is_object());
+        assert!(output_config["format"]["schema"].is_object());
         Ok(())
     }
 
@@ -786,5 +812,60 @@ mod tests {
             "output_config should not be present without structured_output"
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_prepare_schema_adds_additional_properties() {
+        // Regression test: Anthropic API requires additionalProperties: false on objects
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "nested": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "integer"}
+                    }
+                }
+            },
+            "required": ["name"]
+        });
+
+        let prepared = AnthropicClient::prepare_schema_for_anthropic(&schema);
+
+        // Top-level object should have additionalProperties: false
+        assert_eq!(
+            prepared.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "top-level object should have additionalProperties: false"
+        );
+
+        // Nested object should also have additionalProperties: false
+        let nested = &prepared["properties"]["nested"];
+        assert_eq!(
+            nested.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "nested object should have additionalProperties: false"
+        );
+    }
+
+    #[test]
+    fn test_prepare_schema_preserves_existing_additional_properties() {
+        // If additionalProperties is already set, don't override it
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "additionalProperties": true
+        });
+
+        let prepared = AnthropicClient::prepare_schema_for_anthropic(&schema);
+
+        assert_eq!(
+            prepared.get("additionalProperties"),
+            Some(&serde_json::json!(true)),
+            "existing additionalProperties should be preserved"
+        );
     }
 }

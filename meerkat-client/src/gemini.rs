@@ -210,18 +210,42 @@ impl GeminiClient {
     }
 
     /// Sanitize JSON Schema for Gemini
+    ///
+    /// Gemini's API has a restricted JSON Schema support. This function removes
+    /// or transforms unsupported constructs:
+    /// - Removes: $defs, $ref, $schema, additionalProperties, oneOf, anyOf
+    /// - Converts array types like ["string", "null"] to just "string"
     fn sanitize_schema_for_gemini(schema: &Value) -> Value {
         match schema {
             Value::Object(map) => {
                 let mut sanitized = serde_json::Map::new();
                 for (key, value) in map {
+                    // Skip unsupported JSON Schema constructs
                     if key == "$defs"
                         || key == "$ref"
                         || key == "$schema"
                         || key == "additionalProperties"
+                        || key == "oneOf"
+                        || key == "anyOf"
+                        || key == "allOf"
                     {
                         continue;
                     }
+
+                    // Special handling for "type" field - Gemini doesn't support array types
+                    if key == "type" {
+                        if let Value::Array(types) = value {
+                            // Find the first non-null type
+                            let primary_type = types
+                                .iter()
+                                .find(|t| t.as_str() != Some("null"))
+                                .cloned()
+                                .unwrap_or_else(|| Value::String("string".to_string()));
+                            sanitized.insert(key.clone(), primary_type);
+                            continue;
+                        }
+                    }
+
                     sanitized.insert(key.clone(), Self::sanitize_schema_for_gemini(value));
                 }
                 Value::Object(sanitized)
@@ -772,5 +796,75 @@ mod tests {
             "responseSchema should not be present"
         );
         Ok(())
+    }
+
+    /// Regression: Gemini doesn't support array types like ["string", "null"]
+    /// The sanitizer should convert them to just "string".
+    #[test]
+    fn test_sanitize_schema_converts_array_type_to_string() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": ["integer", "null"]},
+                "email": {"type": ["string", "null"]}
+            }
+        });
+
+        let sanitized = GeminiClient::sanitize_schema_for_gemini(&schema);
+
+        // Array types should be converted to their primary type
+        assert_eq!(
+            sanitized["properties"]["age"]["type"], "integer",
+            "['integer', 'null'] should become 'integer'"
+        );
+        assert_eq!(
+            sanitized["properties"]["email"]["type"], "string",
+            "['string', 'null'] should become 'string'"
+        );
+        // Non-array types should be unchanged
+        assert_eq!(
+            sanitized["properties"]["name"]["type"], "string",
+            "'string' should remain 'string'"
+        );
+    }
+
+    /// Regression: Gemini doesn't support oneOf/anyOf/allOf
+    /// The sanitizer should remove them.
+    #[test]
+    fn test_sanitize_schema_removes_oneof_anyof_allof() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "oneOf": [
+                        {"const": "active"},
+                        {"const": "inactive"}
+                    ]
+                },
+                "value": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "number"}
+                    ]
+                }
+            },
+            "allOf": [
+                {"required": ["status"]}
+            ]
+        });
+
+        let sanitized = GeminiClient::sanitize_schema_for_gemini(&schema);
+
+        // oneOf, anyOf, allOf should be removed
+        assert!(
+            sanitized["properties"]["status"].get("oneOf").is_none(),
+            "oneOf should be removed"
+        );
+        assert!(
+            sanitized["properties"]["value"].get("anyOf").is_none(),
+            "anyOf should be removed"
+        );
+        assert!(sanitized.get("allOf").is_none(), "allOf should be removed");
     }
 }

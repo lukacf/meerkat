@@ -591,6 +591,10 @@ impl LlmClient for AnthropicClient {
                 }
 
                 if !saw_done && saw_event {
+                    tracing::warn!(
+                        model = %request.model,
+                        "Anthropic stream ended without terminal event; emitting synthetic Done"
+                    );
                     let reason = last_stop_reason.unwrap_or(StopReason::EndTurn);
                     yield LlmEvent::Done {
                         outcome: LlmDoneOutcome::Success { stop_reason: reason },

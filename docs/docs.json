@@ -1,0 +1,36 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Meerkat",
+  "theme": "mint",
+  "colors": {
+    "primary": "#16a34a"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Getting Started",
+        "pages": ["quickstart", "configuration", "examples"]
+      },
+      {
+        "tab": "CLI",
+        "pages": ["CLI"]
+      },
+      {
+        "tab": "SDK",
+        "pages": ["SDK", "api-reference", "future_sdks"]
+      },
+      {
+        "tab": "MCP",
+        "pages": ["mcp"]
+      },
+      {
+        "tab": "REST",
+        "pages": ["rest"]
+      },
+      {
+        "tab": "Architecture",
+        "pages": ["architecture"]
+      }
+    ]
+  }
+}

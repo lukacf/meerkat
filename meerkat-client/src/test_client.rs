@@ -20,6 +20,7 @@ impl Default for TestClient {
         Self::new(vec![
             LlmEvent::TextDelta {
                 delta: "ok".to_string(),
+                meta: None,
             },
             LlmEvent::Done {
                 outcome: LlmDoneOutcome::Success {

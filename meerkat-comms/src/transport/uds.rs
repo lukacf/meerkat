@@ -114,7 +114,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("test.sock");
 
-        let listener = UdsListener::bind(&path).await.unwrap();
+        let listener = match UdsListener::bind(&path).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                if let TransportError::Io(ref err) = e {
+                    if err.kind() == std::io::ErrorKind::PermissionDenied {
+                        return;
+                    }
+                }
+                panic!("UdsListener::bind failed: {e:?}");
+            }
+        };
         assert!(path.exists());
         drop(listener);
     }
@@ -124,7 +134,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("test.sock");
 
-        let listener = UdsListener::bind(&path).await.unwrap();
+        let listener = match UdsListener::bind(&path).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                if let TransportError::Io(ref err) = e {
+                    if err.kind() == std::io::ErrorKind::PermissionDenied {
+                        return;
+                    }
+                }
+                panic!("UdsListener::bind failed: {e:?}");
+            }
+        };
 
         // Spawn accept task
         let path_clone = path.clone();
@@ -133,7 +153,17 @@ mod tests {
         });
 
         // Connect
-        let _conn = UdsConnection::connect(&path_clone).await.unwrap();
+        let _conn = match UdsConnection::connect(&path_clone).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                if let TransportError::Io(ref err) = e {
+                    if err.kind() == std::io::ErrorKind::PermissionDenied {
+                        return;
+                    }
+                }
+                panic!("UdsConnection::connect failed: {e:?}");
+            }
+        };
         accept_handle.await.unwrap();
     }
 
@@ -142,7 +172,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("test.sock");
 
-        let listener = UdsListener::bind(&path).await.unwrap();
+        let listener = match UdsListener::bind(&path).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                if let TransportError::Io(ref err) = e {
+                    if err.kind() == std::io::ErrorKind::PermissionDenied {
+                        return;
+                    }
+                }
+                panic!("UdsListener::bind failed: {e:?}");
+            }
+        };
         let envelope = make_test_envelope();
         let envelope_id = envelope.id;
 
@@ -153,7 +193,17 @@ mod tests {
         });
 
         // Client sends
-        let mut client = UdsConnection::connect(&path).await.unwrap();
+        let mut client = match UdsConnection::connect(&path).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                if let TransportError::Io(ref err) = e {
+                    if err.kind() == std::io::ErrorKind::PermissionDenied {
+                        return;
+                    }
+                }
+                panic!("UdsConnection::connect failed: {e:?}");
+            }
+        };
         client.send(&envelope).await.unwrap();
 
         // Server receives

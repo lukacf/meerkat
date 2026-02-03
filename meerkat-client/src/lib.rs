@@ -5,6 +5,7 @@
 //! `LlmEvent` type, hiding provider-specific quirks.
 
 pub mod adapter;
+pub mod block_assembler;
 pub mod error;
 pub mod factory;
 mod http;
@@ -23,6 +24,7 @@ pub mod openai;
 pub mod gemini;
 
 pub use adapter::LlmClientAdapter;
+pub use block_assembler::{BlockAssembler, BlockKey, StreamAssemblyError};
 pub use error::LlmError;
 pub use factory::{
     DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClientFactory, LlmProvider,

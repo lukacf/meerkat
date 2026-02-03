@@ -3,8 +3,143 @@
 //! These types form the representation boundary for session persistence and wire formats.
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::Value;
+use std::fmt;
 use uuid::Uuid;
+
+// ===========================================================================
+// New ordered transcript types (spec section 3.1)
+// ===========================================================================
+
+/// Provider-specific metadata for replay continuity.
+/// Typed enum prevents runtime "is this an object?" errors.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ProviderMeta {
+    /// Anthropic thinking block signature
+    Anthropic {
+        /// Opaque signature for thinking continuity
+        signature: String,
+    },
+    /// Gemini thought signature for tool calls
+    Gemini {
+        /// Opaque signature for tool call continuity
+        #[serde(rename = "thoughtSignature")]
+        thought_signature: String,
+    },
+    /// OpenAI reasoning item metadata for stateless replay.
+    /// Both `id` and `encrypted_content` are required for faithful round-trip.
+    OpenAi {
+        /// Reasoning item ID (required by OpenAI schema)
+        id: String,
+        /// Encrypted reasoning tokens for continuity
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+    },
+}
+
+/// A block of content in an assistant message, preserving order.
+///
+/// Uses adjacently tagged serde representation to support `Box<RawValue>` in ToolUse.
+/// Internally tagged enums don't work with RawValue due to buffering requirements.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "block_type", content = "data", rename_all = "snake_case")]
+pub enum AssistantBlock {
+    /// Plain text output.
+    /// Note: Gemini may attach thoughtSignature to trailing text parts for continuity.
+    Text {
+        text: String,
+        /// Provider metadata (Gemini thoughtSignature on text parts)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta: Option<ProviderMeta>,
+    },
+
+    /// Visible reasoning/thinking notes emitted by the model
+    Reasoning {
+        /// Human-readable text (may be empty if only encrypted content)
+        #[serde(default)]
+        text: String,
+        /// Provider continuity metadata (typed, not arbitrary JSON)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta: Option<ProviderMeta>,
+    },
+
+    /// Tool use request
+    ToolUse {
+        id: String,
+        name: String,
+        /// Arguments as raw JSON - only dispatcher parses this
+        args: Box<RawValue>,
+        /// Provider continuity metadata
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta: Option<ProviderMeta>,
+    },
+}
+
+impl PartialEq for AssistantBlock {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                AssistantBlock::Text { text: t1, meta: m1 },
+                AssistantBlock::Text { text: t2, meta: m2 },
+            ) => t1 == t2 && m1 == m2,
+            (
+                AssistantBlock::Reasoning { text: t1, meta: m1 },
+                AssistantBlock::Reasoning { text: t2, meta: m2 },
+            ) => t1 == t2 && m1 == m2,
+            (
+                AssistantBlock::ToolUse { id: i1, name: n1, args: a1, meta: m1 },
+                AssistantBlock::ToolUse { id: i2, name: n2, args: a2, meta: m2 },
+            ) => i1 == i2 && n1 == n2 && a1.get() == a2.get() && m1 == m2,
+            _ => false,
+        }
+    }
+}
+
+/// Borrowed view into a tool call block. Zero allocations.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolCallView<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub args: &'a RawValue,
+}
+
+impl ToolCallView<'_> {
+    /// Parse args into a concrete type. Called by dispatcher, not core.
+    ///
+    /// # Errors
+    /// Returns `serde_json::Error` if args don't match expected schema.
+    pub fn parse_args<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        serde_json::from_str(self.args.get())
+    }
+}
+
+/// Iterator over tool calls in an AssistantMessage. Zero allocations.
+pub struct ToolCallIter<'a> {
+    inner: std::slice::Iter<'a, AssistantBlock>,
+}
+
+impl<'a> Iterator for ToolCallIter<'a> {
+    type Item = ToolCallView<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.inner.next()? {
+                AssistantBlock::ToolUse { id, name, args, .. } => {
+                    return Some(ToolCallView { id, name, args });
+                }
+                _ => continue,
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// Legacy types (will be migrated in later phases)
+// ===========================================================================
 
 /// Configuration for structured output extraction.
 ///
@@ -88,8 +223,11 @@ pub enum Message {
     System(SystemMessage),
     /// User input
     User(UserMessage),
-    /// Assistant response (may include tool calls)
+    /// Assistant response (may include tool calls) - legacy format
     Assistant(AssistantMessage),
+    /// Assistant response with ordered blocks - new format (spec v2)
+    #[serde(rename = "block_assistant")]
+    BlockAssistant(BlockAssistantMessage),
     /// Results from tool execution
     #[serde(rename = "tool_results")]
     ToolResults { results: Vec<ToolResult> },
@@ -109,7 +247,61 @@ pub struct UserMessage {
     pub content: String,
 }
 
-/// Assistant message with potential tool calls
+/// New assistant message with ordered blocks - no billing metadata.
+///
+/// This is the new format for storing assistant messages with full block ordering.
+/// The existing `AssistantMessage` is preserved for backwards compatibility during
+/// the migration period.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BlockAssistantMessage {
+    /// Ordered sequence of content blocks
+    pub blocks: Vec<AssistantBlock>,
+    /// How the turn ended
+    pub stop_reason: StopReason,
+}
+
+// Usage is NOT part of BlockAssistantMessage.
+// It's billing metadata returned separately from LLM calls.
+// See LlmResponse in meerkat-client.
+
+impl BlockAssistantMessage {
+    /// Iterate over tool calls without allocation.
+    pub fn tool_calls(&self) -> ToolCallIter<'_> {
+        ToolCallIter { inner: self.blocks.iter() }
+    }
+
+    /// Check if any tool calls are present.
+    pub fn has_tool_calls(&self) -> bool {
+        self.blocks.iter().any(|b| matches!(b, AssistantBlock::ToolUse { .. }))
+    }
+
+    /// Get tool use block by ID.
+    pub fn get_tool_use(&self, id: &str) -> Option<ToolCallView<'_>> {
+        self.tool_calls().find(|tc| tc.id == id)
+    }
+
+    /// Iterate over text blocks without allocation.
+    pub fn text_blocks(&self) -> impl Iterator<Item = &str> {
+        self.blocks.iter().filter_map(|b| match b {
+            AssistantBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+    }
+}
+
+/// Display implementation for text content - zero intermediate allocations.
+impl fmt::Display for BlockAssistantMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for block in &self.blocks {
+            if let AssistantBlock::Text { text, .. } = block {
+                f.write_str(text)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Assistant message with potential tool calls (legacy format)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct AssistantMessage {

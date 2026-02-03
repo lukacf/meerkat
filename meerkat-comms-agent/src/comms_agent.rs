@@ -369,8 +369,10 @@ mod tests {
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
                 Ok(LlmStreamResult::new(
-                    "Default response".to_string(),
-                    vec![],
+                    vec![meerkat_core::types::AssistantBlock::Text {
+                        text: "Default response".to_string(),
+                        meta: None,
+                    }],
                     StopReason::EndTurn,
                     Usage::default(),
                 ))
@@ -395,10 +397,14 @@ mod tests {
 
         async fn dispatch(
             &self,
-            _name: &str,
-            _args: &serde_json::Value,
-        ) -> Result<serde_json::Value, meerkat_tools::ToolError> {
-            Ok(serde_json::Value::String("mock result".to_string()))
+            call: ToolCallView<'_>,
+        ) -> Result<ToolResult, meerkat_tools::ToolError> {
+            Ok(ToolResult {
+                tool_use_id: call.id.to_string(),
+                content: "mock result".to_string(),
+                is_error: false,
+                thought_signature: None,
+            })
         }
     }
 

@@ -556,3 +556,465 @@ fn test_run_result_without_structured_output_skips_field() {
             || json.get("structured_output") == Some(&Value::Null)
     );
 }
+
+// ===========================================================================
+// New tests for ordered transcript types (spec section 3.1)
+// ===========================================================================
+
+mod ordered_transcript_types {
+    use super::*;
+    use serde_json::value::RawValue;
+
+    // -----------------------------------------------------------------------
+    // ProviderMeta serialization round-trip tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_provider_meta_anthropic_roundtrip() {
+        let meta = ProviderMeta::Anthropic {
+            signature: "opaque_sig_abc123".to_string(),
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: ProviderMeta = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(meta, parsed);
+        // Verify tagged enum structure
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["provider"], "anthropic");
+        assert_eq!(value["signature"], "opaque_sig_abc123");
+    }
+
+    #[test]
+    fn test_provider_meta_gemini_roundtrip() {
+        let meta = ProviderMeta::Gemini {
+            thought_signature: "gemini_thought_xyz".to_string(),
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: ProviderMeta = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(meta, parsed);
+        // Verify tagged enum structure with camelCase rename
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["provider"], "gemini");
+        assert_eq!(value["thoughtSignature"], "gemini_thought_xyz");
+    }
+
+    #[test]
+    fn test_provider_meta_openai_roundtrip() {
+        let meta = ProviderMeta::OpenAi {
+            id: "reasoning_item_123".to_string(),
+            encrypted_content: Some("encrypted_tokens_abc".to_string()),
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: ProviderMeta = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(meta, parsed);
+        // Verify tagged enum structure
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["provider"], "open_ai");
+        assert_eq!(value["id"], "reasoning_item_123");
+        assert_eq!(value["encrypted_content"], "encrypted_tokens_abc");
+    }
+
+    #[test]
+    fn test_provider_meta_openai_without_encrypted_content() {
+        let meta = ProviderMeta::OpenAi {
+            id: "reasoning_item_456".to_string(),
+            encrypted_content: None,
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        // encrypted_content should be skipped when None
+        assert!(
+            value.get("encrypted_content").is_none()
+                || value.get("encrypted_content") == Some(&Value::Null)
+        );
+
+        // Roundtrip still works
+        let parsed: ProviderMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(meta, parsed);
+    }
+
+    // -----------------------------------------------------------------------
+    // AssistantBlock serialization round-trip tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_assistant_block_text_roundtrip() {
+        let block = AssistantBlock::Text {
+            text: "Hello, world!".to_string(),
+            meta: None,
+        };
+
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: AssistantBlock = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(block, parsed);
+        // Verify adjacently tagged enum structure
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["block_type"], "text");
+        assert_eq!(value["data"]["text"], "Hello, world!");
+    }
+
+    #[test]
+    fn test_assistant_block_text_with_gemini_meta() {
+        let block = AssistantBlock::Text {
+            text: "Response with signature".to_string(),
+            meta: Some(ProviderMeta::Gemini {
+                thought_signature: "trailing_sig".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: AssistantBlock = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(block, parsed);
+    }
+
+    #[test]
+    fn test_assistant_block_reasoning_roundtrip() {
+        let block = AssistantBlock::Reasoning {
+            text: "Let me think about this...".to_string(),
+            meta: Some(ProviderMeta::Anthropic {
+                signature: "thinking_sig_abc".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: AssistantBlock = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(block, parsed);
+        // Verify adjacently tagged enum structure
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["block_type"], "reasoning");
+        assert_eq!(value["data"]["text"], "Let me think about this...");
+        assert!(value["data"]["meta"].is_object());
+    }
+
+    #[test]
+    fn test_assistant_block_reasoning_empty_text() {
+        // OpenAI may have empty text with only encrypted_content
+        let block = AssistantBlock::Reasoning {
+            text: String::new(),
+            meta: Some(ProviderMeta::OpenAi {
+                id: "reasoning_123".to_string(),
+                encrypted_content: Some("encrypted".to_string()),
+            }),
+        };
+
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: AssistantBlock = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(block, parsed);
+    }
+
+    #[test]
+    fn test_assistant_block_tool_use_roundtrip() {
+        let args = RawValue::from_string(r#"{"path":"/tmp/test.txt"}"#.to_string()).unwrap();
+        let block = AssistantBlock::ToolUse {
+            id: "tool_123".to_string(),
+            name: "read_file".to_string(),
+            args,
+            meta: None,
+        };
+
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: AssistantBlock = serde_json::from_str(&json).unwrap();
+
+        // Verify adjacently tagged enum structure
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["block_type"], "tool_use");
+        assert_eq!(value["data"]["id"], "tool_123");
+        assert_eq!(value["data"]["name"], "read_file");
+
+        // Check args round-trip (compare as JSON values)
+        match parsed {
+            AssistantBlock::ToolUse { id, name, args, .. } => {
+                assert_eq!(id, "tool_123");
+                assert_eq!(name, "read_file");
+                let args_value: Value = serde_json::from_str(args.get()).unwrap();
+                assert_eq!(args_value["path"], "/tmp/test.txt");
+            }
+            _ => panic!("Expected ToolUse block"),
+        }
+    }
+
+    #[test]
+    fn test_assistant_block_tool_use_with_gemini_meta() {
+        let args = RawValue::from_string(r#"{"query":"test"}"#.to_string()).unwrap();
+        let block = AssistantBlock::ToolUse {
+            id: "tool_456".to_string(),
+            name: "search".to_string(),
+            args,
+            meta: Some(ProviderMeta::Gemini {
+                thought_signature: "first_parallel_call_sig".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: AssistantBlock = serde_json::from_str(&json).unwrap();
+
+        match parsed {
+            AssistantBlock::ToolUse { meta, .. } => {
+                assert!(meta.is_some());
+                match meta.unwrap() {
+                    ProviderMeta::Gemini { thought_signature } => {
+                        assert_eq!(thought_signature, "first_parallel_call_sig");
+                    }
+                    _ => panic!("Expected Gemini meta"),
+                }
+            }
+            _ => panic!("Expected ToolUse block"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ToolCallView::parse_args tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tool_call_view_parse_args() {
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct ReadFileArgs {
+            path: String,
+            #[serde(default)]
+            encoding: Option<String>,
+        }
+
+        let args = RawValue::from_string(r#"{"path":"/tmp/test.txt","encoding":"utf-8"}"#.to_string()).unwrap();
+        let view = ToolCallView {
+            id: "tc_123",
+            name: "read_file",
+            args: &args,
+        };
+
+        let parsed: ReadFileArgs = view.parse_args().unwrap();
+        assert_eq!(parsed.path, "/tmp/test.txt");
+        assert_eq!(parsed.encoding, Some("utf-8".to_string()));
+    }
+
+    #[test]
+    fn test_tool_call_view_parse_args_error() {
+        #[derive(Debug, serde::Deserialize)]
+        struct ExpectedArgs {
+            #[allow(dead_code)]
+            required_field: String,
+        }
+
+        let args = RawValue::from_string(r#"{"wrong_field":"value"}"#.to_string()).unwrap();
+        let view = ToolCallView {
+            id: "tc_456",
+            name: "some_tool",
+            args: &args,
+        };
+
+        let result: Result<ExpectedArgs, _> = view.parse_args();
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // AssistantMessage::tool_calls() iterator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_assistant_message_tool_calls_iterator() {
+        let args1 = RawValue::from_string(r#"{"path":"/a"}"#.to_string()).unwrap();
+        let args2 = RawValue::from_string(r#"{"query":"test"}"#.to_string()).unwrap();
+
+        let msg = BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::Text {
+                    text: "Let me help".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::ToolUse {
+                    id: "tc_1".to_string(),
+                    name: "read_file".to_string(),
+                    args: args1,
+                    meta: None,
+                },
+                AssistantBlock::Reasoning {
+                    text: "thinking...".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::ToolUse {
+                    id: "tc_2".to_string(),
+                    name: "search".to_string(),
+                    args: args2,
+                    meta: None,
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+        };
+
+        let tool_calls: Vec<_> = msg.tool_calls().collect();
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].id, "tc_1");
+        assert_eq!(tool_calls[0].name, "read_file");
+        assert_eq!(tool_calls[1].id, "tc_2");
+        assert_eq!(tool_calls[1].name, "search");
+    }
+
+    #[test]
+    fn test_assistant_message_tool_calls_empty() {
+        let msg = BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::Text {
+                    text: "No tools needed".to_string(),
+                    meta: None,
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+        };
+
+        let tool_calls: Vec<_> = msg.tool_calls().collect();
+        assert!(tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_assistant_message_has_tool_calls() {
+        let args = RawValue::from_string(r#"{}"#.to_string()).unwrap();
+
+        let msg_with_tools = BlockAssistantMessage {
+            blocks: vec![AssistantBlock::ToolUse {
+                id: "tc_1".to_string(),
+                name: "test".to_string(),
+                args,
+                meta: None,
+            }],
+            stop_reason: StopReason::ToolUse,
+        };
+        assert!(msg_with_tools.has_tool_calls());
+
+        let msg_without_tools = BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "Hello".to_string(),
+                meta: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+        };
+        assert!(!msg_without_tools.has_tool_calls());
+    }
+
+    #[test]
+    fn test_assistant_message_get_tool_use() {
+        let args1 = RawValue::from_string(r#"{"a":1}"#.to_string()).unwrap();
+        let args2 = RawValue::from_string(r#"{"b":2}"#.to_string()).unwrap();
+
+        let msg = BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::ToolUse {
+                    id: "tc_first".to_string(),
+                    name: "tool_a".to_string(),
+                    args: args1,
+                    meta: None,
+                },
+                AssistantBlock::ToolUse {
+                    id: "tc_second".to_string(),
+                    name: "tool_b".to_string(),
+                    args: args2,
+                    meta: None,
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+        };
+
+        let found = msg.get_tool_use("tc_second");
+        assert!(found.is_some());
+        let view = found.unwrap();
+        assert_eq!(view.name, "tool_b");
+
+        let not_found = msg.get_tool_use("tc_nonexistent");
+        assert!(not_found.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // AssistantMessage Display impl tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_assistant_message_display() {
+        let args = RawValue::from_string(r#"{}"#.to_string()).unwrap();
+
+        let msg = BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::Text {
+                    text: "First part. ".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::Reasoning {
+                    text: "This should not appear".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::Text {
+                    text: "Second part.".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::ToolUse {
+                    id: "tc_1".to_string(),
+                    name: "test".to_string(),
+                    args,
+                    meta: None,
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+        };
+
+        let display = format!("{}", msg);
+        assert_eq!(display, "First part. Second part.");
+    }
+
+    #[test]
+    fn test_assistant_message_display_empty() {
+        let msg = BlockAssistantMessage {
+            blocks: vec![],
+            stop_reason: StopReason::EndTurn,
+        };
+
+        let display = format!("{}", msg);
+        assert_eq!(display, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // AssistantMessage text_blocks iterator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_assistant_message_text_blocks() {
+        let args = RawValue::from_string(r#"{}"#.to_string()).unwrap();
+
+        let msg = BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::Text {
+                    text: "Hello".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::Reasoning {
+                    text: "thinking".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::Text {
+                    text: "World".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::ToolUse {
+                    id: "tc_1".to_string(),
+                    name: "test".to_string(),
+                    args,
+                    meta: None,
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+        };
+
+        let text_blocks: Vec<_> = msg.text_blocks().collect();
+        assert_eq!(text_blocks.len(), 2);
+        assert_eq!(text_blocks[0], "Hello");
+        assert_eq!(text_blocks[1], "World");
+    }
+}

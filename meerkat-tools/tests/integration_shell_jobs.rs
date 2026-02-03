@@ -6,6 +6,8 @@
 #![allow(clippy::panic, clippy::unwrap_used)]
 
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolCallView;
+use meerkat_core::error::ToolError;
 use meerkat_tools::builtin::shell::ShellConfig;
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolPolicyLayer,
@@ -13,6 +15,23 @@ use meerkat_tools::builtin::{
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
+
+async fn dispatch_json(
+    dispatcher: &dyn AgentToolDispatcher,
+    name: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, ToolError> {
+    let args_raw = serde_json::value::RawValue::from_string(args.to_string())
+        .expect("valid args json");
+    let call = ToolCallView {
+        id: "test-1",
+        name,
+        args: &args_raw,
+    };
+    let result = dispatcher.dispatch(call).await?;
+    serde_json::from_str(&result.content)
+        .or_else(|_| Ok(serde_json::Value::String(result.content)))
+}
 
 /// Create a CompositeDispatcher with shell tools enabled.
 fn create_dispatcher_with_shell(
@@ -53,15 +72,15 @@ async fn test_p1_shell_tool_shares_job_manager_with_job_control_tools()
     let dispatcher = create_dispatcher_with_shell(&temp_dir)?;
 
     // Step 1: Spawn a background job via the shell tool
-    let spawn_result = dispatcher
-        .dispatch(
-            "shell",
-            &json!({
-                "command": "sleep 60",
-                "background": true
-            }),
-        )
-        .await?;
+    let spawn_result = dispatch_json(
+        &dispatcher,
+        "shell",
+        json!({
+            "command": "sleep 60",
+            "background": true
+        }),
+    )
+    .await?;
 
     // Extract the job_id from the response
     let job_id = spawn_result
@@ -76,7 +95,7 @@ async fn test_p1_shell_tool_shares_job_manager_with_job_control_tools()
     );
 
     // Step 2: Verify the job is visible via shell_jobs (list all jobs)
-    let list_result = dispatcher.dispatch("shell_jobs", &json!({})).await?;
+    let list_result = dispatch_json(&dispatcher, "shell_jobs", json!({})).await?;
 
     let jobs = list_result
         .as_array()
@@ -112,9 +131,8 @@ async fn test_p1_shell_tool_shares_job_manager_with_job_control_tools()
     );
 
     // Step 3: Verify the job is queryable via shell_job_status
-    let status_result = dispatcher
-        .dispatch("shell_job_status", &json!({ "job_id": job_id }))
-        .await?;
+    let status_result =
+        dispatch_json(&dispatcher, "shell_job_status", json!({ "job_id": job_id })).await?;
 
     // If JobManagers aren't shared, this will return null/error
     assert!(
@@ -135,9 +153,8 @@ async fn test_p1_shell_tool_shares_job_manager_with_job_control_tools()
     );
 
     // Step 4: Verify the job can be cancelled via shell_job_cancel
-    let cancel_result = dispatcher
-        .dispatch("shell_job_cancel", &json!({ "job_id": job_id }))
-        .await;
+    let cancel_result =
+        dispatch_json(&dispatcher, "shell_job_cancel", json!({ "job_id": job_id })).await;
 
     assert!(
         cancel_result.is_ok(),
@@ -148,9 +165,8 @@ async fn test_p1_shell_tool_shares_job_manager_with_job_control_tools()
     );
 
     // Verify job is now cancelled
-    let final_status = dispatcher
-        .dispatch("shell_job_status", &json!({ "job_id": job_id }))
-        .await?;
+    let final_status =
+        dispatch_json(&dispatcher, "shell_job_status", json!({ "job_id": job_id })).await?;
 
     let status_obj = final_status.get("status");
     // JobStatus is serialized with serde tag="status", so it looks like:
@@ -190,15 +206,15 @@ async fn test_multiple_background_jobs_tracked() -> Result<(), Box<dyn std::erro
     // Spawn 3 background jobs
     let mut job_ids = Vec::new();
     for i in 0..3 {
-        let result = dispatcher
-            .dispatch(
-                "shell",
-                &json!({
-                    "command": format!("sleep {}", 60 + i),
-                    "background": true
-                }),
-            )
-            .await?;
+        let result = dispatch_json(
+            &dispatcher,
+            "shell",
+            json!({
+                "command": format!("sleep {}", 60 + i),
+                "background": true
+            }),
+        )
+        .await?;
 
         let job_id = result
             .get("job_id")
@@ -209,7 +225,7 @@ async fn test_multiple_background_jobs_tracked() -> Result<(), Box<dyn std::erro
     }
 
     // Verify all 3 jobs are visible
-    let list_result = dispatcher.dispatch("shell_jobs", &json!({})).await?;
+    let list_result = dispatch_json(&dispatcher, "shell_jobs", json!({})).await?;
     let jobs = list_result.as_array().unwrap();
 
     assert_eq!(
@@ -229,9 +245,8 @@ async fn test_multiple_background_jobs_tracked() -> Result<(), Box<dyn std::erro
 
     // Clean up: cancel all jobs
     for job_id in &job_ids {
-        let _ = dispatcher
-            .dispatch("shell_job_cancel", &json!({ "job_id": job_id }))
-            .await;
+        let _ =
+            dispatch_json(&dispatcher, "shell_job_cancel", json!({ "job_id": job_id })).await;
     }
 
     Ok(())

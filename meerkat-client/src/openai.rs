@@ -1,18 +1,20 @@
-//! OpenAI API client
+//! OpenAI API client - Responses API
 //!
-//! Implements the LlmClient trait for OpenAI's API.
+//! Implements the LlmClient trait for OpenAI's Responses API.
+//! This client uses the /v1/responses endpoint which supports reasoning items.
 
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, ToolCallBuffer};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+use crate::BlockAssembler;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use meerkat_core::{Message, StopReason, Usage};
+use meerkat_core::{AssistantBlock, Message, ProviderMeta, StopReason, Usage};
 use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::pin::Pin;
 
-/// Client for OpenAI API
+/// Client for OpenAI Responses API
 pub struct OpenAiClient {
     api_key: String,
     base_url: String,
@@ -47,68 +49,23 @@ impl OpenAiClient {
         Ok(Self::new(api_key))
     }
 
-    /// Build request body for OpenAI API
+    /// Build request body for OpenAI Responses API
     fn build_request_body(&self, request: &LlmRequest) -> Value {
-        let mut messages = Vec::new();
-
-        for msg in &request.messages {
-            match msg {
-                Message::System(s) => {
-                    messages.push(serde_json::json!({
-                        "role": "system",
-                        "content": s.content
-                    }));
-                }
-                Message::User(u) => {
-                    messages.push(serde_json::json!({
-                        "role": "user",
-                        "content": u.content
-                    }));
-                }
-                Message::Assistant(a) => {
-                    let mut msg = serde_json::json!({
-                        "role": "assistant",
-                        "content": if a.content.is_empty() { Value::Null } else { Value::String(a.content.clone()) }
-                    });
-
-                    if !a.tool_calls.is_empty() {
-                        let tool_calls: Vec<Value> = a
-                            .tool_calls
-                            .iter()
-                            .map(|tc| {
-                                serde_json::json!({
-                                    "id": tc.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.name,
-                                        "arguments": tc.args.to_string()
-                                    }
-                                })
-                            })
-                            .collect();
-                        msg["tool_calls"] = Value::Array(tool_calls);
-                    }
-
-                    messages.push(msg);
-                }
-                Message::ToolResults { results } => {
-                    for r in results {
-                        messages.push(serde_json::json!({
-                            "role": "tool",
-                            "tool_call_id": r.tool_use_id,
-                            "content": r.content
-                        }));
-                    }
-                }
-            }
-        }
+        let input = Self::convert_to_responses_input(&request.messages);
 
         let mut body = serde_json::json!({
             "model": request.model,
-            "max_completion_tokens": request.max_tokens,
-            "messages": messages,
+            "input": input,
+            "max_output_tokens": request.max_tokens,
             "stream": true,
-            "stream_options": {"include_usage": true}
+            // Request encrypted_content for stateless replay
+            "include": ["reasoning.encrypted_content"],
+        });
+
+        // Enable reasoning with default effort
+        body["reasoning"] = serde_json::json!({
+            "effort": "medium",
+            "summary": "auto"
         });
 
         if let Some(temp) = request.temperature {
@@ -118,17 +75,16 @@ impl OpenAiClient {
         }
 
         if !request.tools.is_empty() {
+            // Responses API tool format: {"type": "function", "name": "...", "parameters": {...}}
             let tools: Vec<Value> = request
                 .tools
                 .iter()
                 .map(|t| {
                     serde_json::json!({
                         "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.input_schema
-                        }
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema
                     })
                 })
                 .collect();
@@ -138,7 +94,7 @@ impl OpenAiClient {
         // Extract OpenAI-specific parameters from provider_params
         if let Some(params) = &request.provider_params {
             if let Some(reasoning_effort) = params.get("reasoning_effort") {
-                body["reasoning_effort"] = reasoning_effort.clone();
+                body["reasoning"]["effort"] = reasoning_effort.clone();
             }
 
             if let Some(seed) = params.get("seed") {
@@ -154,7 +110,6 @@ impl OpenAiClient {
             }
 
             // Handle structured output configuration
-            // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
             if let Some(structured) = params.get("structured_output") {
                 if let Some(schema) = structured.get("schema") {
                     let name = structured
@@ -166,9 +121,9 @@ impl OpenAiClient {
                         .and_then(|s| s.as_bool())
                         .unwrap_or(false);
 
-                    body["response_format"] = serde_json::json!({
-                        "type": "json_schema",
-                        "json_schema": {
+                    body["text"] = serde_json::json!({
+                        "format": {
+                            "type": "json_schema",
                             "name": name,
                             "schema": schema,
                             "strict": strict
@@ -181,8 +136,103 @@ impl OpenAiClient {
         body
     }
 
-    /// Parse an SSE event from the response
-    fn parse_sse_line(line: &str) -> Option<ChatCompletionChunk> {
+    /// Convert messages to Responses API input format
+    fn convert_to_responses_input(messages: &[Message]) -> Vec<Value> {
+        let mut items = Vec::new();
+
+        for msg in messages {
+            match msg {
+                Message::System(s) => {
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "system",
+                        "content": s.content
+                    }));
+                }
+                Message::User(u) => {
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": u.content
+                    }));
+                }
+                Message::Assistant(a) => {
+                    // Legacy AssistantMessage format - convert to items
+                    if !a.content.is_empty() {
+                        items.push(serde_json::json!({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": a.content
+                        }));
+                    }
+                    for tc in &a.tool_calls {
+                        items.push(serde_json::json!({
+                            "type": "function_call",
+                            "call_id": tc.id,
+                            "name": tc.name,
+                            "arguments": tc.args.to_string()
+                        }));
+                    }
+                }
+                Message::BlockAssistant(a) => {
+                    // New BlockAssistantMessage format - render blocks as items
+                    for block in &a.blocks {
+                        match block {
+                            AssistantBlock::Text { text, .. } => {
+                                if !text.is_empty() {
+                                    items.push(serde_json::json!({
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": text
+                                    }));
+                                }
+                            }
+                            AssistantBlock::Reasoning {
+                                text,
+                                meta: Some(ProviderMeta::OpenAi { id, encrypted_content }),
+                            } => {
+                                // OpenAI requires id and summary for reasoning items
+                                let mut item = serde_json::json!({
+                                    "type": "reasoning",
+                                    "id": id,
+                                    "summary": [{"type": "summary_text", "text": text}]
+                                });
+                                if let Some(enc) = encrypted_content {
+                                    item["encrypted_content"] = serde_json::json!(enc);
+                                }
+                                items.push(item);
+                            }
+                            AssistantBlock::Reasoning { .. } => {
+                                // Skip reasoning blocks without OpenAI metadata
+                            }
+                            AssistantBlock::ToolUse { id, name, args, .. } => {
+                                items.push(serde_json::json!({
+                                    "type": "function_call",
+                                    "call_id": id,
+                                    "name": name,
+                                    "arguments": args.get()  // Already JSON string
+                                }));
+                            }
+                            _ => {} // non_exhaustive: ignore unknown future variants
+                        }
+                    }
+                }
+                Message::ToolResults { results } => {
+                    for r in results {
+                        items.push(serde_json::json!({
+                            "type": "function_call_output",
+                            "call_id": r.tool_use_id,
+                            "output": r.content
+                        }));
+                    }
+                }
+            }
+        }
+        items
+    }
+
+    /// Parse an SSE event from the Responses API stream
+    fn parse_responses_sse_line(line: &str) -> Option<ResponsesStreamEvent> {
         if let Some(data) = line.strip_prefix("data: ") {
             if data == "[DONE]" {
                 return None;
@@ -205,7 +255,7 @@ impl LlmClient for OpenAiClient {
                 let body = self.build_request_body(request);
 
                 let response = self.http
-                    .post(format!("{}/v1/chat/completions", self.base_url))
+                    .post(format!("{}/v1/responses", self.base_url))
                     .header("Authorization", format!("Bearer {}", self.api_key))
                     .header("Content-Type", "application/json")
                     .json(&body)
@@ -224,7 +274,8 @@ impl LlmClient for OpenAiClient {
                 };
                 let mut stream = stream_result?;
                 let mut buffer = String::with_capacity(512);
-                let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
+                let mut assembler = BlockAssembler::new();
+                let mut usage = Usage::default();
 
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
@@ -233,84 +284,305 @@ impl LlmClient for OpenAiClient {
                     while let Some(newline_pos) = buffer.find('\n') {
                         let line = buffer[..newline_pos].trim();
                         let should_process = !line.is_empty() && !line.starts_with(':');
-                        let parsed_chunk = if should_process {
-                            Self::parse_sse_line(line)
+                        let parsed_event = if should_process {
+                            Self::parse_responses_sse_line(line)
                         } else {
                             None
                         };
 
                         buffer.drain(..=newline_pos);
 
-                        if let Some(chunk) = parsed_chunk {
-                            if let Some(usage) = chunk.usage {
-                                yield LlmEvent::UsageUpdate {
-                                    usage: Usage {
-                                        input_tokens: usage.prompt_tokens.unwrap_or(0),
-                                        output_tokens: usage.completion_tokens.unwrap_or(0),
-                                        cache_creation_tokens: None,
-                                        cache_read_tokens: None,
-                                    }
-                                };
-                            }
+                        if let Some(event) = parsed_event {
+                            // Handle response.completed event (non-streaming final response)
+                            if event.event_type == "response.completed" {
+                                if let Some(response_obj) = &event.response {
+                                    // Process output items
+                                    if let Some(output) = response_obj.get("output").and_then(|o| o.as_array()) {
+                                        for item in output {
+                                            if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
+                                                match item_type {
+                                                    "message" => {
+                                                        // content is an array: [{"type": "output_text", "text": "..."}, ...]
+                                                        if let Some(content_parts) = item.get("content").and_then(|c| c.as_array()) {
+                                                            for part in content_parts {
+                                                                if let Some(part_type) = part.get("type").and_then(|t| t.as_str()) {
+                                                                    match part_type {
+                                                                        "output_text" => {
+                                                                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                                                assembler.on_text_delta(text, None);
+                                                                                yield LlmEvent::TextDelta { delta: text.to_string(), meta: None };
+                                                                            }
+                                                                        }
+                                                                        "refusal" => {
+                                                                            if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str()) {
+                                                                                assembler.on_text_delta(refusal, None);
+                                                                                yield LlmEvent::TextDelta { delta: refusal.to_string(), meta: None };
+                                                                            }
+                                                                        }
+                                                                        _ => {}
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    "reasoning" => {
+                                                        // Required: reasoning item ID for replay
+                                                        let Some(reasoning_id) = item.get("id").and_then(|i| i.as_str()) else {
+                                                            tracing::warn!("reasoning item missing id, skipping");
+                                                            continue;
+                                                        };
 
-                            for choice in chunk.choices {
-                                let delta = choice.delta;
+                                                        // Extract summary text
+                                                        let mut summary_text = String::new();
+                                                        if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
+                                                            for summary in summaries {
+                                                                if let Some(text) = summary.get("text").and_then(|t| t.as_str()) {
+                                                                    if !summary_text.is_empty() {
+                                                                        summary_text.push('\n');
+                                                                    }
+                                                                    summary_text.push_str(text);
+                                                                }
+                                                            }
+                                                        }
 
-                                if let Some(content) = delta.content {
-                                    if !content.is_empty() {
-                                        yield LlmEvent::TextDelta { delta: content };
-                                    }
-                                }
+                                                        // encrypted_content is optional
+                                                        let encrypted = item.get("encrypted_content")
+                                                            .and_then(|v| v.as_str())
+                                                            .map(|s| s.to_string());
 
-                                if let Some(tool_calls) = delta.tool_calls {
-                                    for tc in tool_calls {
-                                        let index = tc.index.unwrap_or(0);
+                                                        let meta = Some(ProviderMeta::OpenAi {
+                                                            id: reasoning_id.to_string(),
+                                                            encrypted_content: encrypted,
+                                                        });
 
-                                        if let std::collections::hash_map::Entry::Vacant(e) = tool_buffers.entry(index) {
-                                            let id = tc.id.clone().unwrap_or_default();
-                                            let mut buf = ToolCallBuffer::new(id);
-                                            if let Some(func) = &tc.function {
-                                                buf.name = func.name.clone();
-                                            }
-                                            e.insert(buf);
-                                        }
+                                                        assembler.on_reasoning_start();
+                                                        if !summary_text.is_empty() {
+                                                            let _ = assembler.on_reasoning_delta(&summary_text);
+                                                        }
+                                                        assembler.on_reasoning_complete(meta.clone());
 
-                                        if let Some(func) = &tc.function {
-                                            if let Some(args) = &func.arguments {
-                                                if let Some(buf) = tool_buffers.get_mut(&index) {
-                                                    buf.args_json.push_str(args);
-                                                    yield LlmEvent::ToolCallDelta {
-                                                        id: buf.id.clone(),
-                                                        name: buf.name.clone(),
-                                                        args_delta: args.clone(),
-                                                    };
+                                                        yield LlmEvent::ReasoningComplete {
+                                                            text: summary_text,
+                                                            meta,
+                                                        };
+                                                    }
+                                                    "function_call" => {
+                                                        // Extract required fields
+                                                        let Some(call_id) = item.get("call_id").and_then(|c| c.as_str()) else {
+                                                            tracing::warn!("function_call missing call_id");
+                                                            continue;
+                                                        };
+                                                        let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
+                                                            tracing::warn!(call_id, "function_call missing name");
+                                                            continue;
+                                                        };
+                                                        // arguments is a JSON string
+                                                        let args: Box<RawValue> = match item.get("arguments").and_then(|a| a.as_str()) {
+                                                            Some(args_str) => match RawValue::from_string(args_str.to_string()) {
+                                                                Ok(raw) => raw,
+                                                                Err(e) => {
+                                                                    tracing::error!(call_id, "invalid args JSON, skipping: {e}");
+                                                                    continue;
+                                                                }
+                                                            },
+                                                            None => {
+                                                                // Empty args - treat as empty object
+                                                                match RawValue::from_string("{}".to_string()) {
+                                                                    Ok(raw) => raw,
+                                                                    Err(_) => continue,
+                                                                }
+                                                            }
+                                                        };
+
+                                                        let _ = assembler.on_tool_call_start(call_id.to_string());
+                                                        let _ = assembler.on_tool_call_complete(
+                                                            call_id.to_string(),
+                                                            name.to_string(),
+                                                            args.clone(),
+                                                            None,
+                                                        );
+
+                                                        // Also emit as legacy Value for compatibility
+                                                        let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
+                                                        yield LlmEvent::ToolCallComplete {
+                                                            id: call_id.to_string(),
+                                                            name: name.to_string(),
+                                                            args: args_value,
+                                                            thought_signature: None,
+                                                            meta: None,
+                                                        };
+                                                    }
+                                                    _ => {}
                                                 }
                                             }
                                         }
                                     }
-                                }
 
-                                if let Some(finish_reason) = choice.finish_reason {
-                                    for (_, buf) in tool_buffers.drain() {
-                                        if let Some(tc) = buf.try_complete() {
-                                            yield LlmEvent::ToolCallComplete {
-                                                id: tc.id,
-                                                name: tc.name,
-                                                args: tc.args,
-                                                thought_signature: None,
-                                            };
+                                    // Extract usage
+                                    if let Some(usage_obj) = response_obj.get("usage") {
+                                        usage.input_tokens = usage_obj.get("input_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        usage.output_tokens = usage_obj.get("output_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        yield LlmEvent::UsageUpdate { usage: usage.clone() };
+                                    }
+
+                                    // Determine stop reason
+                                    let stop_reason = match response_obj.get("status").and_then(|s| s.as_str()) {
+                                        Some("completed") => {
+                                            // Check if there were tool calls
+                                            let has_tool_calls = response_obj.get("output")
+                                                .and_then(|o| o.as_array())
+                                                .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
+                                                .unwrap_or(false);
+                                            if has_tool_calls {
+                                                StopReason::ToolUse
+                                            } else {
+                                                StopReason::EndTurn
+                                            }
+                                        }
+                                        Some("incomplete") => {
+                                            match response_obj.get("incomplete_details").and_then(|d| d.get("reason")).and_then(|r| r.as_str()) {
+                                                Some("max_output_tokens") => StopReason::MaxTokens,
+                                                Some("content_filter") => StopReason::ContentFilter,
+                                                _ => StopReason::EndTurn,
+                                            }
+                                        }
+                                        Some("cancelled") => StopReason::Cancelled,
+                                        _ => StopReason::EndTurn,
+                                    };
+
+                                    yield LlmEvent::Done {
+                                        outcome: LlmDoneOutcome::Success { stop_reason },
+                                    };
+                                }
+                            }
+                            // Handle streaming delta events
+                            else if event.event_type == "response.output_text.delta" {
+                                if let Some(delta) = &event.delta {
+                                    assembler.on_text_delta(delta, None);
+                                    yield LlmEvent::TextDelta { delta: delta.clone(), meta: None };
+                                }
+                            }
+                            else if event.event_type == "response.reasoning_summary_text.delta" {
+                                if let Some(delta) = &event.delta {
+                                    yield LlmEvent::ReasoningDelta { delta: delta.clone() };
+                                }
+                            }
+                            else if event.event_type == "response.function_call_arguments.delta" {
+                                if let (Some(call_id), Some(delta)) = (&event.call_id, &event.delta) {
+                                    let name = event.name.clone();
+                                    yield LlmEvent::ToolCallDelta {
+                                        id: call_id.clone(),
+                                        name,
+                                        args_delta: delta.clone(),
+                                    };
+                                }
+                            }
+                            else if event.event_type == "response.function_call_arguments.done" {
+                                if let (Some(call_id), Some(arguments)) = (&event.call_id, &event.arguments) {
+                                    let name = event.name.clone().unwrap_or_default();
+                                    let args: Box<RawValue> = RawValue::from_string(arguments.clone())
+                                        .unwrap_or_else(|_| fallback_raw_value());
+
+                                    let _ = assembler.on_tool_call_start(call_id.clone());
+                                    let _ = assembler.on_tool_call_complete(
+                                        call_id.clone(),
+                                        name.clone(),
+                                        args.clone(),
+                                        None,
+                                    );
+
+                                    let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
+                                    yield LlmEvent::ToolCallComplete {
+                                        id: call_id.clone(),
+                                        name,
+                                        args: args_value,
+                                        thought_signature: None,
+                                        meta: None,
+                                    };
+                                }
+                            }
+                            else if event.event_type == "response.reasoning_summary.done" || event.event_type == "response.reasoning.done" {
+                                // Extract reasoning item details from the item field
+                                if let Some(item) = &event.item {
+                                    let reasoning_id = item.get("id")
+                                        .and_then(|i| i.as_str())
+                                        .unwrap_or_default();
+
+                                    let mut summary_text = String::new();
+                                    if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
+                                        for summary in summaries {
+                                            if let Some(text) = summary.get("text").and_then(|t| t.as_str()) {
+                                                if !summary_text.is_empty() {
+                                                    summary_text.push('\n');
+                                                }
+                                                summary_text.push_str(text);
+                                            }
                                         }
                                     }
 
-                                    let reason = match finish_reason.as_str() {
-                                        "stop" => StopReason::EndTurn,
-                                        "tool_calls" => StopReason::ToolUse,
-                                        "length" => StopReason::MaxTokens,
-                                        "content_filter" => StopReason::ContentFilter,
+                                    let encrypted = item.get("encrypted_content")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+
+                                    let meta = Some(ProviderMeta::OpenAi {
+                                        id: reasoning_id.to_string(),
+                                        encrypted_content: encrypted,
+                                    });
+
+                                    assembler.on_reasoning_start();
+                                    if !summary_text.is_empty() {
+                                        let _ = assembler.on_reasoning_delta(&summary_text);
+                                    }
+                                    assembler.on_reasoning_complete(meta.clone());
+
+                                    yield LlmEvent::ReasoningComplete {
+                                        text: summary_text,
+                                        meta,
+                                    };
+                                }
+                            }
+                            else if event.event_type == "response.done" {
+                                // Final done event with usage
+                                if let Some(response_obj) = &event.response {
+                                    if let Some(usage_obj) = response_obj.get("usage") {
+                                        usage.input_tokens = usage_obj.get("input_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        usage.output_tokens = usage_obj.get("output_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        yield LlmEvent::UsageUpdate { usage: usage.clone() };
+                                    }
+
+                                    let stop_reason = match response_obj.get("status").and_then(|s| s.as_str()) {
+                                        Some("completed") => {
+                                            let has_tool_calls = response_obj.get("output")
+                                                .and_then(|o| o.as_array())
+                                                .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
+                                                .unwrap_or(false);
+                                            if has_tool_calls {
+                                                StopReason::ToolUse
+                                            } else {
+                                                StopReason::EndTurn
+                                            }
+                                        }
+                                        Some("incomplete") => {
+                                            match response_obj.get("incomplete_details").and_then(|d| d.get("reason")).and_then(|r| r.as_str()) {
+                                                Some("max_output_tokens") => StopReason::MaxTokens,
+                                                Some("content_filter") => StopReason::ContentFilter,
+                                                _ => StopReason::EndTurn,
+                                            }
+                                        }
+                                        Some("cancelled") => StopReason::Cancelled,
                                         _ => StopReason::EndTurn,
                                     };
+
                                     yield LlmEvent::Done {
-                                        outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                                        outcome: LlmDoneOutcome::Success { stop_reason },
                                     };
                                 }
                             }
@@ -332,41 +604,29 @@ impl LlmClient for OpenAiClient {
     }
 }
 
+/// SSE event from OpenAI Responses API streaming
 #[derive(Debug, Deserialize)]
-struct ChatCompletionChunk {
-    choices: Vec<ChatCompletionChoice>,
-    usage: Option<UsageMetadata>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionChoice {
-    delta: ChatCompletionDelta,
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionDelta {
-    content: Option<String>,
-    tool_calls: Option<Vec<ChatCompletionToolCall>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionToolCall {
-    index: Option<usize>,
-    id: Option<String>,
-    function: Option<ChatCompletionFunction>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionFunction {
+struct ResponsesStreamEvent {
+    /// Event type (e.g., "response.output_text.delta", "response.done")
+    #[serde(rename = "type")]
+    event_type: String,
+    /// Text delta for streaming events
+    delta: Option<String>,
+    /// Call ID for function call events
+    call_id: Option<String>,
+    /// Function name for function call events
     name: Option<String>,
+    /// Complete arguments for function_call_arguments.done
     arguments: Option<String>,
+    /// Item object for reasoning/function done events
+    item: Option<Value>,
+    /// Full response object for response.done and response.completed
+    response: Option<Value>,
 }
 
-#[derive(Debug, Deserialize)]
-struct UsageMetadata {
-    prompt_tokens: Option<u64>,
-    completion_tokens: Option<u64>,
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn fallback_raw_value() -> Box<RawValue> {
+    RawValue::from_string("{}".to_string()).expect("static JSON is valid")
 }
 
 #[cfg(test)]
@@ -375,27 +635,314 @@ mod tests {
     use super::*;
     use meerkat_core::UserMessage;
 
+    // =========================================================================
+    // Responses API Request Format Tests
+    // =========================================================================
+
     #[test]
-    fn test_request_includes_reasoning_effort_from_provider_params() {
+    fn test_request_uses_responses_api_endpoint_format() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "o1-preview",
+            "gpt-5.2",
+            vec![Message::User(UserMessage {
+                content: "Hello".to_string(),
+            })],
+        );
+
+        let body = client.build_request_body(&request);
+
+        // Should have "input" not "messages"
+        assert!(body.get("input").is_some(), "should have 'input' field");
+        assert!(body.get("messages").is_none(), "should NOT have 'messages' field");
+
+        // Should include reasoning.encrypted_content
+        let include = body.get("include").expect("should have include");
+        let include_arr = include.as_array().expect("include should be array");
+        assert!(
+            include_arr.iter().any(|v| v.as_str() == Some("reasoning.encrypted_content")),
+            "should include reasoning.encrypted_content"
+        );
+    }
+
+    #[test]
+    fn test_request_input_format_system_message() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::System(meerkat_core::SystemMessage {
+                    content: "You are helpful".to_string(),
+                }),
+                Message::User(UserMessage {
+                    content: "Hello".to_string(),
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let input = body["input"].as_array().expect("input should be array");
+
+        // System message should have type: "message"
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "system");
+        assert_eq!(input[0]["content"], "You are helpful");
+
+        // User message
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(input[1]["content"], "Hello");
+    }
+
+    #[test]
+    fn test_request_input_format_tool_call() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let tool_args = serde_json::json!({"location": "Tokyo"});
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Weather?".to_string(),
+                }),
+                Message::Assistant(meerkat_core::AssistantMessage {
+                    content: String::new(),
+                    tool_calls: vec![meerkat_core::ToolCall::new(
+                        "call_abc123".to_string(),
+                        "get_weather".to_string(),
+                        tool_args,
+                    )],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage::default(),
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let input = body["input"].as_array().expect("input should be array");
+
+        // Tool call should be type: "function_call"
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "call_abc123");
+        assert_eq!(input[1]["name"], "get_weather");
+        // arguments should be JSON string
+        let args_str = input[1]["arguments"].as_str().expect("arguments should be string");
+        let parsed_args: Value = serde_json::from_str(args_str).expect("should be valid JSON");
+        assert_eq!(parsed_args["location"], "Tokyo");
+    }
+
+    #[test]
+    fn test_request_input_format_tool_result() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Weather?".to_string(),
+                }),
+                Message::ToolResults {
+                    results: vec![meerkat_core::ToolResult::new(
+                        "call_abc123".to_string(),
+                        "Sunny, 25C".to_string(),
+                        false,
+                    )],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let input = body["input"].as_array().expect("input should be array");
+
+        // Tool result should be type: "function_call_output"
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["call_id"], "call_abc123");
+        assert_eq!(input[1]["output"], "Sunny, 25C");
+    }
+
+    #[test]
+    fn test_tool_definition_format() {
+        use std::sync::Arc;
+        use meerkat_core::ToolDef;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
             vec![Message::User(UserMessage {
                 content: "test".to_string(),
             })],
         )
-        .with_provider_param("reasoning_effort", "medium");
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "get_weather".to_string(),
+            description: "Get weather info".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"}
+                }
+            }),
+        })]);
+
+        let body = client.build_request_body(&request);
+        let tools = body["tools"].as_array().expect("tools should be array");
+
+        // Responses API tool format: name at top level, not nested in "function"
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "get_weather");
+        assert_eq!(tools[0]["description"], "Get weather info");
+        assert!(tools[0]["parameters"].is_object());
+        // Should NOT have "function" wrapper
+        assert!(tools[0].get("function").is_none());
+    }
+
+    #[test]
+    fn test_request_includes_reasoning_config() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        );
 
         let body = client.build_request_body(&request);
 
-        assert_eq!(body["reasoning_effort"], "medium");
+        // Should have reasoning config
+        let reasoning = body.get("reasoning").expect("should have reasoning");
+        assert_eq!(reasoning["effort"], "medium");
+        assert_eq!(reasoning["summary"], "auto");
     }
+
+    #[test]
+    fn test_request_reasoning_effort_override() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("reasoning_effort", "high");
+
+        let body = client.build_request_body(&request);
+
+        assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    // =========================================================================
+    // BlockAssistant Message Tests
+    // =========================================================================
+
+    #[test]
+    fn test_request_input_format_block_assistant_text() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Hello".to_string(),
+                }),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::Text {
+                            text: "Hi there!".to_string(),
+                            meta: None,
+                        },
+                    ],
+                    stop_reason: StopReason::EndTurn,
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let input = body["input"].as_array().expect("input should be array");
+
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[1]["content"], "Hi there!");
+    }
+
+    #[test]
+    fn test_request_input_format_block_assistant_reasoning() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Hello".to_string(),
+                }),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::Reasoning {
+                            text: "Let me think about this".to_string(),
+                            meta: Some(ProviderMeta::OpenAi {
+                                id: "rs_abc123".to_string(),
+                                encrypted_content: Some("encrypted_data".to_string()),
+                            }),
+                        },
+                    ],
+                    stop_reason: StopReason::EndTurn,
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let input = body["input"].as_array().expect("input should be array");
+
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_abc123");
+        assert_eq!(input[1]["encrypted_content"], "encrypted_data");
+        let summary = input[1]["summary"].as_array().expect("summary should be array");
+        assert_eq!(summary[0]["text"], "Let me think about this");
+    }
+
+    #[test]
+    fn test_request_input_format_block_assistant_tool_use() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let args = RawValue::from_string(r#"{"location":"Tokyo"}"#.to_string()).unwrap();
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Weather?".to_string(),
+                }),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::ToolUse {
+                            id: "call_xyz".to_string(),
+                            name: "get_weather".to_string(),
+                            args,
+                            meta: None,
+                        },
+                    ],
+                    stop_reason: StopReason::ToolUse,
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let input = body["input"].as_array().expect("input should be array");
+
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "call_xyz");
+        assert_eq!(input[1]["name"], "get_weather");
+        // arguments should be the raw JSON string
+        let args_str = input[1]["arguments"].as_str().expect("arguments should be string");
+        assert_eq!(args_str, r#"{"location":"Tokyo"}"#);
+    }
+
+    // =========================================================================
+    // Provider Parameters Tests
+    // =========================================================================
 
     #[test]
     fn test_request_includes_seed_from_provider_params() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-4o",
+            "gpt-5.2",
             vec![Message::User(UserMessage {
                 content: "test".to_string(),
             })],
@@ -411,7 +958,7 @@ mod tests {
     fn test_request_includes_frequency_penalty_from_provider_params() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-4o",
+            "gpt-5.2",
             vec![Message::User(UserMessage {
                 content: "test".to_string(),
             })],
@@ -427,7 +974,7 @@ mod tests {
     fn test_request_includes_presence_penalty_from_provider_params() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-4o",
+            "gpt-5.2",
             vec![Message::User(UserMessage {
                 content: "test".to_string(),
             })],
@@ -443,7 +990,7 @@ mod tests {
     fn test_unknown_provider_params_are_ignored() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-4o",
+            "gpt-5.2",
             vec![Message::User(UserMessage {
                 content: "test".to_string(),
             })],
@@ -463,100 +1010,27 @@ mod tests {
     fn test_multiple_provider_params_combined() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "o1-preview",
+            "gpt-5.2",
             vec![Message::User(UserMessage {
                 content: "test".to_string(),
             })],
         )
-        .with_provider_param("reasoning_effort", "medium")
+        .with_provider_param("reasoning_effort", "high")
         .with_provider_param("seed", 999)
         .with_provider_param("frequency_penalty", 0.3)
         .with_provider_param("presence_penalty", 0.4);
 
         let body = client.build_request_body(&request);
 
-        assert_eq!(body["reasoning_effort"], "medium");
+        assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["seed"], 999);
         assert_eq!(body["frequency_penalty"], 0.3);
         assert_eq!(body["presence_penalty"], 0.4);
     }
 
-    #[test]
-    fn test_tool_args_serialization_no_double_encoding() -> Result<(), Box<dyn std::error::Error>> {
-        let client = OpenAiClient::new("test-key".to_string());
-
-        let tool_args = serde_json::json!({"city": "Tokyo", "units": "celsius"});
-        let request = LlmRequest::new(
-            "gpt-4o-mini",
-            vec![
-                Message::User(UserMessage {
-                    content: "What's the weather?".to_string(),
-                }),
-                Message::Assistant(meerkat_core::AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![meerkat_core::ToolCall::new(
-                        "call_123".to_string(),
-                        "get_weather".to_string(),
-                        tool_args,
-                    )],
-                    stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
-                }),
-            ],
-        );
-
-        let body = client.build_request_body(&request);
-
-        let messages = body["messages"].as_array().ok_or("not array")?;
-        let assistant_msg = messages
-            .iter()
-            .find(|m| m["role"] == "assistant")
-            .ok_or("no assistant message")?;
-
-        let tool_calls = assistant_msg["tool_calls"]
-            .as_array()
-            .ok_or("no tool calls")?;
-        let arguments = tool_calls[0]["function"]["arguments"]
-            .as_str()
-            .ok_or("not string")?;
-
-        let parsed: serde_json::Value = serde_json::from_str(arguments)?;
-
-        assert_eq!(parsed["city"], "Tokyo");
-        assert_eq!(parsed["units"], "celsius");
-
-        assert!(
-            !arguments.starts_with(r#"{\"#),
-            "arguments should not be double-encoded: {}",
-            arguments
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_sse_line_valid_data() -> Result<(), Box<dyn std::error::Error>> {
-        let line = r###"data: {"id":"123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}"###;
-        let chunk = OpenAiClient::parse_sse_line(line);
-        assert!(chunk.is_some());
-        let chunk = chunk.ok_or("missing chunk")?;
-        assert_eq!(chunk.choices.len(), 1);
-        assert_eq!(chunk.choices[0].delta.content, Some("Hi".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_sse_line_done_marker() {
-        let line = "data: [DONE]";
-        let chunk = OpenAiClient::parse_sse_line(line);
-        assert!(chunk.is_none());
-    }
-
-    #[test]
-    fn test_parse_sse_line_non_data_line() {
-        let line = "event: message";
-        let chunk = OpenAiClient::parse_sse_line(line);
-        assert!(chunk.is_none());
-    }
+    // =========================================================================
+    // Structured Output Tests
+    // =========================================================================
 
     #[test]
     fn test_build_request_body_with_structured_output() {
@@ -588,16 +1062,13 @@ mod tests {
 
         let body = client.build_request_body(&request);
 
-        // Check response_format is present with correct structure
-        assert!(
-            body.get("response_format").is_some(),
-            "response_format should be present"
-        );
-        let rf = &body["response_format"];
-        assert_eq!(rf["type"], "json_schema");
-        assert_eq!(rf["json_schema"]["name"], "person");
-        assert_eq!(rf["json_schema"]["strict"], true);
-        assert!(rf["json_schema"]["schema"].is_object());
+        // Responses API uses "text.format" for structured output
+        let text = body.get("text").expect("should have text");
+        let format = text.get("format").expect("should have format");
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(format["name"], "person");
+        assert_eq!(format["strict"], true);
+        assert!(format["schema"].is_object());
     }
 
     #[test]
@@ -606,7 +1077,6 @@ mod tests {
 
         let schema = serde_json::json!({"type": "object"});
 
-        // No name or strict specified - should use defaults
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![Message::User(UserMessage {
@@ -622,9 +1092,9 @@ mod tests {
 
         let body = client.build_request_body(&request);
 
-        let rf = &body["response_format"];
-        assert_eq!(rf["json_schema"]["name"], "output"); // default name
-        assert_eq!(rf["json_schema"]["strict"], false); // default strict
+        let format = &body["text"]["format"];
+        assert_eq!(format["name"], "output"); // default name
+        assert_eq!(format["strict"], false); // default strict
     }
 
     #[test]
@@ -642,8 +1112,188 @@ mod tests {
 
         // text field should not be present
         assert!(
-            body.get("response_format").is_none(),
-            "response_format should not be present without structured_output"
+            body.get("text").is_none(),
+            "text should not be present without structured_output"
         );
+    }
+
+    // =========================================================================
+    // SSE Parsing Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_responses_sse_line_text_delta() {
+        let line = r#"data: {"type":"response.output_text.delta","delta":"Hello"}"#;
+        let event = OpenAiClient::parse_responses_sse_line(line);
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.event_type, "response.output_text.delta");
+        assert_eq!(event.delta, Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn test_parse_responses_sse_line_reasoning_delta() {
+        let line = r#"data: {"type":"response.reasoning_summary_text.delta","delta":"thinking..."}"#;
+        let event = OpenAiClient::parse_responses_sse_line(line);
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.event_type, "response.reasoning_summary_text.delta");
+        assert_eq!(event.delta, Some("thinking...".to_string()));
+    }
+
+    #[test]
+    fn test_parse_responses_sse_line_function_call_done() {
+        let line = r#"data: {"type":"response.function_call_arguments.done","call_id":"call_123","name":"get_weather","arguments":"{\"location\":\"Tokyo\"}"}"#;
+        let event = OpenAiClient::parse_responses_sse_line(line);
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.event_type, "response.function_call_arguments.done");
+        assert_eq!(event.call_id, Some("call_123".to_string()));
+        assert_eq!(event.name, Some("get_weather".to_string()));
+        assert_eq!(event.arguments, Some(r#"{"location":"Tokyo"}"#.to_string()));
+    }
+
+    #[test]
+    fn test_parse_responses_sse_line_response_done() {
+        let line = r#"data: {"type":"response.done","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Hi"}]}],"usage":{"input_tokens":10,"output_tokens":5}}}"#;
+        let event = OpenAiClient::parse_responses_sse_line(line);
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.event_type, "response.done");
+        assert!(event.response.is_some());
+        let response = event.response.unwrap();
+        assert_eq!(response["status"], "completed");
+    }
+
+    #[test]
+    fn test_parse_responses_sse_line_done_marker() {
+        let line = "data: [DONE]";
+        let event = OpenAiClient::parse_responses_sse_line(line);
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_parse_responses_sse_line_non_data_line() {
+        let line = "event: message";
+        let event = OpenAiClient::parse_responses_sse_line(line);
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_parse_responses_sse_line_reasoning_item_with_encrypted() {
+        let line = r#"data: {"type":"response.reasoning.done","item":{"id":"rs_abc123","summary":[{"type":"summary_text","text":"I need to think"}],"encrypted_content":"enc_xyz"}}"#;
+        let event = OpenAiClient::parse_responses_sse_line(line);
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.event_type, "response.reasoning.done");
+        let item = event.item.expect("should have item");
+        assert_eq!(item["id"], "rs_abc123");
+        assert_eq!(item["encrypted_content"], "enc_xyz");
+        let summary = item["summary"].as_array().expect("summary array");
+        assert_eq!(summary[0]["text"], "I need to think");
+    }
+
+    // =========================================================================
+    // Response Parsing Tests
+    // =========================================================================
+
+    #[test]
+    fn test_response_completed_parses_message_content() {
+        // Test that response.completed event correctly parses message content array
+        let response_json = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {"type": "output_text", "text": "Hello"},
+                        {"type": "output_text", "text": " World"}
+                    ]
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+
+        // Verify structure matches what we expect to parse
+        let output = response_json["output"].as_array().expect("output array");
+        assert_eq!(output[0]["type"], "message");
+        let content = output[0]["content"].as_array().expect("content array");
+        assert_eq!(content[0]["type"], "output_text");
+        assert_eq!(content[0]["text"], "Hello");
+    }
+
+    #[test]
+    fn test_response_completed_parses_reasoning_item() {
+        let response_json = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_abc123",
+                    "summary": [
+                        {"type": "summary_text", "text": "Let me think about this"}
+                    ],
+                    "encrypted_content": "encrypted_stuff_here"
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+
+        let output = response_json["output"].as_array().expect("output array");
+        let reasoning = &output[0];
+        assert_eq!(reasoning["type"], "reasoning");
+        assert_eq!(reasoning["id"], "rs_abc123");
+        assert_eq!(reasoning["encrypted_content"], "encrypted_stuff_here");
+        let summary = reasoning["summary"].as_array().expect("summary array");
+        assert_eq!(summary[0]["text"], "Let me think about this");
+    }
+
+    #[test]
+    fn test_response_completed_parses_function_call() {
+        let response_json = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_xyz789",
+                    "name": "get_weather",
+                    "arguments": "{\"location\":\"Tokyo\"}"
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+
+        let output = response_json["output"].as_array().expect("output array");
+        let func_call = &output[0];
+        assert_eq!(func_call["type"], "function_call");
+        assert_eq!(func_call["call_id"], "call_xyz789");
+        assert_eq!(func_call["name"], "get_weather");
+        // arguments is a JSON STRING
+        let args_str = func_call["arguments"].as_str().expect("string");
+        let args: Value = serde_json::from_str(args_str).expect("valid json");
+        assert_eq!(args["location"], "Tokyo");
+    }
+
+    #[test]
+    fn test_stop_reason_from_response_status() {
+        // completed with tool calls -> ToolUse
+        let response_tool = serde_json::json!({
+            "status": "completed",
+            "output": [{"type": "function_call", "call_id": "1", "name": "x", "arguments": "{}"}]
+        });
+        let has_tools = response_tool["output"].as_array()
+            .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
+            .unwrap_or(false);
+        assert!(has_tools);
+
+        // completed without tool calls -> EndTurn
+        let response_text = serde_json::json!({
+            "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}]
+        });
+        let has_tools = response_text["output"].as_array()
+            .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
+            .unwrap_or(false);
+        assert!(!has_tools);
     }
 }

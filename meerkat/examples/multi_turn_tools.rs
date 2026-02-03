@@ -12,20 +12,23 @@
 use async_trait::async_trait;
 use meerkat::{
     AgentBuilder, AgentFactory, AgentToolDispatcher, AnthropicClient, ToolDef, ToolError,
+    ToolResult,
 };
+use meerkat_core::ToolCallView;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use schemars::JsonSchema;
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::json;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, JsonSchema)]
+#[derive(Debug, Clone, JsonSchema, Deserialize)]
 #[allow(dead_code)]
 struct CalculateArgs {
     #[schemars(description = "A simple arithmetic expression like '2 + 3' or '10 * 5'")]
     expression: String,
 }
 
-#[derive(Debug, Clone, JsonSchema)]
+#[derive(Debug, Clone, JsonSchema, Deserialize)]
 #[allow(dead_code)]
 struct SaveNoteArgs {
     #[schemars(description = "The note content to save")]
@@ -87,12 +90,14 @@ impl AgentToolDispatcher for MultiToolDispatcher {
         .into()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
-        match name {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        let name = call.name;
+        let value = match name {
             "calculate" => {
-                let expr = args["expression"].as_str().ok_or_else(|| {
-                    ToolError::invalid_arguments(name, "Missing 'expression' argument")
-                })?;
+                let args: CalculateArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(name, e.to_string()))?;
+                let expr = args.expression.as_str();
 
                 // Simple expression parser (for demo purposes)
                 let result = parse_and_calculate(expr).map_err(ToolError::execution_failed)?;
@@ -104,12 +109,13 @@ impl AgentToolDispatcher for MultiToolDispatcher {
                     .map_err(|_| ToolError::execution_failed("Lock poisoned"))?;
                 state.calculations.push(result);
 
-                Ok(json!(format!("{} = {}", expr, result)))
+                json!(format!("{} = {}", expr, result))
             }
             "save_note" => {
-                let note = args["note"]
-                    .as_str()
-                    .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'note' argument"))?;
+                let args: SaveNoteArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(name, e.to_string()))?;
+                let note = args.note.as_str();
 
                 let mut state = self
                     .state
@@ -117,24 +123,29 @@ impl AgentToolDispatcher for MultiToolDispatcher {
                     .map_err(|_| ToolError::execution_failed("Lock poisoned"))?;
                 state.notes.push(note.to_string());
 
-                Ok(json!("Note saved"))
+                json!("Note saved")
             }
             "get_notes" => {
                 let state = self
                     .state
                     .lock()
                     .map_err(|_| ToolError::execution_failed("Lock poisoned"))?;
-                Ok(json!(state.notes))
+                json!(state.notes)
             }
             "get_calculation_history" => {
                 let state = self
                     .state
                     .lock()
                     .map_err(|_| ToolError::execution_failed("Lock poisoned"))?;
-                Ok(json!(state.calculations))
+                json!(state.calculations)
             }
-            _ => Err(ToolError::not_found(name)),
-        }
+            _ => return Err(ToolError::not_found(name)),
+        };
+        Ok(ToolResult::new(
+            call.id.to_string(),
+            value.to_string(),
+            false,
+        ))
     }
 }
 

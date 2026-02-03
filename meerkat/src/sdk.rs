@@ -249,6 +249,24 @@ pub fn spawn_event_logger(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use meerkat_core::ToolCallView;
+
+    async fn dispatch_json(
+        dispatcher: &dyn AgentToolDispatcher,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolError> {
+        let args_raw = serde_json::value::RawValue::from_string(args.to_string())
+            .expect("valid args json");
+        let call = ToolCallView {
+            id: "test-1",
+            name,
+            args: &args_raw,
+        };
+        let result = dispatcher.dispatch(call).await?;
+        serde_json::from_str(&result.content)
+            .or_else(|_| Ok(serde_json::Value::String(result.content)))
+    }
 
     #[tokio::test]
     async fn test_builtin_tools_dispatch() {
@@ -263,7 +281,7 @@ mod tests {
             "subject": "Integration test task",
             "description": "Testing the builtin dispatcher"
         });
-        let result = dispatcher.dispatch("task_create", &args).await;
+        let result = dispatch_json(dispatcher.as_ref(), "task_create", args).await;
         assert!(result.is_ok());
 
         let task = result.unwrap();
@@ -271,9 +289,8 @@ mod tests {
         assert_eq!(task.get("subject").unwrap(), "Integration test task");
 
         // List tasks - returns an array directly
-        let list_result = dispatcher
-            .dispatch("task_list", &serde_json::json!({}))
-            .await;
+        let list_result =
+            dispatch_json(dispatcher.as_ref(), "task_list", serde_json::json!({})).await;
         assert!(list_result.is_ok());
         let list = list_result.unwrap();
         assert!(list.is_array());
@@ -310,9 +327,10 @@ mod tests {
             assert!(tools.iter().any(|t| t.name == "wait"));
 
             let _ = rt
-                .block_on(dispatcher.dispatch(
+                .block_on(dispatch_json(
+                    dispatcher.as_ref(),
                     "task_create",
-                    &serde_json::json!({"subject":"Test","description":"Persist"}),
+                    serde_json::json!({"subject":"Test","description":"Persist"}),
                 ))
                 .unwrap();
 
@@ -362,15 +380,15 @@ mod tests {
         .unwrap();
 
         // Create a task
-        let create_result = dispatcher
-            .dispatch(
-                "task_create",
-                &serde_json::json!({
-                    "subject": "File store test",
-                    "description": "Testing with real file storage"
-                }),
-            )
-            .await;
+        let create_result = dispatch_json(
+            dispatcher.as_ref(),
+            "task_create",
+            serde_json::json!({
+                "subject": "File store test",
+                "description": "Testing with real file storage"
+            }),
+        )
+        .await;
         assert!(create_result.is_ok());
 
         let task = create_result.unwrap();
@@ -381,9 +399,9 @@ mod tests {
         assert!(tasks_file.exists(), "tasks.json should be created");
 
         // Get the task back
-        let get_result = dispatcher
-            .dispatch("task_get", &serde_json::json!({"id": task_id}))
-            .await;
+        let get_result =
+            dispatch_json(dispatcher.as_ref(), "task_get", serde_json::json!({"id": task_id}))
+                .await;
         assert!(get_result.is_ok());
         let retrieved = get_result.unwrap();
         assert_eq!(retrieved.get("subject").unwrap(), "File store test");

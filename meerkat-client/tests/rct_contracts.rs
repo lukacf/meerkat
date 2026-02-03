@@ -3,7 +3,7 @@ use futures::Stream;
 use meerkat_client::error::LlmError;
 use meerkat_client::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
-use meerkat_core::{AgentEvent, AgentLlmClient, Provider, StopReason};
+use meerkat_core::{AgentEvent, AgentLlmClient, AssistantBlock, Provider, ProviderMeta, StopReason};
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -37,6 +37,7 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
     let events = vec![
         LlmEvent::TextDelta {
             delta: "hello".to_string(),
+            meta: None,
         },
         LlmEvent::ToolCallDelta {
             id: "tc1".to_string(),
@@ -49,10 +50,18 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
             args_delta: "\"bar\"}".to_string(),
         },
         LlmEvent::ToolCallComplete {
+            id: "tc1".to_string(),
+            name: "tool_a".to_string(),
+            args: json!({"foo":"bar"}),
+            thought_signature: None,
+            meta: None,
+        },
+        LlmEvent::ToolCallComplete {
             id: "tc2".to_string(),
             name: "tool_b".to_string(),
             args: json!({"baz": true}),
             thought_signature: Some("sig-123".to_string()),
+            meta: None,
         },
         LlmEvent::Done {
             outcome: LlmDoneOutcome::Success {
@@ -67,28 +76,43 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
 
     let result = adapter.stream_response(&[], &[], 128, None, None).await?;
 
-    assert_eq!(result.content(), "hello");
+    let mut text = String::new();
+    for block in result.blocks() {
+        if let AssistantBlock::Text { text: t, .. } = block {
+            text.push_str(t);
+        }
+    }
+    assert_eq!(text, "hello");
     assert_eq!(result.stop_reason(), StopReason::EndTurn);
 
     let mut tc1 = None;
     let mut tc2 = None;
-    for tc in result.tool_calls() {
-        match tc.id.as_str() {
-            "tc1" => tc1 = Some(tc),
-            "tc2" => tc2 = Some(tc),
-            _ => {}
+    for block in result.blocks() {
+        if let AssistantBlock::ToolUse { id, name, args, meta } = block {
+            match id.as_str() {
+                "tc1" => tc1 = Some((name, args, meta)),
+                "tc2" => tc2 = Some((name, args, meta)),
+                _ => {}
+            }
         }
     }
 
     let tc1 = tc1.ok_or("buffered tool call missing")?;
-    assert_eq!(tc1.name, "tool_a");
-    assert_eq!(tc1.args, json!({"foo":"bar"}));
-    assert!(tc1.thought_signature.is_none());
+    assert_eq!(tc1.0, "tool_a");
+    let tc1_args: serde_json::Value = serde_json::from_str(tc1.1.get())?;
+    assert_eq!(tc1_args, json!({"foo":"bar"}));
+    assert!(tc1.2.is_none());
 
     let tc2 = tc2.ok_or("complete tool call missing")?;
-    assert_eq!(tc2.name, "tool_b");
-    assert_eq!(tc2.args, json!({"baz": true}));
-    assert_eq!(tc2.thought_signature.as_deref(), Some("sig-123"));
+    assert_eq!(tc2.0, "tool_b");
+    let tc2_args: serde_json::Value = serde_json::from_str(tc2.1.get())?;
+    assert_eq!(tc2_args, json!({"baz": true}));
+    match tc2.2 {
+        Some(ProviderMeta::Gemini { thought_signature }) => {
+            assert_eq!(thought_signature, "sig-123");
+        }
+        other => return Err(format!("unexpected meta: {:?}", other).into()),
+    }
 
     let event = rx.recv().await.ok_or("text delta event missing")?;
     match event {

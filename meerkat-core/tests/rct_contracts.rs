@@ -1,8 +1,29 @@
 use meerkat_core::{
     CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta, ConfigScope, ConfigStore,
-    ProviderConfig, SecurityMode, SystemPromptConfig,
+    ProviderConfig, SecurityMode, SystemPromptConfig, ToolCallView, ToolResult,
 };
 use serde_json::json;
+
+#[test]
+fn test_tool_call_view_parse_args_contract() {
+    #[derive(serde::Deserialize)]
+    struct Args {
+        #[allow(dead_code)]
+        a: i32,
+    }
+
+    let args = json!({ "a": "not-an-int" });
+    let raw = serde_json::value::RawValue::from_string(args.to_string())
+        .expect("valid JSON for RawValue");
+    let call = meerkat_core::types::ToolCallView {
+        id: "test-1",
+        name: "tool",
+        args: &raw,
+    };
+
+    let parsed: Result<Args, _> = call.parse_args();
+    assert!(parsed.is_err(), "type mismatch should fail to parse");
+}
 
 #[test]
 fn test_agent_factory_config_contract() {
@@ -413,10 +434,14 @@ impl AgentToolDispatcher for MockDispatcher {
 
     async fn dispatch(
         &self,
-        name: &str,
-        _args: &serde_json::Value,
-    ) -> Result<serde_json::Value, meerkat_core::ToolError> {
-        Ok(json!({"dispatched": name}))
+        call: ToolCallView<'_>,
+    ) -> Result<ToolResult, meerkat_core::ToolError> {
+        let value = json!({"dispatched": call.name});
+        Ok(ToolResult::new(
+            call.id.to_string(),
+            value.to_string(),
+            false,
+        ))
     }
 }
 
@@ -465,11 +490,23 @@ async fn test_regression_filtered_dispatcher_denies_non_allowed()
     let filtered = FilteredToolDispatcher::new(inner, vec!["allowed".to_string()]);
 
     // Allowed tool should work
-    let result = filtered.dispatch("allowed", &json!({})).await;
+    let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string())
+        .expect("valid args json");
+    let allowed_call = ToolCallView {
+        id: "test-allowed",
+        name: "allowed",
+        args: &args_raw,
+    };
+    let result = filtered.dispatch(allowed_call).await;
     assert!(result.is_ok());
 
     // Non-allowed tool should be denied
-    let result = filtered.dispatch("denied", &json!({})).await;
+    let denied_call = ToolCallView {
+        id: "test-denied",
+        name: "denied",
+        args: &args_raw,
+    };
+    let result = filtered.dispatch(denied_call).await;
     match result {
         Err(meerkat_core::ToolError::AccessDenied { name }) => {
             assert_eq!(name, "denied");

@@ -133,6 +133,7 @@ impl AnthropicClient {
                     }));
                 }
                 Message::Assistant(a) => {
+                    // Legacy format: flat content + tool_calls
                     let mut content = Vec::new();
 
                     if !a.content.is_empty() {
@@ -149,6 +150,54 @@ impl AnthropicClient {
                             "name": tc.name,
                             "input": tc.args
                         }));
+                    }
+
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": content
+                    }));
+                }
+                Message::BlockAssistant(a) => {
+                    // New format: ordered blocks with thinking support
+                    let mut content = Vec::new();
+
+                    for block in &a.blocks {
+                        match block {
+                            meerkat_core::AssistantBlock::Text { text, .. } => {
+                                // Anthropic text blocks don't use meta
+                                if !text.is_empty() {
+                                    content.push(serde_json::json!({
+                                        "type": "text",
+                                        "text": text
+                                    }));
+                                }
+                            }
+                            meerkat_core::AssistantBlock::Reasoning { text, meta } => {
+                                // Claude 4.5 REQUIRES signature on thinking blocks for replay
+                                let Some(meerkat_core::ProviderMeta::Anthropic { signature }) = meta else {
+                                    tracing::warn!("thinking block missing Anthropic signature, skipping");
+                                    continue;
+                                };
+                                content.push(serde_json::json!({
+                                    "type": "thinking",
+                                    "thinking": text,
+                                    "signature": signature
+                                }));
+                            }
+                            meerkat_core::AssistantBlock::ToolUse { id, name, args, .. } => {
+                                // Parse RawValue to Value for JSON serialization
+                                let args_value: Value = serde_json::from_str(args.get())
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+                                content.push(serde_json::json!({
+                                    "type": "tool_use",
+                                    "id": id,
+                                    "name": name,
+                                    "input": args_value
+                                }));
+                            }
+                            // Handle future block types (non_exhaustive pattern)
+                            _ => {}
+                        }
                     }
 
                     messages.push(serde_json::json!({
@@ -341,6 +390,8 @@ impl LlmClient for AnthropicClient {
 
                 // Check if structured output is enabled (requires beta header)
                 let has_structured_output = body.get("output_config").is_some();
+                // Check if thinking is enabled (requires interleaved-thinking beta header)
+                let has_thinking = body.get("thinking").is_some();
 
                 let mut req = self.http
                     .post(format!("{}/v1/messages", self.base_url))
@@ -348,9 +399,16 @@ impl LlmClient for AnthropicClient {
                     .header("anthropic-version", "2023-06-01")
                     .header("Content-Type", "application/json");
 
-                // Add beta header for structured outputs
-                if has_structured_output {
+                // Add beta header for interleaved thinking (Claude 4.5)
+                if has_thinking {
+                    req = req.header("anthropic-beta", "interleaved-thinking-2025-05-14");
+                }
+                // Add beta header for structured outputs (can be combined)
+                if has_structured_output && !has_thinking {
                     req = req.header("anthropic-beta", "structured-outputs-2025-11-13");
+                } else if has_structured_output && has_thinking {
+                    // Combine beta headers
+                    req = req.header("anthropic-beta", "interleaved-thinking-2025-05-14,structured-outputs-2025-11-13");
                 }
 
                 let response = req
@@ -371,6 +429,8 @@ impl LlmClient for AnthropicClient {
                 let mut stream = stream_result?;
                 let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
                 let mut current_tool_id: Option<String> = None;
+                let mut current_block_type: Option<String> = None;
+                let mut current_thinking_signature: Option<String> = None;
                 let mut last_stop_reason: Option<StopReason> = None;
                 let mut usage = Usage::default();
                 let mut saw_done = false;
@@ -383,7 +443,19 @@ impl LlmClient for AnthropicClient {
                                     match delta.delta_type.as_str() {
                                         "text_delta" => {
                                             if let Some(text) = delta.text {
-                                                yield LlmEvent::TextDelta { delta: text };
+                                                yield LlmEvent::TextDelta { delta: text, meta: None };
+                                            }
+                                        }
+                                        "thinking_delta" => {
+                                            // Emit incremental thinking content
+                                            if let Some(text) = delta.thinking {
+                                                yield LlmEvent::ReasoningDelta { delta: text };
+                                            }
+                                        }
+                                        "signature_delta" => {
+                                            // Signature arrives as separate delta before content_block_stop
+                                            if let Some(sig) = delta.signature {
+                                                current_thinking_signature = Some(sig);
                                             }
                                         }
                                         "input_json_delta" => {
@@ -401,16 +473,41 @@ impl LlmClient for AnthropicClient {
                             }
                             "content_block_start" => {
                                 if let Some(content_block) = $event.content_block {
-                                    if content_block.block_type == "tool_use" {
-                                        let id = content_block.id.unwrap_or_default();
-                                        current_tool_id = Some(id.clone());
-                                        yield LlmEvent::ToolCallDelta {
-                                            id,
-                                            name: content_block.name,
-                                            args_delta: String::new(),
-                                        };
+                                    current_block_type = Some(content_block.block_type.clone());
+                                    match content_block.block_type.as_str() {
+                                        "thinking" => {
+                                            // Start of thinking block
+                                            // Signature may already be present or arrive via signature_delta
+                                            current_thinking_signature = content_block.signature;
+                                        }
+                                        "tool_use" => {
+                                            let id = content_block.id.unwrap_or_default();
+                                            current_tool_id = Some(id.clone());
+                                            yield LlmEvent::ToolCallDelta {
+                                                id,
+                                                name: content_block.name,
+                                                args_delta: String::new(),
+                                            };
+                                        }
+                                        _ => {}
                                     }
                                 }
+                            }
+                            "content_block_stop" => {
+                                // Emit complete events based on block type
+                                match current_block_type.as_deref() {
+                                    Some("thinking") => {
+                                        // Emit ReasoningComplete with Anthropic signature
+                                        let meta = current_thinking_signature.take()
+                                            .map(|sig| meerkat_core::ProviderMeta::Anthropic { signature: sig });
+                                        yield LlmEvent::ReasoningComplete {
+                                            text: String::new(), // Text was already streamed via deltas
+                                            meta,
+                                        };
+                                    }
+                                    _ => {}
+                                }
+                                current_block_type = None;
                             }
                             "message_delta" => {
                                 if let Some(usage_update) = $event.usage {
@@ -528,6 +625,10 @@ struct AnthropicDelta {
     text: Option<String>,
     partial_json: Option<String>,
     stop_reason: Option<String>,
+    /// Thinking content for thinking_delta events
+    thinking: Option<String>,
+    /// Signature for signature_delta events (arrives separately before content_block_stop)
+    signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -536,6 +637,11 @@ struct AnthropicContentBlock {
     block_type: String,
     id: Option<String>,
     name: Option<String>,
+    /// Thinking content for thinking blocks
+    #[allow(dead_code)]
+    thinking: Option<String>,
+    /// Signature for thinking block continuity
+    signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -555,7 +661,244 @@ struct AnthropicUsage {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::UserMessage;
+    use meerkat_core::{AssistantBlock, BlockAssistantMessage, ProviderMeta, UserMessage};
+
+    // =========================================================================
+    // Thinking block SSE parsing tests (spec section 3.5)
+    // =========================================================================
+
+    #[test]
+    fn test_anthropic_content_block_parses_thinking_type() {
+        // content_block_start with type: "thinking" should parse
+        let json = r#"{"type": "thinking", "thinking": "Let me analyze..."}"#;
+        let block: AnthropicContentBlock = serde_json::from_str(json).unwrap();
+
+        assert_eq!(block.block_type, "thinking");
+        assert_eq!(block.thinking.as_deref(), Some("Let me analyze..."));
+    }
+
+    #[test]
+    fn test_anthropic_content_block_parses_thinking_with_signature() {
+        // content_block_start may have signature already
+        let json = r#"{"type": "thinking", "thinking": "", "signature": "sig_abc123"}"#;
+        let block: AnthropicContentBlock = serde_json::from_str(json).unwrap();
+
+        assert_eq!(block.block_type, "thinking");
+        assert_eq!(block.signature.as_deref(), Some("sig_abc123"));
+    }
+
+    #[test]
+    fn test_anthropic_delta_parses_thinking_delta() {
+        // content_block_delta with delta type: "thinking_delta"
+        let json = r#"{"type": "thinking_delta", "thinking": "I need to consider..."}"#;
+        let delta: AnthropicDelta = serde_json::from_str(json).unwrap();
+
+        assert_eq!(delta.delta_type, "thinking_delta");
+        assert_eq!(delta.thinking.as_deref(), Some("I need to consider..."));
+    }
+
+    #[test]
+    fn test_anthropic_delta_parses_signature_delta() {
+        // content_block_delta with delta type: "signature_delta"
+        let json = r#"{"type": "signature_delta", "signature": "sig_xyz789"}"#;
+        let delta: AnthropicDelta = serde_json::from_str(json).unwrap();
+
+        assert_eq!(delta.delta_type, "signature_delta");
+        assert_eq!(delta.signature.as_deref(), Some("sig_xyz789"));
+    }
+
+    #[test]
+    fn test_anthropic_delta_parses_text_delta_unchanged() {
+        // Existing text_delta should still work
+        let json = r#"{"type": "text_delta", "text": "Hello world"}"#;
+        let delta: AnthropicDelta = serde_json::from_str(json).unwrap();
+
+        assert_eq!(delta.delta_type, "text_delta");
+        assert_eq!(delta.text.as_deref(), Some("Hello world"));
+        assert!(delta.thinking.is_none());
+        assert!(delta.signature.is_none());
+    }
+
+    #[test]
+    fn test_anthropic_delta_parses_input_json_delta_unchanged() {
+        // Existing input_json_delta should still work
+        let json = r#"{"type": "input_json_delta", "partial_json": "{\"path\":"}"#;
+        let delta: AnthropicDelta = serde_json::from_str(json).unwrap();
+
+        assert_eq!(delta.delta_type, "input_json_delta");
+        assert_eq!(delta.partial_json.as_deref(), Some("{\"path\":"));
+    }
+
+    // =========================================================================
+    // Request building tests for BlockAssistantMessage (spec section 3.5)
+    // =========================================================================
+
+    #[test]
+    fn test_build_request_body_renders_thinking_block_with_signature() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        // Create a session with a thinking block
+        let assistant_msg = Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::Reasoning {
+                    text: "Let me analyze this problem...".to_string(),
+                    meta: Some(ProviderMeta::Anthropic {
+                        signature: "sig_abc123".to_string(),
+                    }),
+                },
+                AssistantBlock::Text {
+                    text: "The answer is 42.".to_string(),
+                    meta: None,
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+        });
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![
+                Message::User(UserMessage {
+                    content: "What is the meaning of life?".to_string(),
+                }),
+                assistant_msg,
+                Message::User(UserMessage {
+                    content: "Can you elaborate?".to_string(),
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+
+        // Second message should be the assistant with thinking + text
+        let assistant_content = messages[1]["content"].as_array().unwrap();
+        assert_eq!(assistant_content.len(), 2);
+
+        // First block should be thinking
+        assert_eq!(assistant_content[0]["type"], "thinking");
+        assert_eq!(assistant_content[0]["thinking"], "Let me analyze this problem...");
+        assert_eq!(assistant_content[0]["signature"], "sig_abc123");
+
+        // Second block should be text
+        assert_eq!(assistant_content[1]["type"], "text");
+        assert_eq!(assistant_content[1]["text"], "The answer is 42.");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_skips_thinking_block_without_signature() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        // Thinking block without Anthropic signature should be skipped
+        let assistant_msg = Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::Reasoning {
+                    text: "Some thinking...".to_string(),
+                    meta: None, // No signature!
+                },
+                AssistantBlock::Text {
+                    text: "The answer.".to_string(),
+                    meta: None,
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+        });
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![
+                Message::User(UserMessage {
+                    content: "Question".to_string(),
+                }),
+                assistant_msg,
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+
+        // Assistant content should only have the text block (thinking skipped)
+        let assistant_content = messages[1]["content"].as_array().unwrap();
+        assert_eq!(assistant_content.len(), 1);
+        assert_eq!(assistant_content[0]["type"], "text");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_renders_tool_use_blocks() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let assistant_msg = Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::Text {
+                    text: "I'll read that file for you.".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::ToolUse {
+                    id: "tu_123".to_string(),
+                    name: "read_file".to_string(),
+                    args: serde_json::value::RawValue::from_string(
+                        r#"{"path": "/tmp/test.txt"}"#.to_string()
+                    ).unwrap(),
+                    meta: None, // Tool use blocks don't have signatures in Anthropic
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+        });
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![
+                Message::User(UserMessage {
+                    content: "Read /tmp/test.txt".to_string(),
+                }),
+                assistant_msg,
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        let assistant_content = messages[1]["content"].as_array().unwrap();
+
+        assert_eq!(assistant_content.len(), 2);
+        assert_eq!(assistant_content[0]["type"], "text");
+        assert_eq!(assistant_content[1]["type"], "tool_use");
+        assert_eq!(assistant_content[1]["id"], "tu_123");
+        assert_eq!(assistant_content[1]["name"], "read_file");
+        assert_eq!(assistant_content[1]["input"]["path"], "/tmp/test.txt");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_adds_thinking_beta_header() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        // When thinking is enabled via provider_params, beta header should be added
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("thinking_budget", 10000);
+
+        let body = client.build_request_body(&request);
+
+        // The beta header is added during the HTTP request, not in the body
+        // But the thinking config should be in the body
+        assert!(body.get("thinking").is_some());
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 10000);
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Original tests (unchanged)
+    // =========================================================================
 
     #[test]
     fn test_build_request_body_basic() -> Result<(), Box<dyn std::error::Error>> {

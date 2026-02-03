@@ -4,7 +4,7 @@
 //! after the agentic loop completes to force validated JSON output.
 
 use crate::error::AgentError;
-use crate::types::{AssistantMessage, Message, RunResult, UserMessage};
+use crate::types::{BlockAssistantMessage, Message, RunResult, UserMessage};
 use jsonschema::Validator;
 use serde_json::{Value, json};
 
@@ -83,19 +83,20 @@ where
                 )
                 .await?;
 
-            // Update budget
+            // Update budget + session usage
             self.budget.record_usage(&result.usage);
+            self.session.record_usage(result.usage.clone());
+
+            let (blocks, stop_reason, _usage) = result.into_parts();
+            let assistant_msg = BlockAssistantMessage { blocks, stop_reason };
+            let content = assistant_msg.to_string();
 
             // Add assistant response to session
-            self.session.push(Message::Assistant(AssistantMessage {
-                content: result.content.clone(),
-                tool_calls: vec![],
-                stop_reason: result.stop_reason,
-                usage: result.usage.clone(),
-            }));
+            self.session
+                .push(Message::BlockAssistant(assistant_msg));
 
             // Try to parse and validate the output
-            let content = result.content.trim();
+            let content = content.trim();
 
             // Strip markdown code fences if present
             let json_content = strip_code_fences(content);
@@ -107,7 +108,7 @@ where
                         Ok(()) => {
                             // Success! Return with structured output
                             return Ok(RunResult {
-                                text: self.session.last_assistant_text().unwrap_or("").to_string(),
+                                text: self.session.last_assistant_text().unwrap_or_default(),
                                 session_id: self.session.id().clone(),
                                 usage: self.session.total_usage(),
                                 turns: turn_count + 1 + attempt + 1, // Include extraction attempts
@@ -131,7 +132,7 @@ where
         Err(AgentError::StructuredOutputValidationFailed {
             attempts: max_attempts,
             reason: last_error,
-            last_output: self.session.last_assistant_text().unwrap_or("").to_string(),
+            last_output: self.session.last_assistant_text().unwrap_or_default(),
         })
     }
 }

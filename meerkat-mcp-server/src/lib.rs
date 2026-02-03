@@ -4,7 +4,7 @@
 //! as MCP tools: meerkat_run and meerkat_resume.
 
 use meerkat::{
-    AgentBuilder, AgentError, JsonlStore, Session, SessionStore, ToolError,
+    AgentBuilder, AgentError, JsonlStore, Session, SessionStore, ToolError, ToolResult,
     build_comms_runtime_from_config, compose_tools_with_comms,
 };
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
@@ -12,7 +12,7 @@ use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::{invalid_session_id, invalid_session_id_message, store_error};
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, Provider, SessionMetadata,
-    SessionTooling, SystemPromptConfig, format_verbose_event,
+    SessionTooling, SystemPromptConfig, ToolCallView, format_verbose_event,
 };
 use meerkat_tools::find_project_root;
 use schemars::JsonSchema;
@@ -1370,13 +1370,15 @@ impl AgentToolDispatcher for MpcToolDispatcher {
         Arc::clone(&self.tools)
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        let args: Value = serde_json::from_str(call.args.get())
+            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         // Check if this is a callback tool
-        if self.callback_tools.contains(name) {
+        if self.callback_tools.contains(call.name) {
             // Return a special error that signals the agent loop should pause
-            Err(ToolError::callback_pending(name, args.clone()))
+            Err(ToolError::callback_pending(call.name, args))
         } else {
-            Err(ToolError::not_found(name))
+            Err(ToolError::not_found(call.name))
         }
     }
 }
@@ -1544,9 +1546,14 @@ mod tests {
         }];
 
         let dispatcher = MpcToolDispatcher::new(&mcp_tools);
-        let result = dispatcher
-            .dispatch("get_weather", &json!({"city": "Tokyo"}))
-            .await;
+        let args_raw =
+            serde_json::value::RawValue::from_string(json!({"city": "Tokyo"}).to_string()).unwrap();
+        let call = ToolCallView {
+            id: "test-1",
+            name: "get_weather",
+            args: &args_raw,
+        };
+        let result = dispatcher.dispatch(call).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();

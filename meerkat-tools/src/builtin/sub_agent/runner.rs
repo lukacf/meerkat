@@ -8,20 +8,20 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, ToolCallBuffer};
+use meerkat_client::{BlockAssembler, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_comms::agent::wrap_with_comms;
 use meerkat_comms::runtime::{CommsBootstrap, CommsRuntime, CoreCommsConfig, ParentCommsContext};
 use meerkat_comms::{PubKey, TrustedPeer, TrustedPeers};
 use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::session::Session;
 use meerkat_core::sub_agent::SubAgentManager;
-use meerkat_core::types::{Message, StopReason, SystemMessage, ToolCall, Usage, UserMessage};
+use meerkat_core::types::{Message, StopReason, SystemMessage, Usage, UserMessage};
+use meerkat_core::ProviderMeta;
 use meerkat_core::{
     AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, BudgetLimits,
     LlmStreamResult, ToolDef,
 };
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -89,45 +89,82 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
 
         let mut stream = self.client.stream(&request);
 
-        let mut content = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut tool_call_buffers: HashMap<String, ToolCallBuffer> = HashMap::new();
+        let mut assembler = BlockAssembler::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = Usage::default();
+        let mut reasoning_started = false;
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => {
-                        content.push_str(&delta);
+                    LlmEvent::TextDelta { delta, meta } => {
+                        assembler.on_text_delta(&delta, meta);
+                    }
+                    LlmEvent::ReasoningDelta { delta } => {
+                        if !reasoning_started {
+                            reasoning_started = true;
+                            assembler.on_reasoning_start();
+                        }
+                        if let Err(e) = assembler.on_reasoning_delta(&delta) {
+                            tracing::warn!(?e, "orphaned reasoning delta");
+                        }
+                    }
+                    LlmEvent::ReasoningComplete { text, meta } => {
+                        if !reasoning_started {
+                            assembler.on_reasoning_start();
+                            let _ = assembler.on_reasoning_delta(&text);
+                        }
+                        assembler.on_reasoning_complete(meta);
+                        reasoning_started = false;
                     }
                     LlmEvent::ToolCallDelta {
                         id,
                         name,
                         args_delta,
                     } => {
-                        // Buffer tool call deltas (Anthropic emits these)
-                        let buffer = tool_call_buffers
-                            .entry(id.clone())
-                            .or_insert_with(|| ToolCallBuffer::new(id));
-
-                        if let Some(n) = name {
-                            buffer.name = Some(n);
+                        if let Err(e) =
+                            assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
+                        {
+                            if matches!(
+                                e,
+                                meerkat_client::block_assembler::StreamAssemblyError::OrphanedToolDelta(_)
+                            ) {
+                                let _ = assembler.on_tool_call_start(id.clone());
+                                if let Err(e) =
+                                    assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
+                                {
+                                    tracing::warn!(?e, "orphaned tool delta");
+                                }
+                            } else {
+                                tracing::warn!(?e, "tool delta error");
+                            }
                         }
-                        buffer.push_args(&args_delta);
                     }
                     LlmEvent::ToolCallComplete {
                         id,
                         name,
                         args,
                         thought_signature,
+                        meta,
                     } => {
-                        let tc = if let Some(sig) = thought_signature {
-                            ToolCall::with_thought_signature(id, name, args, sig)
-                        } else {
-                            ToolCall::new(id, name, args)
+                        let mut effective_meta = meta;
+                        if effective_meta.is_none() {
+                            if let Some(sig) = thought_signature {
+                                effective_meta = Some(ProviderMeta::Gemini {
+                                    thought_signature: sig,
+                                });
+                            }
+                        }
+                        let args_raw = match serde_json::to_string(&args)
+                            .ok()
+                            .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
+                        {
+                            Some(raw) => raw,
+                            None => serde_json::value::RawValue::from_string("{}".to_string())
+                                .unwrap_or_else(|_| unreachable!()),
                         };
-                        tool_calls.push(tc);
+                        let _ =
+                            assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
@@ -155,19 +192,8 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
             }
         }
 
-        // Convert buffered deltas to complete tool calls
-        for (_, buffer) in tool_call_buffers {
-            if let Some(tc) = buffer.try_complete() {
-                // Avoid duplicates if ToolCallComplete was also emitted
-                if !tool_calls.iter().any(|t| t.id == tc.id) {
-                    tool_calls.push(tc);
-                }
-            }
-        }
-
         Ok(LlmStreamResult::new(
-            content,
-            tool_calls,
+            assembler.finalize(),
             stop_reason,
             usage,
         ))
@@ -216,45 +242,82 @@ impl AgentLlmClient for DynLlmClientAdapter {
 
         let mut stream = self.client.stream(&request);
 
-        let mut content = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut tool_call_buffers: HashMap<String, ToolCallBuffer> = HashMap::new();
+        let mut assembler = BlockAssembler::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = Usage::default();
+        let mut reasoning_started = false;
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => {
-                        content.push_str(&delta);
+                    LlmEvent::TextDelta { delta, meta } => {
+                        assembler.on_text_delta(&delta, meta);
+                    }
+                    LlmEvent::ReasoningDelta { delta } => {
+                        if !reasoning_started {
+                            reasoning_started = true;
+                            assembler.on_reasoning_start();
+                        }
+                        if let Err(e) = assembler.on_reasoning_delta(&delta) {
+                            tracing::warn!(?e, "orphaned reasoning delta");
+                        }
+                    }
+                    LlmEvent::ReasoningComplete { text, meta } => {
+                        if !reasoning_started {
+                            assembler.on_reasoning_start();
+                            let _ = assembler.on_reasoning_delta(&text);
+                        }
+                        assembler.on_reasoning_complete(meta);
+                        reasoning_started = false;
                     }
                     LlmEvent::ToolCallDelta {
                         id,
                         name,
                         args_delta,
                     } => {
-                        // Buffer tool call deltas (Anthropic emits these)
-                        let buffer = tool_call_buffers
-                            .entry(id.clone())
-                            .or_insert_with(|| ToolCallBuffer::new(id));
-
-                        if let Some(n) = name {
-                            buffer.name = Some(n);
+                        if let Err(e) =
+                            assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
+                        {
+                            if matches!(
+                                e,
+                                meerkat_client::block_assembler::StreamAssemblyError::OrphanedToolDelta(_)
+                            ) {
+                                let _ = assembler.on_tool_call_start(id.clone());
+                                if let Err(e) =
+                                    assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
+                                {
+                                    tracing::warn!(?e, "orphaned tool delta");
+                                }
+                            } else {
+                                tracing::warn!(?e, "tool delta error");
+                            }
                         }
-                        buffer.push_args(&args_delta);
                     }
                     LlmEvent::ToolCallComplete {
                         id,
                         name,
                         args,
                         thought_signature,
+                        meta,
                     } => {
-                        let tc = if let Some(sig) = thought_signature {
-                            ToolCall::with_thought_signature(id, name, args, sig)
-                        } else {
-                            ToolCall::new(id, name, args)
+                        let mut effective_meta = meta;
+                        if effective_meta.is_none() {
+                            if let Some(sig) = thought_signature {
+                                effective_meta = Some(ProviderMeta::Gemini {
+                                    thought_signature: sig,
+                                });
+                            }
+                        }
+                        let args_raw = match serde_json::to_string(&args)
+                            .ok()
+                            .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
+                        {
+                            Some(raw) => raw,
+                            None => serde_json::value::RawValue::from_string("{}".to_string())
+                                .unwrap_or_else(|_| unreachable!()),
                         };
-                        tool_calls.push(tc);
+                        let _ =
+                            assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
@@ -282,19 +345,8 @@ impl AgentLlmClient for DynLlmClientAdapter {
             }
         }
 
-        // Convert buffered deltas to complete tool calls
-        for (_, buffer) in tool_call_buffers {
-            if let Some(tc) = buffer.try_complete() {
-                // Avoid duplicates if ToolCallComplete was also emitted
-                if !tool_calls.iter().any(|t| t.id == tc.id) {
-                    tool_calls.push(tc);
-                }
-            }
-        }
-
         Ok(LlmStreamResult::new(
-            content,
-            tool_calls,
+            assembler.finalize(),
             stop_reason,
             usage,
         ))

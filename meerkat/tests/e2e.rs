@@ -12,6 +12,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
+use meerkat_core::ToolCallView;
 use schemars::JsonSchema;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -65,7 +66,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         while let Some(result) = stream.next().await {
             match result {
                 Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => {
+                    LlmEvent::TextDelta { delta, .. } => {
                         content.push_str(&delta);
                     }
                     LlmEvent::ToolCallDelta {
@@ -100,6 +101,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                             ));
                         }
                     },
+                    LlmEvent::ReasoningDelta { .. } | LlmEvent::ReasoningComplete { .. } => {}
                 },
                 Err(e) => {
                     return Err(AgentError::llm(
@@ -120,12 +122,26 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
             }
         }
 
-        Ok(LlmStreamResult::new(
-            content,
-            tool_calls,
-            stop_reason,
-            usage,
-        ))
+        let mut blocks = Vec::new();
+        if !content.is_empty() {
+            blocks.push(meerkat_core::AssistantBlock::Text {
+                text: content,
+                meta: None,
+            });
+        }
+        for tc in tool_calls {
+            let args_raw = serde_json::value::RawValue::from_string(
+                serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
+            )
+            .unwrap_or_else(|_| serde_json::value::RawValue::from_string("{}".to_string()).unwrap());
+            blocks.push(meerkat_core::AssistantBlock::ToolUse {
+                id: tc.id,
+                name: tc.name,
+                args: args_raw,
+                meta: None,
+            });
+        }
+        Ok(LlmStreamResult::new(blocks, stop_reason, usage))
     }
 
     fn provider(&self) -> &'static str {
@@ -196,8 +212,8 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Arc::from([])
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
-        Err(ToolError::not_found(name))
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        Err(ToolError::not_found(call.name))
     }
 }
 
@@ -230,12 +246,18 @@ impl AgentToolDispatcher for MockToolDispatcher {
         self.tools.iter().map(Arc::clone).collect::<Vec<_>>().into()
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
-        self.results
-            .get(name)
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        let content = self
+            .results
+            .get(call.name)
             .cloned()
-            .map(Value::String)
-            .ok_or_else(|| ToolError::not_found(name))
+            .ok_or_else(|| ToolError::not_found(call.name))?;
+        Ok(ToolResult {
+            tool_use_id: call.id.to_string(),
+            content,
+            is_error: false,
+            thought_signature: None,
+        })
     }
 }
 
@@ -485,15 +507,17 @@ mod tool_invocation {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            let args: Value = serde_json::from_str(call.args.get())
+                .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
             // Call the tool through the router
-            match self.router.call_tool(name, args).await {
-                Ok(result) => {
-                    #[allow(clippy::unnecessary_lazy_evaluations)]
-                    let value =
-                        serde_json::from_str(&result).unwrap_or_else(|_| Value::String(result));
-                    Ok(value)
-                }
+            match self.router.call_tool(call.name, &args).await {
+                Ok(result) => Ok(ToolResult {
+                    tool_use_id: call.id.to_string(),
+                    content: result,
+                    is_error: false,
+                    thought_signature: None,
+                }),
                 Err(e) => Err(ToolError::execution_failed(e.to_string())),
             }
         }
@@ -1013,7 +1037,7 @@ mod parallel_tools {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
             let start = std::time::Instant::now();
 
             // Simulate network/processing delay
@@ -1023,30 +1047,43 @@ mod parallel_tools {
             self.call_log
                 .lock()
                 .unwrap()
-                .push((name.to_string(), start, end));
+                .push((call.name.to_string(), start, end));
 
             // Return realistic mock responses
-            match name {
+            let args: Value = serde_json::from_str(call.args.get())
+                .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+            let value = match call.name {
                 "get_weather" => {
                     let city = args
                         .get("city")
                         .and_then(|v| v.as_str())
                         .unwrap_or("Unknown");
-                    Ok(Value::String(format!("Weather in {}: Sunny, 22°C", city)))
+                    Value::String(format!("Weather in {}: Sunny, 22°C", city))
                 }
                 "get_time" => {
                     let tz = args
                         .get("timezone")
                         .and_then(|v| v.as_str())
                         .unwrap_or("UTC");
-                    Ok(Value::String(format!("Current time in {}: 14:30 PM", tz)))
+                    Value::String(format!("Current time in {}: 14:30 PM", tz))
                 }
                 "get_stock" => {
                     let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("???");
-                    Ok(Value::String(format!("Stock {}: $150.25 (+2.3%)", symbol)))
+                    Value::String(format!("Stock {}: $150.25 (+2.3%)", symbol))
                 }
-                _ => Err(ToolError::not_found(name)),
-            }
+                _ => return Err(ToolError::not_found(call.name)),
+            };
+
+            let content = match &value {
+                Value::String(s) => s.clone(),
+                _ => serde_json::to_string(&value).unwrap_or_default(),
+            };
+            Ok(ToolResult {
+                tool_use_id: call.id.to_string(),
+                content,
+                is_error: false,
+                thought_signature: None,
+            })
         }
     }
 
@@ -1230,22 +1267,35 @@ mod parallel_tools {
                 .into()
             }
 
-            async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+            async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
                 // Simulate some processing time
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-                match name {
+                let value = match call.name {
                     "working_tool" => {
-                        Ok(Value::String("Working tool result: success!".to_string()))
+                        Value::String("Working tool result: success!".to_string())
                     }
-                    "broken_tool" => Err(ToolError::execution_failed(
-                        "Error: broken_tool encountered a critical failure",
-                    )),
-                    "another_working_tool" => Ok(Value::String(
+                    "broken_tool" => {
+                        return Err(ToolError::execution_failed(
+                            "Error: broken_tool encountered a critical failure",
+                        ));
+                    }
+                    "another_working_tool" => Value::String(
                         "Another working tool result: also success!".to_string(),
-                    )),
-                    _ => Err(ToolError::not_found(name)),
-                }
+                    ),
+                    _ => return Err(ToolError::not_found(call.name)),
+                };
+
+                let content = match &value {
+                    Value::String(s) => s.clone(),
+                    _ => serde_json::to_string(&value).unwrap_or_default(),
+                };
+                Ok(ToolResult {
+                    tool_use_id: call.id.to_string(),
+                    content,
+                    is_error: false,
+                    thought_signature: None,
+                })
             }
         }
 
@@ -1559,8 +1609,10 @@ mod sanity {
             _provider_params: Option<&serde_json::Value>,
         ) -> Result<LlmStreamResult, AgentError> {
             Ok(LlmStreamResult::new(
-                "test".to_string(),
-                vec![],
+                vec![meerkat_core::AssistantBlock::Text {
+                    text: "test".to_string(),
+                    meta: None,
+                }],
                 StopReason::EndTurn,
                 Usage::default(),
             ))

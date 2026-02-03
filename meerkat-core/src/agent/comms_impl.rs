@@ -210,7 +210,7 @@ mod tests {
     };
     use crate::error::AgentError;
     use crate::session::Session;
-    use crate::types::{StopReason, ToolDef};
+    use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, ToolResult};
     use async_trait::async_trait;
     use serde_json::Value;
     use std::sync::Arc;
@@ -278,8 +278,10 @@ mod tests {
             _provider_params: Option<&Value>,
         ) -> Result<LlmStreamResult, AgentError> {
             Ok(LlmStreamResult::new(
-                "Done".to_string(),
-                vec![],
+                vec![AssistantBlock::Text {
+                    text: "Done".to_string(),
+                    meta: None,
+                }],
                 StopReason::EndTurn,
                 crate::types::Usage::default(),
             ))
@@ -301,11 +303,10 @@ mod tests {
 
         async fn dispatch(
             &self,
-            name: &str,
-            _args: &Value,
-        ) -> Result<Value, crate::error::ToolError> {
+            call: ToolCallView<'_>,
+        ) -> Result<ToolResult, crate::error::ToolError> {
             Err(crate::error::ToolError::NotFound {
-                name: name.to_string(),
+                name: call.name.to_string(),
             })
         }
     }

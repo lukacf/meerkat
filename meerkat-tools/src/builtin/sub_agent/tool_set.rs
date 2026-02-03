@@ -137,8 +137,9 @@ mod tests {
     use meerkat_core::ops::ConcurrencyLimits;
     use meerkat_core::session::Session;
     use meerkat_core::sub_agent::SubAgentManager;
-    use meerkat_core::{AgentSessionStore, AgentToolDispatcher, ToolDef};
-    use serde_json::Value;
+    use meerkat_core::{
+        AgentSessionStore, AgentToolDispatcher, ToolCallView, ToolDef, ToolResult,
+    };
     use tokio::sync::RwLock;
 
     struct MockClientFactory;
@@ -165,8 +166,8 @@ mod tests {
             Arc::from([])
         }
 
-        async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
-            Err(ToolError::not_found("mock"))
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            Err(ToolError::not_found(call.name))
         }
     }
 

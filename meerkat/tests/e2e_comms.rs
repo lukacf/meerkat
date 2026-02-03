@@ -70,7 +70,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         while let Some(result) = stream.next().await {
             match result {
                 Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => {
+                    LlmEvent::TextDelta { delta, .. } => {
                         content.push_str(&delta);
                     }
                     LlmEvent::ToolCallDelta {
@@ -105,6 +105,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                             ));
                         }
                     },
+                    LlmEvent::ReasoningDelta { .. } | LlmEvent::ReasoningComplete { .. } => {}
                 },
                 Err(e) => {
                     return Err(AgentError::llm(
@@ -125,12 +126,27 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
             }
         }
 
-        Ok(LlmStreamResult::new(
-            content,
-            tool_calls,
-            stop_reason,
-            usage,
-        ))
+        let mut blocks = Vec::new();
+        if !content.is_empty() {
+            blocks.push(meerkat_core::AssistantBlock::Text {
+                text: content,
+                meta: None,
+            });
+        }
+        for tc in tool_calls {
+            let args_raw = serde_json::value::RawValue::from_string(
+                serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
+            )
+            .unwrap_or_else(|_| serde_json::value::RawValue::from_string("{}".to_string()).unwrap());
+            blocks.push(meerkat_core::AssistantBlock::ToolUse {
+                id: tc.id,
+                name: tc.name,
+                args: args_raw,
+                meta: None,
+            });
+        }
+
+        Ok(LlmStreamResult::new(blocks, stop_reason, usage))
     }
 
     fn provider(&self) -> &'static str {

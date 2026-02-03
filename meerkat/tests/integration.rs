@@ -51,7 +51,7 @@ mod llm_normalization {
 
         while let Some(event) = stream.next().await {
             match event {
-                Ok(LlmEvent::TextDelta { delta }) => {
+                Ok(LlmEvent::TextDelta { delta, .. }) => {
                     // delta exists (may be empty for some deltas)
                     let _ = delta;
                     got_text_delta = true;
@@ -78,6 +78,9 @@ mod llm_normalization {
                 Ok(LlmEvent::UsageUpdate { usage }) => {
                     // Usage should have positive tokens
                     assert!(usage.input_tokens > 0 || usage.output_tokens > 0);
+                }
+                Ok(LlmEvent::ReasoningDelta { .. }) | Ok(LlmEvent::ReasoningComplete { .. }) => {
+                    // Reasoning events are valid
                 }
                 Err(e) => panic!("Unexpected error: {:?}", e),
             }
@@ -986,6 +989,12 @@ mod combined {
             content: "Call a tool".to_string(),
         }));
 
+        let first_usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+        };
         session.push(Message::Assistant(AssistantMessage {
             content: "".to_string(),
             tool_calls: vec![ToolCall::new(
@@ -994,13 +1003,9 @@ mod combined {
                 serde_json::json!({"input": "test"}),
             )],
             stop_reason: StopReason::ToolUse,
-            usage: Usage {
-                input_tokens: 100,
-                output_tokens: 50,
-                cache_creation_tokens: None,
-                cache_read_tokens: None,
-            },
+            usage: first_usage.clone(),
         }));
+        session.record_usage(first_usage);
 
         session.push(Message::ToolResults {
             results: vec![ToolResult::new(
@@ -1010,17 +1015,19 @@ mod combined {
             )],
         });
 
+        let second_usage = Usage {
+            input_tokens: 150,
+            output_tokens: 75,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+        };
         session.push(Message::Assistant(AssistantMessage {
             content: "Based on the tool result...".to_string(),
             tool_calls: vec![],
             stop_reason: StopReason::EndTurn,
-            usage: Usage {
-                input_tokens: 150,
-                output_tokens: 75,
-                cache_creation_tokens: None,
-                cache_read_tokens: None,
-            },
+            usage: second_usage.clone(),
         }));
+        session.record_usage(second_usage);
 
         // Verify session state
         assert_eq!(session.messages().len(), 4);

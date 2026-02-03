@@ -12,14 +12,17 @@
 use async_trait::async_trait;
 use meerkat::{
     AgentBuilder, AgentFactory, AgentToolDispatcher, AnthropicClient, ToolDef, ToolError,
+    ToolResult,
 };
+use meerkat_core::ToolCallView;
 use meerkat_store::JsonlStore;
 use meerkat_store::StoreAdapter;
 use schemars::JsonSchema;
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::json;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, JsonSchema)]
+#[derive(Debug, Clone, JsonSchema, Deserialize)]
 #[allow(dead_code)]
 struct BinaryMathArgs {
     #[schemars(description = "First number")]
@@ -49,28 +52,20 @@ impl AgentToolDispatcher for MathToolDispatcher {
         .into()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
-        match name {
-            "add" => {
-                let a = args["a"]
-                    .as_f64()
-                    .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'a' argument"))?;
-                let b = args["b"]
-                    .as_f64()
-                    .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'b' argument"))?;
-                Ok(json!(a + b))
-            }
-            "multiply" => {
-                let a = args["a"]
-                    .as_f64()
-                    .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'a' argument"))?;
-                let b = args["b"]
-                    .as_f64()
-                    .ok_or_else(|| ToolError::invalid_arguments(name, "Missing 'b' argument"))?;
-                Ok(json!(a * b))
-            }
-            _ => Err(ToolError::not_found(name)),
-        }
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        let args: BinaryMathArgs = call
+            .parse_args()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let value = match call.name {
+            "add" => json!(args.a + args.b),
+            "multiply" => json!(args.a * args.b),
+            _ => return Err(ToolError::not_found(call.name)),
+        };
+        Ok(ToolResult::new(
+            call.id.to_string(),
+            value.to_string(),
+            false,
+        ))
     }
 }
 

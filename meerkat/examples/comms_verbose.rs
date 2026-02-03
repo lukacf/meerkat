@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
+use meerkat_core::{ToolCallView, ToolResult};
 use meerkat_comms::agent::{
     CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
 };
@@ -100,7 +101,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
         while let Some(result) = stream.next().await {
             match result {
                 Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => {
+                    LlmEvent::TextDelta { delta, .. } => {
                         content.push_str(&delta);
                     }
                     LlmEvent::ToolCallDelta {
@@ -126,6 +127,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
                         println!("└────────────────────────────────────────┘");
                         tool_calls.push(ToolCall::new(id, name, args));
                     }
+                    LlmEvent::ReasoningDelta { .. } | LlmEvent::ReasoningComplete { .. } => {}
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }
@@ -174,12 +176,26 @@ impl AgentLlmClient for LoggingLlmAdapter {
             tool_calls.len()
         );
 
-        Ok(LlmStreamResult::new(
-            content,
-            tool_calls,
-            stop_reason,
-            usage,
-        ))
+        let mut blocks = Vec::new();
+        if !content.is_empty() {
+            blocks.push(meerkat_core::AssistantBlock::Text {
+                text: content,
+                meta: None,
+            });
+        }
+        for tc in tool_calls {
+            let args_raw = serde_json::value::RawValue::from_string(
+                serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
+            )
+            .unwrap_or_else(|_| serde_json::value::RawValue::from_string("{}".to_string()).unwrap());
+            blocks.push(meerkat_core::AssistantBlock::ToolUse {
+                id: tc.id,
+                name: tc.name,
+                args: args_raw,
+                meta: None,
+            });
+        }
+        Ok(LlmStreamResult::new(blocks, stop_reason, usage))
     }
 
     fn provider(&self) -> &'static str {
@@ -199,29 +215,27 @@ impl AgentToolDispatcher for LoggingToolDispatcher {
         self.inner.tools()
     }
 
-    async fn dispatch(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-    ) -> Result<serde_json::Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         let call_num = TOOL_CALL_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+        let args_value: serde_json::Value = serde_json::from_str(call.args.get())
+            .unwrap_or_else(|_| serde_json::Value::String(call.args.get().to_string()));
 
         println!("\n┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓");
         println!(
             "┃  TOOL EXECUTION #{} - {} calling '{}'",
-            call_num, self.agent_name, name
+            call_num, self.agent_name, call.name
         );
         println!("┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫");
         println!(
             "┃ Args: {}",
-            serde_json::to_string_pretty(args).unwrap_or_else(|_| "{}".to_string())
+            serde_json::to_string_pretty(&args_value).unwrap_or_else(|_| "{}".to_string())
         );
 
-        let result = self.inner.dispatch(name, args).await;
+        let result = self.inner.dispatch(call).await;
 
         match &result {
             Ok(r) => {
-                println!("┃ SUCCESS: {}", r);
+                println!("┃ SUCCESS: {}", r.content);
             }
             Err(e) => {
                 println!("┃ ERROR: {}", e);

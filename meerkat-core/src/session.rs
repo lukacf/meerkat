@@ -35,6 +35,8 @@ pub struct Session {
     updated_at: SystemTime,
     /// Arbitrary metadata
     metadata: serde_json::Map<String, serde_json::Value>,
+    /// Cumulative token usage across all LLM calls in this session
+    usage: Usage,
 }
 
 /// Serde helper for Session serialization (flattens Arc)
@@ -49,6 +51,8 @@ struct SessionSerde {
     updated_at: SystemTime,
     #[serde(default)]
     metadata: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    usage: Usage,
 }
 
 impl Serialize for Session {
@@ -63,6 +67,7 @@ impl Serialize for Session {
             created_at: self.created_at,
             updated_at: self.updated_at,
             metadata: self.metadata.clone(),
+            usage: self.usage.clone(),
         };
         serde_repr.serialize(serializer)
     }
@@ -81,6 +86,7 @@ impl<'de> Deserialize<'de> for Session {
             created_at: serde_repr.created_at,
             updated_at: serde_repr.updated_at,
             metadata: serde_repr.metadata,
+            usage: serde_repr.usage,
         })
     }
 }
@@ -100,6 +106,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             metadata: serde_json::Map::new(),
+            usage: Usage::default(),
         }
     }
 
@@ -173,26 +180,20 @@ impl Session {
         &self.messages[start..]
     }
 
-    /// Count total tokens used (approximation from stored usage)
+    /// Count total tokens used.
     pub fn total_tokens(&self) -> u64 {
-        self.messages
-            .iter()
-            .filter_map(|m| match m {
-                Message::Assistant(a) => Some(a.usage.total_tokens()),
-                _ => None,
-            })
-            .sum()
+        self.usage.total_tokens()
     }
 
-    /// Get total usage statistics for the session
+    /// Get total usage statistics for the session.
     pub fn total_usage(&self) -> Usage {
-        let mut usage = Usage::default();
-        for msg in self.messages.iter() {
-            if let Message::Assistant(a) = msg {
-                usage.add(&a.usage);
-            }
-        }
-        usage
+        self.usage.clone()
+    }
+
+    /// Update cumulative usage after an LLM call.
+    pub fn record_usage(&mut self, turn_usage: Usage) {
+        self.usage.add(&turn_usage);
+        self.updated_at = SystemTime::now();
     }
 
     /// Set a system prompt (adds or replaces System message at start)
@@ -209,10 +210,19 @@ impl Session {
         self.updated_at = SystemTime::now();
     }
 
-    /// Get the last assistant message text content
-    pub fn last_assistant_text(&self) -> Option<&str> {
+    /// Get the last assistant message text content.
+    pub fn last_assistant_text(&self) -> Option<String> {
         self.messages.iter().rev().find_map(|m| match m {
-            Message::Assistant(a) if !a.content.is_empty() => Some(a.content.as_str()),
+            Message::BlockAssistant(a) => {
+                let mut buf = String::new();
+                for block in &a.blocks {
+                    if let crate::types::AssistantBlock::Text { text, .. } = block {
+                        buf.push_str(text);
+                    }
+                }
+                if buf.is_empty() { None } else { Some(buf) }
+            }
+            Message::Assistant(a) if !a.content.is_empty() => Some(a.content.clone()),
             _ => None,
         })
     }
@@ -222,6 +232,12 @@ impl Session {
         self.messages
             .iter()
             .filter_map(|m| match m {
+                Message::BlockAssistant(a) => Some(
+                    a.blocks
+                        .iter()
+                        .filter(|b| matches!(b, crate::types::AssistantBlock::ToolUse { .. }))
+                        .count(),
+                ),
                 Message::Assistant(a) => Some(a.tool_calls.len()),
                 _ => None,
             })
@@ -270,6 +286,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             metadata: self.metadata.clone(),
+            usage: self.usage.clone(),
         }
     }
 
@@ -286,6 +303,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             metadata: self.metadata.clone(),
+            usage: self.usage.clone(),
         }
     }
 }
@@ -540,6 +558,12 @@ mod tests {
                 cache_read_tokens: None,
             },
         }));
+        session.record_usage(Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+        });
 
         let meta = SessionMeta::from(&session);
         assert_eq!(meta.id, *session.id());

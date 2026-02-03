@@ -168,7 +168,7 @@ mod tests {
     use super::*;
     use crate::LlmStreamResult;
     use crate::error::{AgentError, ToolError};
-    use crate::types::{StopReason, ToolDef, UserMessage};
+    use crate::types::{AssistantBlock, StopReason, ToolDef, ToolResult, ToolCallView, UserMessage};
     use async_trait::async_trait;
 
     struct MockClient;
@@ -184,8 +184,10 @@ mod tests {
             _provider_params: Option<&Value>,
         ) -> Result<LlmStreamResult, AgentError> {
             Ok(LlmStreamResult::new(
-                "Done".to_string(),
-                vec![],
+                vec![AssistantBlock::Text {
+                    text: "Done".to_string(),
+                    meta: None,
+                }],
                 StopReason::EndTurn,
                 crate::types::Usage::default(),
             ))
@@ -204,9 +206,9 @@ mod tests {
             Arc::new([])
         }
 
-        async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
             Err(ToolError::NotFound {
-                name: name.to_string(),
+                name: call.name.to_string(),
             })
         }
     }

@@ -4,9 +4,10 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+use meerkat_client::{BlockAssembler, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_core::{
-    AgentError, Message, Session, SessionId, StopReason, ToolCall, ToolDef, Usage,
+    AgentError, Message, ProviderMeta, Session, SessionId, StopReason, ToolCallView, ToolDef,
+    ToolResult, Usage,
     agent::{AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult},
     error::{invalid_session_id, store_error},
     event::AgentEvent,
@@ -15,7 +16,6 @@ use meerkat_store::SessionStore;
 use meerkat_tools::ToolError;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -90,18 +90,17 @@ impl AgentLlmClient for DynLlmClientAdapter {
         // Get stream
         let mut stream = self.client.stream(&request);
 
-        // Accumulate response
-        let mut content = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut tool_call_buffers: HashMap<Arc<str>, ToolCallBuffer> = HashMap::new();
+        // Accumulate response blocks
+        let mut assembler = BlockAssembler::new();
+        let mut reasoning_started = false;
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = Usage::default();
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => {
-                        content.push_str(&delta);
+                    LlmEvent::TextDelta { delta, meta } => {
+                        assembler.on_text_delta(&delta, meta);
                         // Emit streaming event if channel is configured
                         if let Some(ref tx) = self.event_tx {
                             let _ = tx
@@ -111,32 +110,63 @@ impl AgentLlmClient for DynLlmClientAdapter {
                                 .await;
                         }
                     }
+                    LlmEvent::ReasoningDelta { delta } => {
+                        if !reasoning_started {
+                            reasoning_started = true;
+                            assembler.on_reasoning_start();
+                        }
+                        if let Err(e) = assembler.on_reasoning_delta(&delta) {
+                            tracing::warn!(?e, "orphaned reasoning delta");
+                        }
+                    }
+                    LlmEvent::ReasoningComplete { text, meta } => {
+                        if !reasoning_started {
+                            assembler.on_reasoning_start();
+                            let _ = assembler.on_reasoning_delta(&text);
+                        }
+                        assembler.on_reasoning_complete(meta);
+                        reasoning_started = false;
+                    }
                     LlmEvent::ToolCallDelta {
                         id,
                         name,
                         args_delta,
                     } => {
-                        let id: Arc<str> = id.into();
-                        let buffer = tool_call_buffers
-                            .entry(Arc::clone(&id))
-                            .or_insert_with(|| ToolCallBuffer::new(Arc::clone(&id)));
-
-                        if let Some(n) = name {
-                            buffer.name = Some(n.into());
+                        if let Err(e) = assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta) {
+                            if matches!(e, meerkat_client::StreamAssemblyError::OrphanedToolDelta(_)) {
+                                let _ = assembler.on_tool_call_start(id.clone());
+                                if let Err(e) = assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta) {
+                                    tracing::warn!(?e, "orphaned tool delta");
+                                }
+                            } else {
+                                tracing::warn!(?e, "tool delta error");
+                            }
                         }
-                        buffer.args_json.push_str(&args_delta);
                     }
                     LlmEvent::ToolCallComplete {
                         id,
                         name,
                         args,
                         thought_signature,
+                        meta,
                     } => {
-                        let tool_call = match thought_signature {
-                            Some(sig) => ToolCall::with_thought_signature(id, name, args, sig),
-                            None => ToolCall::new(id, name, args),
+                        let mut effective_meta = meta;
+                        if effective_meta.is_none() {
+                            if let Some(sig) = thought_signature {
+                                effective_meta = Some(ProviderMeta::Gemini {
+                                    thought_signature: sig,
+                                });
+                            }
+                        }
+                        let args_raw = match serde_json::to_string(&args)
+                            .ok()
+                            .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
+                        {
+                            Some(raw) => raw,
+                            None => serde_json::value::RawValue::from_string("{}".to_string())
+                                .unwrap_or_else(|_| unreachable!()),
                         };
-                        tool_calls.push(tool_call);
+                        let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
@@ -163,20 +193,8 @@ impl AgentLlmClient for DynLlmClientAdapter {
                 }
             }
         }
-
-        // Complete any buffered tool calls that weren't explicitly completed
-        for (_, buffer) in tool_call_buffers {
-            if let Some(tc) = buffer.try_complete() {
-                // Only add if not already in tool_calls
-                if !tool_calls.iter().any(|t| t.id == tc.id) {
-                    tool_calls.push(tc);
-                }
-            }
-        }
-
         Ok(LlmStreamResult::new(
-            content,
-            tool_calls,
+            assembler.finalize(),
             stop_reason,
             usage,
         ))
@@ -184,30 +202,6 @@ impl AgentLlmClient for DynLlmClientAdapter {
 
     fn provider(&self) -> &'static str {
         self.client.provider()
-    }
-}
-
-/// Helper for accumulating tool call deltas
-#[derive(Debug, Default)]
-struct ToolCallBuffer {
-    id: Arc<str>,
-    name: Option<Cow<'static, str>>,
-    args_json: String,
-}
-
-impl ToolCallBuffer {
-    fn new(id: Arc<str>) -> Self {
-        Self {
-            id,
-            name: None,
-            args_json: String::new(),
-        }
-    }
-
-    fn try_complete(&self) -> Option<ToolCall> {
-        let name = self.name.as_ref()?;
-        let args: Value = serde_json::from_str(&self.args_json).ok()?;
-        Some(ToolCall::new(self.id.to_string(), name.to_string(), args))
     }
 }
 
@@ -245,8 +239,8 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Arc::from([])
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
-        Err(ToolError::not_found(name))
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        Err(ToolError::not_found(call.name))
     }
 }
 
@@ -257,7 +251,7 @@ mod tests {
     use futures::stream;
     use futures::Stream;
     use meerkat_client::LlmError;
-    use meerkat_core::UserMessage;
+    use meerkat_core::{AssistantBlock, ProviderMeta, UserMessage};
     use std::pin::Pin;
 
     struct MockClient;
@@ -274,6 +268,7 @@ mod tests {
                     name: "get_weather".to_string(),
                     args: serde_json::json!({"city": "Tokyo"}),
                     thought_signature: Some("sig_123".to_string()),
+                    meta: None,
                 }),
                 Ok(LlmEvent::Done {
                     outcome: LlmDoneOutcome::Success {
@@ -309,11 +304,15 @@ mod tests {
             .await
             .expect("stream_response should succeed");
 
-        assert_eq!(result.tool_calls().len(), 1);
-        assert_eq!(
-            result.tool_calls()[0].thought_signature.as_deref(),
-            Some("sig_123")
-        );
+        let mut sig = None;
+        for block in result.blocks() {
+            if let AssistantBlock::ToolUse { meta, .. } = block {
+                if let Some(ProviderMeta::Gemini { thought_signature }) = meta {
+                    sig = Some(thought_signature.as_str());
+                }
+            }
+        }
+        assert_eq!(sig, Some("sig_123"));
     }
 }
 
@@ -372,18 +371,22 @@ impl AgentToolDispatcher for McpRouterAdapter {
         }
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         let guard = self.router.read().await;
         match &*guard {
             Some(router) => {
+                let args: Value = serde_json::from_str(call.args.get())
+                    .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
                 let result = router
-                    .call_tool(name, args)
+                    .call_tool(call.name, &args)
                     .await
                     .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-                // Parse the result string as JSON, or wrap in a string value
-                #[allow(clippy::unnecessary_lazy_evaluations)]
-                let value = serde_json::from_str(&result).unwrap_or_else(|_| Value::String(result));
-                Ok(value)
+                Ok(ToolResult {
+                    tool_use_id: call.id.to_string(),
+                    content: result,
+                    is_error: false,
+                    thought_signature: None,
+                })
             }
             None => Err(ToolError::execution_failed("MCP router has been shut down")),
         }
@@ -426,12 +429,12 @@ impl AgentToolDispatcher for CliToolDispatcher {
         }
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         match self {
-            CliToolDispatcher::Empty(d) => d.dispatch(name, args).await,
-            CliToolDispatcher::Mcp(d) => d.dispatch(name, args).await,
-            CliToolDispatcher::Composite(d) => d.dispatch(name, args).await,
-            CliToolDispatcher::WithComms(d) => d.dispatch(name, args).await,
+            CliToolDispatcher::Empty(d) => d.dispatch(call).await,
+            CliToolDispatcher::Mcp(d) => d.dispatch(call).await,
+            CliToolDispatcher::Composite(d) => d.dispatch(call).await,
+            CliToolDispatcher::WithComms(d) => d.dispatch(call).await,
         }
     }
 }

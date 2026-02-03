@@ -82,10 +82,9 @@ impl MeerkatSchema {
         let (schema, warnings) = match provider {
             Provider::OpenAI | Provider::Other => (self.0.clone(), Vec::new()),
             Provider::Anthropic => {
-                let mut warnings = Vec::new();
                 let mut schema = self.0.clone();
-                ensure_additional_properties_false(&mut schema, &mut warnings, provider, "");
-                (schema, warnings)
+                ensure_additional_properties_false(&mut schema);
+                (schema, Vec::new())
             }
             Provider::Gemini => sanitize_for_gemini(&self.0, provider),
         };
@@ -134,12 +133,7 @@ fn normalize_schema(value: &mut Value) {
     }
 }
 
-fn ensure_additional_properties_false(
-    value: &mut Value,
-    warnings: &mut Vec<SchemaWarning>,
-    provider: Provider,
-    path: &str,
-) {
+fn ensure_additional_properties_false(value: &mut Value) {
     match value {
         Value::Object(obj) => {
             let is_object_type = match obj.get("type") {
@@ -156,16 +150,14 @@ fn ensure_additional_properties_false(
 
             let keys: Vec<String> = obj.keys().cloned().collect();
             for key in keys {
-                let next = join_path(path, &key);
                 if let Some(child) = obj.get_mut(&key) {
-                    ensure_additional_properties_false(child, warnings, provider, &next);
+                    ensure_additional_properties_false(child);
                 }
             }
         }
         Value::Array(items) => {
-            for (idx, item) in items.iter_mut().enumerate() {
-                let next = join_index(path, idx);
-                ensure_additional_properties_false(item, warnings, provider, &next);
+            for item in items.iter_mut() {
+                ensure_additional_properties_false(item);
             }
         }
         _ => {}

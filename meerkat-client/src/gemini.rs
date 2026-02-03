@@ -112,7 +112,7 @@ impl GeminiClient {
                                 if !text.is_empty() {
                                     let mut part = serde_json::json!({"text": text});
                                     // Gemini may have thoughtSignature on text parts for continuity
-                                    if let Some(meerkat_core::ProviderMeta::Gemini { thought_signature }) = meta {
+                                    if let Some(meerkat_core::ProviderMeta::Gemini { thought_signature }) = meta.as_deref() {
                                         part["thoughtSignature"] = serde_json::json!(thought_signature);
                                     }
                                     parts.push(part);
@@ -132,7 +132,7 @@ impl GeminiClient {
                                     .unwrap_or_else(|_| serde_json::json!({}));
                                 let mut part = serde_json::json!({"functionCall": {"name": name, "args": args_value}});
                                 // Only add signature if present (first parallel call has it)
-                                if let Some(meerkat_core::ProviderMeta::Gemini { thought_signature }) = meta {
+                                if let Some(meerkat_core::ProviderMeta::Gemini { thought_signature }) = meta.as_deref() {
                                     part["thoughtSignature"] = serde_json::json!(thought_signature);
                                 }
                                 parts.push(part);
@@ -381,9 +381,9 @@ impl LlmClient for GeminiClient {
                                             for part in parts {
                                                 // Build meta from thoughtSignature if present
                                                 let meta = part.thought_signature.as_ref().map(|sig| {
-                                                    meerkat_core::ProviderMeta::Gemini {
+                                                    Box::new(meerkat_core::ProviderMeta::Gemini {
                                                         thought_signature: sig.clone(),
-                                                    }
+                                                    })
                                                 });
 
                                                 if let Some(text) = part.text {
@@ -396,7 +396,6 @@ impl LlmClient for GeminiClient {
                                                         id,
                                                         name: fc.name,
                                                         args: fc.args.unwrap_or(json!({})),
-                                                        thought_signature: None, // DEPRECATED: use meta instead
                                                         meta,
                                                     };
                                                 }
@@ -1180,22 +1179,20 @@ mod tests {
 
         // This test verifies the LlmEvent::ToolCallComplete uses the `meta` field
         // with ProviderMeta::Gemini variant instead of the deprecated `thought_signature` field
-        let meta = Some(ProviderMeta::Gemini {
+        let meta = Some(Box::new(ProviderMeta::Gemini {
             thought_signature: "sig_test".to_string(),
-        });
+        }));
 
         let event = LlmEvent::ToolCallComplete {
             id: "fc_0".to_string(),
             name: "test_tool".to_string(),
             args: json!({}),
-            thought_signature: None, // deprecated, should be None
-            meta: meta.clone(),      // new field
+            meta, // new field
         };
 
-        if let LlmEvent::ToolCallComplete { meta: m, thought_signature: ts, .. } = event {
-            assert!(ts.is_none(), "deprecated thought_signature should be None");
+        if let LlmEvent::ToolCallComplete { meta: m, .. } = event {
             assert!(m.is_some(), "meta should be Some");
-            match m.unwrap() {
+            match *m.unwrap() {
                 ProviderMeta::Gemini { thought_signature } => {
                     assert_eq!(thought_signature, "sig_test");
                 }
@@ -1209,18 +1206,18 @@ mod tests {
     fn test_text_delta_uses_provider_meta() {
         use meerkat_core::ProviderMeta;
 
-        let meta = Some(ProviderMeta::Gemini {
+        let meta = Some(Box::new(ProviderMeta::Gemini {
             thought_signature: "sig_text".to_string(),
-        });
+        }));
 
         let event = LlmEvent::TextDelta {
             delta: "Hello".to_string(),
-            meta: meta.clone(),
+            meta,
         };
 
         if let LlmEvent::TextDelta { meta: m, .. } = event {
             assert!(m.is_some());
-            match m.unwrap() {
+            match *m.unwrap() {
                 ProviderMeta::Gemini { thought_signature } => {
                     assert_eq!(thought_signature, "sig_text");
                 }

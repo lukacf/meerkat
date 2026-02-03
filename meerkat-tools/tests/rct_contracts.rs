@@ -1,4 +1,4 @@
-#![allow(clippy::panic)]
+#![allow(clippy::panic, clippy::unwrap_used)]
 
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
@@ -15,8 +15,7 @@ async fn dispatch_tool(
     name: &str,
     args: serde_json::Value,
 ) -> Result<ToolResult, ToolError> {
-    let args_raw = serde_json::value::RawValue::from_string(args.to_string())
-        .expect("valid args json");
+    let args_raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
     let call = ToolCallView {
         id: "test-1",
         name,
@@ -348,8 +347,7 @@ async fn test_regression_builder_populates_registry() -> Result<(), Box<dyn std:
     );
 
     // dispatch_call should succeed for a valid tool (not NotFound)
-    let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string())
-        .expect("valid args json");
+    let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
     let call = ToolCallView {
         id: "test-1",
         name: "task_list",

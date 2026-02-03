@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_core::{AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, StopReason, ToolDef, Usage, ProviderMeta};
+use meerkat_core::{AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, StopReason, ToolDef, Usage};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -50,6 +50,11 @@ impl LlmClientAdapter {
         self.provider_params = params;
         self
     }
+}
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn fallback_raw_value() -> Box<serde_json::value::RawValue> {
+    serde_json::value::RawValue::from_string("{}".to_string()).expect("static JSON is valid")
 }
 
 #[async_trait]
@@ -125,28 +130,14 @@ impl AgentLlmClient for LlmClientAdapter {
                             }
                         }
                     }
-                    LlmEvent::ToolCallComplete {
-                        id,
-                        name,
-                        args,
-                        thought_signature,
-                        meta,
-                    } => {
-                        let mut effective_meta = meta;
-                        if effective_meta.is_none() {
-                            if let Some(sig) = thought_signature {
-                                effective_meta = Some(ProviderMeta::Gemini {
-                                    thought_signature: sig,
-                                });
-                            }
-                        }
+                    LlmEvent::ToolCallComplete { id, name, args, meta } => {
+                        let effective_meta = meta;
                         let args_raw = match serde_json::to_string(&args)
                             .ok()
                             .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
                         {
                             Some(raw) => raw,
-                            None => serde_json::value::RawValue::from_string("{}".to_string())
-                                .unwrap_or_else(|_| unreachable!()),
+                            None => fallback_raw_value(),
                         };
                         let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
                     }

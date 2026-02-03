@@ -8,15 +8,12 @@
 #[ignore = "E2E: requires full macOS system proxy access"]
 fn test_system_proxy_discovery_does_not_panic() {
     let result = std::panic::catch_unwind(|| {
-        let _client = reqwest::Client::builder()
-            .build()
-            .expect("reqwest client build failed");
+        let _client = reqwest::Client::builder().build();
     });
 
     if result.is_err() {
         eprintln!(
             "skipping: system proxy discovery panicked (likely restricted/headless macOS)."
         );
-        return;
     }
 }

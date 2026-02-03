@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::panic))]
 //! meerkat-client - LLM provider abstraction for Meerkat
 //!
 //! This crate provides a unified interface for calling different LLM providers.

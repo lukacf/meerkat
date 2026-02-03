@@ -43,7 +43,6 @@ impl LlmClient for MockLlmClient {
                     id: "tc-1".into(),
                     name: "echo".into(),
                     args: json!({"message": "hello"}),
-                    thought_signature: None,
                     meta: None,
                 }),
                 Ok(LlmEvent::Done {

@@ -265,7 +265,7 @@ mod tests {
         };
         let result = dispatcher.dispatch(call).await?;
         serde_json::from_str(&result.content)
-            .or_else(|_| Ok(serde_json::Value::String(result.content)))
+            .or(Ok(serde_json::Value::String(result.content)))
     }
 
     #[tokio::test]

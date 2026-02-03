@@ -54,7 +54,7 @@ pub enum AssistantBlock {
         text: String,
         /// Provider metadata (Gemini thoughtSignature on text parts)
         #[serde(skip_serializing_if = "Option::is_none")]
-        meta: Option<ProviderMeta>,
+        meta: Option<Box<ProviderMeta>>,
     },
 
     /// Visible reasoning/thinking notes emitted by the model
@@ -64,7 +64,7 @@ pub enum AssistantBlock {
         text: String,
         /// Provider continuity metadata (typed, not arbitrary JSON)
         #[serde(skip_serializing_if = "Option::is_none")]
-        meta: Option<ProviderMeta>,
+        meta: Option<Box<ProviderMeta>>,
     },
 
     /// Tool use request
@@ -75,7 +75,7 @@ pub enum AssistantBlock {
         args: Box<RawValue>,
         /// Provider continuity metadata
         #[serde(skip_serializing_if = "Option::is_none")]
-        meta: Option<ProviderMeta>,
+        meta: Option<Box<ProviderMeta>>,
     },
 }
 

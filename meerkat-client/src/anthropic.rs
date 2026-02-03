@@ -174,7 +174,7 @@ impl AnthropicClient {
                             }
                             meerkat_core::AssistantBlock::Reasoning { text, meta } => {
                                 // Claude 4.5 REQUIRES signature on thinking blocks for replay
-                                let Some(meerkat_core::ProviderMeta::Anthropic { signature }) = meta else {
+                                let Some(meerkat_core::ProviderMeta::Anthropic { signature }) = meta.as_deref() else {
                                     tracing::warn!("thinking block missing Anthropic signature, skipping");
                                     continue;
                                 };
@@ -498,8 +498,9 @@ impl LlmClient for AnthropicClient {
                                 match current_block_type.as_deref() {
                                     Some("thinking") => {
                                         // Emit ReasoningComplete with Anthropic signature
-                                        let meta = current_thinking_signature.take()
-                                            .map(|sig| meerkat_core::ProviderMeta::Anthropic { signature: sig });
+                                        let meta = current_thinking_signature
+                                            .take()
+                                            .map(|sig| Box::new(meerkat_core::ProviderMeta::Anthropic { signature: sig }));
                                         yield LlmEvent::ReasoningComplete {
                                             text: String::new(), // Text was already streamed via deltas
                                             meta,
@@ -637,9 +638,6 @@ struct AnthropicContentBlock {
     block_type: String,
     id: Option<String>,
     name: Option<String>,
-    /// Thinking content for thinking blocks
-    #[allow(dead_code)]
-    thinking: Option<String>,
     /// Signature for thinking block continuity
     signature: Option<String>,
 }
@@ -674,7 +672,6 @@ mod tests {
         let block: AnthropicContentBlock = serde_json::from_str(json).unwrap();
 
         assert_eq!(block.block_type, "thinking");
-        assert_eq!(block.thinking.as_deref(), Some("Let me analyze..."));
     }
 
     #[test]
@@ -742,9 +739,9 @@ mod tests {
             blocks: vec![
                 AssistantBlock::Reasoning {
                     text: "Let me analyze this problem...".to_string(),
-                    meta: Some(ProviderMeta::Anthropic {
+                    meta: Some(Box::new(ProviderMeta::Anthropic {
                         signature: "sig_abc123".to_string(),
-                    }),
+                    })),
                 },
                 AssistantBlock::Text {
                     text: "The answer is 42.".to_string(),

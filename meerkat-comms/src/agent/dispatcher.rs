@@ -157,12 +157,12 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
             let result = handle_tools_call(&self.tool_context, call.name, &args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-                Ok(ToolResult {
-                    tool_use_id: call.id.to_string(),
-                    content: result.to_string(),
-                    is_error: false,
-                    thought_signature: None,
-                })
+            Ok(ToolResult {
+                tool_use_id: call.id.to_string(),
+                content: result.to_string(),
+                is_error: false,
+                thought_signature: None,
+            })
         } else {
             self.inner.dispatch(call).await
         }

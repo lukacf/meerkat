@@ -500,10 +500,15 @@ async fn test_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::test]
 async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
-    let app = Router::new().route(
-        "/v1/chat/completions",
-        post(|| async { (StatusCode::UNAUTHORIZED, "unauthorized") }),
-    );
+    let app = Router::new()
+        .route(
+            "/v1/responses",
+            post(|| async { (StatusCode::UNAUTHORIZED, "unauthorized") }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(|| async { (StatusCode::UNAUTHORIZED, "unauthorized") }),
+        );
     let Some((base_url, _server)) = spawn_test_server_or_skip(app).await? else {
         return Ok(());
     };

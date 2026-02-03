@@ -21,8 +21,7 @@ async fn dispatch_json(
     name: &str,
     args: serde_json::Value,
 ) -> Result<serde_json::Value, ToolError> {
-    let args_raw = serde_json::value::RawValue::from_string(args.to_string())
-        .expect("valid args json");
+    let args_raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
     let call = ToolCallView {
         id: "test-1",
         name,
@@ -30,7 +29,7 @@ async fn dispatch_json(
     };
     let result = dispatcher.dispatch(call).await?;
     serde_json::from_str(&result.content)
-        .or_else(|_| Ok(serde_json::Value::String(result.content)))
+        .or(Ok(serde_json::Value::String(result.content)))
 }
 
 /// Create a CompositeDispatcher with shell tools enabled.

@@ -16,7 +16,6 @@ use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::session::Session;
 use meerkat_core::sub_agent::SubAgentManager;
 use meerkat_core::types::{Message, StopReason, SystemMessage, Usage, UserMessage};
-use meerkat_core::ProviderMeta;
 use meerkat_core::{
     AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, BudgetLimits,
     LlmStreamResult, ToolDef,
@@ -49,6 +48,11 @@ pub struct SubAgentHandle {
     pub child_pubkey: [u8; 32],
     /// Address to reach the child
     pub child_addr: String,
+}
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn fallback_raw_value() -> Box<serde_json::value::RawValue> {
+    serde_json::value::RawValue::from_string("{}".to_string()).expect("static JSON is valid")
 }
 
 /// Adapter that converts meerkat_client::LlmClient to meerkat_core::AgentLlmClient
@@ -140,28 +144,14 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                             }
                         }
                     }
-                    LlmEvent::ToolCallComplete {
-                        id,
-                        name,
-                        args,
-                        thought_signature,
-                        meta,
-                    } => {
-                        let mut effective_meta = meta;
-                        if effective_meta.is_none() {
-                            if let Some(sig) = thought_signature {
-                                effective_meta = Some(ProviderMeta::Gemini {
-                                    thought_signature: sig,
-                                });
-                            }
-                        }
+                    LlmEvent::ToolCallComplete { id, name, args, meta } => {
+                        let effective_meta = meta;
                         let args_raw = match serde_json::to_string(&args)
                             .ok()
                             .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
                         {
                             Some(raw) => raw,
-                            None => serde_json::value::RawValue::from_string("{}".to_string())
-                                .unwrap_or_else(|_| unreachable!()),
+                            None => fallback_raw_value(),
                         };
                         let _ =
                             assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
@@ -293,28 +283,14 @@ impl AgentLlmClient for DynLlmClientAdapter {
                             }
                         }
                     }
-                    LlmEvent::ToolCallComplete {
-                        id,
-                        name,
-                        args,
-                        thought_signature,
-                        meta,
-                    } => {
-                        let mut effective_meta = meta;
-                        if effective_meta.is_none() {
-                            if let Some(sig) = thought_signature {
-                                effective_meta = Some(ProviderMeta::Gemini {
-                                    thought_signature: sig,
-                                });
-                            }
-                        }
+                    LlmEvent::ToolCallComplete { id, name, args, meta } => {
+                        let effective_meta = meta;
                         let args_raw = match serde_json::to_string(&args)
                             .ok()
                             .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
                         {
                             Some(raw) => raw,
-                            None => serde_json::value::RawValue::from_string("{}".to_string())
-                                .unwrap_or_else(|_| unreachable!()),
+                            None => fallback_raw_value(),
                         };
                         let _ =
                             assembler.on_tool_call_complete(id, name, args_raw, effective_meta);

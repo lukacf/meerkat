@@ -53,15 +53,15 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
             id: "tc1".to_string(),
             name: "tool_a".to_string(),
             args: json!({"foo":"bar"}),
-            thought_signature: None,
             meta: None,
         },
         LlmEvent::ToolCallComplete {
             id: "tc2".to_string(),
             name: "tool_b".to_string(),
             args: json!({"baz": true}),
-            thought_signature: Some("sig-123".to_string()),
-            meta: None,
+            meta: Some(Box::new(ProviderMeta::Gemini {
+                thought_signature: "sig-123".to_string(),
+            })),
         },
         LlmEvent::Done {
             outcome: LlmDoneOutcome::Success {
@@ -107,7 +107,7 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
     assert_eq!(tc2.0, "tool_b");
     let tc2_args: serde_json::Value = serde_json::from_str(tc2.1.get())?;
     assert_eq!(tc2_args, json!({"baz": true}));
-    match tc2.2 {
+    match tc2.2.as_deref() {
         Some(ProviderMeta::Gemini { thought_signature }) => {
             assert_eq!(thought_signature, "sig-123");
         }

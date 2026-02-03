@@ -7,7 +7,6 @@
 use indexmap::IndexMap;
 use meerkat_core::{AssistantBlock, ProviderMeta};
 use serde_json::value::RawValue;
-use slab::Slab;
 
 /// Errors that can occur during stream assembly.
 /// Returned to caller, who decides whether to skip, count, or abort.
@@ -27,7 +26,7 @@ pub enum StreamAssemblyError {
     InvalidArgsJson { id: String, reason: String },
 }
 
-/// Typed key into the block slab - prevents mixing up different indices.
+/// Typed key into the block list - prevents mixing up different indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockKey(usize);
 
@@ -59,14 +58,14 @@ struct ReasoningBuffer {
 ///
 /// # Design
 ///
-/// - `Slab<BlockSlot>` provides stable keys even if items were removed
+/// - `Vec<BlockSlot>` provides stable indices because we never remove elements
 /// - `BlockKey(usize)` is a newtype - prevents mixing up different indices
 /// - Methods return `Result<(), StreamAssemblyError>` for caller-decided policy
 /// - `ToolCallBuffer` does NOT store `id` - it's the map key, avoiding duplication
 /// - `Box<RawValue>` for args - no parsing in adapter
 pub struct BlockAssembler {
-    /// Slab provides stable keys even if items are removed.
-    slots: Slab<BlockSlot>,
+    /// Slots are append-only to preserve start-order.
+    slots: Vec<BlockSlot>,
     /// Map from tool call ID to buffer. ID is the key, not stored in value.
     tool_buffers: IndexMap<String, ToolCallBuffer>,
     /// Active reasoning block buffer.
@@ -77,7 +76,7 @@ impl BlockAssembler {
     /// Create a new empty assembler.
     pub fn new() -> Self {
         Self {
-            slots: Slab::new(),
+            slots: Vec::new(),
             tool_buffers: IndexMap::new(),
             reasoning_buffer: None,
         }
@@ -87,28 +86,17 @@ impl BlockAssembler {
     ///
     /// Text deltas can always succeed - no Result needed.
     /// `meta` is used by Gemini for thoughtSignature on text parts.
-    pub fn on_text_delta(&mut self, delta: &str, meta: Option<ProviderMeta>) {
-        // Find last slot and check if it's a text block we can extend (only if no new meta)
-        let should_extend = meta.is_none()
-            && self
-                .slots
-                .iter()
-                .next_back()
-                .is_some_and(|(_, slot)| matches!(slot, BlockSlot::Finalized(AssistantBlock::Text { meta: None, .. })));
-
-        if should_extend {
-            // Safe: we just checked this slot exists and is Text without meta
-            let last_key = self.slots.iter().next_back().map(|(k, _)| k);
-            if let Some(key) = last_key {
-                if let BlockSlot::Finalized(AssistantBlock::Text { text, .. }) = &mut self.slots[key]
-                {
-                    text.push_str(delta);
-                    return;
-                }
+    pub fn on_text_delta(&mut self, delta: &str, meta: Option<Box<ProviderMeta>>) {
+        if meta.is_none() {
+            if let Some(BlockSlot::Finalized(AssistantBlock::Text { text, meta: None })) =
+                self.slots.last_mut()
+            {
+                text.push_str(delta);
+                return;
             }
         }
         // Insert new text block
-        self.slots.insert(BlockSlot::Finalized(AssistantBlock::Text {
+        self.slots.push(BlockSlot::Finalized(AssistantBlock::Text {
             text: delta.into(),
             meta,
         }));
@@ -116,10 +104,11 @@ impl BlockAssembler {
 
     /// Start a new reasoning block.
     pub fn on_reasoning_start(&mut self) {
-        let key = self.slots.insert(BlockSlot::Pending);
+        let key = BlockKey(self.slots.len());
+        self.slots.push(BlockSlot::Pending);
         self.reasoning_buffer = Some(ReasoningBuffer {
             text: String::new(),
-            block_key: BlockKey(key),
+            block_key: key,
         });
     }
 
@@ -139,12 +128,14 @@ impl BlockAssembler {
     /// Complete the current reasoning block.
     ///
     /// Provider adapter converts raw JSON to typed `ProviderMeta` before calling.
-    pub fn on_reasoning_complete(&mut self, meta: Option<ProviderMeta>) {
+    pub fn on_reasoning_complete(&mut self, meta: Option<Box<ProviderMeta>>) {
         if let Some(buf) = self.reasoning_buffer.take() {
-            self.slots[buf.block_key.0] = BlockSlot::Finalized(AssistantBlock::Reasoning {
-                text: buf.text,
-                meta,
-            });
+            if let Some(slot) = self.slots.get_mut(buf.block_key.0) {
+                *slot = BlockSlot::Finalized(AssistantBlock::Reasoning {
+                    text: buf.text,
+                    meta,
+                });
+            }
         }
         // Complete without prior start is silently ignored - provider protocol quirk
     }
@@ -157,13 +148,14 @@ impl BlockAssembler {
         if self.tool_buffers.contains_key(&id) {
             return Err(StreamAssemblyError::DuplicateToolStart(id));
         }
-        let key = self.slots.insert(BlockSlot::Pending);
+        let key = BlockKey(self.slots.len());
+        self.slots.push(BlockSlot::Pending);
         self.tool_buffers.insert(
             id,
             ToolCallBuffer {
                 name: None,
                 args_json: String::new(),
-                block_key: BlockKey(key),
+                block_key: key,
             },
         );
         Ok(())
@@ -226,20 +218,23 @@ impl BlockAssembler {
         id: String,
         name: String,
         args: Box<RawValue>,
-        meta: Option<ProviderMeta>,
+        meta: Option<Box<ProviderMeta>>,
     ) -> Result<(), StreamAssemblyError> {
         if let Some((_, _, buf)) = self.tool_buffers.swap_remove_full(&id) {
-            self.slots[buf.block_key.0] = BlockSlot::Finalized(AssistantBlock::ToolUse {
-                id,
-                name,
-                args,
-                meta,
-            });
+            if let Some(slot) = self.slots.get_mut(buf.block_key.0) {
+                *slot = BlockSlot::Finalized(AssistantBlock::ToolUse {
+                    id,
+                    name,
+                    args,
+                    meta,
+                });
+                return Ok(());
+            }
             Ok(())
         } else {
             // No prior start - provider that doesn't emit start events
             // Insert at end; ordering may be off but we have the data
-            self.slots.insert(BlockSlot::Finalized(AssistantBlock::ToolUse {
+            self.slots.push(BlockSlot::Finalized(AssistantBlock::ToolUse {
                 id,
                 name,
                 args,
@@ -256,7 +251,7 @@ impl BlockAssembler {
     pub fn finalize(self) -> Vec<AssistantBlock> {
         self.slots
             .into_iter()
-            .filter_map(|(_, slot)| match slot {
+            .filter_map(|slot| match slot {
                 BlockSlot::Finalized(block) => Some(block),
                 BlockSlot::Pending => None,
             })
@@ -306,9 +301,9 @@ mod tests {
         assembler.on_text_delta("First", None);
         assembler.on_text_delta(
             "Second",
-            Some(ProviderMeta::Gemini {
+            Some(Box::new(ProviderMeta::Gemini {
                 thought_signature: "sig1".to_string(),
-            }),
+            })),
         );
         assembler.on_text_delta("Third", None);
 
@@ -345,9 +340,9 @@ mod tests {
         assembler.on_reasoning_start();
         assembler.on_reasoning_delta("Let me think").unwrap();
         assembler.on_reasoning_delta("...").unwrap();
-        assembler.on_reasoning_complete(Some(ProviderMeta::Anthropic {
+        assembler.on_reasoning_complete(Some(Box::new(ProviderMeta::Anthropic {
             signature: "sig_abc".to_string(),
-        }));
+        })));
 
         let blocks = assembler.finalize();
         assert_eq!(blocks.len(), 1);
@@ -355,7 +350,7 @@ mod tests {
         match &blocks[0] {
             AssistantBlock::Reasoning { text, meta } => {
                 assert_eq!(text, "Let me think...");
-                match meta {
+                match meta.as_deref() {
                     Some(ProviderMeta::Anthropic { signature }) => {
                         assert_eq!(signature, "sig_abc");
                     }
@@ -447,15 +442,15 @@ mod tests {
                 "tc_2".to_string(),
                 "search".to_string(),
                 args,
-                Some(ProviderMeta::Gemini {
+                Some(Box::new(ProviderMeta::Gemini {
                     thought_signature: "gemini_sig".to_string(),
-                }),
+                })),
             )
             .unwrap();
 
         let blocks = assembler.finalize();
         match &blocks[0] {
-            AssistantBlock::ToolUse { meta, .. } => match meta {
+            AssistantBlock::ToolUse { meta, .. } => match meta.as_deref() {
                 Some(ProviderMeta::Gemini { thought_signature }) => {
                     assert_eq!(thought_signature, "gemini_sig");
                 }
@@ -588,9 +583,9 @@ mod tests {
 
         assembler.on_text_delta("Done!", None);
 
-        assembler.on_reasoning_complete(Some(ProviderMeta::Anthropic {
+        assembler.on_reasoning_complete(Some(Box::new(ProviderMeta::Anthropic {
             signature: "sig".to_string(),
-        }));
+        })));
 
         let args = assembler.finalize_tool_args("tc_1").unwrap();
         assembler

@@ -187,24 +187,22 @@ impl OpenAiClient {
                                     }));
                                 }
                             }
-                            AssistantBlock::Reasoning {
-                                text,
-                                meta: Some(ProviderMeta::OpenAi { id, encrypted_content }),
-                            } => {
-                                // OpenAI requires id and summary for reasoning items
-                                let mut item = serde_json::json!({
-                                    "type": "reasoning",
-                                    "id": id,
-                                    "summary": [{"type": "summary_text", "text": text}]
-                                });
-                                if let Some(enc) = encrypted_content {
-                                    item["encrypted_content"] = serde_json::json!(enc);
+                            AssistantBlock::Reasoning { text, meta: Some(meta) } => {
+                                if let ProviderMeta::OpenAi { id, encrypted_content } = meta.as_ref() {
+                                    // OpenAI requires id and summary for reasoning items
+                                    let mut item = serde_json::json!({
+                                        "type": "reasoning",
+                                        "id": id,
+                                        "summary": [{"type": "summary_text", "text": text}]
+                                    });
+                                    if let Some(enc) = encrypted_content {
+                                        item["encrypted_content"] = serde_json::json!(enc);
+                                    }
+                                    items.push(item);
                                 }
-                                items.push(item);
-                            }
-                            AssistantBlock::Reasoning { .. } => {
                                 // Skip reasoning blocks without OpenAI metadata
                             }
+                            AssistantBlock::Reasoning { .. } => {}
                             AssistantBlock::ToolUse { id, name, args, .. } => {
                                 items.push(serde_json::json!({
                                     "type": "function_call",
@@ -350,10 +348,10 @@ impl LlmClient for OpenAiClient {
                                                             .and_then(|v| v.as_str())
                                                             .map(|s| s.to_string());
 
-                                                        let meta = Some(ProviderMeta::OpenAi {
+                                                        let meta = Some(Box::new(ProviderMeta::OpenAi {
                                                             id: reasoning_id.to_string(),
                                                             encrypted_content: encrypted,
-                                                        });
+                                                        }));
 
                                                         assembler.on_reasoning_start();
                                                         if !summary_text.is_empty() {
@@ -387,10 +385,7 @@ impl LlmClient for OpenAiClient {
                                                             },
                                                             None => {
                                                                 // Empty args - treat as empty object
-                                                                match RawValue::from_string("{}".to_string()) {
-                                                                    Ok(raw) => raw,
-                                                                    Err(_) => continue,
-                                                                }
+                                                                fallback_raw_value()
                                                             }
                                                         };
 
@@ -408,7 +403,6 @@ impl LlmClient for OpenAiClient {
                                                             id: call_id.to_string(),
                                                             name: name.to_string(),
                                                             args: args_value,
-                                                            thought_signature: None,
                                                             meta: None,
                                                         };
                                                     }
@@ -500,7 +494,6 @@ impl LlmClient for OpenAiClient {
                                         id: call_id.clone(),
                                         name,
                                         args: args_value,
-                                        thought_signature: None,
                                         meta: None,
                                     };
                                 }
@@ -528,10 +521,10 @@ impl LlmClient for OpenAiClient {
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.to_string());
 
-                                    let meta = Some(ProviderMeta::OpenAi {
+                                    let meta = Some(Box::new(ProviderMeta::OpenAi {
                                         id: reasoning_id.to_string(),
                                         encrypted_content: encrypted,
-                                    });
+                                    }));
 
                                     assembler.on_reasoning_start();
                                     if !summary_text.is_empty() {
@@ -876,10 +869,10 @@ mod tests {
                     blocks: vec![
                         AssistantBlock::Reasoning {
                             text: "Let me think about this".to_string(),
-                            meta: Some(ProviderMeta::OpenAi {
+                            meta: Some(Box::new(ProviderMeta::OpenAi {
                                 id: "rs_abc123".to_string(),
                                 encrypted_content: Some("encrypted_data".to_string()),
-                            }),
+                            })),
                         },
                     ],
                     stop_reason: StopReason::EndTurn,

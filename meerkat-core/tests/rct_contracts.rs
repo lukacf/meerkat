@@ -5,7 +5,7 @@ use meerkat_core::{
 use serde_json::json;
 
 #[test]
-fn test_tool_call_view_parse_args_contract() {
+fn test_tool_call_view_parse_args_contract() -> Result<(), Box<dyn std::error::Error>> {
     #[derive(serde::Deserialize)]
     struct Args {
         #[allow(dead_code)]
@@ -13,8 +13,7 @@ fn test_tool_call_view_parse_args_contract() {
     }
 
     let args = json!({ "a": "not-an-int" });
-    let raw = serde_json::value::RawValue::from_string(args.to_string())
-        .expect("valid JSON for RawValue");
+    let raw = serde_json::value::RawValue::from_string(args.to_string())?;
     let call = meerkat_core::types::ToolCallView {
         id: "test-1",
         name: "tool",
@@ -23,6 +22,7 @@ fn test_tool_call_view_parse_args_contract() {
 
     let parsed: Result<Args, _> = call.parse_args();
     assert!(parsed.is_err(), "type mismatch should fail to parse");
+    Ok(())
 }
 
 #[test]
@@ -40,17 +40,18 @@ fn test_agent_factory_config_contract() {
 }
 
 #[test]
-fn test_shell_allowlist_backward_compat() {
+fn test_shell_allowlist_backward_compat() -> Result<(), Box<dyn std::error::Error>> {
     let toml_str = r#"
 [shell]
 allowlist = ["git *", "ls -la"]
 "#;
-    let config: Config = toml::from_str(toml_str).expect("Should parse config");
+    let config: Config = toml::from_str(toml_str)?;
     assert_eq!(config.shell.security_mode, SecurityMode::AllowList);
     assert_eq!(
         config.shell.security_patterns,
         vec!["git *".to_string(), "ls -la".to_string()]
     );
+    Ok(())
 }
 
 #[test]
@@ -490,8 +491,7 @@ async fn test_regression_filtered_dispatcher_denies_non_allowed()
     let filtered = FilteredToolDispatcher::new(inner, vec!["allowed".to_string()]);
 
     // Allowed tool should work
-    let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string())
-        .expect("valid args json");
+    let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string())?;
     let allowed_call = ToolCallView {
         id: "test-allowed",
         name: "allowed",

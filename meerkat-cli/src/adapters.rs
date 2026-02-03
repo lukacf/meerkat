@@ -6,8 +6,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_client::{BlockAssembler, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_core::{
-    AgentError, Message, ProviderMeta, Session, SessionId, StopReason, ToolCallView, ToolDef,
-    ToolResult, Usage,
+    AgentError, Message, Session, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
     agent::{AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult},
     error::{invalid_session_id, store_error},
     event::AgentEvent,
@@ -18,6 +17,11 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn fallback_raw_value() -> Box<serde_json::value::RawValue> {
+    serde_json::value::RawValue::from_string("{}".to_string()).expect("static JSON is valid")
+}
 
 /// Dynamic dispatch adapter for runtime LLM provider selection
 pub struct DynLlmClientAdapter {
@@ -143,28 +147,14 @@ impl AgentLlmClient for DynLlmClientAdapter {
                             }
                         }
                     }
-                    LlmEvent::ToolCallComplete {
-                        id,
-                        name,
-                        args,
-                        thought_signature,
-                        meta,
-                    } => {
-                        let mut effective_meta = meta;
-                        if effective_meta.is_none() {
-                            if let Some(sig) = thought_signature {
-                                effective_meta = Some(ProviderMeta::Gemini {
-                                    thought_signature: sig,
-                                });
-                            }
-                        }
+                    LlmEvent::ToolCallComplete { id, name, args, meta } => {
+                        let effective_meta = meta;
                         let args_raw = match serde_json::to_string(&args)
                             .ok()
                             .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
                         {
                             Some(raw) => raw,
-                            None => serde_json::value::RawValue::from_string("{}".to_string())
-                                .unwrap_or_else(|_| unreachable!()),
+                            None => fallback_raw_value(),
                         };
                         let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
                     }
@@ -241,78 +231,6 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         Err(ToolError::not_found(call.name))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use futures::stream;
-    use futures::Stream;
-    use meerkat_client::LlmError;
-    use meerkat_core::{AssistantBlock, ProviderMeta, UserMessage};
-    use std::pin::Pin;
-
-    struct MockClient;
-
-    #[async_trait]
-    impl LlmClient for MockClient {
-        fn stream<'a>(
-            &'a self,
-            _request: &'a LlmRequest,
-        ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-            Box::pin(stream::iter(vec![
-                Ok(LlmEvent::ToolCallComplete {
-                    id: "call_1".to_string(),
-                    name: "get_weather".to_string(),
-                    args: serde_json::json!({"city": "Tokyo"}),
-                    thought_signature: Some("sig_123".to_string()),
-                    meta: None,
-                }),
-                Ok(LlmEvent::Done {
-                    outcome: LlmDoneOutcome::Success {
-                        stop_reason: StopReason::ToolUse,
-                    },
-                }),
-            ]))
-        }
-
-        fn provider(&self) -> &'static str {
-            "mock"
-        }
-
-        async fn health_check(&self) -> Result<(), LlmError> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn test_tool_call_complete_preserves_thought_signature() {
-        let client = Arc::new(MockClient);
-        let adapter = DynLlmClientAdapter::new(client, "mock-model");
-        let result = adapter
-            .stream_response(
-                &[Message::User(UserMessage {
-                    content: "test".to_string(),
-                })],
-                &[],
-                128,
-                None,
-                None,
-            )
-            .await
-            .expect("stream_response should succeed");
-
-        let mut sig = None;
-        for block in result.blocks() {
-            if let AssistantBlock::ToolUse { meta, .. } = block {
-                if let Some(ProviderMeta::Gemini { thought_signature }) = meta {
-                    sig = Some(thought_signature.as_str());
-                }
-            }
-        }
-        assert_eq!(sig, Some("sig_123"));
     }
 }
 
@@ -436,5 +354,79 @@ impl AgentToolDispatcher for CliToolDispatcher {
             CliToolDispatcher::Composite(d) => d.dispatch(call).await,
             CliToolDispatcher::WithComms(d) => d.dispatch(call).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::stream;
+    use futures::Stream;
+    use meerkat_client::LlmError;
+    use meerkat_core::{AssistantBlock, ProviderMeta, UserMessage};
+    use std::pin::Pin;
+
+    struct MockClient;
+
+    #[async_trait]
+    impl LlmClient for MockClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::ToolCallComplete {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    args: serde_json::json!({"city": "Tokyo"}),
+                    meta: Some(Box::new(ProviderMeta::Gemini {
+                        thought_signature: "sig_123".to_string(),
+                    })),
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_complete_preserves_thought_signature(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let client = Arc::new(MockClient);
+        let adapter = DynLlmClientAdapter::new(client, "mock-model");
+        let result = adapter
+            .stream_response(
+                &[Message::User(UserMessage {
+                    content: "test".to_string(),
+                })],
+                &[],
+                128,
+                None,
+                None,
+            )
+            .await?;
+
+        let mut sig = None;
+        for block in result.blocks() {
+            if let AssistantBlock::ToolUse { meta, .. } = block {
+                if let Some(ProviderMeta::Gemini { thought_signature }) = meta.as_deref() {
+                    sig = Some(thought_signature.as_str());
+                }
+            }
+        }
+        assert_eq!(sig, Some("sig_123"));
+        Ok(())
     }
 }

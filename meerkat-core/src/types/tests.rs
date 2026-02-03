@@ -665,9 +665,9 @@ mod ordered_transcript_types {
     fn test_assistant_block_text_with_gemini_meta() {
         let block = AssistantBlock::Text {
             text: "Response with signature".to_string(),
-            meta: Some(ProviderMeta::Gemini {
+            meta: Some(Box::new(ProviderMeta::Gemini {
                 thought_signature: "trailing_sig".to_string(),
-            }),
+            })),
         };
 
         let json = serde_json::to_string(&block).unwrap();
@@ -680,9 +680,9 @@ mod ordered_transcript_types {
     fn test_assistant_block_reasoning_roundtrip() {
         let block = AssistantBlock::Reasoning {
             text: "Let me think about this...".to_string(),
-            meta: Some(ProviderMeta::Anthropic {
+            meta: Some(Box::new(ProviderMeta::Anthropic {
                 signature: "thinking_sig_abc".to_string(),
-            }),
+            })),
         };
 
         let json = serde_json::to_string(&block).unwrap();
@@ -701,10 +701,10 @@ mod ordered_transcript_types {
         // OpenAI may have empty text with only encrypted_content
         let block = AssistantBlock::Reasoning {
             text: String::new(),
-            meta: Some(ProviderMeta::OpenAi {
+            meta: Some(Box::new(ProviderMeta::OpenAi {
                 id: "reasoning_123".to_string(),
                 encrypted_content: Some("encrypted".to_string()),
-            }),
+            })),
         };
 
         let json = serde_json::to_string(&block).unwrap();
@@ -751,9 +751,9 @@ mod ordered_transcript_types {
             id: "tool_456".to_string(),
             name: "search".to_string(),
             args,
-            meta: Some(ProviderMeta::Gemini {
+            meta: Some(Box::new(ProviderMeta::Gemini {
                 thought_signature: "first_parallel_call_sig".to_string(),
-            }),
+            })),
         };
 
         let json = serde_json::to_string(&block).unwrap();
@@ -762,7 +762,7 @@ mod ordered_transcript_types {
         match parsed {
             AssistantBlock::ToolUse { meta, .. } => {
                 assert!(meta.is_some());
-                match meta.unwrap() {
+                match *meta.unwrap() {
                     ProviderMeta::Gemini { thought_signature } => {
                         assert_eq!(thought_signature, "first_parallel_call_sig");
                     }

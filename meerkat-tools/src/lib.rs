@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 //! meerkat-tools - Tool validation and dispatch for Meerkat
 //!
 //! This crate provides tool registry and dispatch functionality.

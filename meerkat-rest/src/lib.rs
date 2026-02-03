@@ -26,8 +26,8 @@ use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
     AgentBuilder, AgentEvent, AgentToolDispatcher, JsonlStore, OutputSchema, SessionId,
-    SessionMeta, SessionStore, ToolDef, ToolError, build_comms_runtime_from_config,
-    compose_tools_with_comms,
+    SessionMeta, SessionStore, ToolDef, ToolError, ToolResult,
+    build_comms_runtime_from_config, compose_tools_with_comms,
 };
 use meerkat_client::LlmClientAdapter;
 use meerkat_client::ProviderResolver;
@@ -35,7 +35,7 @@ use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::{
     Config, ConfigDelta, ConfigStore, FileConfigStore, Provider, SessionMetadata, SessionTooling,
-    SystemPromptConfig, format_verbose_event,
+    SystemPromptConfig, ToolCallView, format_verbose_event,
 };
 use meerkat_store::StoreAdapter;
 use meerkat_tools::builtin::{
@@ -944,8 +944,8 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Arc::from([])
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
-        Err(ToolError::not_found(name))
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        Err(ToolError::not_found(call.name))
     }
 }
 

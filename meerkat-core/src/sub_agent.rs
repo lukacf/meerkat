@@ -181,6 +181,7 @@ impl SubAgentManager {
                     let msg_len = match msg {
                         Message::User(u) => u.content.len(),
                         Message::Assistant(a) => a.content.len(),
+                        Message::BlockAssistant(a) => a.to_string().len(),
                         Message::System(s) => s.content.len(),
                         Message::ToolResults { results } => {
                             results.iter().map(|r| r.content.len()).sum()

@@ -3,8 +3,9 @@
 use crate::error::AgentError;
 use crate::event::{AgentEvent, BudgetType};
 use crate::state::LoopState;
-use crate::types::{AssistantMessage, Message, RunResult, ToolDef, ToolResult};
+use crate::types::{BlockAssistantMessage, Message, RunResult, ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
+use serde_json::value::RawValue;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -117,31 +118,36 @@ where
                         )
                         .await?;
 
-                    // Update budget
+                    // Update budget + session usage
                     self.budget.record_usage(&result.usage);
+                    self.session.record_usage(result.usage.clone());
 
-                    if !result.content.is_empty() {
+                    let (blocks, stop_reason, usage) = result.into_parts();
+                    let assistant_msg = BlockAssistantMessage {
+                        blocks,
+                        stop_reason,
+                    };
+                    let assistant_text = assistant_msg.to_string();
+                    if !assistant_text.is_empty() {
                         emit_event!(AgentEvent::TextComplete {
-                            content: result.content.clone(),
+                            content: assistant_text.clone(),
                         });
                     }
 
                     // Check if we have tool calls
-                    if !result.tool_calls.is_empty() {
-                        // Add assistant message with tool calls
-                        self.session.push(Message::Assistant(AssistantMessage {
-                            content: result.content,
-                            tool_calls: result.tool_calls.clone(),
-                            stop_reason: result.stop_reason,
-                            usage: result.usage,
-                        }));
+                    if assistant_msg.has_tool_calls() {
+                        // Add assistant message with ordered blocks
+                        self.session
+                            .push(Message::BlockAssistant(assistant_msg.clone()));
 
                         // Emit tool call requests
-                        for tc in &result.tool_calls {
+                        for tc in assistant_msg.tool_calls() {
+                            let args_value: Value = serde_json::from_str(tc.args.get())
+                                .unwrap_or_else(|_| Value::String(tc.args.get().to_string()));
                             emit_event!(AgentEvent::ToolCallRequested {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                args: tc.args.clone(),
+                                id: tc.id.to_string(),
+                                name: tc.name.to_string(),
+                                args: args_value,
                             });
                         }
 
@@ -149,11 +155,15 @@ where
                         self.state.transition(LoopState::WaitingForOps)?;
 
                         // Execute tool calls in parallel
-                        let num_tool_calls = result.tool_calls.len();
-                        let tools_ref = &self.tools;
+                        let tool_calls: Vec<ToolCallOwned> = assistant_msg
+                            .tool_calls()
+                            .map(ToolCallOwned::from_view)
+                            .collect();
+                        let num_tool_calls = tool_calls.len();
+                        let tools_ref = Arc::clone(&self.tools);
 
                         // Emit all execution start events
-                        for tc in &result.tool_calls {
+                        for tc in &tool_calls {
                             emit_event!(AgentEvent::ToolExecutionStarted {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
@@ -161,26 +171,15 @@ where
                         }
 
                         // Execute all tool calls in parallel using join_all
-                        let dispatch_futures: Vec<_> = result
-                            .tool_calls
-                            .iter()
+                        let dispatch_futures: Vec<_> = tool_calls
+                            .into_iter()
                             .map(|tc| {
-                                let id = tc.id.clone();
-                                let name = tc.name.clone();
-                                let args = tc.args.clone();
-                                let thought_signature = tc.thought_signature.clone();
+                                let tools_ref = Arc::clone(&tools_ref);
                                 async move {
                                     let start = std::time::Instant::now();
-                                    let dispatch_result = tools_ref.dispatch(&name, &args).await;
+                                    let dispatch_result = tools_ref.dispatch(tc.as_view()).await;
                                     let duration_ms = start.elapsed().as_millis() as u64;
-                                    (
-                                        id,
-                                        name,
-                                        args,
-                                        dispatch_result,
-                                        duration_ms,
-                                        thought_signature,
-                                    )
+                                    (tc, dispatch_result, duration_ms)
                                 }
                             })
                             .collect();
@@ -189,18 +188,9 @@ where
 
                         // Process results and emit events
                         let mut tool_results = Vec::with_capacity(num_tool_calls);
-                        for (id, name, _args, dispatch_result, duration_ms, thought_signature) in
-                            dispatch_results
-                        {
-                            let (content, is_error) = match dispatch_result {
-                                Ok(v) => {
-                                    // Stringify the Value for the LLM
-                                    let s = match &v {
-                                        Value::String(s) => s.clone(),
-                                        _ => serde_json::to_string(&v).unwrap_or_default(),
-                                    };
-                                    (s, false)
-                                }
+                        for (tc, dispatch_result, duration_ms) in dispatch_results {
+                            let mut tool_result = match dispatch_result {
+                                Ok(result) => result,
                                 Err(crate::error::ToolError::CallbackPending {
                                     tool_name: callback_tool,
                                     args: callback_args,
@@ -210,7 +200,7 @@ where
                                         callback_args.as_object().cloned().unwrap_or_default();
                                     merged_args.insert(
                                         "tool_use_id".to_string(),
-                                        Value::String(id.clone()),
+                                        Value::String(tc.id.clone()),
                                     );
                                     return Err(AgentError::CallbackPending {
                                         tool_name: callback_tool,
@@ -224,32 +214,36 @@ where
                                             "{\"error\":\"tool_error\",\"message\":\"tool error\"}"
                                                 .to_string()
                                         });
-                                    (serialized, true)
+                                    ToolResult {
+                                        tool_use_id: tc.id.clone(),
+                                        content: serialized,
+                                        is_error: true,
+                                        thought_signature: None,
+                                    }
                                 }
                             };
 
+                            if tool_result.tool_use_id.is_empty() {
+                                tool_result.tool_use_id = tc.id.clone();
+                            }
+
                             // Emit execution complete
                             emit_event!(AgentEvent::ToolExecutionCompleted {
-                                id: id.clone(),
-                                name: name.clone(),
-                                result: content.clone(),
-                                is_error,
+                                id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                result: tool_result.content.clone(),
+                                is_error: tool_result.is_error,
                                 duration_ms,
                             });
 
                             // Emit result received
                             emit_event!(AgentEvent::ToolResultReceived {
-                                id: id.clone(),
-                                name: name.clone(),
-                                is_error,
+                                id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                is_error: tool_result.is_error,
                             });
 
-                            tool_results.push(ToolResult {
-                                tool_use_id: id,
-                                content,
-                                is_error,
-                                thought_signature,
-                            });
+                            tool_results.push(tool_result);
 
                             // Track tool call in budget
                             self.budget.record_tool_call();
@@ -291,18 +285,14 @@ where
                         turn_count += 1;
                     } else {
                         // No tool calls - we're done with the agentic loop
-                        let final_text = result.content.clone();
-                        self.session.push(Message::Assistant(AssistantMessage {
-                            content: result.content,
-                            tool_calls: vec![],
-                            stop_reason: result.stop_reason,
-                            usage: result.usage.clone(),
-                        }));
+                        let final_text = assistant_text.clone();
+                        self.session
+                            .push(Message::BlockAssistant(assistant_msg));
 
                         // Emit turn completed
                         emit_event!(AgentEvent::TurnCompleted {
-                            stop_reason: result.stop_reason,
-                            usage: result.usage,
+                            stop_reason,
+                            usage,
                         });
 
                         // Check if we need to perform extraction turn for structured output
@@ -387,7 +377,7 @@ where
     /// Build a RunResult from current state
     fn build_result(&self, turns: u32, tool_calls: u32) -> RunResult {
         RunResult {
-            text: self.session.last_assistant_text().unwrap_or("").to_string(),
+            text: self.session.last_assistant_text().unwrap_or_default(),
             session_id: self.session.id().clone(),
             usage: self.session.total_usage(),
             turns,
@@ -395,4 +385,36 @@ where
             structured_output: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallOwned {
+    id: String,
+    name: String,
+    args: Box<RawValue>,
+}
+
+impl ToolCallOwned {
+    fn from_view(view: ToolCallView<'_>) -> Self {
+        let args = RawValue::from_string(view.args.get().to_string())
+            .unwrap_or_else(|_| fallback_raw_value());
+        Self {
+            id: view.id.to_string(),
+            name: view.name.to_string(),
+            args,
+        }
+    }
+
+    fn as_view(&self) -> ToolCallView<'_> {
+        ToolCallView {
+            id: &self.id,
+            name: &self.name,
+            args: &self.args,
+        }
+    }
+}
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn fallback_raw_value() -> Box<RawValue> {
+    RawValue::from_string("{}".to_string()).expect("static JSON is valid")
 }

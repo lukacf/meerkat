@@ -19,6 +19,8 @@ async-trait = { workspace = true }
 async-stream = { workspace = true }
 reqwest = { workspace = true }
 tracing = { workspace = true }
+slab = "0.4"
+indexmap = "2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

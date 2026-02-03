@@ -30,9 +30,8 @@
 
 use crate::AgentToolDispatcher;
 use crate::error::ToolError;
-use crate::types::ToolDef;
+use crate::types::{ToolCallView, ToolDef, ToolResult};
 use async_trait::async_trait;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -348,20 +347,20 @@ impl AgentToolDispatcher for ToolGateway {
     /// - `ToolError::NotFound` if the tool doesn't exist
     /// - `ToolError::Unavailable` if the tool exists but is currently hidden
     /// - The tool result if execution succeeds
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         let idx = self
             .route
-            .get(name)
-            .ok_or_else(|| ToolError::not_found(name))?;
+            .get(call.name)
+            .ok_or_else(|| ToolError::not_found(call.name))?;
 
         let entry = &self.entries[*idx];
 
         // Check availability before dispatch
         if let Some(reason) = entry.availability.unavailable_reason() {
-            return Err(ToolError::unavailable(name, reason));
+            return Err(ToolError::unavailable(call.name, reason));
         }
 
-        entry.dispatcher.dispatch(name, args).await
+        entry.dispatcher.dispatch(call).await
     }
 }
 
@@ -371,6 +370,24 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use serde_json::Value;
+
+    async fn dispatch_json(
+        gateway: &ToolGateway,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<Value, ToolError> {
+        let args_raw = serde_json::value::RawValue::from_string(args.to_string())
+            .expect("valid args json");
+        let call = ToolCallView {
+            id: "test-1",
+            name,
+            args: &args_raw,
+        };
+        let result = gateway.dispatch(call).await?;
+        serde_json::from_str(&result.content)
+            .map_err(|e| ToolError::execution_failed(e.to_string()))
+    }
 
     fn empty_object_schema() -> Value {
         let mut obj = serde_json::Map::new();
@@ -415,11 +432,16 @@ mod tests {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
-            if self.tools.iter().any(|t| t.name == name) {
-                Ok(json!({"source": self.prefix, "tool": name}))
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            if self.tools.iter().any(|t| t.name == call.name) {
+                Ok(ToolResult {
+                    tool_use_id: call.id.to_string(),
+                    content: json!({"source": self.prefix, "tool": call.name}).to_string(),
+                    is_error: false,
+                    thought_signature: None,
+                })
             } else {
-                Err(ToolError::not_found(name))
+                Err(ToolError::not_found(call.name))
             }
         }
     }
@@ -478,7 +500,9 @@ mod tests {
 
         let gateway = ToolGateway::new(base, Some(overlay)).unwrap();
 
-        let result = gateway.dispatch("task_create", &json!({})).await.unwrap();
+        let result = dispatch_json(&gateway, "task_create", json!({}))
+            .await
+            .unwrap();
         assert_eq!(result["source"], "base");
         assert_eq!(result["tool"], "task_create");
     }
@@ -490,7 +514,9 @@ mod tests {
 
         let gateway = ToolGateway::new(base, Some(overlay)).unwrap();
 
-        let result = gateway.dispatch("send_message", &json!({})).await.unwrap();
+        let result = dispatch_json(&gateway, "send_message", json!({}))
+            .await
+            .unwrap();
         assert_eq!(result["source"], "comms");
         assert_eq!(result["tool"], "send_message");
     }
@@ -501,7 +527,7 @@ mod tests {
 
         let gateway = ToolGateway::new(base, None).unwrap();
 
-        let result = gateway.dispatch("unknown_tool", &json!({})).await;
+        let result = dispatch_json(&gateway, "unknown_tool", json!({})).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ToolError::NotFound { .. }));
     }
@@ -618,7 +644,7 @@ mod tests {
             .unwrap();
 
         // Try to dispatch unavailable tool
-        let result = gateway.dispatch("send_message", &json!({})).await;
+        let result = dispatch_json(&gateway, "send_message", json!({})).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, ToolError::Unavailable { .. }));
@@ -626,7 +652,7 @@ mod tests {
 
         // Enable comms
         flag.store(true, Ordering::SeqCst);
-        let result = gateway.dispatch("send_message", &json!({})).await;
+        let result = dispatch_json(&gateway, "send_message", json!({})).await;
         assert!(result.is_ok());
     }
 

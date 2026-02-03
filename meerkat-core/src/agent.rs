@@ -15,7 +15,10 @@ use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
 use crate::sub_agent::SubAgentManager;
-use crate::types::{Message, StopReason, ToolCall, ToolDef, Usage};
+use crate::types::{
+    AssistantBlock, BlockAssistantMessage, Message, StopReason, ToolCallView, ToolDef, ToolResult,
+    Usage,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -53,31 +56,26 @@ pub trait AgentLlmClient: Send + Sync {
 
 /// Result of streaming from the LLM
 pub struct LlmStreamResult {
-    content: String,
-    tool_calls: Vec<ToolCall>,
+    blocks: Vec<AssistantBlock>,
     stop_reason: StopReason,
     usage: Usage,
 }
 
 impl LlmStreamResult {
     pub fn new(
-        content: String,
-        tool_calls: Vec<ToolCall>,
+        blocks: Vec<AssistantBlock>,
         stop_reason: StopReason,
         usage: Usage,
     ) -> Self {
         Self {
-            content,
-            tool_calls,
+            blocks,
             stop_reason,
             usage,
         }
     }
-    pub fn content(&self) -> &str {
-        &self.content
-    }
-    pub fn tool_calls(&self) -> &[ToolCall] {
-        &self.tool_calls
+
+    pub fn blocks(&self) -> &[AssistantBlock] {
+        &self.blocks
     }
     pub fn stop_reason(&self) -> StopReason {
         self.stop_reason
@@ -85,8 +83,16 @@ impl LlmStreamResult {
     pub fn usage(&self) -> &Usage {
         &self.usage
     }
-    pub fn into_parts(self) -> (String, Vec<ToolCall>, StopReason, Usage) {
-        (self.content, self.tool_calls, self.stop_reason, self.usage)
+
+    pub fn into_message(self) -> BlockAssistantMessage {
+        BlockAssistantMessage {
+            blocks: self.blocks,
+            stop_reason: self.stop_reason,
+        }
+    }
+
+    pub fn into_parts(self) -> (Vec<AssistantBlock>, StopReason, Usage) {
+        (self.blocks, self.stop_reason, self.usage)
     }
 }
 
@@ -96,7 +102,7 @@ pub trait AgentToolDispatcher: Send + Sync {
     /// Get available tool definitions
     fn tools(&self) -> Arc<[Arc<ToolDef>]>;
     /// Execute a tool call
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, crate::error::ToolError>;
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, crate::error::ToolError>;
 }
 
 /// A tool dispatcher that filters tools based on a policy
@@ -137,11 +143,11 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         Arc::clone(&self.filtered_tools)
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, crate::error::ToolError> {
-        if !self.allowed_tools.contains(name) {
-            return Err(crate::error::ToolError::access_denied(name));
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, crate::error::ToolError> {
+        if !self.allowed_tools.contains(call.name) {
+            return Err(crate::error::ToolError::access_denied(call.name));
         }
-        self.inner.dispatch(name, args).await
+        self.inner.dispatch(call).await
     }
 }
 

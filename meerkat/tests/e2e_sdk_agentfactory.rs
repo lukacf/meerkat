@@ -7,17 +7,19 @@ use std::sync::{
 use async_trait::async_trait;
 use futures::stream;
 use meerkat::{
-    AgentBuilder, AgentFactory, AgentToolDispatcher, LlmDoneOutcome, LlmEvent, LlmRequest, ToolDef,
-    ToolError,
+    AgentBuilder, AgentFactory, AgentToolDispatcher, LlmDoneOutcome, LlmEvent, LlmRequest,
+    ToolDef, ToolError, ToolResult,
 };
+use meerkat_core::ToolCallView;
 use meerkat_client::LlmClient;
 use meerkat_store::MemoryStore;
 use meerkat_tools::schema_for;
 use schemars::JsonSchema;
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::json;
 
 #[allow(dead_code)]
-#[derive(Debug, JsonSchema)]
+#[derive(Debug, JsonSchema, Deserialize)]
 struct EchoInput {
     message: String,
 }
@@ -41,7 +43,7 @@ impl LlmClient for MockLlmClient {
                     id: "tc-1".into(),
                     name: "echo".into(),
                     args: json!({"message": "hello"}),
-                    thought_signature: None,
+                    meta: None,
                 }),
                 Ok(LlmEvent::Done {
                     outcome: LlmDoneOutcome::Success {
@@ -53,6 +55,7 @@ impl LlmClient for MockLlmClient {
             Box::pin(stream::iter(vec![
                 Ok(LlmEvent::TextDelta {
                     delta: "done".to_string(),
+                    meta: None,
                 }),
                 Ok(LlmEvent::Done {
                     outcome: LlmDoneOutcome::Success {
@@ -87,10 +90,17 @@ impl AgentToolDispatcher for RecordingDispatcher {
         .into()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         self.called.store(true, Ordering::SeqCst);
-        let message = args.get("message").cloned().unwrap_or_else(|| json!(""));
-        Ok(json!({ "message": message, "tool": name }))
+        let args: EchoInput = call
+            .parse_args()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let payload = json!({ "message": args.message, "tool": call.name });
+        Ok(ToolResult::new(
+            call.id.to_string(),
+            payload.to_string(),
+            false,
+        ))
     }
 }
 

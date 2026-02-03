@@ -5,7 +5,7 @@ use meerkat_comms::{Router, ToolContext, TrustedPeers, handle_tools_call, tools_
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::gateway::Availability;
-use meerkat_core::types::ToolDef;
+use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -68,17 +68,25 @@ impl AgentToolDispatcher for CommsToolSurface {
         Arc::clone(&self.tool_defs)
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
-        let is_comms = self.tool_defs.iter().any(|t| t.name == name);
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        let is_comms = self.tool_defs.iter().any(|t| t.name == call.name);
         if !is_comms {
             return Err(ToolError::NotFound {
-                name: name.to_string(),
+                name: call.name.to_string(),
             });
         }
 
-        handle_tools_call(&self.tool_context, name, args)
+        let args: Value = serde_json::from_str(call.args.get())
+            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        let result = handle_tools_call(&self.tool_context, call.name, &args)
             .await
-            .map_err(|e| ToolError::ExecutionFailed { message: e })
+            .map_err(|e| ToolError::ExecutionFailed { message: e })?;
+        Ok(ToolResult {
+            tool_use_id: call.id.to_string(),
+            content: result.to_string(),
+            is_error: false,
+            thought_signature: None,
+        })
     }
 }
 
@@ -125,7 +133,14 @@ mod tests {
     async fn test_comms_tool_surface_dispatch_unknown() {
         let (router, trusted_peers) = make_tool_context();
         let surface = CommsToolSurface::new(router, trusted_peers);
-        let result = surface.dispatch("unknown", &Value::Null).await;
+        let args_raw =
+            serde_json::value::RawValue::from_string(Value::Null.to_string()).unwrap();
+        let call = ToolCallView {
+            id: "test-1",
+            name: "unknown",
+            args: &args_raw,
+        };
+        let result = surface.dispatch(call).await;
         assert!(matches!(result, Err(ToolError::NotFound { .. })));
     }
 }

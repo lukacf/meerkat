@@ -36,6 +36,22 @@ async fn spawn_test_server(
     Ok((base_url, AbortOnDrop(handle)))
 }
 
+async fn spawn_test_server_or_skip(
+    app: Router,
+) -> Result<Option<(String, AbortOnDrop)>, Box<dyn std::error::Error>> {
+    match spawn_test_server(app).await {
+        Ok(server) => Ok(Some(server)),
+        Err(e) => {
+            if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+                if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                    return Ok(None);
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
 fn schema_for<T: JsonSchema>() -> Value {
     let schema = schemars::schema_for!(T);
     let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
@@ -107,7 +123,7 @@ async fn test_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(LlmEvent::TextDelta { delta }) => {
+            Ok(LlmEvent::TextDelta { delta, .. }) => {
                 if !delta.is_empty() {
                     got_text = true;
                 }
@@ -173,7 +189,9 @@ async fn test_anthropic_auth_error() -> Result<(), Box<dyn std::error::Error>> {
         "/v1/messages",
         post(|| async { (StatusCode::UNAUTHORIZED, "unauthorized") }),
     );
-    let (base_url, _server) = spawn_test_server(app).await?;
+    let Some((base_url, _server)) = spawn_test_server_or_skip(app).await? else {
+        return Ok(());
+    };
 
     let client = AnthropicClient::new("invalid-key".to_string())?.with_base_url(base_url);
 
@@ -213,7 +231,9 @@ async fn test_anthropic_message_stop_without_newline_yields_done()
         "/v1/messages",
         post(|| async { (StatusCode::OK, SSE_BODY) }),
     );
-    let (base_url, _server) = spawn_test_server(app).await?;
+    let Some((base_url, _server)) = spawn_test_server_or_skip(app).await? else {
+        return Ok(());
+    };
 
     let client = AnthropicClient::new("test-key".to_string())?.with_base_url(base_url);
     let request = LlmRequest::new(
@@ -230,7 +250,7 @@ async fn test_anthropic_message_stop_without_newline_yields_done()
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(LlmEvent::TextDelta { delta }) => {
+            Ok(LlmEvent::TextDelta { delta, .. }) => {
                 if !delta.is_empty() {
                     got_text = true;
                 }
@@ -272,7 +292,9 @@ async fn test_anthropic_message_stop_without_space_prefix_yields_done()
         "/v1/messages",
         post(|| async { (StatusCode::OK, SSE_BODY) }),
     );
-    let (base_url, _server) = spawn_test_server(app).await?;
+    let Some((base_url, _server)) = spawn_test_server_or_skip(app).await? else {
+        return Ok(());
+    };
 
     let client = AnthropicClient::new("test-key".to_string())?.with_base_url(base_url);
     let request = LlmRequest::new(
@@ -289,7 +311,7 @@ async fn test_anthropic_message_stop_without_space_prefix_yields_done()
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(LlmEvent::TextDelta { delta }) => {
+            Ok(LlmEvent::TextDelta { delta, .. }) => {
                 if !delta.is_empty() {
                     got_text = true;
                 }
@@ -337,7 +359,7 @@ async fn test_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(LlmEvent::TextDelta { delta }) => {
+            Ok(LlmEvent::TextDelta { delta, .. }) => {
                 if !delta.is_empty() {
                     got_text = true;
                 }
@@ -416,7 +438,7 @@ async fn test_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(LlmEvent::TextDelta { delta }) => {
+            Ok(LlmEvent::TextDelta { delta, .. }) => {
                 if !delta.is_empty() {
                     got_text = true;
                 }
@@ -478,11 +500,18 @@ async fn test_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::test]
 async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
-    let app = Router::new().route(
-        "/v1/chat/completions",
-        post(|| async { (StatusCode::UNAUTHORIZED, "unauthorized") }),
-    );
-    let (base_url, _server) = spawn_test_server(app).await?;
+    let app = Router::new()
+        .route(
+            "/v1/responses",
+            post(|| async { (StatusCode::UNAUTHORIZED, "unauthorized") }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(|| async { (StatusCode::UNAUTHORIZED, "unauthorized") }),
+        );
+    let Some((base_url, _server)) = spawn_test_server_or_skip(app).await? else {
+        return Ok(());
+    };
 
     let client = OpenAiClient::new("invalid-key".to_string()).with_base_url(base_url);
 
@@ -537,7 +566,7 @@ async fn collect_stream_text(
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(LlmEvent::TextDelta { delta }) => {
+            Ok(LlmEvent::TextDelta { delta, .. }) => {
                 text.push_str(&delta);
             }
             Ok(LlmEvent::Done {

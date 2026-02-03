@@ -98,3 +98,84 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 | Anthropic | `claude-opus-4-5` or `claude-sonnet-4-5` |
 
 Do NOT use older model names like `gpt-4o-mini` or `gemini-2.0-flash`.
+
+## Rust Design Guidelines
+
+This project follows strict Rust idioms. Code review will reject "JavaScript wearing a struct costume."
+
+### Type Safety
+
+1. **Typed enums over `serde_json::Value`**: If you know the possible shapes of data, define a typed enum. Parse at the boundary, fail fast. Don't ferry `Value` through the system hoping someone else validates it.
+
+   ```rust
+   // BAD: runtime "is this an object?" checks
+   meta: Option<serde_json::Value>
+
+   // GOOD: compiler-enforced variants
+   #[serde(tag = "provider")]
+   pub enum ProviderMeta {
+       Anthropic { signature: String },
+       Gemini { thought_signature: String },
+       OpenAi { encrypted_content: String },
+   }
+   ```
+
+2. **Newtype indices**: If using indices into collections, wrap them in a newtype to prevent mixing up different index spaces.
+
+   ```rust
+   struct BlockKey(usize);  // Can't accidentally use a ToolBufferIdx here
+   ```
+
+3. **`Box<RawValue>` for pass-through JSON**: If JSON is parsed by another layer (e.g., tool dispatcher), use `RawValue` to avoid parsing twice.
+
+### Error Handling
+
+4. **`Result` over silent failures**: Separate mechanism from policy. Return errors, let the caller decide to skip/count/abort.
+
+   ```rust
+   // BAD: swallows the signal
+   fn on_delta(&mut self, id: &str) {
+       if let Some(buf) = self.buffers.get_mut(id) { ... }
+   }
+
+   // GOOD: caller decides policy
+   fn on_delta(&mut self, id: &str) -> Result<(), StreamError> {
+       let buf = self.buffers.get_mut(id)
+           .ok_or_else(|| StreamError::OrphanedDelta(id.into()))?;
+       ...
+   }
+   ```
+
+5. **No `.unwrap()` or `.expect()` in library code**: Use `?` propagation or explicit `match`/`if let` with error handling.
+
+### Allocation Discipline
+
+6. **Zero-allocation iterators**: Return `impl Iterator<Item = View<'_>>` instead of `Vec<Owned>` when callers just iterate.
+
+   ```rust
+   // BAD: allocates Vec for every call
+   pub fn tool_calls(&self) -> Vec<ToolCall> { ... }
+
+   // GOOD: lazy iterator, borrows from self
+   pub fn tool_calls(&self) -> impl Iterator<Item = ToolCallView<'_>> { ... }
+   ```
+
+7. **`impl Display` over collect+join**: For concatenating strings, implement `Display` to avoid intermediate allocations.
+
+8. **`Slab` for stable keys**: If you need stable indices that survive mutations, use `slab` crate instead of `Vec` + `usize`.
+
+### Data Modeling
+
+9. **Don't duplicate map keys**: If something is a map key, don't store it in the value too.
+
+   ```rust
+   // BAD: id stored twice
+   tool_buffers: HashMap<String, ToolBuffer>  // where ToolBuffer has `id: String`
+
+   // GOOD: id is only the key
+   tool_buffers: IndexMap<String, ToolBuffer>  // ToolBuffer has no id field
+   ```
+
+10. **Separate concerns in structs**: Billing metadata (`Usage`) doesn't belong in domain models (`AssistantMessage`). Return them separately.
+
+11. **`IndexMap` for deterministic ordering**: Use `IndexMap` instead of `HashMap` when iteration order matters (e.g., tool calls must appear in emission order).

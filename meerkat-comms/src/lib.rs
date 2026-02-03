@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::panic))]
 // meerkat-comms
 //! Inter-agent communication for Meerkat instances.
 

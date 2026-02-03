@@ -102,7 +102,53 @@ impl GeminiClient {
                         "parts": parts
                     }));
                 }
+                Message::BlockAssistant(a) => {
+                    // New format: ordered blocks with ProviderMeta
+                    let mut parts = Vec::new();
+
+                    for block in &a.blocks {
+                        match block {
+                            meerkat_core::AssistantBlock::Text { text, meta } => {
+                                if !text.is_empty() {
+                                    let mut part = serde_json::json!({"text": text});
+                                    // Gemini may have thoughtSignature on text parts for continuity
+                                    if let Some(meerkat_core::ProviderMeta::Gemini { thought_signature }) = meta.as_deref() {
+                                        part["thoughtSignature"] = serde_json::json!(thought_signature);
+                                    }
+                                    parts.push(part);
+                                }
+                            }
+                            meerkat_core::AssistantBlock::Reasoning { text, .. } => {
+                                // Gemini doesn't accept reasoning blocks back
+                                // Just include as text if needed for context
+                                if !text.is_empty() {
+                                    parts.push(serde_json::json!({"text": format!("[Reasoning: {}]", text)}));
+                                }
+                            }
+                            meerkat_core::AssistantBlock::ToolUse { id, name, args, meta } => {
+                                tool_name_by_id.insert(id.clone(), name.clone());
+                                // Parse RawValue to Value
+                                let args_value: Value = serde_json::from_str(args.get())
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+                                let mut part = serde_json::json!({"functionCall": {"name": name, "args": args_value}});
+                                // Only add signature if present (first parallel call has it)
+                                if let Some(meerkat_core::ProviderMeta::Gemini { thought_signature }) = meta.as_deref() {
+                                    part["thoughtSignature"] = serde_json::json!(thought_signature);
+                                }
+                                parts.push(part);
+                            }
+                            _ => {} // non_exhaustive: ignore unknown future variants
+                        }
+                    }
+
+                    contents.push(serde_json::json!({
+                        "role": "model",
+                        "parts": parts
+                    }));
+                }
                 Message::ToolResults { results } => {
+                    // Per spec section 2.3: thoughtSignature NEVER on functionResponse
+                    // Signature belongs on functionCall, not on the response
                     let parts: Vec<Value> = results
                         .iter()
                         .map(|r| {
@@ -110,28 +156,19 @@ impl GeminiClient {
                                 .get(&r.tool_use_id)
                                 .cloned()
                                 .unwrap_or_else(|| r.tool_use_id.clone());
-                            if let Some(sig) = &r.thought_signature {
-                                serde_json::json!({
-                                    "functionResponse": {
-                                        "name": function_name,
-                                        "response": {
-                                            "content": r.content,
-                                            "error": r.is_error
-                                        }
-                                    },
-                                    "thoughtSignature": sig
-                                })
-                            } else {
-                                serde_json::json!({
-                                    "functionResponse": {
-                                        "name": function_name,
-                                        "response": {
-                                            "content": r.content,
-                                            "error": r.is_error
-                                        }
+                            serde_json::json!({
+                                "functionResponse": {
+                                    "name": function_name,
+                                    "response": {
+                                        "content": r.content,
+                                        "error": r.is_error
                                     }
-                                })
-                            }
+                                }
+                            })
+                            // NOTE: thoughtSignature is intentionally NOT included here
+                            // Verified by scripts/test_gemini_thought_signature.py:
+                            // - sig on functionCall only: PASS
+                            // - sig on functionResponse only: FAIL (400 error)
                         })
                         .collect();
 
@@ -342,8 +379,15 @@ impl LlmClient for GeminiClient {
                                     if let Some(content) = cand.content {
                                         if let Some(parts) = content.parts {
                                             for part in parts {
+                                                // Build meta from thoughtSignature if present
+                                                let meta = part.thought_signature.as_ref().map(|sig| {
+                                                    Box::new(meerkat_core::ProviderMeta::Gemini {
+                                                        thought_signature: sig.clone(),
+                                                    })
+                                                });
+
                                                 if let Some(text) = part.text {
-                                                    yield LlmEvent::TextDelta { delta: text };
+                                                    yield LlmEvent::TextDelta { delta: text, meta: meta.clone() };
                                                 }
                                                 if let Some(fc) = part.function_call {
                                                     let id = format!("fc_{}", tool_call_index);
@@ -352,7 +396,7 @@ impl LlmClient for GeminiClient {
                                                         id,
                                                         name: fc.name,
                                                         args: fc.args.unwrap_or(json!({})),
-                                                        thought_signature: part.thought_signature,
+                                                        meta,
                                                     };
                                                 }
                                             }
@@ -532,8 +576,10 @@ mod tests {
         Ok(())
     }
 
+    /// Test that functionCall has thoughtSignature but functionResponse does NOT
+    /// Per spec section 2.3: Signatures on functionCall, NEVER on functionResponse
     #[test]
-    fn test_tool_response_uses_function_name_and_signature()
+    fn test_tool_response_uses_function_name_no_signature()
     -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
         let tool_call = ToolCall::with_thought_signature(
@@ -571,6 +617,22 @@ mod tests {
             .and_then(|c| c.as_array())
             .ok_or("missing contents")?;
 
+        // Find the assistant message (role: "model") - functionCall SHOULD have signature
+        let model_content = contents
+            .iter()
+            .find(|c| c.get("role").and_then(|r| r.as_str()) == Some("model"))
+            .ok_or("missing model content")?;
+        let model_parts = model_content
+            .get("parts")
+            .and_then(|p| p.as_array())
+            .ok_or("missing model parts")?;
+        let fc_part = model_parts
+            .iter()
+            .find(|p| p.get("functionCall").is_some())
+            .ok_or("missing functionCall part")?;
+        assert_eq!(fc_part["thoughtSignature"], "sig_123", "functionCall SHOULD have signature");
+
+        // Find the tool result (last message) - functionResponse MUST NOT have signature
         let tool_result_parts = contents
             .last()
             .and_then(|c| c.get("parts"))
@@ -579,7 +641,11 @@ mod tests {
 
         let function_response = &tool_result_parts[0]["functionResponse"];
         assert_eq!(function_response["name"], "get_weather");
-        assert_eq!(tool_result_parts[0]["thoughtSignature"], "sig_123");
+        // IMPORTANT: functionResponse MUST NOT have thoughtSignature (spec section 2.3)
+        assert!(
+            tool_result_parts[0].get("thoughtSignature").is_none(),
+            "functionResponse MUST NOT have thoughtSignature"
+        );
         Ok(())
     }
 
@@ -929,5 +995,234 @@ mod tests {
             "anyOf should be removed"
         );
         assert!(sanitized.get("allOf").is_none(), "allOf should be removed");
+    }
+
+    // =========================================================================
+    // Thought Signature Tests (Spec Section 3.5)
+    // =========================================================================
+
+    /// Parse thoughtSignature from functionCall parts into ProviderMeta::Gemini
+    #[test]
+    fn test_parse_function_call_with_thought_signature() -> Result<(), Box<dyn std::error::Error>> {
+        let line = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Tokyo"}},"thoughtSignature":"sig_abc123"}]}}]}"#;
+        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .ok_or("missing content")?
+            .parts
+            .as_ref()
+            .ok_or("missing parts")?;
+
+        assert!(parts[0].function_call.is_some(), "should have function_call");
+        assert_eq!(
+            parts[0].thought_signature.as_deref(),
+            Some("sig_abc123"),
+            "should have thoughtSignature"
+        );
+        Ok(())
+    }
+
+    /// Parse thoughtSignature from text parts into ProviderMeta::Gemini
+    #[test]
+    fn test_parse_text_with_thought_signature() -> Result<(), Box<dyn std::error::Error>> {
+        let line = r#"{"candidates":[{"content":{"parts":[{"text":"Hello world","thoughtSignature":"sig_text_456"}]}}]}"#;
+        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .ok_or("missing content")?
+            .parts
+            .as_ref()
+            .ok_or("missing parts")?;
+
+        assert_eq!(parts[0].text.as_deref(), Some("Hello world"));
+        assert_eq!(
+            parts[0].thought_signature.as_deref(),
+            Some("sig_text_456"),
+            "text parts can have thoughtSignature for continuity"
+        );
+        Ok(())
+    }
+
+    /// Parallel tool calls: only FIRST call has signature per spec section 2.3
+    #[test]
+    fn test_parallel_calls_only_first_has_signature() -> Result<(), Box<dyn std::error::Error>> {
+        // Simulating 3 parallel function calls from Gemini - only first has signature
+        let line = r#"{"candidates":[{"content":{"parts":[
+            {"functionCall":{"name":"get_weather","args":{"city":"Tokyo"}},"thoughtSignature":"sig_first"},
+            {"functionCall":{"name":"get_time","args":{"tz":"JST"}}},
+            {"functionCall":{"name":"get_population","args":{"city":"Tokyo"}}}
+        ]}}]}"#;
+
+        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let candidates = response.candidates.ok_or("missing candidates")?;
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .ok_or("missing content")?
+            .parts
+            .as_ref()
+            .ok_or("missing parts")?;
+
+        assert_eq!(parts.len(), 3);
+        assert_eq!(
+            parts[0].thought_signature.as_deref(),
+            Some("sig_first"),
+            "first parallel call MUST have signature"
+        );
+        assert!(
+            parts[1].thought_signature.is_none(),
+            "second parallel call must NOT have signature"
+        );
+        assert!(
+            parts[2].thought_signature.is_none(),
+            "third parallel call must NOT have signature"
+        );
+        Ok(())
+    }
+
+    /// Request building: thoughtSignature on functionCall, NEVER on functionResponse
+    #[test]
+    fn test_request_building_no_signature_on_function_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+
+        // ToolCall with thought_signature
+        let tool_call = ToolCall::with_thought_signature(
+            "call_1".to_string(),
+            "get_weather".to_string(),
+            json!({"city": "Tokyo"}),
+            "sig_123".to_string(),
+        );
+
+        // ToolResult also has thought_signature (from legacy code path)
+        let tool_result = ToolResult::with_thought_signature(
+            "call_1".to_string(),
+            "Sunny, 25C".to_string(),
+            false,
+            "sig_123".to_string(),
+        );
+
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![
+                Message::User(UserMessage {
+                    content: "What's the weather?".to_string(),
+                }),
+                Message::Assistant(AssistantMessage {
+                    content: String::new(),
+                    tool_calls: vec![tool_call],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage::default(),
+                }),
+                Message::ToolResults {
+                    results: vec![tool_result],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let contents = body
+            .get("contents")
+            .and_then(|c| c.as_array())
+            .ok_or("missing contents")?;
+
+        // Find the assistant message (role: "model")
+        let assistant_content = contents
+            .iter()
+            .find(|c| c.get("role").and_then(|r| r.as_str()) == Some("model"))
+            .ok_or("missing model content")?;
+        let assistant_parts = assistant_content
+            .get("parts")
+            .and_then(|p| p.as_array())
+            .ok_or("missing parts")?;
+
+        // Assistant's functionCall SHOULD have thoughtSignature
+        let fc_part = assistant_parts
+            .iter()
+            .find(|p| p.get("functionCall").is_some())
+            .ok_or("missing functionCall part")?;
+        assert!(
+            fc_part.get("thoughtSignature").is_some(),
+            "functionCall part SHOULD have thoughtSignature"
+        );
+
+        // Find the tool results message (role: "user" with functionResponse)
+        let tool_results_content = contents
+            .last()
+            .ok_or("missing last content")?;
+        let tool_result_parts = tool_results_content
+            .get("parts")
+            .and_then(|p| p.as_array())
+            .ok_or("missing tool result parts")?;
+
+        // Tool result's functionResponse MUST NOT have thoughtSignature
+        let fr_part = tool_result_parts
+            .iter()
+            .find(|p| p.get("functionResponse").is_some())
+            .ok_or("missing functionResponse part")?;
+        assert!(
+            fr_part.get("thoughtSignature").is_none(),
+            "functionResponse MUST NOT have thoughtSignature (verified by test_gemini_thought_signature.py)"
+        );
+
+        Ok(())
+    }
+
+    /// ToolCallComplete event should use ProviderMeta::Gemini instead of deprecated thought_signature field
+    #[test]
+    fn test_tool_call_complete_uses_provider_meta() {
+        use meerkat_core::ProviderMeta;
+
+        // This test verifies the LlmEvent::ToolCallComplete uses the `meta` field
+        // with ProviderMeta::Gemini variant instead of the deprecated `thought_signature` field
+        let meta = Some(Box::new(ProviderMeta::Gemini {
+            thought_signature: "sig_test".to_string(),
+        }));
+
+        let event = LlmEvent::ToolCallComplete {
+            id: "fc_0".to_string(),
+            name: "test_tool".to_string(),
+            args: json!({}),
+            meta, // new field
+        };
+
+        if let LlmEvent::ToolCallComplete { meta: m, .. } = event {
+            assert!(m.is_some(), "meta should be Some");
+            match *m.unwrap() {
+                ProviderMeta::Gemini { thought_signature } => {
+                    assert_eq!(thought_signature, "sig_test");
+                }
+                _ => panic!("expected Gemini variant"),
+            }
+        }
+    }
+
+    /// TextDelta event should include meta for Gemini text parts with thoughtSignature
+    #[test]
+    fn test_text_delta_uses_provider_meta() {
+        use meerkat_core::ProviderMeta;
+
+        let meta = Some(Box::new(ProviderMeta::Gemini {
+            thought_signature: "sig_text".to_string(),
+        }));
+
+        let event = LlmEvent::TextDelta {
+            delta: "Hello".to_string(),
+            meta,
+        };
+
+        if let LlmEvent::TextDelta { meta: m, .. } = event {
+            assert!(m.is_some());
+            match *m.unwrap() {
+                ProviderMeta::Gemini { thought_signature } => {
+                    assert_eq!(thought_signature, "sig_text");
+                }
+                _ => panic!("expected Gemini variant"),
+            }
+        }
     }
 }

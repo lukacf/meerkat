@@ -2,16 +2,13 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_core::{
-    AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, StopReason, ToolCall,
-    ToolDef, Usage,
-};
+use meerkat_core::{AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, StopReason, ToolDef, Usage};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, ToolCallBuffer};
+use crate::block_assembler::BlockAssembler;
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 
 /// Shared adapter for streaming LLM clients.
 #[derive(Clone)]
@@ -55,6 +52,11 @@ impl LlmClientAdapter {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn fallback_raw_value() -> Box<serde_json::value::RawValue> {
+    serde_json::value::RawValue::from_string("{}".to_string()).expect("static JSON is valid")
+}
+
 #[async_trait]
 impl AgentLlmClient for LlmClientAdapter {
     async fn stream_response(
@@ -81,46 +83,63 @@ impl AgentLlmClient for LlmClientAdapter {
 
         let mut stream = self.client.stream(&request);
 
-        let mut content = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut tool_call_buffers: HashMap<String, ToolCallBuffer> = HashMap::new();
+        let mut assembler = BlockAssembler::new();
+        let mut reasoning_started = false;
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = Usage::default();
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => {
-                        content.push_str(&delta);
+                    LlmEvent::TextDelta { delta, meta } => {
+                        assembler.on_text_delta(&delta, meta);
                         if let Some(ref tx) = self.event_tx {
                             let _ = tx.send(AgentEvent::TextDelta { delta }).await;
                         }
+                    }
+                    LlmEvent::ReasoningDelta { delta } => {
+                        if !reasoning_started {
+                            reasoning_started = true;
+                            assembler.on_reasoning_start();
+                        }
+                        if let Err(e) = assembler.on_reasoning_delta(&delta) {
+                            tracing::warn!(?e, "orphaned reasoning delta");
+                        }
+                    }
+                    LlmEvent::ReasoningComplete { text, meta } => {
+                        if !reasoning_started {
+                            assembler.on_reasoning_start();
+                            let _ = assembler.on_reasoning_delta(&text);
+                        }
+                        assembler.on_reasoning_complete(meta);
+                        reasoning_started = false;
                     }
                     LlmEvent::ToolCallDelta {
                         id,
                         name,
                         args_delta,
                     } => {
-                        let buffer = tool_call_buffers
-                            .entry(id.clone())
-                            .or_insert_with(|| ToolCallBuffer::new(id));
-
-                        if let Some(n) = name {
-                            buffer.name = Some(n);
+                        if let Err(e) = assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta) {
+                            if matches!(e, crate::block_assembler::StreamAssemblyError::OrphanedToolDelta(_)) {
+                                let _ = assembler.on_tool_call_start(id.clone());
+                                if let Err(e) = assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta) {
+                                    tracing::warn!(?e, "orphaned tool delta");
+                                }
+                            } else {
+                                tracing::warn!(?e, "tool delta error");
+                            }
                         }
-                        buffer.push_args(&args_delta);
                     }
-                    LlmEvent::ToolCallComplete {
-                        id,
-                        name,
-                        args,
-                        thought_signature,
-                    } => {
-                        let tool_call = match thought_signature {
-                            Some(sig) => ToolCall::with_thought_signature(id, name, args, sig),
-                            None => ToolCall::new(id, name, args),
+                    LlmEvent::ToolCallComplete { id, name, args, meta } => {
+                        let effective_meta = meta;
+                        let args_raw = match serde_json::to_string(&args)
+                            .ok()
+                            .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
+                        {
+                            Some(raw) => raw,
+                            None => fallback_raw_value(),
                         };
-                        tool_calls.push(tool_call);
+                        let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
@@ -147,18 +166,8 @@ impl AgentLlmClient for LlmClientAdapter {
                 }
             }
         }
-
-        for (_, buffer) in tool_call_buffers {
-            if let Some(tc) = buffer.try_complete() {
-                if !tool_calls.iter().any(|t| t.id == tc.id) {
-                    tool_calls.push(tc);
-                }
-            }
-        }
-
         Ok(LlmStreamResult::new(
-            content,
-            tool_calls,
+            assembler.finalize(),
             stop_reason,
             usage,
         ))

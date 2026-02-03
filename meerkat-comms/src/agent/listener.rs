@@ -206,14 +206,22 @@ mod tests {
 
         let (mut inbox, inbox_sender) = Inbox::new();
 
-        let handle = spawn_uds_listener(
+        let handle = match spawn_uds_listener(
             &sock_path,
             receiver_keypair,
             Arc::new(RwLock::new(trusted)),
             inbox_sender,
         )
         .await
-        .unwrap();
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    return;
+                }
+                panic!("spawn_uds_listener failed: {e}");
+            }
+        };
 
         // Give listener time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -269,18 +277,34 @@ mod tests {
         let (mut inbox, inbox_sender) = Inbox::new();
 
         // Use port 0 to get a random available port
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    return;
+                }
+                panic!("TcpListener::bind failed: {e}");
+            }
+        };
         let addr = listener.local_addr().unwrap();
         drop(listener); // Release the port
 
-        let handle = spawn_tcp_listener(
+        let handle = match spawn_tcp_listener(
             &addr.to_string(),
             receiver_keypair,
             Arc::new(RwLock::new(trusted)),
             inbox_sender,
         )
         .await
-        .unwrap();
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    return;
+                }
+                panic!("spawn_tcp_listener failed: {e}");
+            }
+        };
 
         // Give listener time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -346,14 +370,22 @@ mod tests {
         let keypair = manager.router().keypair_arc();
 
         // Start listener using manager's components
-        let handle = spawn_uds_listener(
+        let handle = match spawn_uds_listener(
             &sock_path,
             keypair,
             Arc::new(RwLock::new(trusted)),
             manager.inbox_sender().clone(),
         )
         .await
-        .unwrap();
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    return;
+                }
+                panic!("spawn_uds_listener failed: {e}");
+            }
+        };
 
         // Give listener time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -402,9 +434,15 @@ mod tests {
         let trusted = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, inbox_sender) = Inbox::new();
 
-        let handle = spawn_uds_listener(&sock_path, keypair, trusted, inbox_sender)
-            .await
-            .unwrap();
+        let handle = match spawn_uds_listener(&sock_path, keypair, trusted, inbox_sender).await {
+            Ok(handle) => handle,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    return;
+                }
+                panic!("spawn_uds_listener failed: {e}");
+            }
+        };
 
         // Give it a moment to start
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::{ToolError, ToolValidationError};
 use meerkat_core::ops::ToolAccessPolicy;
-use meerkat_core::types::{ToolCall, ToolDef};
+use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -22,9 +22,9 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Arc::from([])
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         Err(ToolError::NotFound {
-            name: name.to_string(),
+            name: call.name.to_string(),
         })
     }
 }
@@ -53,14 +53,16 @@ impl ToolDispatcher {
     }
 
     /// Dispatch a tool call
-    pub async fn dispatch_call(&self, call: &ToolCall) -> Result<Value, DispatchError> {
+    pub async fn dispatch_call(&self, call: ToolCallView<'_>) -> Result<ToolResult, DispatchError> {
+        let args: Value = serde_json::from_str(call.args.get())
+            .map_err(|e| ToolValidationError::invalid_arguments(call.name, e.to_string()))?;
         // 1. Validate arguments against schema
-        self.registry.validate(&call.name, &call.args)?;
+        self.registry.validate(call.name, &args)?;
 
         // 2. Dispatch to router with timeout
         let result = tokio::time::timeout(
             self.default_timeout,
-            self.router.dispatch(&call.name, &call.args),
+            self.router.dispatch(call),
         )
         .await
         .map_err(|_| DispatchError::Timeout {
@@ -77,9 +79,14 @@ impl AgentToolDispatcher for ToolDispatcher {
         Arc::from(self.registry.list())
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        let args: Value = serde_json::from_str(call.args.get())
+            .map_err(|e| ToolError::InvalidArguments {
+                name: call.name.to_string(),
+                reason: e.to_string(),
+            })?;
         // Validate arguments against schema
-        self.registry.validate(name, args).map_err(|e| match e {
+        self.registry.validate(call.name, &args).map_err(|e| match e {
             ToolValidationError::NotFound { name } => ToolError::NotFound { name },
             ToolValidationError::InvalidArguments { name, reason } => {
                 ToolError::InvalidArguments { name, reason }
@@ -87,9 +94,9 @@ impl AgentToolDispatcher for ToolDispatcher {
         })?;
 
         // Dispatch with timeout to prevent hanging tool calls
-        tokio::time::timeout(self.default_timeout, self.router.dispatch(name, args))
+        tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
             .await
-            .map_err(|_| ToolError::timeout(name, self.default_timeout.as_millis() as u64))?
+            .map_err(|_| ToolError::timeout(call.name, self.default_timeout.as_millis() as u64))?
     }
 }
 
@@ -154,13 +161,13 @@ impl AgentToolDispatcher for FilteredDispatcher {
             .into()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
-        if !self.allowed_names.contains(name) {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        if !self.allowed_names.contains(call.name) {
             return Err(ToolError::NotFound {
-                name: name.to_string(),
+                name: call.name.to_string(),
             });
         }
-        self.inner.dispatch(name, args).await
+        self.inner.dispatch(call).await
     }
 }
 
@@ -181,6 +188,14 @@ mod tests {
         }
     }
 
+    fn make_call<'a>(name: &'a str, args_raw: &'a serde_json::value::RawValue) -> ToolCallView<'a> {
+        ToolCallView {
+            id: "test-1",
+            name,
+            args: args_raw,
+        }
+    }
+
     #[async_trait]
     impl AgentToolDispatcher for MockDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -197,12 +212,17 @@ mod tests {
                 .into()
         }
 
-        async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
-            if self.tool_names.contains(&name) {
-                Ok(json!({"called": name}))
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            if self.tool_names.contains(&call.name) {
+                Ok(ToolResult {
+                    tool_use_id: call.id.to_string(),
+                    content: json!({"called": call.name}).to_string(),
+                    is_error: false,
+                    thought_signature: None,
+                })
             } else {
                 Err(ToolError::NotFound {
-                    name: name.to_string(),
+                    name: call.name.to_string(),
                 })
             }
         }
@@ -254,11 +274,13 @@ mod tests {
         let filtered = FilteredDispatcher::new(inner, &policy);
 
         // Allowed tool succeeds
-        let result = filtered.dispatch("task_list", &json!({})).await;
+        let args_raw =
+            serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let result = filtered.dispatch(make_call("task_list", &args_raw)).await;
         assert!(result.is_ok());
 
         // Blocked tool returns NotFound
-        let result = filtered.dispatch("shell", &json!({})).await;
+        let result = filtered.dispatch(make_call("shell", &args_raw)).await;
         match result {
             Err(ToolError::NotFound { name }) => assert_eq!(name, "shell"),
             other => panic!("Expected NotFound error, got: {:?}", other),
@@ -299,7 +321,9 @@ mod tests {
         );
 
         // Attempting to dispatch denied tools should fail
-        let shell_result = filtered.dispatch("shell", &json!({})).await;
+        let args_raw =
+            serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let shell_result = filtered.dispatch(make_call("shell", &args_raw)).await;
         assert!(
             matches!(shell_result, Err(ToolError::NotFound { .. })),
             "shell dispatch should fail with NotFound"

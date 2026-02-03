@@ -159,10 +159,9 @@ mod tests {
     use crate::schema::empty_object_schema;
     use async_trait::async_trait;
     use meerkat_client::{FactoryError, LlmClient, LlmProvider};
-    use meerkat_core::ToolDef;
     use meerkat_core::error::{AgentError, ToolError};
     use meerkat_core::ops::ConcurrencyLimits;
-    use serde_json::Value;
+    use meerkat_core::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
 
     // Mock implementations for testing
 
@@ -190,8 +189,8 @@ mod tests {
             Arc::from([])
         }
 
-        async fn dispatch(&self, _name: &str, _args: &Value) -> Result<Value, ToolError> {
-            Err(ToolError::not_found("mock"))
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            Err(ToolError::not_found(call.name))
         }
     }
 
@@ -352,11 +351,16 @@ mod tests {
                 .into()
         }
 
-        async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
-            if self.tool_names.iter().any(|n| n == name) {
-                Ok(Value::String(format!("{} executed", name)))
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            if self.tool_names.iter().any(|n| n == call.name) {
+                Ok(ToolResult {
+                    tool_use_id: call.id.to_string(),
+                    content: format!("{} executed", call.name),
+                    is_error: false,
+                    thought_signature: None,
+                })
             } else {
-                Err(ToolError::not_found(name))
+                Err(ToolError::not_found(call.name))
             }
         }
     }
@@ -466,29 +470,37 @@ mod tests {
         );
 
         // Sub-agent should be able to dispatch inherited tools
-        let result = state
-            .tool_dispatcher
-            .dispatch("shell", &serde_json::json!({}))
-            .await;
+        let args_raw =
+            serde_json::value::RawValue::from_string(serde_json::json!({}).to_string()).unwrap();
+        let shell_call = ToolCallView {
+            id: "test-shell",
+            name: "shell",
+            args: &args_raw,
+        };
+        let result = state.tool_dispatcher.dispatch(shell_call).await;
         assert!(
             result.is_ok(),
             "Sub-agent should be able to use 'shell' tool"
         );
 
-        let result = state
-            .tool_dispatcher
-            .dispatch("task_list", &serde_json::json!({}))
-            .await;
+        let task_list_call = ToolCallView {
+            id: "test-task-list",
+            name: "task_list",
+            args: &args_raw,
+        };
+        let result = state.tool_dispatcher.dispatch(task_list_call).await;
         assert!(
             result.is_ok(),
             "Sub-agent should be able to use 'task_list' tool"
         );
 
         // Sub-agent should NOT be able to dispatch non-existent tools
-        let result = state
-            .tool_dispatcher
-            .dispatch("agent_spawn", &serde_json::json!({}))
-            .await;
+        let spawn_call = ToolCallView {
+            id: "test-agent-spawn",
+            name: "agent_spawn",
+            args: &args_raw,
+        };
+        let result = state.tool_dispatcher.dispatch(spawn_call).await;
         assert!(
             result.is_err(),
             "Sub-agent should NOT have 'agent_spawn' tool"

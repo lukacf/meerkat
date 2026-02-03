@@ -6,7 +6,7 @@ use crate::{Router, TrustedPeers};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
-use meerkat_core::types::ToolDef;
+use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -61,9 +61,9 @@ impl AgentToolDispatcher for NoOpDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::from([])
     }
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         Err(ToolError::NotFound {
-            name: name.to_string(),
+            name: call.name.to_string(),
         })
     }
 }
@@ -94,16 +94,24 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
         Arc::clone(&self.tool_defs)
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
-        if COMMS_TOOL_NAMES.contains(&name) {
-            handle_tools_call(&self.tool_context, name, args)
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        let args: Value = serde_json::from_str(call.args.get())
+            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        if COMMS_TOOL_NAMES.contains(&call.name) {
+            let result = handle_tools_call(&self.tool_context, call.name, &args)
                 .await
-                .map_err(|e| ToolError::ExecutionFailed { message: e })
+                .map_err(|e| ToolError::ExecutionFailed { message: e })?;
+            Ok(ToolResult {
+                tool_use_id: call.id.to_string(),
+                content: result.to_string(),
+                is_error: false,
+                thought_signature: None,
+            })
         } else if let Some(inner) = &self.inner {
-            inner.dispatch(name, args).await
+            inner.dispatch(call).await
         } else {
             Err(ToolError::NotFound {
-                name: name.to_string(),
+                name: call.name.to_string(),
             })
         }
     }
@@ -142,13 +150,21 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
         Arc::clone(&self.tool_defs)
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
-        if COMMS_TOOL_NAMES.contains(&name) {
-            handle_tools_call(&self.tool_context, name, args)
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        let args: Value = serde_json::from_str(call.args.get())
+            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        if COMMS_TOOL_NAMES.contains(&call.name) {
+            let result = handle_tools_call(&self.tool_context, call.name, &args)
                 .await
-                .map_err(|e| ToolError::ExecutionFailed { message: e })
+                .map_err(|e| ToolError::ExecutionFailed { message: e })?;
+            Ok(ToolResult {
+                tool_use_id: call.id.to_string(),
+                content: result.to_string(),
+                is_error: false,
+                thought_signature: None,
+            })
         } else {
-            self.inner.dispatch(name, args).await
+            self.inner.dispatch(call).await
         }
     }
 }

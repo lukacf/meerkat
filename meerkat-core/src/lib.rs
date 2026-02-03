@@ -53,6 +53,7 @@ pub use state::LoopState;
 pub use sub_agent::{SubAgentCommsInfo, SubAgentCompletion, SubAgentInfo, SubAgentManager};
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use types::{
-    ArtifactRef, AssistantMessage, Message, OutputSchema, RunResult, SecurityMode, SessionId,
-    StopReason, SystemMessage, ToolCall, ToolDef, ToolResult, Usage, UserMessage,
+    ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, Message, OutputSchema,
+    ProviderMeta, RunResult, SecurityMode, SessionId, StopReason, SystemMessage, ToolCall,
+    ToolCallIter, ToolCallView, ToolDef, ToolResult, Usage, UserMessage,
 };

@@ -1698,6 +1698,33 @@ async fn show_session(id: &str) -> anyhow::Result<()> {
                     println!("  [{}] {}: {}", status, result.tool_use_id, content);
                 }
             }
+            Message::BlockAssistant(a) => {
+                println!("\n[{}] ASSISTANT (blocks):", i + 1);
+                for block in &a.blocks {
+                    match block {
+                        meerkat_core::AssistantBlock::Text { text, .. } => {
+                            let display_text = if text.len() > 500 {
+                                format!("{}...", truncate_str(text, 500))
+                            } else {
+                                text.clone()
+                            };
+                            println!("  {}", display_text);
+                        }
+                        meerkat_core::AssistantBlock::Reasoning { text, .. } => {
+                            let display_text = if text.len() > 200 {
+                                format!("{}...", truncate_str(text, 200))
+                            } else {
+                                text.clone()
+                            };
+                            println!("  [thinking] {}", display_text);
+                        }
+                        meerkat_core::AssistantBlock::ToolUse { name, .. } => {
+                            println!("  Tool call: {}", name);
+                        }
+                        _ => {} // non_exhaustive
+                    }
+                }
+            }
         }
     }
 

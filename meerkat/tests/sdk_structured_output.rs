@@ -13,8 +13,9 @@ use async_trait::async_trait;
 use futures::stream;
 use meerkat::{
     AgentBuilder, AgentFactory, AgentToolDispatcher, LlmDoneOutcome, LlmEvent, LlmRequest,
-    OutputSchema, ToolDef, ToolError,
+    OutputSchema, ToolDef, ToolError, ToolResult,
 };
+use meerkat_core::ToolCallView;
 use meerkat_client::LlmClient;
 use meerkat_store::MemoryStore;
 use serde::Deserialize;
@@ -39,6 +40,7 @@ impl LlmClient for MockLlmClientWithStructuredOutput {
             Box::pin(stream::iter(vec![
                 Ok(LlmEvent::TextDelta {
                     delta: "Let me provide the person info.".to_string(),
+                    meta: None,
                 }),
                 Ok(LlmEvent::Done {
                     outcome: LlmDoneOutcome::Success {
@@ -51,6 +53,7 @@ impl LlmClient for MockLlmClientWithStructuredOutput {
             Box::pin(stream::iter(vec![
                 Ok(LlmEvent::TextDelta {
                     delta: r#"{"name": "Alice", "age": 30}"#.to_string(),
+                    meta: None,
                 }),
                 Ok(LlmEvent::Done {
                     outcome: LlmDoneOutcome::Success {
@@ -90,6 +93,7 @@ impl LlmClient for MockLlmClientWithRetry {
                 Box::pin(stream::iter(vec![
                     Ok(LlmEvent::TextDelta {
                         delta: "Processing...".to_string(),
+                        meta: None,
                     }),
                     Ok(LlmEvent::Done {
                         outcome: LlmDoneOutcome::Success {
@@ -103,6 +107,7 @@ impl LlmClient for MockLlmClientWithRetry {
                 Box::pin(stream::iter(vec![
                     Ok(LlmEvent::TextDelta {
                         delta: r#"{"name": "Bob"}"#.to_string(), // missing 'age'
+                        meta: None,
                     }),
                     Ok(LlmEvent::Done {
                         outcome: LlmDoneOutcome::Success {
@@ -116,6 +121,7 @@ impl LlmClient for MockLlmClientWithRetry {
                 Box::pin(stream::iter(vec![
                     Ok(LlmEvent::TextDelta {
                         delta: r#"{"name": "Bob", "age": 25}"#.to_string(),
+                        meta: None,
                     }),
                     Ok(LlmEvent::Done {
                         outcome: LlmDoneOutcome::Success {
@@ -144,9 +150,9 @@ impl AgentToolDispatcher for EmptyDispatcher {
         Arc::new([])
     }
 
-    async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         Err(ToolError::NotFound {
-            name: name.to_string(),
+            name: call.name.to_string(),
         })
     }
 }

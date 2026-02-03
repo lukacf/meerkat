@@ -7,7 +7,7 @@ use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
-use meerkat_core::types::ToolDef;
+use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -188,32 +188,48 @@ impl AgentToolDispatcher for CompositeDispatcher {
         tools.into()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        let args: Value = serde_json::from_str(call.args.get()).map_err(|e| {
+            ToolError::InvalidArguments {
+                name: call.name.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
         // First check if it's an allowed tool
-        if !self.allowed_tools.contains(name) {
+        if !self.allowed_tools.contains(call.name) {
             // Check external dispatcher for non-allowed tools
             if let Some(ref ext) = self.external {
-                if ext.tools().iter().any(|t| t.name == name) {
-                    return ext.dispatch(name, args).await;
+                if ext.tools().iter().any(|t| t.name == call.name) {
+                    return ext.dispatch(call).await;
                 }
             }
             return Err(ToolError::NotFound {
-                name: name.to_string(),
+                name: call.name.to_string(),
             });
         }
 
         // Check builtin tools
         for tool in &self.builtin_tools {
-            if tool.name() == name {
-                return tool.call(args.clone()).await.map_err(|e| match e {
+            if tool.name() == call.name {
+                let value = tool.call(args.clone()).await.map_err(|e| match e {
                     BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
-                        name: name.to_string(),
+                        name: call.name.to_string(),
                         reason: msg,
                     },
                     BuiltinToolError::ExecutionFailed(msg) => {
                         ToolError::ExecutionFailed { message: msg }
                     }
                     BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
+                })?;
+                let content = match &value {
+                    Value::String(s) => s.clone(),
+                    _ => serde_json::to_string(&value).unwrap_or_default(),
+                };
+                return Ok(ToolResult {
+                    tool_use_id: call.id.to_string(),
+                    content,
+                    is_error: false,
+                    thought_signature: None,
                 });
             }
         }
@@ -221,10 +237,10 @@ impl AgentToolDispatcher for CompositeDispatcher {
         // Check sub-agent tools
         if let Some(ref sub) = self.sub_agent_tools {
             for tool in sub.tools() {
-                if tool.name() == name {
-                    return tool.call(args.clone()).await.map_err(|e| match e {
+                if tool.name() == call.name {
+                    let value = tool.call(args.clone()).await.map_err(|e| match e {
                         BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
-                            name: name.to_string(),
+                            name: call.name.to_string(),
                             reason: msg,
                         },
                         BuiltinToolError::ExecutionFailed(msg) => {
@@ -233,13 +249,23 @@ impl AgentToolDispatcher for CompositeDispatcher {
                         BuiltinToolError::TaskError(te) => {
                             ToolError::ExecutionFailed { message: te }
                         }
+                    })?;
+                    let content = match &value {
+                        Value::String(s) => s.clone(),
+                        _ => serde_json::to_string(&value).unwrap_or_default(),
+                    };
+                    return Ok(ToolResult {
+                        tool_use_id: call.id.to_string(),
+                        content,
+                        is_error: false,
+                        thought_signature: None,
                     });
                 }
             }
         }
 
         Err(ToolError::NotFound {
-            name: name.to_string(),
+            name: call.name.to_string(),
         })
     }
 }

@@ -1,8 +1,29 @@
 use meerkat_core::{
     CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta, ConfigScope, ConfigStore,
-    ProviderConfig, SecurityMode, SystemPromptConfig,
+    ProviderConfig, SecurityMode, SystemPromptConfig, ToolCallView, ToolResult,
 };
 use serde_json::json;
+
+#[test]
+fn test_tool_call_view_parse_args_contract() -> Result<(), Box<dyn std::error::Error>> {
+    #[derive(serde::Deserialize)]
+    struct Args {
+        #[allow(dead_code)]
+        a: i32,
+    }
+
+    let args = json!({ "a": "not-an-int" });
+    let raw = serde_json::value::RawValue::from_string(args.to_string())?;
+    let call = meerkat_core::types::ToolCallView {
+        id: "test-1",
+        name: "tool",
+        args: &raw,
+    };
+
+    let parsed: Result<Args, _> = call.parse_args();
+    assert!(parsed.is_err(), "type mismatch should fail to parse");
+    Ok(())
+}
 
 #[test]
 fn test_agent_factory_config_contract() {
@@ -19,17 +40,18 @@ fn test_agent_factory_config_contract() {
 }
 
 #[test]
-fn test_shell_allowlist_backward_compat() {
+fn test_shell_allowlist_backward_compat() -> Result<(), Box<dyn std::error::Error>> {
     let toml_str = r#"
 [shell]
 allowlist = ["git *", "ls -la"]
 "#;
-    let config: Config = toml::from_str(toml_str).expect("Should parse config");
+    let config: Config = toml::from_str(toml_str)?;
     assert_eq!(config.shell.security_mode, SecurityMode::AllowList);
     assert_eq!(
         config.shell.security_patterns,
         vec!["git *".to_string(), "ls -la".to_string()]
     );
+    Ok(())
 }
 
 #[test]
@@ -413,10 +435,14 @@ impl AgentToolDispatcher for MockDispatcher {
 
     async fn dispatch(
         &self,
-        name: &str,
-        _args: &serde_json::Value,
-    ) -> Result<serde_json::Value, meerkat_core::ToolError> {
-        Ok(json!({"dispatched": name}))
+        call: ToolCallView<'_>,
+    ) -> Result<ToolResult, meerkat_core::ToolError> {
+        let value = json!({"dispatched": call.name});
+        Ok(ToolResult::new(
+            call.id.to_string(),
+            value.to_string(),
+            false,
+        ))
     }
 }
 
@@ -465,11 +491,22 @@ async fn test_regression_filtered_dispatcher_denies_non_allowed()
     let filtered = FilteredToolDispatcher::new(inner, vec!["allowed".to_string()]);
 
     // Allowed tool should work
-    let result = filtered.dispatch("allowed", &json!({})).await;
+    let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string())?;
+    let allowed_call = ToolCallView {
+        id: "test-allowed",
+        name: "allowed",
+        args: &args_raw,
+    };
+    let result = filtered.dispatch(allowed_call).await;
     assert!(result.is_ok());
 
     // Non-allowed tool should be denied
-    let result = filtered.dispatch("denied", &json!({})).await;
+    let denied_call = ToolCallView {
+        id: "test-denied",
+        name: "denied",
+        args: &args_raw,
+    };
+    let result = filtered.dispatch(denied_call).await;
     match result {
         Err(meerkat_core::ToolError::AccessDenied { name }) => {
             assert_eq!(name, "denied");

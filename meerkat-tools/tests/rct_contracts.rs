@@ -1,12 +1,28 @@
-#![allow(clippy::panic)]
+#![allow(clippy::panic, clippy::unwrap_used)]
 
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::error::ToolError;
+use meerkat_core::types::{ToolCallView, ToolResult};
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolPolicyLayer,
 };
 use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
+
+async fn dispatch_tool(
+    dispatcher: &dyn AgentToolDispatcher,
+    name: &str,
+    args: serde_json::Value,
+) -> Result<ToolResult, ToolError> {
+    let args_raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+    let call = ToolCallView {
+        id: "test-1",
+        name,
+        args: &args_raw,
+    };
+    dispatcher.dispatch(call).await
+}
 
 #[tokio::test]
 async fn test_rct_contracts_tool_dispatcher_contract() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,14 +56,15 @@ async fn test_rct_contracts_task_store_persistence_contract()
     let config = BuiltinToolConfig::default();
     let tool = CompositeDispatcher::new(store, &config, None, None, None)?;
 
-    let result = tool
-        .dispatch(
-            "task_create",
-            &json!({"subject":"Test","description":"Persist"}),
-        )
-        .await?;
-
-    assert!(result.get("id").is_some());
+    let result = dispatch_tool(
+        &tool,
+        "task_create",
+        json!({"subject":"Test","description":"Persist"}),
+    )
+    .await?;
+    let value: serde_json::Value =
+        serde_json::from_str(&result.content).unwrap_or_else(|_| json!(result.content));
+    assert!(value.get("id").is_some());
     Ok(())
 }
 
@@ -59,15 +76,16 @@ async fn test_rct_contracts_inv_004_task_tools_session_id() -> Result<(), Box<dy
     let tool =
         CompositeDispatcher::new(store, &config, None, None, Some("test-session-123".into()))?;
 
-    let result = tool
-        .dispatch(
-            "task_create",
-            &json!({"subject":"Task","description":"Track session"}),
-        )
-        .await?;
-
+    let result = dispatch_tool(
+        &tool,
+        "task_create",
+        json!({"subject":"Task","description":"Track session"}),
+    )
+    .await?;
+    let value: serde_json::Value =
+        serde_json::from_str(&result.content).unwrap_or_else(|_| json!(result.content));
     assert_eq!(
-        result.get("created_by_session").and_then(|v| v.as_str()),
+        value.get("created_by_session").and_then(|v| v.as_str()),
         Some("test-session-123")
     );
     Ok(())
@@ -329,14 +347,14 @@ async fn test_regression_builder_populates_registry() -> Result<(), Box<dyn std:
     );
 
     // dispatch_call should succeed for a valid tool (not NotFound)
-    let call = meerkat_core::types::ToolCall {
-        id: "test-1".to_string(),
-        name: "task_list".to_string(),
-        args: json!({}),
-        thought_signature: None,
+    let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+    let call = ToolCallView {
+        id: "test-1",
+        name: "task_list",
+        args: &args_raw,
     };
 
-    let result = dispatcher.dispatch_call(&call).await;
+    let result = dispatcher.dispatch_call(call).await;
     assert!(
         result.is_ok(),
         "dispatch_call should succeed, not return NotFound: {:?}",
@@ -351,7 +369,6 @@ async fn test_regression_builder_populates_registry() -> Result<(), Box<dyn std:
 #[tokio::test]
 async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std::error::Error>> {
     use async_trait::async_trait;
-    use meerkat_core::error::ToolError;
     use meerkat_core::types::ToolDef;
     use meerkat_tools::dispatcher::ToolDispatcher;
     use meerkat_tools::registry::ToolRegistry;
@@ -371,11 +388,8 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
             })])
         }
 
-        async fn dispatch(
-            &self,
-            _name: &str,
-            _args: &serde_json::Value,
-        ) -> Result<serde_json::Value, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            let _ = call;
             // Hang forever
             std::future::pending().await
         }
@@ -393,7 +407,7 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
     let dispatcher = ToolDispatcher::new(registry, router).with_timeout(Duration::from_millis(50));
 
     let start = std::time::Instant::now();
-    let result = dispatcher.dispatch("hang", &json!({})).await;
+    let result = dispatch_tool(&dispatcher, "hang", json!({})).await;
     let elapsed = start.elapsed();
 
     // Should timeout quickly, not hang
@@ -442,7 +456,6 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
 async fn test_regression_composite_deduplicates_external_tools()
 -> Result<(), Box<dyn std::error::Error>> {
     use async_trait::async_trait;
-    use meerkat_core::error::ToolError;
     use meerkat_core::types::ToolDef;
 
     /// An external dispatcher that provides a tool with the same name as a builtin
@@ -467,12 +480,13 @@ async fn test_regression_composite_deduplicates_external_tools()
             ])
         }
 
-        async fn dispatch(
-            &self,
-            name: &str,
-            _args: &serde_json::Value,
-        ) -> Result<serde_json::Value, ToolError> {
-            Ok(json!({"from": "external", "tool": name}))
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            let value = json!({"from": "external", "tool": call.name});
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                value.to_string(),
+                false,
+            ))
         }
     }
 
@@ -516,7 +530,6 @@ async fn test_regression_composite_deduplicates_external_tools()
 #[test]
 fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
     use async_trait::async_trait;
-    use meerkat_core::error::ToolError;
     use meerkat_core::ops::ToolAccessPolicy;
     use meerkat_core::types::ToolDef;
     use meerkat_tools::dispatcher::FilteredDispatcher;
@@ -551,12 +564,13 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
             ])
         }
 
-        async fn dispatch(
-            &self,
-            name: &str,
-            _args: &serde_json::Value,
-        ) -> Result<serde_json::Value, ToolError> {
-            Ok(json!({"called": name}))
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            let value = json!({"called": call.name});
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                value.to_string(),
+                false,
+            ))
         }
     }
 
@@ -663,11 +677,7 @@ async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_not_found(
             })])
         }
 
-        async fn dispatch(
-            &self,
-            _name: &str,
-            _args: &serde_json::Value,
-        ) -> Result<serde_json::Value, ToolError> {
+        async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
             // This should NOT be called for blocked tools
             panic!("Dispatch should not be called for blocked tools!");
         }
@@ -678,7 +688,7 @@ async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_not_found(
     let filtered = FilteredDispatcher::new(inner, &policy);
 
     // Attempting to dispatch a blocked tool should return NotFound
-    let result = filtered.dispatch("shell", &json!({})).await;
+    let result = dispatch_tool(&filtered, "shell", json!({})).await;
 
     match result {
         Err(ToolError::NotFound { name }) => {

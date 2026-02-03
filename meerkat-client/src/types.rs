@@ -309,8 +309,25 @@ pub enum LlmDoneOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmEvent {
-    /// Incremental text output
-    TextDelta { delta: String },
+    /// Incremental text output.
+    /// Gemini may include `meta` for thoughtSignature on text parts.
+    TextDelta {
+        delta: String,
+        /// Provider metadata (Gemini thoughtSignature on text parts)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Box<meerkat_core::ProviderMeta>>,
+    },
+
+    /// Incremental reasoning/thinking content
+    ReasoningDelta { delta: String },
+
+    /// Complete reasoning block (emitted at content_block_stop)
+    ReasoningComplete {
+        text: String,
+        /// Typed provider metadata - each adapter knows its provider
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Box<meerkat_core::ProviderMeta>>,
+    },
 
     /// Incremental tool call (may arrive in pieces)
     ToolCallDelta {
@@ -324,8 +341,9 @@ pub enum LlmEvent {
         id: String,
         name: String,
         args: Value,
-        /// Thought signature for Gemini 3+ (must be passed back)
-        thought_signature: Option<String>,
+        /// Typed provider metadata
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Box<meerkat_core::ProviderMeta>>,
     },
 
     /// Token usage update
@@ -417,6 +435,16 @@ mod tests {
         let events = vec![
             LlmEvent::TextDelta {
                 delta: "Hello".to_string(),
+                meta: None,
+            },
+            LlmEvent::ReasoningDelta {
+                delta: "thinking...".to_string(),
+            },
+            LlmEvent::ReasoningComplete {
+                text: "done thinking".to_string(),
+                meta: Some(Box::new(meerkat_core::ProviderMeta::Anthropic {
+                    signature: "sig123".to_string(),
+                })),
             },
             LlmEvent::ToolCallDelta {
                 id: "tc_1".to_string(),
@@ -427,7 +455,7 @@ mod tests {
                 id: "tc_1".to_string(),
                 name: "read_file".to_string(),
                 args: serde_json::json!({"path": "/tmp/test"}),
-                thought_signature: None,
+                meta: None,
             },
             LlmEvent::UsageUpdate {
                 usage: Usage {

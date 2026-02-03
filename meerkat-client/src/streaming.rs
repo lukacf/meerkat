@@ -46,6 +46,7 @@ mod tests {
         let inner = Box::pin(futures::stream::iter([
             Ok(LlmEvent::TextDelta {
                 delta: "hi".to_string(),
+                meta: None,
             }),
             Err(LlmError::ConnectionReset),
         ]));
@@ -74,6 +75,7 @@ mod tests {
     async fn test_ensure_terminal_done_appends_incomplete_done() {
         let inner = Box::pin(futures::stream::iter([Ok(LlmEvent::TextDelta {
             delta: "hi".to_string(),
+            meta: None,
         })]));
 
         let mut stream = ensure_terminal_done(inner);
@@ -100,6 +102,7 @@ mod tests {
         let inner = Box::pin(futures::stream::iter([
             Ok(LlmEvent::TextDelta {
                 delta: "hi".to_string(),
+                meta: None,
             }),
             Ok(LlmEvent::Done {
                 outcome: LlmDoneOutcome::Success {
@@ -108,6 +111,7 @@ mod tests {
             }),
             Ok(LlmEvent::TextDelta {
                 delta: "later".to_string(),
+                meta: None,
             }),
         ]));
 
@@ -118,7 +122,7 @@ mod tests {
         while let Some(item) = stream.next().await {
             let event = item.expect("wrapper should not yield Err");
             match event {
-                LlmEvent::TextDelta { delta } => {
+                LlmEvent::TextDelta { delta, .. } => {
                     if delta == "later" {
                         saw_later_delta = true;
                     }

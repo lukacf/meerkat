@@ -126,8 +126,17 @@ impl AgentLlmClient for DynLlmClientAdapter {
                         }
                         buffer.args_json.push_str(&args_delta);
                     }
-                    LlmEvent::ToolCallComplete { id, name, args, .. } => {
-                        tool_calls.push(ToolCall::new(id, name, args));
+                    LlmEvent::ToolCallComplete {
+                        id,
+                        name,
+                        args,
+                        thought_signature,
+                    } => {
+                        let tool_call = match thought_signature {
+                            Some(sig) => ToolCall::with_thought_signature(id, name, args, sig),
+                            None => ToolCall::new(id, name, args),
+                        };
+                        tool_calls.push(tool_call);
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
@@ -238,6 +247,73 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 
     async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
         Err(ToolError::not_found(name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::stream;
+    use futures::Stream;
+    use meerkat_client::LlmError;
+    use meerkat_core::UserMessage;
+    use std::pin::Pin;
+
+    struct MockClient;
+
+    #[async_trait]
+    impl LlmClient for MockClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::ToolCallComplete {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    args: serde_json::json!({"city": "Tokyo"}),
+                    thought_signature: Some("sig_123".to_string()),
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_complete_preserves_thought_signature() {
+        let client = Arc::new(MockClient);
+        let adapter = DynLlmClientAdapter::new(client, "mock-model");
+        let result = adapter
+            .stream_response(
+                &[Message::User(UserMessage {
+                    content: "test".to_string(),
+                })],
+                &[],
+                128,
+                None,
+                None,
+            )
+            .await
+            .expect("stream_response should succeed");
+
+        assert_eq!(result.tool_calls().len(), 1);
+        assert_eq!(
+            result.tool_calls()[0].thought_signature.as_deref(),
+            Some("sig_123")
+        );
     }
 }
 

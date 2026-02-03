@@ -278,6 +278,12 @@ impl AgentSpawnTool {
             return Err(BuiltinToolError::invalid_args("Prompt cannot be empty"));
         }
 
+        if params.host_mode && self.state.parent_comms.is_none() {
+            return Err(BuiltinToolError::invalid_args(
+                "host_mode requires comms to be enabled for sub-agents".to_string(),
+            ));
+        }
+
         // Resolve provider and model
         let provider = self
             .resolve_provider(params.provider.as_deref())
@@ -715,6 +721,23 @@ mod tests {
         assert!(
             err.to_string().contains("LLM client") || err.to_string().contains("MissingApiKey")
         );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_host_mode_requires_comms() {
+        let state = create_test_state();
+        let tool = AgentSpawnTool::new(state);
+
+        let result = tool
+            .call(json!({
+                "prompt": "Test task",
+                "host_mode": true
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("host_mode requires comms"));
     }
 
     #[test]

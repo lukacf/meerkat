@@ -74,16 +74,14 @@ impl AnthropicClientBuilder {
 
     /// Build the client with configured HTTP settings
     pub fn build(self) -> Result<AnthropicClient, LlmError> {
-        let http = reqwest::Client::builder()
+        let http = crate::http::build_http_client(
+            reqwest::Client::builder()
             .connect_timeout(self.connect_timeout)
             .timeout(self.request_timeout)
             .pool_idle_timeout(self.pool_idle_timeout)
             .pool_max_idle_per_host(4)
             .tcp_keepalive(Duration::from_secs(30))
-            .build()
-            .map_err(|e| LlmError::Unknown {
-                message: format!("Failed to build HTTP client: {}", e),
-            })?;
+        )?;
 
         Ok(AnthropicClient {
             api_key: self.api_key,

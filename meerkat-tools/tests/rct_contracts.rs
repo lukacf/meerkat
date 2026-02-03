@@ -119,7 +119,8 @@ fn test_rct_contracts_shell_defaults_contract() -> Result<(), Box<dyn std::error
         max_completed_jobs: 10,
         completed_job_ttl_secs: 60,
         max_concurrent_processes: 5,
-        allowlist: vec![],
+        security_mode: meerkat_core::SecurityMode::Unrestricted,
+        security_patterns: vec![],
     };
     let json_str = serde_json::to_string(&tool)?;
     let json_val: serde_json::Value = serde_json::from_str(&json_str)?;

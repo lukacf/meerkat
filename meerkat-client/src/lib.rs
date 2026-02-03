@@ -7,6 +7,7 @@
 pub mod adapter;
 pub mod error;
 pub mod factory;
+mod http;
 pub mod provider;
 mod streaming;
 mod test_client;

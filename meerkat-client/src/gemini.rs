@@ -9,6 +9,7 @@ use futures::{Stream, StreamExt};
 use meerkat_core::{Message, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::pin::Pin;
 
 /// Client for Google Gemini API
@@ -21,10 +22,14 @@ pub struct GeminiClient {
 impl GeminiClient {
     /// Create a new Gemini client with the given API key
     pub fn new(api_key: String) -> Self {
+        let http =
+            crate::http::build_http_client(reqwest::Client::builder()).unwrap_or_else(|_| {
+                reqwest::Client::new()
+            });
         Self {
             api_key,
             base_url: "https://generativelanguage.googleapis.com".to_string(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
@@ -49,6 +54,8 @@ impl GeminiClient {
         let mut contents = Vec::new();
         let mut system_instruction = None;
 
+        let mut tool_name_by_id: HashMap<String, String> = HashMap::new();
+
         for msg in &request.messages {
             match msg {
                 Message::System(s) => {
@@ -70,6 +77,7 @@ impl GeminiClient {
                     }
 
                     for tc in &a.tool_calls {
+                        tool_name_by_id.insert(tc.id.clone(), tc.name.clone());
                         let part = if let Some(sig) = &tc.thought_signature {
                             serde_json::json!({
                                 "functionCall": {
@@ -98,10 +106,14 @@ impl GeminiClient {
                     let parts: Vec<Value> = results
                         .iter()
                         .map(|r| {
+                            let function_name = tool_name_by_id
+                                .get(&r.tool_use_id)
+                                .cloned()
+                                .unwrap_or_else(|| r.tool_use_id.clone());
                             if let Some(sig) = &r.thought_signature {
                                 serde_json::json!({
                                     "functionResponse": {
-                                        "name": r.tool_use_id,
+                                        "name": function_name,
                                         "response": {
                                             "content": r.content,
                                             "error": r.is_error
@@ -112,7 +124,7 @@ impl GeminiClient {
                             } else {
                                 serde_json::json!({
                                     "functionResponse": {
-                                        "name": r.tool_use_id,
+                                        "name": function_name,
                                         "response": {
                                             "content": r.content,
                                             "error": r.is_error
@@ -427,7 +439,7 @@ struct GeminiUsage {
 )]
 mod tests {
     use super::*;
-    use meerkat_core::UserMessage;
+    use meerkat_core::{AssistantMessage, ToolCall, ToolResult, Usage, UserMessage};
 
     #[test]
     fn test_build_request_body_with_thinking_budget() -> Result<(), Box<dyn std::error::Error>> {
@@ -517,6 +529,57 @@ mod tests {
 
         assert!(generation_config.get("thinkingConfig").is_none());
         assert!(generation_config.get("topK").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_tool_response_uses_function_name_and_signature()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let tool_call = ToolCall::with_thought_signature(
+            "call_1".to_string(),
+            "get_weather".to_string(),
+            json!({"city": "Tokyo"}),
+            "sig_123".to_string(),
+        );
+        let request = LlmRequest::new(
+            "gemini-1.5-pro",
+            vec![
+                Message::User(UserMessage {
+                    content: "test".to_string(),
+                }),
+                Message::Assistant(AssistantMessage {
+                    content: String::new(),
+                    tool_calls: vec![tool_call],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage::default(),
+                }),
+                Message::ToolResults {
+                    results: vec![ToolResult::with_thought_signature(
+                        "call_1".to_string(),
+                        "Sunny".to_string(),
+                        false,
+                        "sig_123".to_string(),
+                    )],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request);
+        let contents = body
+            .get("contents")
+            .and_then(|c| c.as_array())
+            .ok_or("missing contents")?;
+
+        let tool_result_parts = contents
+            .last()
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
+            .ok_or("missing parts")?;
+
+        let function_response = &tool_result_parts[0]["functionResponse"];
+        assert_eq!(function_response["name"], "get_weather");
+        assert_eq!(tool_result_parts[0]["thoughtSignature"], "sig_123");
         Ok(())
     }
 

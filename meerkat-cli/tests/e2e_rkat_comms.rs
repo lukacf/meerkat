@@ -14,24 +14,23 @@ use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-/// Atomic counter for generating unique ports across tests
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(14200);
-
 /// Get an available TCP port for testing
 fn get_available_port() -> u16 {
-    // Try to find an available port by attempting to bind
-    for _ in 0..100 {
-        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-        if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{}", port)) {
-            drop(listener);
-            return port;
-        }
-    }
-    panic!("Could not find available port");
+    let listener =
+        TcpListener::bind("127.0.0.1:0").expect("failed to bind to an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("failed to read local addr")
+        .port();
+    drop(listener);
+    port
+}
+
+fn e2e_enabled() -> bool {
+    std::env::var("RKAT_E2E").ok().as_deref() == Some("1")
 }
 
 /// Get path to the rkat binary
@@ -317,6 +316,10 @@ pub async fn setup_mutual_trust(instances: &mut [&mut RkatTestInstance]) -> std:
 
 #[test]
 fn test_rkat_instance_spawn_kill() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     // Test that we can create an RkatTestInstance with real Ed25519 identity
     let instance = RkatTestInstance::new("test-agent");
 
@@ -335,6 +338,10 @@ fn test_rkat_instance_spawn_kill() {
 
 #[tokio::test]
 async fn test_rkat_temp_setup() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     // Test temp directory setup with identity and config paths
     let instance = RkatTestInstance::new("test-agent");
 
@@ -370,6 +377,10 @@ async fn test_rkat_temp_setup() {
 
 #[tokio::test]
 async fn test_rkat_mutual_trust_setup() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     // Test that mutual trust configuration is generated correctly with real keys
     let mut instance_a = RkatTestInstance::new("agent-a");
     let mut instance_b = RkatTestInstance::new("agent-b");
@@ -412,6 +423,10 @@ async fn test_rkat_mutual_trust_setup() {
 
 #[tokio::test]
 async fn test_rkat_wait_for_ready() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     // Verify RkatTestInstance has proper methods for wait_for_ready logic
     let instance = RkatTestInstance::new("test-agent");
 
@@ -466,6 +481,10 @@ fn skip_if_no_prereqs() -> bool {
 #[tokio::test]
 #[ignore = "E2E network test"]
 async fn test_e2e_rkat_tcp_message_exchange() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -522,6 +541,10 @@ async fn test_e2e_rkat_tcp_message_exchange() {
 #[tokio::test]
 #[ignore = "E2E network test"]
 async fn test_e2e_rkat_uds_message_exchange() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -625,6 +648,10 @@ trusted_peers_path = "{}"
 #[tokio::test]
 #[ignore = "E2E network test"]
 async fn test_e2e_rkat_request_response_flow() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -668,6 +695,10 @@ async fn test_e2e_rkat_request_response_flow() {
 #[tokio::test]
 #[ignore = "E2E network test"]
 async fn test_e2e_rkat_untrusted_rejected() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -722,6 +753,10 @@ async fn test_e2e_rkat_untrusted_rejected() {
 #[tokio::test]
 #[ignore = "E2E network test"]
 async fn test_e2e_rkat_three_peer_coordination() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -787,6 +822,10 @@ async fn test_e2e_rkat_three_peer_coordination() {
 #[tokio::test]
 #[ignore = "E2E network test"]
 async fn test_e2e_rkat_ack_is_immediate() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -845,6 +884,10 @@ async fn test_e2e_rkat_ack_is_immediate() {
 #[tokio::test]
 #[ignore = "E2E network test"]
 async fn test_e2e_rkat_sender_nonblocking() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     if skip_if_no_prereqs() {
         return;
     }

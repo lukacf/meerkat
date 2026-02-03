@@ -22,10 +22,14 @@ pub struct OpenAiClient {
 impl OpenAiClient {
     /// Create a new OpenAI client with the given API key
     pub fn new(api_key: String) -> Self {
+        let http =
+            crate::http::build_http_client(reqwest::Client::builder()).unwrap_or_else(|_| {
+                reqwest::Client::new()
+            });
         Self {
             api_key,
             base_url: "https://api.openai.com".to_string(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 

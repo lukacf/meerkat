@@ -229,6 +229,9 @@ pub struct ToolResultInput {
     /// Whether this is an error result
     #[serde(default)]
     pub is_error: bool,
+    /// Thought signature for Gemini 3+ (must be passed back)
+    #[serde(default)]
+    pub thought_signature: Option<String>,
 }
 
 pub type EventNotifier = Arc<dyn Fn(&str, &AgentEvent) + Send + Sync>;
@@ -793,7 +796,18 @@ async fn handle_meerkat_resume(
         let results: Vec<ToolResult> = input
             .tool_results
             .iter()
-            .map(|r| ToolResult::new(r.tool_use_id.clone(), r.content.clone(), r.is_error))
+            .map(|r| {
+                if let Some(sig) = r.thought_signature.clone() {
+                    ToolResult::with_thought_signature(
+                        r.tool_use_id.clone(),
+                        r.content.clone(),
+                        r.is_error,
+                        sig,
+                    )
+                } else {
+                    ToolResult::new(r.tool_use_id.clone(), r.content.clone(), r.is_error)
+                }
+            })
             .collect();
         session.push(Message::ToolResults { results });
     }
@@ -1040,7 +1054,18 @@ async fn handle_meerkat_resume_with_builtins(
         let results: Vec<ToolResult> = input
             .tool_results
             .iter()
-            .map(|r| ToolResult::new(r.tool_use_id.clone(), r.content.clone(), r.is_error))
+            .map(|r| {
+                if let Some(sig) = r.thought_signature.clone() {
+                    ToolResult::with_thought_signature(
+                        r.tool_use_id.clone(),
+                        r.content.clone(),
+                        r.is_error,
+                        sig,
+                    )
+                } else {
+                    ToolResult::new(r.tool_use_id.clone(), r.content.clone(), r.is_error)
+                }
+            })
             .collect();
         session.push(Message::ToolResults { results });
     }
@@ -1466,7 +1491,8 @@ mod tests {
             "tool_results": [
                 {
                     "tool_use_id": "tc_123",
-                    "content": "Sunny, 72°F"
+                    "content": "Sunny, 72°F",
+                    "thought_signature": "sig_123"
                 }
             ]
         });
@@ -1477,6 +1503,10 @@ mod tests {
         assert_eq!(input.tool_results[0].tool_use_id, "tc_123");
         assert_eq!(input.tool_results[0].content, "Sunny, 72°F");
         assert!(!input.tool_results[0].is_error);
+        assert_eq!(
+            input.tool_results[0].thought_signature.as_deref(),
+            Some("sig_123")
+        );
     }
 
     #[test]
@@ -1551,6 +1581,8 @@ mod tests {
             resume_tool["inputSchema"]["properties"]["tool_results"]["type"],
             "array"
         );
+        let items = &resume_tool["inputSchema"]["properties"]["tool_results"]["items"];
+        assert!(items["properties"]["thought_signature"].is_object());
     }
 
     #[test]

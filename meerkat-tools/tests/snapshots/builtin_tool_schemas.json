@@ -16,7 +16,7 @@
         "type": "boolean"
       },
       "command": {
-        "description": "The command to execute (Nushell syntax)",
+        "description": "The command to execute (POSIX-style parsing for policy checks)",
         "type": "string"
       },
       "timeout_secs": {

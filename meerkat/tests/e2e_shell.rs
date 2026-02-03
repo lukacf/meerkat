@@ -35,7 +35,8 @@ fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
         max_completed_jobs: 100,
         completed_job_ttl_secs: 300,
         max_concurrent_processes: 0, // Unlimited for e2e tests
-        allowlist: vec![],           // Allow all commands in e2e tests
+        security_mode: Default::default(), // Unrestricted for e2e tests
+        security_patterns: vec![],
     }
 }
 

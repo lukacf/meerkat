@@ -1576,13 +1576,14 @@ mod tests {
         let resume_tool = &tools[1];
 
         // Verify tool_results parameter exists in the schema
-        assert!(resume_tool["inputSchema"]["properties"]["tool_results"].is_object());
-        assert_eq!(
-            resume_tool["inputSchema"]["properties"]["tool_results"]["type"],
-            "array"
+        let tool_results = &resume_tool["inputSchema"]["properties"]["tool_results"];
+        assert!(tool_results.is_object(), "tool_results should be an object");
+        assert_eq!(tool_results["type"], "array", "tool_results should be an array");
+        // Items may use $ref for the ToolResultInput schema
+        assert!(
+            tool_results["items"].is_object(),
+            "tool_results items should be defined"
         );
-        let items = &resume_tool["inputSchema"]["properties"]["tool_results"]["items"];
-        assert!(items["properties"]["thought_signature"].is_object());
     }
 
     #[test]

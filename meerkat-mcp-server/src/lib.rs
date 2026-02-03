@@ -4,8 +4,8 @@
 //! as MCP tools: meerkat_run and meerkat_resume.
 
 use meerkat::{
-    AgentBuilder, AgentError, JsonlStore, Session, SessionStore, ToolError, ToolResult,
-    build_comms_runtime_from_config, compose_tools_with_comms,
+    AgentBuilder, AgentError, JsonlStore, OutputSchema, Session, SessionStore, ToolError,
+    ToolResult, build_comms_runtime_from_config, compose_tools_with_comms,
 };
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
@@ -74,6 +74,12 @@ pub struct MeerkatRunInput {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub provider: Option<ProviderInput>,
+    /// JSON schema for structured output extraction (wrapper or raw schema).
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+    /// Max retries for structured output validation (default: 2).
+    #[serde(default = "default_structured_output_retries")]
+    pub structured_output_retries: u32,
     /// Stream agent events to the MCP client via notifications.
     #[serde(default)]
     pub stream: bool,
@@ -96,6 +102,10 @@ pub struct MeerkatRunInput {
     /// Agent name for inter-agent communication. Required for host_mode.
     #[serde(default)]
     pub comms_name: Option<String>,
+}
+
+fn default_structured_output_retries() -> u32 {
+    2
 }
 
 /// Configuration options for built-in tools
@@ -448,7 +458,14 @@ async fn handle_meerkat_run_simple(
     let mut builder = AgentBuilder::new()
         .model(model.clone())
         .max_tokens_per_turn(max_tokens)
-        .budget(config.budget_limits());
+        .budget(config.budget_limits())
+        .structured_output_retries(input.structured_output_retries);
+
+    if let Some(schema) = input.output_schema.clone() {
+        let output_schema = OutputSchema::from_json_value(schema)
+            .map_err(|e| format!("Invalid output_schema: {e}"))?;
+        builder = builder.output_schema(output_schema);
+    }
 
     let mut system_prompt = match input.system_prompt.clone() {
         Some(prompt) => prompt,
@@ -521,7 +538,9 @@ async fn handle_meerkat_run_simple(
                 }],
                 "session_id": result.session_id.to_string(),
                 "turns": result.turns,
-                "tool_calls": result.tool_calls
+                "tool_calls": result.tool_calls,
+                "structured_output": result.structured_output,
+                "schema_warnings": result.schema_warnings
             });
             Ok(wrap_tool_payload(payload))
         }
@@ -689,7 +708,14 @@ async fn handle_meerkat_run_with_builtins(
     let mut builder = AgentBuilder::new()
         .model(model.clone())
         .max_tokens_per_turn(max_tokens)
-        .budget(config.budget_limits());
+        .budget(config.budget_limits())
+        .structured_output_retries(input.structured_output_retries);
+
+    if let Some(schema) = input.output_schema.clone() {
+        let output_schema = OutputSchema::from_json_value(schema)
+            .map_err(|e| format!("Invalid output_schema: {e}"))?;
+        builder = builder.output_schema(output_schema);
+    }
 
     let mut system_prompt = match input.system_prompt.clone() {
         Some(prompt) => prompt,
@@ -746,7 +772,9 @@ async fn handle_meerkat_run_with_builtins(
                 }],
                 "session_id": result.session_id.to_string(),
                 "turns": result.turns,
-                "tool_calls": result.tool_calls
+                "tool_calls": result.tool_calls,
+                "structured_output": result.structured_output,
+                "schema_warnings": result.schema_warnings
             });
             Ok(wrap_tool_payload(payload))
         }
@@ -1009,7 +1037,9 @@ async fn handle_meerkat_resume_simple(
                 }],
                 "session_id": result.session_id.to_string(),
                 "turns": result.turns,
-                "tool_calls": result.tool_calls
+                "tool_calls": result.tool_calls,
+                "structured_output": result.structured_output,
+                "schema_warnings": result.schema_warnings
             });
             Ok(wrap_tool_payload(payload))
         }
@@ -1289,7 +1319,9 @@ async fn handle_meerkat_resume_with_builtins(
                 }],
                 "session_id": result.session_id.to_string(),
                 "turns": result.turns,
-                "tool_calls": result.tool_calls
+                "tool_calls": result.tool_calls,
+                "structured_output": result.structured_output,
+                "schema_warnings": result.schema_warnings
             });
             Ok(wrap_tool_payload(payload))
         }
@@ -1421,6 +1453,8 @@ mod tests {
         assert_eq!(run_tool["name"], "meerkat_run");
         assert!(run_tool["inputSchema"]["properties"]["prompt"].is_object());
         assert!(run_tool["inputSchema"]["properties"]["verbose"].is_object());
+        assert!(run_tool["inputSchema"]["properties"].get("output_schema").is_some());
+        assert!(run_tool["inputSchema"]["properties"].get("structured_output_retries").is_some());
 
         let resume_tool = &tools[1];
         assert_eq!(resume_tool["name"], "meerkat_resume");
@@ -1443,6 +1477,8 @@ mod tests {
         assert_eq!(input.prompt, "Hello");
         assert_eq!(input.model, Some("claude-sonnet-4".to_string()));
         assert_eq!(input.max_tokens, None);
+        assert_eq!(input.structured_output_retries, 2);
+        assert!(input.output_schema.is_none());
         assert!(!input.verbose);
     }
 
@@ -1627,6 +1663,8 @@ mod tests {
                 model: Some("claude-opus-4-5".to_string()),
                 max_tokens: Some(4096),
                 provider: None,
+                output_schema: None,
+                structured_output_retries: 2,
                 stream: false,
                 verbose: false,
                 tools: vec![],

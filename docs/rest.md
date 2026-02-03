@@ -73,7 +73,13 @@ Request (full):
   "model": "claude-3-7-sonnet-20250219",
   "provider": "anthropic",
   "max_tokens": 4096,
-  "output_schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+  "output_schema": {
+    "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+    "name": "answer",
+    "strict": false,
+    "compat": "lossy",
+    "format": "meerkat_v1"
+  },
   "structured_output_retries": 2,
   "verbose": false,
   "host_mode": false,
@@ -92,7 +98,15 @@ Response:
     "input_tokens": 50,
     "output_tokens": 200
   },
-  "stop_reason": "end_turn"
+  "stop_reason": "end_turn",
+  "structured_output": {"answer": "example"},
+  "schema_warnings": [
+    {
+      "provider": "gemini",
+      "path": "/properties/choice/oneOf",
+      "message": "Removed unsupported keyword 'oneOf'"
+    }
+  ]
 }
 ```
 
@@ -130,4 +144,6 @@ Server-Sent Events (SSE) stream for real-time updates. Event types include:
 
 - When `output_schema` is provided, the `text` field in the response is the
   schema-only JSON string produced by the extraction turn (no extra text).
+- `output_schema` may be provided as a wrapper object (shown above) or as a raw
+  JSON Schema object. The wrapper enables explicit compat/format settings.
 - Host mode requires `host_mode: true` and a `comms_name`.

@@ -4,9 +4,14 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::fmt;
 use uuid::Uuid;
+
+use crate::schema::{
+    CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
+};
+use crate::Provider;
 
 // ===========================================================================
 // New ordered transcript types (spec section 3.1)
@@ -147,26 +152,34 @@ impl<'a> Iterator for ToolCallIter<'a> {
 /// completing the agentic work, forcing the LLM to output validated JSON that
 /// conforms to the provided schema. The extraction JSON becomes the final
 /// response text (schema-only) in [`RunResult`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OutputSchema {
     /// The JSON schema that the output must conform to
-    pub schema: Value,
+    pub schema: MeerkatSchema,
     /// Optional name for the schema (used by some providers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Whether to enforce strict schema validation (provider-specific)
     #[serde(default)]
     pub strict: bool,
+    /// Compatibility mode for provider lowering (lossy or strict)
+    #[serde(default)]
+    pub compat: SchemaCompat,
+    /// Schema format version
+    #[serde(default)]
+    pub format: SchemaFormat,
 }
 
 impl OutputSchema {
     /// Create a new output schema
-    pub fn new(schema: Value) -> Self {
-        Self {
-            schema,
+    pub fn new(schema: Value) -> Result<Self, SchemaError> {
+        Ok(Self {
+            schema: MeerkatSchema::new(schema)?,
             name: None,
             strict: false,
-        }
+            compat: SchemaCompat::default(),
+            format: SchemaFormat::default(),
+        })
     }
 
     /// Set the schema name
@@ -180,6 +193,120 @@ impl OutputSchema {
         self.strict = true;
         self
     }
+
+    /// Set compatibility mode for provider lowering
+    pub fn with_compat(mut self, compat: SchemaCompat) -> Self {
+        self.compat = compat;
+        self
+    }
+
+    /// Set the schema format
+    pub fn with_format(mut self, format: SchemaFormat) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// Parse from a JSON string (wrapper or raw schema).
+    pub fn from_json_str(raw: &str) -> Result<Self, SchemaError> {
+        let value: Value = serde_json::from_str(raw).map_err(|_| SchemaError::InvalidRoot)?;
+        Self::from_json_value(value)
+    }
+
+    /// Parse from a JSON value (wrapper or raw schema).
+    pub fn from_json_value(value: Value) -> Result<Self, SchemaError> {
+        match value {
+            Value::Object(obj) if is_wrapped_schema(&obj) => {
+                let wrapped: OutputSchemaWire =
+                    serde_json::from_value(Value::Object(obj)).map_err(|_| SchemaError::InvalidRoot)?;
+                Ok(Self {
+                    schema: MeerkatSchema::new(wrapped.schema)?,
+                    name: wrapped.name,
+                    strict: wrapped.strict,
+                    compat: wrapped.compat,
+                    format: wrapped.format,
+                })
+            }
+            other => OutputSchema::new(other),
+        }
+    }
+
+    /// Create from a Rust type via schemars.
+    pub fn from_type<T: schemars::JsonSchema>() -> Result<Self, SchemaError> {
+        let schema = schemars::schema_for!(T);
+        let mut value = serde_json::to_value(&schema).map_err(|_| SchemaError::InvalidRoot)?;
+        // Ensure object schemas always have `properties` and `required` keys.
+        if let Value::Object(ref mut obj) = value {
+            if obj.get("type").and_then(Value::as_str) == Some("object") {
+                obj.entry("properties".to_string())
+                    .or_insert_with(|| Value::Object(Map::new()));
+                obj.entry("required".to_string())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+            }
+        }
+        OutputSchema::new(value)
+    }
+
+    /// Compile this schema for a provider using the configured compatibility mode.
+    pub fn compile_for(&self, provider: Provider) -> Result<CompiledSchema, SchemaError> {
+        self.schema.compile_for(provider, self.compat)
+    }
+
+    /// Convert to a JSON value for provider params.
+    pub fn to_value(&self) -> Value {
+        let mut obj = Map::new();
+        obj.insert("schema".to_string(), self.schema.as_value().clone());
+        if let Some(name) = &self.name {
+            obj.insert("name".to_string(), Value::String(name.clone()));
+        }
+        obj.insert("strict".to_string(), Value::Bool(self.strict));
+        obj.insert(
+            "compat".to_string(),
+            serde_json::to_value(self.compat).unwrap_or(Value::String("lossy".to_string())),
+        );
+        obj.insert(
+            "format".to_string(),
+            serde_json::to_value(self.format)
+                .unwrap_or(Value::String("meerkat_v1".to_string())),
+        );
+        Value::Object(obj)
+    }
+}
+
+impl<'de> Deserialize<'de> for OutputSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        OutputSchema::from_json_value(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OutputSchemaWire {
+    pub schema: Value,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub strict: bool,
+    #[serde(default)]
+    pub compat: SchemaCompat,
+    #[serde(default)]
+    pub format: SchemaFormat,
+}
+
+fn is_wrapped_schema(obj: &Map<String, Value>) -> bool {
+    let has_schema = obj.contains_key("schema");
+    let has_marker =
+        obj.contains_key("compat") || obj.contains_key("strict") || obj.contains_key("name");
+    let has_format_marker = obj
+        .get("format")
+        .and_then(Value::as_str)
+        .is_some_and(|f| f == "meerkat_v1");
+    let only_wrapper_keys = obj.keys().all(|key| {
+        matches!(key.as_str(), "schema" | "name" | "strict" | "compat" | "format")
+    });
+    has_schema && (has_marker || has_format_marker || only_wrapper_keys)
 }
 
 /// Unique identifier for a session (UUID v7 for time-ordering)
@@ -504,6 +631,9 @@ pub struct RunResult {
     /// extraction is enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<Value>,
+    /// Warnings produced during schema compilation (if any).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_warnings: Option<Vec<SchemaWarning>>,
 }
 
 /// Reference to an artifact stored externally

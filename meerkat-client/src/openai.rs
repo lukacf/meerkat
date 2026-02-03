@@ -8,7 +8,9 @@ use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use crate::BlockAssembler;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use meerkat_core::{AssistantBlock, Message, ProviderMeta, StopReason, Usage};
+use meerkat_core::{
+    AssistantBlock, Message, OutputSchema, Provider, ProviderMeta, StopReason, Usage,
+};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::Value;
@@ -50,7 +52,7 @@ impl OpenAiClient {
     }
 
     /// Build request body for OpenAI Responses API
-    fn build_request_body(&self, request: &LlmRequest) -> Value {
+    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let input = Self::convert_to_responses_input(&request.messages);
 
         let mut body = serde_json::json!({
@@ -111,29 +113,33 @@ impl OpenAiClient {
 
             // Handle structured output configuration
             if let Some(structured) = params.get("structured_output") {
-                if let Some(schema) = structured.get("schema") {
-                    let name = structured
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("output");
-                    let strict = structured
-                        .get("strict")
-                        .and_then(|s| s.as_bool())
-                        .unwrap_or(false);
-
-                    body["text"] = serde_json::json!({
-                        "format": {
-                            "type": "json_schema",
-                            "name": name,
-                            "schema": schema,
-                            "strict": strict
+                let output_schema: OutputSchema =
+                    serde_json::from_value(structured.clone()).map_err(|e| {
+                        LlmError::InvalidRequest {
+                            message: format!("Invalid structured_output schema: {e}"),
                         }
-                    });
-                }
+                    })?;
+                let compiled =
+                    output_schema
+                        .compile_for(Provider::OpenAI)
+                        .map_err(|e| LlmError::InvalidRequest {
+                            message: e.to_string(),
+                        })?;
+                let name = output_schema.name.as_deref().unwrap_or("output");
+                let strict = output_schema.strict;
+
+                body["text"] = serde_json::json!({
+                    "format": {
+                        "type": "json_schema",
+                        "name": name,
+                        "schema": compiled.schema,
+                        "strict": strict
+                    }
+                });
             }
         }
 
-        body
+        Ok(body)
     }
 
     /// Convert messages to Responses API input format
@@ -250,7 +256,7 @@ impl LlmClient for OpenAiClient {
     ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
         let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> = Box::pin(
             async_stream::try_stream! {
-                let body = self.build_request_body(request);
+                let body = self.build_request_body(request)?;
 
                 let response = self.http
                     .post(format!("{}/v1/responses", self.base_url))
@@ -642,7 +648,7 @@ mod tests {
             })],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         // Should have "input" not "messages"
         assert!(body.get("input").is_some(), "should have 'input' field");
@@ -672,7 +678,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
         // System message should have type: "message"
@@ -709,7 +715,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
         // Tool call should be type: "function_call"
@@ -741,7 +747,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
         // Tool result should be type: "function_call_output"
@@ -773,7 +779,7 @@ mod tests {
             }),
         })]);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
         let tools = body["tools"].as_array().expect("tools should be array");
 
         // Responses API tool format: name at top level, not nested in "function"
@@ -795,7 +801,7 @@ mod tests {
             })],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         // Should have reasoning config
         let reasoning = body.get("reasoning").expect("should have reasoning");
@@ -814,7 +820,7 @@ mod tests {
         )
         .with_provider_param("reasoning_effort", "high");
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         assert_eq!(body["reasoning"]["effort"], "high");
     }
@@ -846,7 +852,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
         assert_eq!(input[1]["type"], "message");
@@ -880,7 +886,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
         assert_eq!(input[1]["type"], "reasoning");
@@ -916,7 +922,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
         assert_eq!(input[1]["type"], "function_call");
@@ -942,7 +948,7 @@ mod tests {
         )
         .with_provider_param("seed", 12345);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         assert_eq!(body["seed"], 12345);
     }
@@ -958,7 +964,7 @@ mod tests {
         )
         .with_provider_param("frequency_penalty", 0.5);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         assert_eq!(body["frequency_penalty"], 0.5);
     }
@@ -974,7 +980,7 @@ mod tests {
         )
         .with_provider_param("presence_penalty", 0.8);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         assert_eq!(body["presence_penalty"], 0.8);
     }
@@ -992,7 +998,7 @@ mod tests {
         .with_provider_param("another_unknown", 123)
         .with_provider_param("seed", 42);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         assert!(body.get("unknown_param").is_none());
         assert!(body.get("another_unknown").is_none());
@@ -1013,12 +1019,83 @@ mod tests {
         .with_provider_param("frequency_penalty", 0.3)
         .with_provider_param("presence_penalty", 0.4);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["seed"], 999);
         assert_eq!(body["frequency_penalty"], 0.3);
         assert_eq!(body["presence_penalty"], 0.4);
+    }
+
+    #[test]
+    fn test_tool_args_serialization_no_double_encoding() -> Result<(), Box<dyn std::error::Error>> {
+        let client = OpenAiClient::new("test-key".to_string());
+
+        let tool_args = serde_json::json!({"city": "Tokyo", "units": "celsius"});
+        let request = LlmRequest::new(
+            "gpt-4o-mini",
+            vec![
+                Message::User(UserMessage {
+                    content: "What's the weather?".to_string(),
+                }),
+                Message::Assistant(meerkat_core::AssistantMessage {
+                    content: String::new(),
+                    tool_calls: vec![meerkat_core::ToolCall::new(
+                        "call_123".to_string(),
+                        "get_weather".to_string(),
+                        tool_args,
+                    )],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage::default(),
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+
+        let input = body["input"].as_array().ok_or("not array")?;
+        let tool_call = input
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .ok_or("no tool call")?;
+        let arguments = tool_call["arguments"].as_str().ok_or("not string")?;
+
+        let parsed: serde_json::Value = serde_json::from_str(arguments)?;
+
+        assert_eq!(parsed["city"], "Tokyo");
+        assert_eq!(parsed["units"], "celsius");
+
+        assert!(
+            !arguments.starts_with(r#"{\"#),
+            "arguments should not be double-encoded: {}",
+            arguments
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_sse_line_valid_data() -> Result<(), Box<dyn std::error::Error>> {
+        let line = r###"data: {"id":"123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}"###;
+        let chunk = OpenAiClient::parse_sse_line(line);
+        assert!(chunk.is_some());
+        let chunk = chunk.ok_or("missing chunk")?;
+        assert_eq!(chunk.choices.len(), 1);
+        assert_eq!(chunk.choices[0].delta.content, Some("Hi".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_sse_line_done_marker() {
+        let line = "data: [DONE]";
+        let chunk = OpenAiClient::parse_sse_line(line);
+        assert!(chunk.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_line_non_data_line() {
+        let line = "event: message";
+        let chunk = OpenAiClient::parse_sse_line(line);
+        assert!(chunk.is_none());
     }
 
     // =========================================================================
@@ -1053,7 +1130,7 @@ mod tests {
             }),
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         // Responses API uses "text.format" for structured output
         let text = body.get("text").expect("should have text");
@@ -1083,7 +1160,7 @@ mod tests {
             }),
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         let format = &body["text"]["format"];
         assert_eq!(format["name"], "output"); // default name
@@ -1101,7 +1178,7 @@ mod tests {
             })],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request).expect("build request");
 
         // text field should not be present
         assert!(

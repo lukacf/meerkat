@@ -64,6 +64,7 @@ where
                 tool_calls: 0,
                 usage: Usage::default(),
                 structured_output: None,
+                schema_warnings: None,
             }
         };
 
@@ -155,6 +156,7 @@ where
                 tool_calls: 0,
                 usage: Usage::default(),
                 structured_output: None,
+                schema_warnings: None,
             }
         };
 

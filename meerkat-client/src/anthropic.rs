@@ -6,7 +6,7 @@ use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use meerkat_core::{Message, StopReason, Usage};
+use meerkat_core::{Message, OutputSchema, Provider, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::Value;
 use std::pin::Pin;
@@ -117,7 +117,7 @@ impl AnthropicClient {
     }
 
     /// Build request body for Anthropic API
-    fn build_request_body(&self, request: &LlmRequest) -> Value {
+    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut messages = Vec::new();
         let mut system_prompt = None;
 
@@ -294,47 +294,31 @@ impl AnthropicClient {
             // Handle structured output configuration
             // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
             if let Some(structured) = params.get("structured_output") {
-                if let Some(schema) = structured.get("schema") {
-                    // Anthropic requires additionalProperties: false on all objects
-                    let prepared_schema = Self::prepare_schema_for_anthropic(schema);
-                    body["output_config"] = serde_json::json!({
-                        "format": {
-                            "type": "json_schema",
-                            "schema": prepared_schema
+                let output_schema: OutputSchema =
+                    serde_json::from_value(structured.clone()).map_err(|e| {
+                        LlmError::InvalidRequest {
+                            message: format!("Invalid structured_output schema: {e}"),
                         }
-                    });
-                }
+                    })?;
+                let compiled =
+                    output_schema
+                        .compile_for(Provider::Anthropic)
+                        .map_err(|e| LlmError::InvalidRequest {
+                            message: e.to_string(),
+                        })?;
+                body["output_config"] = serde_json::json!({
+                    "format": {
+                        "type": "json_schema",
+                        "schema": compiled.schema
+                    }
+                });
             }
         }
 
-        body
+        Ok(body)
     }
 
-    /// Prepare a JSON schema for Anthropic's structured output API.
-    ///
-    /// Anthropic requires `additionalProperties: false` on all object types.
-    fn prepare_schema_for_anthropic(schema: &Value) -> Value {
-        match schema {
-            Value::Object(obj) => {
-                let mut result = serde_json::Map::new();
-                for (key, value) in obj {
-                    result.insert(key.clone(), Self::prepare_schema_for_anthropic(value));
-                }
-                // Add additionalProperties: false to objects with properties
-                if obj.get("type") == Some(&Value::String("object".to_string()))
-                    && obj.contains_key("properties")
-                    && !obj.contains_key("additionalProperties")
-                {
-                    result.insert("additionalProperties".to_string(), Value::Bool(false));
-                }
-                Value::Object(result)
-            }
-            Value::Array(arr) => {
-                Value::Array(arr.iter().map(Self::prepare_schema_for_anthropic).collect())
-            }
-            other => other.clone(),
-        }
-    }
+    // prepare_schema_for_anthropic removed: handled by core schema compiler
 
     /// Parse an SSE event from the response
     fn parse_sse_line(line: &str) -> Option<AnthropicEvent> {
@@ -386,7 +370,7 @@ impl LlmClient for AnthropicClient {
     ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
         let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> = Box::pin(
             async_stream::try_stream! {
-                let body = self.build_request_body(request);
+                let body = self.build_request_body(request)?;
 
                 // Check if structured output is enabled (requires beta header)
                 let has_structured_output = body.get("output_config").is_some();
@@ -909,7 +893,7 @@ mod tests {
         )
         .with_provider_param("thinking_budget", 10000);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         assert!(
             body.get("thinking").is_some(),
@@ -933,7 +917,7 @@ mod tests {
         )
         .with_provider_param("top_k", 40);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         assert_eq!(body["top_k"], 40);
         Ok(())
@@ -949,7 +933,7 @@ mod tests {
             })],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         assert!(body.get("thinking").is_none());
         assert!(body.get("top_k").is_none());
@@ -1023,7 +1007,7 @@ mod tests {
         )
         .with_provider_param("top_k", "40"); // String, not number!
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         // Should be coerced to a number
         assert!(
@@ -1047,7 +1031,7 @@ mod tests {
         )
         .with_provider_param("top_k", "not_a_number");
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         // Invalid string should be ignored (no top_k in body)
         assert!(
@@ -1117,7 +1101,7 @@ mod tests {
             }),
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         // Check output_config is present with correct structure
         assert!(
@@ -1127,6 +1111,10 @@ mod tests {
         let output_config = &body["output_config"];
         assert_eq!(output_config["format"]["type"], "json_schema");
         assert!(output_config["format"]["schema"].is_object());
+        assert_eq!(
+            output_config["format"]["schema"]["additionalProperties"],
+            serde_json::json!(false)
+        );
         Ok(())
     }
 
@@ -1142,7 +1130,7 @@ mod tests {
             })],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         // output_config should not be present
         assert!(
@@ -1152,58 +1140,5 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_prepare_schema_adds_additional_properties() {
-        // Regression test: Anthropic API requires additionalProperties: false on objects
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "nested": {
-                    "type": "object",
-                    "properties": {
-                        "value": {"type": "integer"}
-                    }
-                }
-            },
-            "required": ["name"]
-        });
-
-        let prepared = AnthropicClient::prepare_schema_for_anthropic(&schema);
-
-        // Top-level object should have additionalProperties: false
-        assert_eq!(
-            prepared.get("additionalProperties"),
-            Some(&serde_json::json!(false)),
-            "top-level object should have additionalProperties: false"
-        );
-
-        // Nested object should also have additionalProperties: false
-        let nested = &prepared["properties"]["nested"];
-        assert_eq!(
-            nested.get("additionalProperties"),
-            Some(&serde_json::json!(false)),
-            "nested object should have additionalProperties: false"
-        );
-    }
-
-    #[test]
-    fn test_prepare_schema_preserves_existing_additional_properties() {
-        // If additionalProperties is already set, don't override it
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"}
-            },
-            "additionalProperties": true
-        });
-
-        let prepared = AnthropicClient::prepare_schema_for_anthropic(&schema);
-
-        assert_eq!(
-            prepared.get("additionalProperties"),
-            Some(&serde_json::json!(true)),
-            "existing additionalProperties should be preserved"
-        );
-    }
+    // AdditionalProperties handling is covered by core schema compiler tests.
 }

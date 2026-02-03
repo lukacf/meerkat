@@ -347,6 +347,7 @@ where
                             turns: turn_count + 1,
                             tool_calls: tool_call_count,
                             structured_output: None,
+                            schema_warnings: None,
                         });
                     }
                 }
@@ -383,6 +384,7 @@ where
             turns,
             tool_calls,
             structured_output: None,
+            schema_warnings: None,
         }
     }
 }

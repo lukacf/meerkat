@@ -15,6 +15,7 @@ pub mod ops;
 pub mod prompt;
 pub mod provider;
 pub mod retry;
+pub mod schema;
 pub mod session;
 pub mod state;
 pub mod sub_agent;
@@ -48,6 +49,9 @@ pub use ops::{
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
 pub use retry::RetryPolicy;
+pub use schema::{
+    CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
+};
 pub use session::{SESSION_VERSION, Session, SessionMeta, SessionMetadata, SessionTooling};
 pub use state::LoopState;
 pub use sub_agent::{SubAgentCommsInfo, SubAgentCompletion, SubAgentInfo, SubAgentManager};

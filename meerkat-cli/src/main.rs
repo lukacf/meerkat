@@ -12,7 +12,7 @@ use meerkat_core::ToolGatewayBuilder;
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::ops::ConcurrencyLimits;
 use meerkat_core::sub_agent::SubAgentManager;
-use meerkat_core::{AgentEvent, format_verbose_event};
+use meerkat_core::{AgentEvent, SchemaCompat, format_verbose_event};
 use meerkat_core::{
     CommsRuntimeMode, Config, ConfigDelta, ConfigStore, FileConfigStore, SessionMetadata,
     SessionTooling,
@@ -185,9 +185,13 @@ enum Commands {
         #[arg(long = "param", value_name = "KEY=VALUE")]
         params: Vec<String>,
 
-        /// JSON Schema for structured output (file path OR inline JSON starting with '{')
+        /// Structured output schema (wrapper or raw JSON schema; file path OR inline JSON)
         #[arg(long, value_name = "SCHEMA")]
         output_schema: Option<String>,
+
+        /// Compatibility mode for schema lowering (lossy, strict)
+        #[arg(long, value_enum)]
+        output_schema_compat: Option<SchemaCompatArg>,
 
         /// Max retries for structured output validation (default: 2)
         #[arg(long, default_value = "2")]
@@ -293,6 +297,22 @@ enum ConfigCommands {
 enum ConfigFormat {
     Toml,
     Json,
+}
+
+/// Schema compatibility mode for provider lowering.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SchemaCompatArg {
+    Lossy,
+    Strict,
+}
+
+impl From<SchemaCompatArg> for SchemaCompat {
+    fn from(value: SchemaCompatArg) -> Self {
+        match value {
+            SchemaCompatArg::Lossy => SchemaCompat::Lossy,
+            SchemaCompatArg::Strict => SchemaCompat::Strict,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -437,6 +457,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             stream,
             params,
             output_schema,
+            output_schema_compat,
             structured_output_retries,
             comms_name,
             comms_listen_tcp,
@@ -474,7 +495,14 @@ async fn main() -> anyhow::Result<ExitCode> {
             let parsed_output_schema = output_schema
                 .as_ref()
                 .map(|s| parse_output_schema(s))
-                .transpose()?;
+                .transpose()?
+                .map(|schema| {
+                    if let Some(compat) = output_schema_compat {
+                        schema.with_compat(compat.into())
+                    } else {
+                        schema
+                    }
+                });
 
             match (duration, provider_params) {
                 (Ok(dur), Ok(parsed_params)) => {
@@ -578,19 +606,15 @@ fn parse_provider_params(params: &[String]) -> anyhow::Result<Option<serde_json:
 /// If the value starts with '{', treat it as inline JSON.
 /// Otherwise, treat it as a file path.
 fn parse_output_schema(schema_arg: &str) -> anyhow::Result<OutputSchema> {
-    let schema_value: serde_json::Value = if schema_arg.trim().starts_with('{') {
-        // Inline JSON
-        serde_json::from_str(schema_arg)
-            .map_err(|e| anyhow::anyhow!("Invalid inline JSON schema: {}", e))?
+    let schema_str = if schema_arg.trim().starts_with('{') {
+        schema_arg.to_string()
     } else {
-        // File path
-        let content = std::fs::read_to_string(schema_arg)
-            .map_err(|e| anyhow::anyhow!("Failed to read schema file '{}': {}", schema_arg, e))?;
-        serde_json::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON in schema file '{}': {}", schema_arg, e))?
+        std::fs::read_to_string(schema_arg)
+            .map_err(|e| anyhow::anyhow!("Failed to read schema file '{}': {}", schema_arg, e))?
     };
 
-    Ok(OutputSchema::new(schema_value))
+    OutputSchema::from_json_str(&schema_str)
+        .map_err(|e| anyhow::anyhow!("Invalid output schema: {}", e))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1387,7 +1411,9 @@ async fn run_agent(
                 "usage": {
                     "input_tokens": result.usage.input_tokens,
                     "output_tokens": result.usage.output_tokens,
-                }
+                },
+                "structured_output": result.structured_output,
+                "schema_warnings": result.schema_warnings,
             });
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
@@ -1403,6 +1429,17 @@ async fn run_agent(
                 result.usage.input_tokens,
                 result.usage.output_tokens
             );
+            if let Some(warnings) = &result.schema_warnings {
+                if !warnings.is_empty() {
+                    eprintln!("\n[Schema warnings]");
+                    for warning in warnings {
+                        eprintln!(
+                            "- {:?} {}: {}",
+                            warning.provider, warning.path, warning.message
+                        );
+                    }
+                }
+            }
         }
     }
 

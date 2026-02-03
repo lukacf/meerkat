@@ -6,7 +6,7 @@ use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use meerkat_core::{Message, StopReason, Usage};
+use meerkat_core::{Message, OutputSchema, Provider, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -50,7 +50,7 @@ impl GeminiClient {
     }
 
     /// Build request body for Gemini API
-    fn build_request_body(&self, request: &LlmRequest) -> Value {
+    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut contents = Vec::new();
         let mut system_instruction = None;
 
@@ -227,13 +227,21 @@ impl GeminiClient {
             // Handle structured output configuration
             // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
             if let Some(structured) = params.get("structured_output") {
-                if let Some(schema) = structured.get("schema") {
-                    body["generationConfig"]["responseMimeType"] =
-                        Value::String("application/json".to_string());
-                    // Sanitize schema for Gemini (remove $defs, $ref, etc.)
-                    body["generationConfig"]["responseSchema"] =
-                        Self::sanitize_schema_for_gemini(schema);
-                }
+                let output_schema: OutputSchema =
+                    serde_json::from_value(structured.clone()).map_err(|e| {
+                        LlmError::InvalidRequest {
+                            message: format!("Invalid structured_output schema: {e}"),
+                        }
+                    })?;
+                let compiled =
+                    output_schema
+                        .compile_for(Provider::Gemini)
+                        .map_err(|e| LlmError::InvalidRequest {
+                            message: e.to_string(),
+                        })?;
+                body["generationConfig"]["responseMimeType"] =
+                    Value::String("application/json".to_string());
+                body["generationConfig"]["responseSchema"] = compiled.schema;
             }
         }
 
@@ -255,7 +263,7 @@ impl GeminiClient {
             }]);
         }
 
-        body
+        Ok(body)
     }
 
     /// Sanitize JSON Schema for Gemini
@@ -320,7 +328,7 @@ impl LlmClient for GeminiClient {
     ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
         let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> =
             Box::pin(async_stream::try_stream! {
-                let body = self.build_request_body(request);
+                let body = self.build_request_body(request)?;
                 let url = format!(
                     "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
                     self.base_url, request.model, self.api_key
@@ -496,7 +504,7 @@ mod tests {
         )
         .with_provider_param("thinking_budget", 10000);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         let generation_config = body.get("generationConfig").ok_or("missing config")?;
         let thinking_config = generation_config
@@ -521,7 +529,7 @@ mod tests {
         )
         .with_provider_param("top_k", 40);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
         let generation_config = body.get("generationConfig").ok_or("missing config")?;
         let top_k = generation_config.get("topK").ok_or("missing top_k")?;
 
@@ -542,7 +550,7 @@ mod tests {
         .with_provider_param("top_k", 50)
         .with_provider_param("thinking_budget", 5000);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
         let generation_config = body.get("generationConfig").ok_or("missing config")?;
 
         let top_k = generation_config.get("topK").ok_or("missing top_k")?;
@@ -568,7 +576,7 @@ mod tests {
             })],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
         let generation_config = body.get("generationConfig").ok_or("missing config")?;
 
         assert!(generation_config.get("thinkingConfig").is_none());
@@ -611,7 +619,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
         let contents = body
             .get("contents")
             .and_then(|c| c.as_array())
@@ -831,7 +839,7 @@ mod tests {
             }),
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         let gen_config = body
             .get("generationConfig")
@@ -872,7 +880,7 @@ mod tests {
         )
         .with_provider_param("structured_output", serde_json::json!({"schema": schema}));
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         let gen_config = body
             .get("generationConfig")
@@ -911,7 +919,7 @@ mod tests {
             })],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         let gen_config = body
             .get("generationConfig")

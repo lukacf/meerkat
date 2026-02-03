@@ -5,6 +5,7 @@
 
 use crate::error::AgentError;
 use crate::types::{BlockAssistantMessage, Message, RunResult, UserMessage};
+use crate::Provider;
 use jsonschema::Validator;
 use serde_json::{Value, json};
 
@@ -27,16 +28,26 @@ where
         tool_call_count: u32,
     ) -> Result<RunResult, AgentError> {
         // SAFETY: This method is only called when output_schema is Some (checked by caller)
-        let schema = self.config.output_schema.as_ref().ok_or_else(|| {
+        let output_schema = self.config.output_schema.as_ref().ok_or_else(|| {
             AgentError::InternalError("perform_extraction_turn called without output_schema".into())
         })?;
 
+        let provider = Provider::from_name(self.client.provider());
+        let compiled = output_schema
+            .compile_for(provider)
+            .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
+
         // Build the JSON schema validator
-        let validator = Validator::new(&schema.schema)
+        let validator = Validator::new(&compiled.schema)
             .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
 
         let max_attempts = self.config.structured_output_retries + 1;
         let mut last_error = String::new();
+        let schema_warnings = if compiled.warnings.is_empty() {
+            None
+        } else {
+            Some(compiled.warnings.clone())
+        };
 
         for attempt in 0..max_attempts {
             // Add extraction prompt
@@ -61,14 +72,7 @@ where
 
             // Add structured output params - providers will interpret this
             if let Some(obj) = params.as_object_mut() {
-                obj.insert(
-                    "structured_output".to_string(),
-                    json!({
-                        "schema": schema.schema,
-                        "name": schema.name,
-                        "strict": schema.strict,
-                    }),
-                );
+                obj.insert("structured_output".to_string(), output_schema.to_value());
             }
 
             // Call LLM with NO tools (extraction turn is pure text generation)
@@ -114,6 +118,7 @@ where
                                 turns: turn_count + 1 + attempt + 1, // Include extraction attempts
                                 tool_calls: tool_call_count,
                                 structured_output: Some(parsed),
+                                schema_warnings: schema_warnings.clone(),
                             });
                         }
                         Err(error) => {

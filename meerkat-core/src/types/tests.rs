@@ -549,6 +549,36 @@ fn test_output_schema_deserialize_raw() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
+fn test_output_schema_deserialize_raw_with_schema_key() -> Result<(), Box<dyn std::error::Error>> {
+    let input = json!({
+        "type": "object",
+        "schema": {"type": "string"},
+        "properties": {"value": {"type": "string"}}
+    });
+    let parsed: OutputSchema = serde_json::from_value(input)?;
+    assert!(parsed.name.is_none());
+    assert_eq!(parsed.schema.as_value()["type"], "object");
+    Ok(())
+}
+
+#[test]
+fn test_output_schema_from_type() -> Result<(), Box<dyn std::error::Error>> {
+    #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+    struct Payload {
+        label: String,
+        count: u32,
+    }
+
+    let output_schema = OutputSchema::from_type::<Payload>()?;
+    let schema = output_schema.schema.as_value();
+
+    assert_eq!(schema["type"], "object");
+    assert!(schema["properties"]["label"].is_object());
+    assert!(schema["properties"]["count"].is_object());
+    Ok(())
+}
+
+#[test]
 fn test_run_result_with_structured_output() {
     let result = RunResult {
         text: "Here's the structured data".to_string(),

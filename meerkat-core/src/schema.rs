@@ -199,7 +199,7 @@ fn sanitize_gemini_value(
                         warnings.push(SchemaWarning {
                             provider,
                             path: join_path(path, key),
-                            message: "Collapsed array type to a single type".to_string(),
+                            message: "Collapsed array type to a single type; nullable/union semantics may be lost for Gemini".to_string(),
                         });
                         sanitized.insert(key.clone(), primary);
                         continue;

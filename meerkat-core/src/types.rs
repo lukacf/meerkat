@@ -297,8 +297,6 @@ struct OutputSchemaWire {
 
 fn is_wrapped_schema(obj: &Map<String, Value>) -> bool {
     let has_schema = obj.contains_key("schema");
-    let has_marker =
-        obj.contains_key("compat") || obj.contains_key("strict") || obj.contains_key("name");
     let has_format_marker = obj
         .get("format")
         .and_then(Value::as_str)
@@ -306,7 +304,7 @@ fn is_wrapped_schema(obj: &Map<String, Value>) -> bool {
     let only_wrapper_keys = obj.keys().all(|key| {
         matches!(key.as_str(), "schema" | "name" | "strict" | "compat" | "format")
     });
-    has_schema && (has_marker || has_format_marker || only_wrapper_keys)
+    has_schema && (has_format_marker || only_wrapper_keys)
 }
 
 /// Unique identifier for a session (UUID v7 for time-ordering)

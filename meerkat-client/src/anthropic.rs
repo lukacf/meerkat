@@ -418,6 +418,7 @@ impl LlmClient for AnthropicClient {
                 let mut last_stop_reason: Option<StopReason> = None;
                 let mut usage = Usage::default();
                 let mut saw_done = false;
+                let mut saw_event = false;
 
                 macro_rules! handle_event {
                     ($event:expr) => {
@@ -427,23 +428,27 @@ impl LlmClient for AnthropicClient {
                                     match delta.delta_type.as_str() {
                                         "text_delta" => {
                                             if let Some(text) = delta.text {
+                                                saw_event = true;
                                                 yield LlmEvent::TextDelta { delta: text, meta: None };
                                             }
                                         }
                                         "thinking_delta" => {
                                             // Emit incremental thinking content
                                             if let Some(text) = delta.thinking {
+                                                saw_event = true;
                                                 yield LlmEvent::ReasoningDelta { delta: text };
                                             }
                                         }
                                         "signature_delta" => {
                                             // Signature arrives as separate delta before content_block_stop
                                             if let Some(sig) = delta.signature {
+                                                saw_event = true;
                                                 current_thinking_signature = Some(sig);
                                             }
                                         }
                                         "input_json_delta" => {
                                             if let Some(partial_json) = delta.partial_json {
+                                                saw_event = true;
                                                 yield LlmEvent::ToolCallDelta {
                                                     id: current_tool_id.clone().unwrap_or_default(),
                                                     name: None,
@@ -467,6 +472,7 @@ impl LlmClient for AnthropicClient {
                                         "tool_use" => {
                                             let id = content_block.id.unwrap_or_default();
                                             current_tool_id = Some(id.clone());
+                                            saw_event = true;
                                             yield LlmEvent::ToolCallDelta {
                                                 id,
                                                 name: content_block.name,
@@ -497,6 +503,7 @@ impl LlmClient for AnthropicClient {
                             "message_delta" => {
                                 if let Some(usage_update) = $event.usage {
                                     merge_usage(&mut usage, &usage_update);
+                                    saw_event = true;
                                     yield LlmEvent::UsageUpdate {
                                         usage: usage.clone(),
                                     };
@@ -505,6 +512,7 @@ impl LlmClient for AnthropicClient {
                                     let reason = Self::map_stop_reason(finish_reason.as_str());
                                     last_stop_reason = Some(reason);
                                     if !saw_done {
+                                        saw_event = true;
                                         yield LlmEvent::Done {
                                             outcome: LlmDoneOutcome::Success { stop_reason: reason },
                                         };
@@ -515,6 +523,7 @@ impl LlmClient for AnthropicClient {
                             "message_start" => {
                                 if let Some(usage_update) = $event.message.and_then(|m| m.usage) {
                                     merge_usage(&mut usage, &usage_update);
+                                    saw_event = true;
                                     yield LlmEvent::UsageUpdate {
                                         usage: usage.clone(),
                                     };
@@ -529,6 +538,7 @@ impl LlmClient for AnthropicClient {
                                         .or(last_stop_reason)
                                         .unwrap_or(StopReason::EndTurn);
                                     last_stop_reason = Some(reason);
+                                    saw_event = true;
                                     yield LlmEvent::Done {
                                         outcome: LlmDoneOutcome::Success { stop_reason: reason },
                                     };
@@ -548,6 +558,7 @@ impl LlmClient for AnthropicClient {
                                     if !saw_done {
                                         let reason =
                                             last_stop_reason.unwrap_or(StopReason::EndTurn);
+                                        saw_event = true;
                                         yield LlmEvent::Done {
                                             outcome: LlmDoneOutcome::Success { stop_reason: reason },
                                         };
@@ -577,6 +588,13 @@ impl LlmClient for AnthropicClient {
                         let line = line.trim();
                         handle_line!(line);
                     }
+                }
+
+                if !saw_done && saw_event {
+                    let reason = last_stop_reason.unwrap_or(StopReason::EndTurn);
+                    yield LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                    };
                 }
             },
         );

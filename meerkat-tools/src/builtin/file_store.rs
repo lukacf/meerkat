@@ -16,6 +16,9 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
+const MAX_TASKS: usize = 10_000;
+const MAX_COMPLETED_TASKS: usize = 5_000;
+
 /// File-based task store with atomic writes
 ///
 /// Stores tasks in a JSON file with the following features:
@@ -25,7 +28,7 @@ use tokio::sync::Mutex;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use meerkat_tools::builtin::{FileTaskStore, TaskStore, NewTask};
 /// use std::path::PathBuf;
 ///
@@ -69,11 +72,14 @@ impl FileTaskStore {
 
     /// Load the store data from disk, creating default data if the file doesn't exist
     async fn load(&self) -> Result<TaskStoreData, TaskError> {
-        if !self.path.exists() {
+        let exists = fs::try_exists(&self.path)
+            .await
+            .map_err(|e| TaskError::StorageError(format!("Failed to check file: {}", e)))?;
+        if !exists {
             return Ok(TaskStoreData {
                 meta: TaskStoreMeta {
                     version: 1,
-                    project_id: ulid::Ulid::new().to_string(),
+                    project_id: uuid::Uuid::now_v7().to_string(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                     store_rev: 0,
                 },
@@ -128,6 +134,68 @@ impl FileTaskStore {
 
         Ok(())
     }
+
+    fn enforce_retention(tasks: &mut Vec<Task>) -> usize {
+        let total = tasks.len();
+        if total <= MAX_TASKS {
+            let completed = tasks
+                .iter()
+                .filter(|task| task.status == TaskStatus::Completed)
+                .count();
+            if completed <= MAX_COMPLETED_TASKS {
+                return 0;
+            }
+        }
+
+        let mut remove = vec![false; total];
+
+        let mut completed_indices: Vec<usize> = tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| task.status == TaskStatus::Completed)
+            .map(|(idx, _)| idx)
+            .collect();
+        completed_indices.sort_by(|a, b| tasks[*a].updated_at.cmp(&tasks[*b].updated_at));
+
+        let completed_count = completed_indices.len();
+        let mut excess_completed = completed_count.saturating_sub(MAX_COMPLETED_TASKS);
+        for idx in completed_indices {
+            if excess_completed == 0 {
+                break;
+            }
+            remove[idx] = true;
+            excess_completed -= 1;
+        }
+
+        let mut removed = remove.iter().filter(|&&flag| flag).count();
+        let remaining = total.saturating_sub(removed);
+        let mut excess_total = remaining.saturating_sub(MAX_TASKS);
+        if excess_total > 0 {
+            let mut all_indices: Vec<usize> = (0..total).collect();
+            all_indices.sort_by(|a, b| tasks[*a].updated_at.cmp(&tasks[*b].updated_at));
+            for idx in all_indices {
+                if excess_total == 0 {
+                    break;
+                }
+                if !remove[idx] {
+                    remove[idx] = true;
+                    removed += 1;
+                    excess_total -= 1;
+                }
+            }
+        }
+
+        if removed > 0 {
+            let mut idx = 0usize;
+            tasks.retain(|_| {
+                let keep = !remove[idx];
+                idx += 1;
+                keep
+            });
+        }
+
+        removed
+    }
 }
 
 #[async_trait]
@@ -161,9 +229,13 @@ impl TaskStore for FileTaskStore {
             updated_at: now,
             created_by_session: session_id.map(String::from),
             updated_by_session: session_id.map(String::from),
+            owner: new_task.owner,
+            metadata: new_task.metadata.unwrap_or_default(),
+            blocked_by: new_task.blocked_by.unwrap_or_default(),
         };
 
         data.tasks.push(task.clone());
+        Self::enforce_retention(&mut data.tasks);
         self.save(&mut data).await?;
 
         Ok(task)
@@ -210,6 +282,31 @@ impl TaskStore for FileTaskStore {
             task.blocks.retain(|b| !remove_blocks.contains(b));
         }
 
+        // Handle new fields: owner, metadata, add_blocked_by, remove_blocked_by
+        if let Some(owner) = update.owner {
+            task.owner = Some(owner);
+        }
+        if let Some(metadata) = update.metadata {
+            for (key, value) in metadata {
+                if value.is_null() {
+                    // Null value means delete the key
+                    task.metadata.remove(&key);
+                } else {
+                    task.metadata.insert(key, value);
+                }
+            }
+        }
+        if let Some(add_blocked_by) = update.add_blocked_by {
+            for block_id in add_blocked_by {
+                if !task.blocked_by.contains(&block_id) {
+                    task.blocked_by.push(block_id);
+                }
+            }
+        }
+        if let Some(remove_blocked_by) = update.remove_blocked_by {
+            task.blocked_by.retain(|b| !remove_blocked_by.contains(b));
+        }
+
         task.updated_at = chrono::Utc::now().to_rfc3339();
         task.updated_by_session = session_id.map(String::from);
 
@@ -236,6 +333,7 @@ impl TaskStore for FileTaskStore {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::builtin::types::{TaskPriority, TaskStatus};
@@ -258,6 +356,7 @@ mod tests {
             priority: Some(TaskPriority::High),
             labels: Some(vec!["test".to_string(), "important".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, Some("session-1")).await.unwrap();
@@ -275,7 +374,7 @@ mod tests {
         assert_eq!(created.updated_by_session, Some("session-1".to_string()));
         assert!(!created.created_at.is_empty());
         assert!(!created.updated_at.is_empty());
-        assert_eq!(created.id.0.len(), 26); // ULID format
+        assert_eq!(created.id.0.len(), 36); // UUID format
 
         // Verify we can retrieve it
         let fetched = store.get(&created.id).await.unwrap();
@@ -301,6 +400,7 @@ mod tests {
             priority: Some(TaskPriority::Low),
             labels: None,
             blocks: None,
+            ..Default::default()
         };
         let task2 = NewTask {
             subject: "Task 2".to_string(),
@@ -308,6 +408,7 @@ mod tests {
             priority: Some(TaskPriority::High),
             labels: None,
             blocks: None,
+            ..Default::default()
         };
         let task3 = NewTask {
             subject: "Task 3".to_string(),
@@ -315,6 +416,7 @@ mod tests {
             priority: None,
             labels: Some(vec!["urgent".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created1 = store.create(task1, None).await.unwrap();
@@ -342,6 +444,7 @@ mod tests {
             priority: Some(TaskPriority::Low),
             labels: Some(vec!["initial".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, Some("session-1")).await.unwrap();
@@ -359,6 +462,10 @@ mod tests {
             labels: Some(vec!["updated".to_string(), "reviewed".to_string()]),
             add_blocks: None,
             remove_blocks: None,
+            owner: None,
+            metadata: None,
+            add_blocked_by: None,
+            remove_blocked_by: None,
         };
 
         let updated = store
@@ -392,6 +499,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();
@@ -444,6 +552,7 @@ mod tests {
                 priority: Some(TaskPriority::High),
                 labels: Some(vec!["persistent".to_string()]),
                 blocks: None,
+                ..Default::default()
             };
             let created = store.create(new_task, Some("session-1")).await.unwrap();
             task_id = created.id;
@@ -485,6 +594,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();
@@ -513,6 +623,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         store.create(new_task, None).await.unwrap();
@@ -541,6 +652,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -561,6 +673,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -609,6 +722,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -623,6 +737,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -695,6 +810,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();

@@ -6,7 +6,7 @@
 use super::store::TaskStore;
 use super::types::{NewTask, Task, TaskError, TaskId, TaskStatus, TaskUpdate};
 use async_trait::async_trait;
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 
 /// In-memory task store for testing
 ///
@@ -15,7 +15,7 @@ use std::sync::RwLock;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use meerkat_tools::builtin::{MemoryTaskStore, TaskStore, NewTask};
 ///
 /// let store = MemoryTaskStore::new();
@@ -58,7 +58,7 @@ impl MemoryTaskStore {
     ///
     /// This is a convenience method for testing.
     pub fn len(&self) -> usize {
-        self.tasks.read().map(|t| t.len()).unwrap_or(0)
+        self.tasks.try_read().ok().map(|t| t.len()).unwrap_or(0)
     }
 
     /// Check if the store is empty
@@ -76,18 +76,12 @@ impl Default for MemoryTaskStore {
 #[async_trait]
 impl TaskStore for MemoryTaskStore {
     async fn list(&self) -> Result<Vec<Task>, TaskError> {
-        let tasks = self
-            .tasks
-            .read()
-            .map_err(|e| TaskError::StorageError(e.to_string()))?;
+        let tasks = self.tasks.read().await;
         Ok(tasks.clone())
     }
 
     async fn get(&self, id: &TaskId) -> Result<Option<Task>, TaskError> {
-        let tasks = self
-            .tasks
-            .read()
-            .map_err(|e| TaskError::StorageError(e.to_string()))?;
+        let tasks = self.tasks.read().await;
         Ok(tasks.iter().find(|t| &t.id == id).cloned())
     }
 
@@ -105,12 +99,12 @@ impl TaskStore for MemoryTaskStore {
             updated_at: now,
             created_by_session: session_id.map(String::from),
             updated_by_session: session_id.map(String::from),
+            owner: new_task.owner,
+            metadata: new_task.metadata.unwrap_or_default(),
+            blocked_by: new_task.blocked_by.unwrap_or_default(),
         };
 
-        let mut tasks = self
-            .tasks
-            .write()
-            .map_err(|e| TaskError::StorageError(e.to_string()))?;
+        let mut tasks = self.tasks.write().await;
         tasks.push(task.clone());
         Ok(task)
     }
@@ -121,10 +115,7 @@ impl TaskStore for MemoryTaskStore {
         update: TaskUpdate,
         session_id: Option<&str>,
     ) -> Result<Task, TaskError> {
-        let mut tasks = self
-            .tasks
-            .write()
-            .map_err(|e| TaskError::StorageError(e.to_string()))?;
+        let mut tasks = self.tasks.write().await;
         let task = tasks
             .iter_mut()
             .find(|t| &t.id == id)
@@ -156,6 +147,31 @@ impl TaskStore for MemoryTaskStore {
             task.blocks.retain(|b| !remove_blocks.contains(b));
         }
 
+        // Handle new fields: owner, metadata, add_blocked_by, remove_blocked_by
+        if let Some(owner) = update.owner {
+            task.owner = Some(owner);
+        }
+        if let Some(metadata) = update.metadata {
+            for (key, value) in metadata {
+                if value.is_null() {
+                    // Null value means delete the key
+                    task.metadata.remove(&key);
+                } else {
+                    task.metadata.insert(key, value);
+                }
+            }
+        }
+        if let Some(add_blocked_by) = update.add_blocked_by {
+            for block_id in add_blocked_by {
+                if !task.blocked_by.contains(&block_id) {
+                    task.blocked_by.push(block_id);
+                }
+            }
+        }
+        if let Some(remove_blocked_by) = update.remove_blocked_by {
+            task.blocked_by.retain(|b| !remove_blocked_by.contains(b));
+        }
+
         task.updated_at = chrono::Utc::now().to_rfc3339();
         task.updated_by_session = session_id.map(String::from);
 
@@ -163,10 +179,7 @@ impl TaskStore for MemoryTaskStore {
     }
 
     async fn delete(&self, id: &TaskId) -> Result<(), TaskError> {
-        let mut tasks = self
-            .tasks
-            .write()
-            .map_err(|e| TaskError::StorageError(e.to_string()))?;
+        let mut tasks = self.tasks.write().await;
         let len_before = tasks.len();
         tasks.retain(|t| &t.id != id);
         if tasks.len() == len_before {
@@ -177,6 +190,7 @@ impl TaskStore for MemoryTaskStore {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::builtin::types::{TaskPriority, TaskStatus};
@@ -191,6 +205,7 @@ mod tests {
             priority: Some(TaskPriority::High),
             labels: Some(vec!["test".to_string(), "important".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, Some("session-1")).await.unwrap();
@@ -208,7 +223,7 @@ mod tests {
         assert_eq!(created.updated_by_session, Some("session-1".to_string()));
         assert!(!created.created_at.is_empty());
         assert!(!created.updated_at.is_empty());
-        assert_eq!(created.id.0.len(), 26); // ULID format
+        assert_eq!(created.id.0.len(), 36); // UUID format
 
         // Verify we can retrieve it
         let fetched = store.get(&created.id).await.unwrap();
@@ -229,6 +244,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();
@@ -267,6 +283,7 @@ mod tests {
             priority: Some(TaskPriority::Low),
             labels: None,
             blocks: None,
+            ..Default::default()
         };
         let task2 = NewTask {
             subject: "Task 2".to_string(),
@@ -274,6 +291,7 @@ mod tests {
             priority: Some(TaskPriority::High),
             labels: None,
             blocks: None,
+            ..Default::default()
         };
         let task3 = NewTask {
             subject: "Task 3".to_string(),
@@ -281,6 +299,7 @@ mod tests {
             priority: None,
             labels: Some(vec!["urgent".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created1 = store.create(task1, None).await.unwrap();
@@ -308,6 +327,7 @@ mod tests {
             priority: Some(TaskPriority::Low),
             labels: Some(vec!["initial".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, Some("session-1")).await.unwrap();
@@ -325,6 +345,10 @@ mod tests {
             labels: Some(vec!["updated".to_string(), "reviewed".to_string()]),
             add_blocks: None,
             remove_blocks: None,
+            owner: None,
+            metadata: None,
+            add_blocked_by: None,
+            remove_blocked_by: None,
         };
 
         let updated = store
@@ -358,6 +382,7 @@ mod tests {
             priority: Some(TaskPriority::High),
             labels: Some(vec!["keep".to_string()]),
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();
@@ -404,6 +429,7 @@ mod tests {
             priority: None,
             labels: None,
             blocks: None,
+            ..Default::default()
         };
 
         let created = store.create(new_task, None).await.unwrap();
@@ -444,6 +470,7 @@ mod tests {
                         priority: None,
                         labels: None,
                         blocks: None,
+                        ..Default::default()
                     },
                     None,
                 )
@@ -482,6 +509,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -496,6 +524,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -510,6 +539,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: None,
+                    ..Default::default()
                 },
                 None,
             )
@@ -555,6 +585,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: Some(vec![blocker1.clone(), blocker2.clone(), blocker3.clone()]),
+                    ..Default::default()
                 },
                 None,
             )
@@ -600,6 +631,7 @@ mod tests {
                     priority: None,
                     labels: None,
                     blocks: Some(vec![blocker1.clone()]),
+                    ..Default::default()
                 },
                 None,
             )
@@ -632,6 +664,9 @@ mod tests {
                 priority: TaskPriority::High,
                 labels: vec![],
                 blocks: vec![],
+                owner: None,
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![],
                 created_at: "2025-01-01T00:00:00Z".to_string(),
                 updated_at: "2025-01-01T00:00:00Z".to_string(),
                 created_by_session: None,
@@ -645,6 +680,9 @@ mod tests {
                 priority: TaskPriority::Medium,
                 labels: vec!["work".to_string()],
                 blocks: vec![],
+                owner: None,
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![],
                 created_at: "2025-01-02T00:00:00Z".to_string(),
                 updated_at: "2025-01-02T00:00:00Z".to_string(),
                 created_by_session: Some("old-session".to_string()),
@@ -680,5 +718,350 @@ mod tests {
         let store = MemoryTaskStore::default();
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
+    }
+
+    // ======================================================================
+    // Tests for TaskUpdate new fields: owner, metadata, add_blocked_by, remove_blocked_by
+    // These tests verify the store correctly handles the update semantics
+    // ======================================================================
+
+    #[tokio::test]
+    async fn test_memory_store_update_owner() {
+        let store = MemoryTaskStore::new();
+
+        let task = store
+            .create(
+                NewTask {
+                    subject: "Task with no owner".to_string(),
+                    description: "".to_string(),
+                    priority: None,
+                    labels: None,
+                    blocks: None,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Initially no owner
+        assert!(task.owner.is_none());
+
+        // Set owner
+        let update = TaskUpdate {
+            owner: Some("alice".to_string()),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+        assert_eq!(updated.owner, Some("alice".to_string()));
+
+        // Change owner
+        let update = TaskUpdate {
+            owner: Some("bob".to_string()),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+        assert_eq!(updated.owner, Some("bob".to_string()));
+
+        // Note: To clear owner, we'd need to support explicit None vs absent
+        // For now, absent owner in update means "don't change"
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_update_metadata_merge() {
+        let store = MemoryTaskStore::new();
+
+        let task = store
+            .create(
+                NewTask {
+                    subject: "Task with metadata".to_string(),
+                    description: "".to_string(),
+                    priority: None,
+                    labels: None,
+                    blocks: None,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Initially empty metadata
+        assert!(task.metadata.is_empty());
+
+        // Add some metadata
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("key1".to_string(), serde_json::json!("value1"));
+        metadata.insert("key2".to_string(), serde_json::json!(100));
+
+        let update = TaskUpdate {
+            metadata: Some(metadata),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+
+        assert_eq!(updated.metadata.len(), 2);
+        assert_eq!(
+            updated.metadata.get("key1"),
+            Some(&serde_json::json!("value1"))
+        );
+        assert_eq!(updated.metadata.get("key2"), Some(&serde_json::json!(100)));
+
+        // Merge more metadata - existing keys unchanged, new keys added
+        let mut metadata2 = std::collections::HashMap::new();
+        metadata2.insert("key2".to_string(), serde_json::json!(200)); // update existing
+        metadata2.insert("key3".to_string(), serde_json::json!("new")); // add new
+
+        let update = TaskUpdate {
+            metadata: Some(metadata2),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+
+        assert_eq!(updated.metadata.len(), 3);
+        assert_eq!(
+            updated.metadata.get("key1"),
+            Some(&serde_json::json!("value1"))
+        ); // unchanged
+        assert_eq!(updated.metadata.get("key2"), Some(&serde_json::json!(200))); // updated
+        assert_eq!(
+            updated.metadata.get("key3"),
+            Some(&serde_json::json!("new"))
+        ); // added
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_update_metadata_delete_with_null() {
+        let store = MemoryTaskStore::new();
+
+        let task = store
+            .create(
+                NewTask {
+                    subject: "Task with metadata to delete".to_string(),
+                    description: "".to_string(),
+                    priority: None,
+                    labels: None,
+                    blocks: None,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Add initial metadata
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("keep".to_string(), serde_json::json!("keep me"));
+        metadata.insert(
+            "delete_me".to_string(),
+            serde_json::json!("will be deleted"),
+        );
+
+        let update = TaskUpdate {
+            metadata: Some(metadata),
+            ..Default::default()
+        };
+        store.update(&task.id, update, None).await.unwrap();
+
+        // Delete a key by setting it to null
+        let mut metadata_delete = std::collections::HashMap::new();
+        metadata_delete.insert("delete_me".to_string(), serde_json::Value::Null);
+
+        let update = TaskUpdate {
+            metadata: Some(metadata_delete),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+
+        // "delete_me" should be removed, "keep" should remain
+        assert_eq!(updated.metadata.len(), 1);
+        assert_eq!(
+            updated.metadata.get("keep"),
+            Some(&serde_json::json!("keep me"))
+        );
+        assert!(!updated.metadata.contains_key("delete_me"));
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_update_add_blocked_by() {
+        let store = MemoryTaskStore::new();
+
+        // Create blocking tasks
+        let blocker1 = store
+            .create(
+                NewTask {
+                    subject: "Blocker 1".to_string(),
+                    description: "".to_string(),
+                    priority: None,
+                    labels: None,
+                    blocks: None,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let blocker2 = store
+            .create(
+                NewTask {
+                    subject: "Blocker 2".to_string(),
+                    description: "".to_string(),
+                    priority: None,
+                    labels: None,
+                    blocks: None,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Create the blocked task
+        let task = store
+            .create(
+                NewTask {
+                    subject: "Blocked task".to_string(),
+                    description: "".to_string(),
+                    priority: None,
+                    labels: None,
+                    blocks: None,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Initially no blocked_by
+        assert!(task.blocked_by.is_empty());
+
+        // Add blocker1 to blocked_by
+        let update = TaskUpdate {
+            add_blocked_by: Some(vec![blocker1.id.clone()]),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+
+        assert_eq!(updated.blocked_by.len(), 1);
+        assert!(updated.blocked_by.contains(&blocker1.id));
+
+        // Add blocker2 (blocker1 should still be there)
+        let update = TaskUpdate {
+            add_blocked_by: Some(vec![blocker2.id.clone()]),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+
+        assert_eq!(updated.blocked_by.len(), 2);
+        assert!(updated.blocked_by.contains(&blocker1.id));
+        assert!(updated.blocked_by.contains(&blocker2.id));
+
+        // Adding same blocker again should not duplicate
+        let update = TaskUpdate {
+            add_blocked_by: Some(vec![blocker1.id.clone()]),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+
+        assert_eq!(updated.blocked_by.len(), 2); // Still 2, no duplicate
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_update_remove_blocked_by() {
+        let store = MemoryTaskStore::new();
+
+        let blocker1 = TaskId::from_string("blocker-1");
+        let blocker2 = TaskId::from_string("blocker-2");
+        let blocker3 = TaskId::from_string("blocker-3");
+
+        // Create task with initial blocked_by
+        // Note: This requires Task to have blocked_by field - will fail until implemented
+        let task = store
+            .create(
+                NewTask {
+                    subject: "Task blocked by multiple".to_string(),
+                    description: "".to_string(),
+                    priority: None,
+                    labels: None,
+                    blocks: None,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // First add some blocked_by entries
+        let update = TaskUpdate {
+            add_blocked_by: Some(vec![blocker1.clone(), blocker2.clone(), blocker3.clone()]),
+            ..Default::default()
+        };
+        let task = store.update(&task.id, update, None).await.unwrap();
+        assert_eq!(task.blocked_by.len(), 3);
+
+        // Remove one
+        let update = TaskUpdate {
+            remove_blocked_by: Some(vec![blocker2.clone()]),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+
+        assert_eq!(updated.blocked_by.len(), 2);
+        assert!(updated.blocked_by.contains(&blocker1));
+        assert!(!updated.blocked_by.contains(&blocker2));
+        assert!(updated.blocked_by.contains(&blocker3));
+
+        // Remove multiple
+        let update = TaskUpdate {
+            remove_blocked_by: Some(vec![blocker1.clone(), blocker3.clone()]),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+
+        assert!(updated.blocked_by.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_update_add_and_remove_blocked_by_same_update() {
+        let store = MemoryTaskStore::new();
+
+        let blocker1 = TaskId::from_string("blocker-1");
+        let blocker2 = TaskId::from_string("blocker-2");
+
+        let task = store
+            .create(
+                NewTask {
+                    subject: "Task".to_string(),
+                    description: "".to_string(),
+                    priority: None,
+                    labels: None,
+                    blocks: None,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Add blocker1 first
+        let update = TaskUpdate {
+            add_blocked_by: Some(vec![blocker1.clone()]),
+            ..Default::default()
+        };
+        store.update(&task.id, update, None).await.unwrap();
+
+        // Add blocker2 and remove blocker1 in the same update
+        let update = TaskUpdate {
+            add_blocked_by: Some(vec![blocker2.clone()]),
+            remove_blocked_by: Some(vec![blocker1.clone()]),
+            ..Default::default()
+        };
+        let updated = store.update(&task.id, update, None).await.unwrap();
+
+        // add_blocked_by is processed first, then remove_blocked_by
+        assert_eq!(updated.blocked_by.len(), 1);
+        assert!(!updated.blocked_by.contains(&blocker1));
+        assert!(updated.blocked_by.contains(&blocker2));
     }
 }

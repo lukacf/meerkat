@@ -1,12 +1,12 @@
 //! Cryptographic identity types for Meerkat comms.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::fs;
 use std::path::Path;
 use thiserror::Error;
+use zeroize::Zeroize;
 
 /// Errors that can occur during identity operations.
 #[derive(Debug, Error)]
@@ -144,6 +144,7 @@ impl Signature {
 }
 
 /// Ed25519 keypair for signing messages.
+#[derive(Debug, Clone)]
 pub struct Keypair {
     signing_key: SigningKey,
 }
@@ -156,8 +157,9 @@ impl Keypair {
     }
 
     /// Create a keypair from a secret key.
-    pub fn from_secret(secret: [u8; 32]) -> Self {
+    pub fn from_secret(mut secret: [u8; 32]) -> Self {
         let signing_key = SigningKey::from_bytes(&secret);
+        secret.zeroize();
         Self { signing_key }
     }
 
@@ -172,32 +174,40 @@ impl Keypair {
         Signature(sig.to_bytes())
     }
 
+    /// Return the raw secret bytes for this keypair.
+    pub fn secret_bytes(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
+
     /// Save the keypair to a directory.
     /// Writes `identity.key` (secret, mode 0600) and `identity.pub` (public).
-    pub fn save(&self, dir: &Path) -> Result<(), IdentityError> {
-        fs::create_dir_all(dir)?;
+    pub async fn save(&self, dir: &Path) -> Result<(), IdentityError> {
+        tokio::fs::create_dir_all(dir).await?;
 
         let key_path = dir.join("identity.key");
-        fs::write(&key_path, self.signing_key.to_bytes())?;
+        let mut secret_bytes = self.signing_key.to_bytes();
+        tokio::fs::write(&key_path, &secret_bytes).await?;
+        secret_bytes.zeroize();
 
         // Set restrictive permissions on private key (Unix only)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&key_path, perms)?;
+            tokio::fs::set_permissions(&key_path, perms).await?;
         }
 
-        fs::write(
+        tokio::fs::write(
             dir.join("identity.pub"),
             self.signing_key.verifying_key().to_bytes(),
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
     /// Load a keypair from a directory.
-    pub fn load(dir: &Path) -> Result<Self, IdentityError> {
-        let secret_bytes = fs::read(dir.join("identity.key"))?;
+    pub async fn load(dir: &Path) -> Result<Self, IdentityError> {
+        let mut secret_bytes = tokio::fs::read(dir.join("identity.key")).await?;
         if secret_bytes.len() != 32 {
             return Err(IdentityError::InvalidKeyLength {
                 expected: 32,
@@ -206,23 +216,25 @@ impl Keypair {
         }
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&secret_bytes);
+        secret_bytes.zeroize();
         Ok(Self::from_secret(secret))
     }
 
     /// Load existing keypair or generate a new one.
-    pub fn load_or_generate(dir: &Path) -> Result<Self, IdentityError> {
+    pub async fn load_or_generate(dir: &Path) -> Result<Self, IdentityError> {
         let key_path = dir.join("identity.key");
-        if key_path.exists() {
-            Self::load(dir)
+        if tokio::fs::try_exists(&key_path).await? {
+            Self::load(dir).await
         } else {
             let keypair = Self::generate();
-            keypair.save(dir)?;
+            keypair.save(dir).await?;
             Ok(keypair)
         }
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::mem::size_of;
@@ -283,9 +295,11 @@ mod tests {
         assert!(peer_id.starts_with("ed25519:"));
         let base64_part = &peer_id["ed25519:".len()..];
         // Base64 alphabet check (alphanumeric + / + = for padding)
-        assert!(base64_part
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(
+            base64_part
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 
     #[test]
@@ -339,38 +353,38 @@ mod tests {
 
     // Phase 1: Key Persistence tests
 
-    #[test]
-    fn test_keypair_save() {
+    #[tokio::test]
+    async fn test_keypair_save() {
         let tmp = TempDir::new().unwrap();
         let keypair = Keypair::generate();
-        keypair.save(tmp.path()).unwrap();
+        keypair.save(tmp.path()).await.unwrap();
         assert!(tmp.path().join("identity.key").exists());
         assert!(tmp.path().join("identity.pub").exists());
     }
 
-    #[test]
-    fn test_keypair_load() {
+    #[tokio::test]
+    async fn test_keypair_load() {
         let tmp = TempDir::new().unwrap();
         let original = Keypair::generate();
-        original.save(tmp.path()).unwrap();
-        let loaded = Keypair::load(tmp.path()).unwrap();
+        original.save(tmp.path()).await.unwrap();
+        let loaded = Keypair::load(tmp.path()).await.unwrap();
         assert_eq!(original.public_key(), loaded.public_key());
     }
 
-    #[test]
-    fn test_keypair_load_or_generate_existing() {
+    #[tokio::test]
+    async fn test_keypair_load_or_generate_existing() {
         let tmp = TempDir::new().unwrap();
         let original = Keypair::generate();
-        original.save(tmp.path()).unwrap();
-        let loaded = Keypair::load_or_generate(tmp.path()).unwrap();
+        original.save(tmp.path()).await.unwrap();
+        let loaded = Keypair::load_or_generate(tmp.path()).await.unwrap();
         assert_eq!(original.public_key(), loaded.public_key());
     }
 
-    #[test]
-    fn test_keypair_load_or_generate_new() {
+    #[tokio::test]
+    async fn test_keypair_load_or_generate_new() {
         let tmp = TempDir::new().unwrap();
         assert!(!tmp.path().join("identity.key").exists());
-        let keypair = Keypair::load_or_generate(tmp.path()).unwrap();
+        let keypair = Keypair::load_or_generate(tmp.path()).await.unwrap();
         assert!(tmp.path().join("identity.key").exists());
         assert_eq!(keypair.public_key().as_bytes().len(), 32);
     }
@@ -404,12 +418,12 @@ mod tests {
         assert!(!keypair2.public_key().verify(data, &sig));
     }
 
-    #[test]
-    fn test_keypair_persistence_roundtrip() {
+    #[tokio::test]
+    async fn test_keypair_persistence_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let original = Keypair::generate();
-        original.save(tmp.path()).unwrap();
-        let loaded = Keypair::load(tmp.path()).unwrap();
+        original.save(tmp.path()).await.unwrap();
+        let loaded = Keypair::load(tmp.path()).await.unwrap();
         // Sign with loaded key, verify with original's pubkey
         let data = b"persistence test";
         let sig = loaded.sign(data);

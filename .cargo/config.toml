@@ -5,9 +5,9 @@
 RUST_TEST_THREADS = "1"
 
 [alias]
-# Run all RCT tests
-rct = "test --workspace --lib"
-# Run integration tests
+# Run all unit/integration tests FAST (skips slow doc-test compilation)
+rct = "test --workspace --lib --bins --tests"
+# Run integration tests only
 int = "test --package meerkat --test integration"
-# Run E2E tests (ignored by default)
-e2e = "test --package meerkat --test e2e -- --ignored"
+# Run E2E tests (all tests marked #[ignore = "e2e: ..."])
+e2e = "test --workspace -- --ignored"

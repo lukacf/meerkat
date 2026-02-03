@@ -3,16 +3,18 @@
 //! This module defines the core types for task management including
 //! [`Task`], [`TaskId`], [`TaskStatus`], and [`TaskPriority`].
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-/// Task ID - ULID string for unique task identification
+/// Task ID - UUID v7 string for unique task identification
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub String);
 
 impl TaskId {
-    /// Create a new TaskId with a generated ULID
+    /// Create a new TaskId with a generated UUID v7
     pub fn new() -> Self {
-        Self(ulid::Ulid::new().to_string())
+        Self(uuid::Uuid::now_v7().to_string())
     }
 
     /// Create a TaskId from an existing string
@@ -40,8 +42,8 @@ impl AsRef<str> for TaskId {
 }
 
 /// Status of a task in its lifecycle
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")] // for Serialize
 pub enum TaskStatus {
     /// Task is waiting to be started
     #[default]
@@ -52,9 +54,27 @@ pub enum TaskStatus {
     Completed,
 }
 
+impl<'de> Deserialize<'de> for TaskStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.as_str() {
+            "pending" => Ok(Self::Pending),
+            "in_progress" => Ok(Self::InProgress),
+            "completed" => Ok(Self::Completed),
+            other => Err(serde::de::Error::custom(format!(
+                "Invalid status: {}. Must be pending, in_progress, or completed",
+                other
+            ))),
+        }
+    }
+}
+
 /// Priority level for a task
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")] // for Serialize
 pub enum TaskPriority {
     /// Low priority task
     Low,
@@ -63,6 +83,24 @@ pub enum TaskPriority {
     Medium,
     /// High priority task
     High,
+}
+
+impl<'de> Deserialize<'de> for TaskPriority {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.as_str() {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            other => Err(serde::de::Error::custom(format!(
+                "Invalid priority: {}. Must be low, medium, or high",
+                other
+            ))),
+        }
+    }
 }
 
 /// A task in the task management system
@@ -90,10 +128,19 @@ pub struct Task {
     pub created_by_session: Option<String>,
     /// Session ID that last updated this task
     pub updated_by_session: Option<String>,
+    /// Owner/assignee of this task (agent name or user identifier)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Arbitrary key-value metadata for extensibility
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, serde_json::Value>,
+    /// IDs of tasks that block THIS task (inverse of `blocks`)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<TaskId>,
 }
 
 /// Input for creating a new task
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct NewTask {
     /// Short subject/title of the task
     pub subject: String,
@@ -105,6 +152,12 @@ pub struct NewTask {
     pub labels: Option<Vec<String>>,
     /// IDs of tasks that this task blocks
     pub blocks: Option<Vec<TaskId>>,
+    /// Owner/assignee of the task
+    pub owner: Option<String>,
+    /// Arbitrary key-value metadata
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// IDs of tasks that block THIS task
+    pub blocked_by: Option<Vec<TaskId>>,
 }
 
 /// Input for updating an existing task
@@ -124,6 +177,14 @@ pub struct TaskUpdate {
     pub add_blocks: Option<Vec<TaskId>>,
     /// Task IDs to remove from blocks
     pub remove_blocks: Option<Vec<TaskId>>,
+    /// New owner/assignee (if Some)
+    pub owner: Option<String>,
+    /// Metadata key-value pairs to merge (null value = delete key)
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
+    /// Task IDs to add to blocked_by
+    pub add_blocked_by: Option<Vec<TaskId>>,
+    /// Task IDs to remove from blocked_by
+    pub remove_blocked_by: Option<Vec<TaskId>>,
 }
 
 /// Errors that can occur during task operations
@@ -163,25 +224,24 @@ pub struct TaskStoreData {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_task_id_new_generates_ulid() {
+    fn test_task_id_new_generates_uuid() {
         let id1 = TaskId::new();
         let id2 = TaskId::new();
 
-        // Should be 26 characters (ULID format)
-        assert_eq!(id1.0.len(), 26);
-        assert_eq!(id2.0.len(), 26);
+        // Should be 36 characters (UUID format)
+        assert_eq!(id1.0.len(), 36);
+        assert_eq!(id2.0.len(), 36);
 
         // Should be different IDs
         assert_ne!(id1, id2);
 
-        // Should be valid ULID (uppercase alphanumeric, no I, L, O, U)
-        for c in id1.0.chars() {
-            assert!(c.is_ascii_alphanumeric());
-        }
+        // Should be valid UUID
+        assert!(uuid::Uuid::parse_str(&id1.0).is_ok());
     }
 
     #[test]
@@ -292,6 +352,9 @@ mod tests {
             updated_at: "2025-01-23T11:00:00Z".to_string(),
             created_by_session: Some("session-123".to_string()),
             updated_by_session: Some("session-456".to_string()),
+            owner: None,
+            metadata: std::collections::HashMap::new(),
+            blocked_by: vec![],
         };
 
         let json = serde_json::to_string_pretty(&task).unwrap();
@@ -332,6 +395,9 @@ mod tests {
                     updated_at: "2025-01-23T10:00:00Z".to_string(),
                     created_by_session: None,
                     updated_by_session: None,
+                    owner: None,
+                    metadata: std::collections::HashMap::new(),
+                    blocked_by: vec![],
                 },
                 Task {
                     id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAW"),
@@ -345,6 +411,9 @@ mod tests {
                     updated_at: "2025-01-23T12:00:00Z".to_string(),
                     created_by_session: Some("session-1".to_string()),
                     updated_by_session: Some("session-2".to_string()),
+                    owner: None,
+                    metadata: std::collections::HashMap::new(),
+                    blocked_by: vec![],
                 },
             ],
         };
@@ -383,5 +452,513 @@ mod tests {
         assert!(update.labels.is_none());
         assert!(update.add_blocks.is_none());
         assert!(update.remove_blocks.is_none());
+    }
+
+    // ======================================================================
+    // Tests for new TaskUpdate fields: owner, metadata, add_blocked_by, remove_blocked_by
+    // These tests are written TDD-style - they will fail until implementation
+    // ======================================================================
+
+    #[test]
+    fn test_task_update_has_owner_field() {
+        // TaskUpdate should have an optional owner field to set task ownership
+        let update = TaskUpdate {
+            owner: Some("alice".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(update.owner, Some("alice".to_string()));
+
+        // Default should be None
+        let default_update = TaskUpdate::default();
+        assert!(default_update.owner.is_none());
+    }
+
+    #[test]
+    fn test_task_update_has_metadata_field() {
+        // TaskUpdate should have a metadata field for merging key-value pairs
+        // Setting a key to a value adds/updates it
+        // Setting a key to null (Value::Null) removes it
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("key1".to_string(), serde_json::json!("value1"));
+        metadata.insert("key2".to_string(), serde_json::json!(42));
+        metadata.insert("key3".to_string(), serde_json::Value::Null); // delete key3
+
+        let update = TaskUpdate {
+            metadata: Some(metadata.clone()),
+            ..Default::default()
+        };
+        assert!(update.metadata.is_some());
+        let meta = update.metadata.unwrap();
+        assert_eq!(meta.get("key1"), Some(&serde_json::json!("value1")));
+        assert_eq!(meta.get("key2"), Some(&serde_json::json!(42)));
+        assert_eq!(meta.get("key3"), Some(&serde_json::Value::Null));
+
+        // Default should be None
+        let default_update = TaskUpdate::default();
+        assert!(default_update.metadata.is_none());
+    }
+
+    #[test]
+    fn test_task_update_has_add_blocked_by_field() {
+        // TaskUpdate should have add_blocked_by to add blocking relationships
+        // blocked_by tracks which tasks block THIS task (inverse of blocks)
+        let update = TaskUpdate {
+            add_blocked_by: Some(vec![
+                TaskId::from_string("blocker-1"),
+                TaskId::from_string("blocker-2"),
+            ]),
+            ..Default::default()
+        };
+        assert!(update.add_blocked_by.is_some());
+        let blocked_by = update.add_blocked_by.unwrap();
+        assert_eq!(blocked_by.len(), 2);
+        assert_eq!(blocked_by[0], TaskId::from_string("blocker-1"));
+        assert_eq!(blocked_by[1], TaskId::from_string("blocker-2"));
+
+        // Default should be None
+        let default_update = TaskUpdate::default();
+        assert!(default_update.add_blocked_by.is_none());
+    }
+
+    #[test]
+    fn test_task_update_has_remove_blocked_by_field() {
+        // TaskUpdate should have remove_blocked_by to remove blocking relationships
+        let update = TaskUpdate {
+            remove_blocked_by: Some(vec![TaskId::from_string("blocker-1")]),
+            ..Default::default()
+        };
+        assert!(update.remove_blocked_by.is_some());
+        let remove_blocked_by = update.remove_blocked_by.unwrap();
+        assert_eq!(remove_blocked_by.len(), 1);
+        assert_eq!(remove_blocked_by[0], TaskId::from_string("blocker-1"));
+
+        // Default should be None
+        let default_update = TaskUpdate::default();
+        assert!(default_update.remove_blocked_by.is_none());
+    }
+
+    #[test]
+    fn test_task_update_all_new_fields_together() {
+        // Test setting all new fields at once
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "priority_reason".to_string(),
+            serde_json::json!("urgent customer request"),
+        );
+
+        let update = TaskUpdate {
+            owner: Some("bob".to_string()),
+            metadata: Some(metadata),
+            add_blocked_by: Some(vec![TaskId::from_string("prerequisite-task")]),
+            remove_blocked_by: Some(vec![TaskId::from_string("old-blocker")]),
+            ..Default::default()
+        };
+
+        assert_eq!(update.owner, Some("bob".to_string()));
+        assert!(update.metadata.is_some());
+        assert!(update.add_blocked_by.is_some());
+        assert!(update.remove_blocked_by.is_some());
+    }
+
+    // ==========================================================================
+    // Tests for new Task struct fields: owner, metadata, blocked_by
+    // Written TDD-style - these will fail until implementation in Task #4
+    // ==========================================================================
+
+    // Task #1: Tests for Task struct with owner field
+    mod task_owner_tests {
+        use super::*;
+
+        #[test]
+        fn test_task_owner_field_exists() {
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Test task".to_string(),
+                description: "Test description".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None, // New field
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![],
+            };
+            assert!(task.owner.is_none());
+        }
+
+        #[test]
+        fn test_task_owner_with_value() {
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Test task".to_string(),
+                description: "Test description".to_string(),
+                status: TaskStatus::InProgress,
+                priority: TaskPriority::High,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: Some("alice".to_string()),
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![],
+            };
+            assert_eq!(task.owner, Some("alice".to_string()));
+        }
+
+        #[test]
+        fn test_task_owner_serialization() {
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Test task".to_string(),
+                description: "Test".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: Some("bob".to_string()),
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![],
+            };
+
+            let json = serde_json::to_string(&task).unwrap();
+            assert!(json.contains("\"owner\":\"bob\""));
+
+            let parsed: Task = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.owner, Some("bob".to_string()));
+        }
+
+        #[test]
+        fn test_task_owner_none_serialization() {
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Test task".to_string(),
+                description: "Test".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![],
+            };
+
+            let json = serde_json::to_string(&task).unwrap();
+            let parsed: Task = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.owner, None);
+        }
+    }
+
+    // Task #2: Tests for Task struct with metadata field
+    mod task_metadata_tests {
+        use super::*;
+        use std::collections::HashMap;
+
+        #[test]
+        fn test_task_metadata_field_exists() {
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Test task".to_string(),
+                description: "Test description".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata: HashMap::new(),
+                blocked_by: vec![],
+            };
+            assert!(task.metadata.is_empty());
+        }
+
+        #[test]
+        fn test_task_metadata_with_values() {
+            let mut metadata = HashMap::new();
+            metadata.insert("priority_score".to_string(), serde_json::json!(42));
+            metadata.insert("estimate_hours".to_string(), serde_json::json!(8.5));
+            metadata.insert(
+                "assignee_email".to_string(),
+                serde_json::json!("alice@example.com"),
+            );
+
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Test task".to_string(),
+                description: "Test description".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata,
+                blocked_by: vec![],
+            };
+
+            assert_eq!(task.metadata.len(), 3);
+            assert_eq!(
+                task.metadata.get("priority_score"),
+                Some(&serde_json::json!(42))
+            );
+            assert_eq!(
+                task.metadata.get("estimate_hours"),
+                Some(&serde_json::json!(8.5))
+            );
+        }
+
+        #[test]
+        fn test_task_metadata_with_complex_values() {
+            let mut metadata = HashMap::new();
+            metadata.insert(
+                "tags".to_string(),
+                serde_json::json!(["frontend", "urgent"]),
+            );
+            metadata.insert(
+                "config".to_string(),
+                serde_json::json!({"retries": 3, "timeout": 30}),
+            );
+
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Test task".to_string(),
+                description: "Test".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata,
+                blocked_by: vec![],
+            };
+
+            let tags = task.metadata.get("tags").unwrap();
+            assert!(tags.is_array());
+            assert_eq!(tags.as_array().unwrap().len(), 2);
+
+            let config = task.metadata.get("config").unwrap();
+            assert!(config.is_object());
+            assert_eq!(config.get("retries"), Some(&serde_json::json!(3)));
+        }
+
+        #[test]
+        fn test_task_metadata_serialization() {
+            let mut metadata = HashMap::new();
+            metadata.insert("key1".to_string(), serde_json::json!("value1"));
+            metadata.insert("key2".to_string(), serde_json::json!(123));
+
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Test task".to_string(),
+                description: "Test".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata,
+                blocked_by: vec![],
+            };
+
+            let json = serde_json::to_string(&task).unwrap();
+            assert!(json.contains("\"metadata\""));
+
+            let parsed: Task = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                parsed.metadata.get("key1"),
+                Some(&serde_json::json!("value1"))
+            );
+            assert_eq!(parsed.metadata.get("key2"), Some(&serde_json::json!(123)));
+        }
+    }
+
+    // Task #3: Tests for Task struct with blocked_by field
+    mod task_blocked_by_tests {
+        use super::*;
+
+        #[test]
+        fn test_task_blocked_by_field_exists() {
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Test task".to_string(),
+                description: "Test description".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![],
+            };
+            assert!(task.blocked_by.is_empty());
+        }
+
+        #[test]
+        fn test_task_blocked_by_single_blocker() {
+            let blocker_id = TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAW");
+
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Blocked task".to_string(),
+                description: "This task is blocked by another".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![blocker_id.clone()],
+            };
+
+            assert_eq!(task.blocked_by.len(), 1);
+            assert_eq!(task.blocked_by[0], blocker_id);
+        }
+
+        #[test]
+        fn test_task_blocked_by_multiple_blockers() {
+            let blocker1 = TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FA1");
+            let blocker2 = TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FA2");
+            let blocker3 = TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FA3");
+
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Multi-blocked task".to_string(),
+                description: "This task is blocked by three others".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::High,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![blocker1.clone(), blocker2.clone(), blocker3.clone()],
+            };
+
+            assert_eq!(task.blocked_by.len(), 3);
+            assert!(task.blocked_by.contains(&blocker1));
+            assert!(task.blocked_by.contains(&blocker2));
+            assert!(task.blocked_by.contains(&blocker3));
+        }
+
+        #[test]
+        fn test_task_blocked_by_serialization() {
+            let blocker_id = TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAW");
+
+            let task = Task {
+                id: TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                subject: "Blocked task".to_string(),
+                description: "Test".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![],
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![blocker_id.clone()],
+            };
+
+            let json = serde_json::to_string(&task).unwrap();
+            assert!(json.contains("\"blocked_by\""));
+            assert!(json.contains("01ARZ3NDEKTSV4RRFFQ69G5FAW"));
+
+            let parsed: Task = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.blocked_by.len(), 1);
+            assert_eq!(parsed.blocked_by[0], blocker_id);
+        }
+
+        #[test]
+        fn test_task_blocks_vs_blocked_by_distinction() {
+            // Task A blocks Task B
+            // From A's perspective: blocks = [B]
+            // From B's perspective: blocked_by = [A]
+
+            let task_a_id = TaskId::from_string("TASK_A_ID_00000000000000");
+            let task_b_id = TaskId::from_string("TASK_B_ID_00000000000000");
+
+            // Task A - the blocker
+            let task_a = Task {
+                id: task_a_id.clone(),
+                subject: "Task A - the blocker".to_string(),
+                description: "This task blocks Task B".to_string(),
+                status: TaskStatus::InProgress,
+                priority: TaskPriority::High,
+                labels: vec![],
+                blocks: vec![task_b_id.clone()], // A blocks B
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![], // A is not blocked by anything
+            };
+
+            // Task B - the blocked task
+            let task_b = Task {
+                id: task_b_id.clone(),
+                subject: "Task B - blocked".to_string(),
+                description: "This task is blocked by Task A".to_string(),
+                status: TaskStatus::Pending,
+                priority: TaskPriority::Medium,
+                labels: vec![],
+                blocks: vec![], // B doesn't block anything
+                created_at: "2025-01-24T10:00:00Z".to_string(),
+                updated_at: "2025-01-24T10:00:00Z".to_string(),
+                created_by_session: None,
+                updated_by_session: None,
+                owner: None,
+                metadata: std::collections::HashMap::new(),
+                blocked_by: vec![task_a_id.clone()], // B is blocked by A
+            };
+
+            // Verify the relationship
+            assert!(task_a.blocks.contains(&task_b_id));
+            assert!(task_a.blocked_by.is_empty());
+
+            assert!(task_b.blocks.is_empty());
+            assert!(task_b.blocked_by.contains(&task_a_id));
+        }
     }
 }

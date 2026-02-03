@@ -1,6 +1,6 @@
 # Configuration Guide
 
-Meerkat supports configuration through multiple layers: environment variables, configuration files, and programmatic settings.
+Meerkat supports configuration through configuration files and programmatic settings. Environment variables are used only for secrets (API keys).
 
 ## Environment Variables
 
@@ -12,16 +12,6 @@ Meerkat supports configuration through multiple layers: environment variables, c
 | `OPENAI_API_KEY` | OpenAI GPT | For OpenAI models |
 | `GOOGLE_API_KEY` | Google Gemini | For Gemini models |
 
-### Runtime Settings
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `RKAT_MODEL` | Default model name | Provider-dependent |
-| `RKAT_MAX_TOKENS` | Default max tokens per turn | `4096` |
-| `RKAT_STORE_PATH` | Session storage directory | `~/.local/share/meerkat/sessions` |
-| `RKAT_HOST` | REST API host | `127.0.0.1` |
-| `RKAT_PORT` | REST API port | `8080` |
-
 ### Testing Variables
 
 | Variable | Description | Default |
@@ -29,6 +19,10 @@ Meerkat supports configuration through multiple layers: environment variables, c
 | `ANTHROPIC_MODEL` | Model for Anthropic E2E tests | `claude-opus-4-5` |
 | `OPENAI_MODEL` | Model for OpenAI E2E tests | `gpt-5.2` |
 | `GEMINI_MODEL` | Model for Gemini E2E tests | `gemini-3-flash-preview` |
+
+## Configuration Files
+
+Edit `~/.rkat/config.toml` (global) or `.rkat/config.toml` (project) for non-secret settings.
 
 ## CLI Options
 
@@ -189,9 +183,8 @@ let mut agent = AgentBuilder::new()
 
 | Model | Context | Best For |
 |-------|---------|----------|
-| `gemini-2.0-flash-exp` | 1M | Fast, large context |
-| `gemini-1.5-pro` | 2M | Largest context window |
-| `gemini-1.5-flash` | 1M | Balanced |
+| `gemini-3-pro-preview` | 1M | Advanced reasoning, complex tasks |
+| `gemini-3-flash-preview` | 1M | Fast, balanced performance |
 
 ## Budget Configuration
 
@@ -304,13 +297,16 @@ router.add_server(config).await?;
 
 ## REST API Configuration
 
-### Environment Variables
+### Config File
 
-```bash
-export RKAT_HOST=0.0.0.0      # Bind to all interfaces
-export RKAT_PORT=3000          # Custom port
-export RKAT_MODEL=claude-opus-4-5  # Default model
-export RKAT_MAX_TOKENS=8192    # Default max tokens
+```toml
+[rest]
+host = "0.0.0.0"
+port = 3000
+
+[agent]
+model = "claude-opus-4-5"
+max_tokens_per_turn = 8192
 ```
 
 ### Running the Server
@@ -341,8 +337,9 @@ Each file contains the complete session state, updated after each turn.
 
 ### Custom Storage Path
 
-```bash
-export RKAT_STORE_PATH=/custom/path/to/sessions
+```toml
+[store]
+sessions_path = "/custom/path/to/sessions"
 ```
 
 Or programmatically:

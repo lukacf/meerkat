@@ -1,11 +1,16 @@
 //! TCP transport for Meerkat comms.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::codec::Framed;
 
-use super::{TransportError, MAX_PAYLOAD_SIZE};
+use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
+
+use super::TransportError;
+use super::codec::{EnvelopeFrame, TransportCodec};
 use crate::types::Envelope;
 
 /// A TCP listener for accepting incoming connections.
@@ -28,60 +33,58 @@ impl TcpTransportListener {
     /// Accept an incoming connection.
     pub async fn accept(&self) -> Result<TcpConnection, TransportError> {
         let (stream, _) = self.listener.accept().await?;
-        Ok(TcpConnection { stream })
+        Ok(TcpConnection {
+            framed: Framed::new(
+                stream,
+                TransportCodec::new(crate::transport::MAX_PAYLOAD_SIZE),
+            ),
+        })
     }
 }
 
 /// A TCP connection for sending and receiving envelopes.
 pub struct TcpConnection {
-    stream: TcpStream,
+    framed: Framed<TcpStream, TransportCodec>,
 }
 
 impl TcpConnection {
     /// Connect to a TCP socket address.
     pub async fn connect(addr: SocketAddr) -> Result<Self, TransportError> {
         let stream = TcpStream::connect(addr).await?;
-        Ok(Self { stream })
+        Ok(Self {
+            framed: Framed::new(
+                stream,
+                TransportCodec::new(crate::transport::MAX_PAYLOAD_SIZE),
+            ),
+        })
     }
 
     /// Send an envelope over the connection.
     pub async fn send(&mut self, envelope: &Envelope) -> Result<(), TransportError> {
-        let mut payload = Vec::new();
-        ciborium::into_writer(envelope, &mut payload)
-            .map_err(|e| TransportError::Cbor(e.to_string()))?;
+        let frame = EnvelopeFrame {
+            envelope: envelope.clone(),
+            raw: Arc::new(Bytes::new()),
+        };
 
-        let len = payload.len() as u32;
-        if len > MAX_PAYLOAD_SIZE {
-            return Err(TransportError::MessageTooLarge { size: len });
-        }
-
-        self.stream.write_all(&len.to_be_bytes()).await?;
-        self.stream.write_all(&payload).await?;
-        self.stream.flush().await?;
+        self.framed.send(frame).await.map_err(TransportError::Io)?;
         Ok(())
     }
 
     /// Receive an envelope from the connection.
     pub async fn recv(&mut self) -> Result<Envelope, TransportError> {
-        let mut len_bytes = [0u8; 4];
-        self.stream.read_exact(&mut len_bytes).await?;
-        let len = u32::from_be_bytes(len_bytes);
-
-        if len > MAX_PAYLOAD_SIZE {
-            return Err(TransportError::MessageTooLarge { size: len });
+        match self.framed.next().await {
+            Some(Ok(frame)) => Ok(frame.envelope),
+            Some(Err(err)) => Err(TransportError::Io(err)),
+            None => Err(TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed",
+            ))),
         }
-
-        let mut payload = vec![0u8; len as usize];
-        self.stream.read_exact(&mut payload).await?;
-
-        let envelope: Envelope = ciborium::from_reader(&payload[..])
-            .map_err(|e| TransportError::InvalidFrame(format!("CBOR decode error: {e}")))?;
-
-        Ok(envelope)
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::identity::{Keypair, PubKey, Signature};
@@ -139,8 +142,7 @@ mod tests {
         // Spawn server
         let server_handle = tokio::spawn(async move {
             let mut conn = listener.accept().await.unwrap();
-            let received = conn.recv().await.unwrap();
-            received
+            conn.recv().await.unwrap()
         });
 
         // Client sends

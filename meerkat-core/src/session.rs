@@ -9,6 +9,7 @@
 //! - Mutation (push) triggers CoW only when refcount > 1
 //! - `push_batch()` adds multiple messages with a single timestamp update
 
+use crate::Provider;
 use crate::types::{Message, SessionId, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
@@ -238,6 +239,23 @@ impl Session {
         self.updated_at = SystemTime::now();
     }
 
+    /// Store SessionMetadata in the session metadata map.
+    pub fn set_session_metadata(
+        &mut self,
+        metadata: SessionMetadata,
+    ) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(metadata)?;
+        self.set_metadata(SESSION_METADATA_KEY, value);
+        Ok(())
+    }
+
+    /// Load SessionMetadata from the session metadata map.
+    pub fn session_metadata(&self) -> Option<SessionMetadata> {
+        self.metadata
+            .get(SESSION_METADATA_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
     /// Fork the session at a specific message index
     ///
     /// Creates a new session with a subset of messages. The messages are copied
@@ -291,6 +309,31 @@ pub struct SessionMeta {
     pub metadata: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Metadata required to reliably resume a session across interfaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionMetadata {
+    pub model: String,
+    pub max_tokens: u32,
+    pub provider: Provider,
+    pub tooling: SessionTooling,
+    pub host_mode: bool,
+    pub comms_name: Option<String>,
+}
+
+/// Key used to store SessionMetadata in Session metadata map.
+pub const SESSION_METADATA_KEY: &str = "session_metadata";
+
+/// Tooling flags captured at session creation time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionTooling {
+    pub builtins: bool,
+    pub shell: bool,
+    pub comms: bool,
+    pub subagents: bool,
+}
+
 impl From<&Session> for SessionMeta {
     fn from(session: &Session) -> Self {
         Self {
@@ -305,6 +348,7 @@ impl From<&Session> for SessionMeta {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::types::{AssistantMessage, StopReason, SystemMessage, UserMessage};

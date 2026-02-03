@@ -117,7 +117,116 @@ pub enum BudgetType {
     ToolCalls,
 }
 
+/// Configuration for formatting verbose event output.
+#[derive(Debug, Clone, Copy)]
+pub struct VerboseEventConfig {
+    pub max_tool_args_bytes: usize,
+    pub max_tool_result_bytes: usize,
+    pub max_text_bytes: usize,
+}
+
+impl Default for VerboseEventConfig {
+    fn default() -> Self {
+        Self {
+            max_tool_args_bytes: 100,
+            max_tool_result_bytes: 200,
+            max_text_bytes: 500,
+        }
+    }
+}
+
+/// Format an agent event using default verbose formatting rules.
+pub fn format_verbose_event(event: &AgentEvent) -> Option<String> {
+    format_verbose_event_with_config(event, &VerboseEventConfig::default())
+}
+
+/// Format an agent event using custom verbose formatting rules.
+pub fn format_verbose_event_with_config(
+    event: &AgentEvent,
+    config: &VerboseEventConfig,
+) -> Option<String> {
+    match event {
+        AgentEvent::TurnStarted { turn_number } => {
+            Some(format!("\n━━━ Turn {} ━━━", turn_number + 1))
+        }
+        AgentEvent::ToolCallRequested { name, args, .. } => {
+            let args_str = serde_json::to_string(args).unwrap_or_default();
+            let args_preview = truncate_preview(&args_str, config.max_tool_args_bytes);
+            Some(format!("  → Calling tool: {} {}", name, args_preview))
+        }
+        AgentEvent::ToolExecutionCompleted {
+            name,
+            result,
+            is_error,
+            duration_ms,
+            ..
+        } => {
+            let status = if *is_error { "✗" } else { "✓" };
+            let result_preview = truncate_preview(result, config.max_tool_result_bytes);
+            Some(format!(
+                "  {} {} ({}ms): {}",
+                status, name, duration_ms, result_preview
+            ))
+        }
+        AgentEvent::TurnCompleted { stop_reason, usage } => Some(format!(
+            "  ── Turn complete: {:?} ({} in / {} out tokens)",
+            stop_reason, usage.input_tokens, usage.output_tokens
+        )),
+        AgentEvent::TextComplete { content } => {
+            if content.is_empty() {
+                None
+            } else {
+                let preview = truncate_preview(content, config.max_text_bytes);
+                Some(format!("  💬 Response: {}", preview))
+            }
+        }
+        AgentEvent::Retrying {
+            attempt,
+            max_attempts,
+            error,
+            delay_ms,
+        } => Some(format!(
+            "  ⟳ Retry {}/{}: {} (waiting {}ms)",
+            attempt, max_attempts, error, delay_ms
+        )),
+        AgentEvent::BudgetWarning {
+            budget_type,
+            used,
+            limit,
+            percent,
+        } => Some(format!(
+            "  ⚠ Budget warning: {:?} at {:.0}% ({}/{})",
+            budget_type,
+            percent * 100.0,
+            used,
+            limit
+        )),
+        _ => None,
+    }
+}
+
+fn truncate_preview(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
+    }
+    format!("{}...", truncate_str(input, max_bytes))
+}
+
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let truncate_at = s
+        .char_indices()
+        .take_while(|(i, _)| *i < max_bytes)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    &s[..truncate_at]
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

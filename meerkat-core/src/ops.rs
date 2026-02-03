@@ -172,9 +172,6 @@ pub enum OpEvent {
 
     /// Operation was cancelled
     Cancelled { id: OperationId },
-
-    /// Steering message was applied
-    SteeringApplied { id: OperationId, steering_id: Uuid },
 }
 
 /// Concurrency limits for operations
@@ -229,41 +226,6 @@ pub struct ForkBranch {
     pub tool_access: Option<ToolAccessPolicy>,
 }
 
-/// Steering message sent from parent to running sub-agent
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SteeringMessage {
-    /// Unique ID for this steering message
-    pub id: Uuid,
-    /// Sequence number (for ordering)
-    pub seq: u64,
-    /// The steering content
-    pub content: String,
-    /// Timestamp when sent
-    pub sent_at: std::time::SystemTime,
-}
-
-/// Status of a steering message
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SteeringStatus {
-    /// In sub-agent's queue, not yet applied
-    Queued,
-    /// Injected into session before LLM call
-    Applied,
-    /// Sub-agent completed before steering applied
-    Expired,
-    /// Sub-agent crashed or was cancelled
-    Failed,
-}
-
-/// Handle returned when sending steering
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SteeringHandle {
-    pub id: Uuid,
-    pub seq: u64,
-    pub status: SteeringStatus,
-}
-
 /// State of a running sub-agent
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -279,6 +241,7 @@ pub enum SubAgentState {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -329,7 +292,7 @@ mod tests {
         let parsed: ContextStrategy = serde_json::from_value(json).unwrap();
         match parsed {
             ContextStrategy::Summary { max_tokens } => assert_eq!(max_tokens, 1000),
-            _ => panic!("Wrong variant"),
+            _ => unreachable!("Wrong variant"),
         }
     }
 
@@ -356,7 +319,7 @@ mod tests {
         let parsed: ForkBudgetPolicy = serde_json::from_value(json).unwrap();
         match parsed {
             ForkBudgetPolicy::Fixed(tokens) => assert_eq!(tokens, 5000),
-            _ => panic!("Wrong variant"),
+            _ => unreachable!("Wrong variant"),
         }
     }
 
@@ -385,7 +348,7 @@ mod tests {
                 assert_eq!(tools.len(), 1);
                 assert_eq!(tools[0], "dangerous_tool");
             }
-            _ => panic!("Wrong variant"),
+            _ => unreachable!("Wrong variant"),
         }
     }
 

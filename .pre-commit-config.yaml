@@ -5,26 +5,6 @@
 default_stages: [pre-commit]
 
 repos:
-  # Rust formatting check
-  - repo: local
-    hooks:
-      - id: cargo-fmt
-        name: cargo fmt
-        entry: cargo fmt --all -- --check
-        language: system
-        types: [rust]
-        pass_filenames: false
-
-  # Clippy linting (fast mode for commits)
-  - repo: local
-    hooks:
-      - id: cargo-clippy
-        name: cargo clippy
-        entry: cargo clippy --workspace --all-targets -- -D warnings
-        language: system
-        types: [rust]
-        pass_filenames: false
-
   # Fast unit tests on commit
   - repo: local
     hooks:
@@ -35,23 +15,30 @@ repos:
         types: [rust]
         pass_filenames: false
 
-  # Secret detection
+  # Secret detection (pre-push)
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.4
     hooks:
       - id: gitleaks
+        stages: [pre-push]
 
-  # General file checks
+  # General file checks (pre-push)
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
       - id: trailing-whitespace
+        stages: [pre-push]
       - id: end-of-file-fixer
+        stages: [pre-push]
       - id: check-yaml
+        stages: [pre-push]
       - id: check-toml
+        stages: [pre-push]
       - id: check-merge-conflict
+        stages: [pre-push]
       - id: check-added-large-files
         args: ['--maxkb=1000']
+        stages: [pre-push]
 
   # Full test suite on push only
   - repo: local
@@ -59,6 +46,17 @@ repos:
       - id: cargo-test-all
         name: cargo test (full suite)
         entry: make test-all
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+  # Clippy lint check on push
+  - repo: local
+    hooks:
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false

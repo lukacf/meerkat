@@ -5,18 +5,40 @@
 //! ANTHROPIC_API_KEY=your-key cargo run --example simple
 //! ```
 
+use std::sync::Arc;
+
+use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, JsonlStore};
+use meerkat_store::StoreAdapter;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get API key from environment
     let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .expect("ANTHROPIC_API_KEY environment variable must be set");
+        .map_err(|_| "ANTHROPIC_API_KEY environment variable must be set")?;
 
-    // Create and run an agent with the simplified SDK
-    let result = meerkat::with_anthropic(api_key)
+    let store_dir = std::env::current_dir()?.join(".rkat").join("sessions");
+    std::fs::create_dir_all(&store_dir)?;
+
+    let factory = AgentFactory::new(store_dir.clone());
+
+    let client = Arc::new(AnthropicClient::new(api_key)?);
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4").await;
+
+    let store = Arc::new(JsonlStore::new(store_dir));
+    store.init().await?;
+    let store = Arc::new(StoreAdapter::new(store));
+
+    let tools = Arc::new(meerkat_tools::EmptyToolDispatcher);
+
+    let mut agent = AgentBuilder::new()
         .model("claude-sonnet-4")
         .system_prompt("You are a helpful assistant. Be concise in your responses.")
-        .max_tokens(1024)
-        .run("What is the capital of France? Answer in one sentence.")
+        .max_tokens_per_turn(1024)
+        .build(Arc::new(llm), tools, store)
+        .await;
+
+    let result = agent
+        .run("What is the capital of France? Answer in one sentence.".to_string())
         .await?;
 
     println!("Response: {}", result.text);

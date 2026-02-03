@@ -5,15 +5,14 @@ members = [
     "meerkat-client",
     "meerkat-store",
     "meerkat-tools",
-    "meerkat-mcp-client",
+    "meerkat-mcp",
     "meerkat-mcp-server",
     "meerkat-cli",
     "meerkat-rest",
     "meerkat",
     "meerkat-comms",
-    "meerkat-comms-mcp",
-    "meerkat-comms-agent",
     "test-fixtures/mcp-test-server",
+    "tests/integration",
 ]
 
 [workspace.package]
@@ -32,7 +31,7 @@ async-trait = "0.1"
 async-stream = "0.3"
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 toml = "0.8"
 toml_edit = "0.22"
@@ -45,16 +44,19 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Utilities
-ulid = "1"
+nix = { version = "0.29", features = ["signal", "process"] }
+which = "7"
 uuid = { version = "1.11", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 humantime = "2.1"
 humantime-serde = "1.1"
+redb = "2"
 
 # JSON Schema validation
 jsonschema = "0.26"
+schemars = { version = "1", features = ["derive"] }
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -62,11 +64,13 @@ dirs = "5.0"
 
 # Web framework
 axum = { version = "0.8", features = ["json"] }
+hyper = "1.6"
+http-body-util = "0.1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # MCP
-rmcp = "0.13"
+rmcp = "0.14"
 
 # Testing
 tempfile = "3.14"
@@ -76,20 +80,26 @@ meerkat-core = { path = "meerkat-core" }
 meerkat-client = { path = "meerkat-client" }
 meerkat-store = { path = "meerkat-store" }
 meerkat-tools = { path = "meerkat-tools" }
-meerkat-mcp-client = { path = "meerkat-mcp-client" }
+meerkat-mcp = { path = "meerkat-mcp" }
 meerkat-mcp-server = { path = "meerkat-mcp-server" }
 meerkat-cli = { path = "meerkat-cli" }
 meerkat-rest = { path = "meerkat-rest" }
 meerkat = { path = "meerkat" }
 meerkat-comms = { path = "meerkat-comms" }
-meerkat-comms-mcp = { path = "meerkat-comms-mcp" }
-meerkat-comms-agent = { path = "meerkat-comms-agent" }
+
 
 [workspace.lints.rust]
-# unsafe_code = "forbid"  # Enable after stabilizing
+unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+panic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+mutex_integer = "deny"
+mutex_atomic = "deny"
+redundant_clone = "deny"
+implicit_clone = "deny"
 # Allow patterns common in development
 module_name_repetitions = "allow"
 must_use_candidate = "allow"

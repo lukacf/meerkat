@@ -1,39 +1,47 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! End-to-end tests for rkat CLI inter-agent communication (Phase 12)
 //!
 //! These tests spawn actual rkat processes and verify inter-process communication.
-//! Tests are marked #[ignore] as they require the rkat binary to be built first.
+//! They require ANTHROPIC_API_KEY and a built rkat binary.
+//! When prerequisites are missing, the tests will skip themselves at runtime.
 //!
 //! Run with:
 //!   cargo build -p meerkat-cli
-//!   cargo test -p meerkat-cli --test e2e_rkat_comms -- --ignored
+//!   ANTHROPIC_API_KEY=... cargo test -p meerkat-cli --test e2e_rkat_comms
 
 use meerkat_comms::{Keypair, PubKey, TrustedPeer, TrustedPeers};
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-/// Atomic counter for generating unique ports across tests
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(14200);
-
 /// Get an available TCP port for testing
 fn get_available_port() -> u16 {
-    // Try to find an available port by attempting to bind
-    for _ in 0..100 {
-        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-        if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{}", port)) {
-            drop(listener);
-            return port;
-        }
-    }
-    panic!("Could not find available port");
+    let listener =
+        TcpListener::bind("127.0.0.1:0").expect("failed to bind to an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("failed to read local addr")
+        .port();
+    drop(listener);
+    port
+}
+
+fn e2e_enabled() -> bool {
+    std::env::var("RKAT_E2E").ok().as_deref() == Some("1")
 }
 
 /// Get path to the rkat binary
-fn rkat_binary_path() -> PathBuf {
+fn rkat_binary_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rkat") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
     // Look for debug binary first, then release
     let debug_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -41,7 +49,7 @@ fn rkat_binary_path() -> PathBuf {
         .join("target/debug/rkat");
 
     if debug_path.exists() {
-        return debug_path;
+        return Some(debug_path);
     }
 
     let release_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -50,14 +58,10 @@ fn rkat_binary_path() -> PathBuf {
         .join("target/release/rkat");
 
     if release_path.exists() {
-        return release_path;
+        return Some(release_path);
     }
 
-    panic!(
-        "rkat binary not found. Run 'cargo build -p meerkat-cli' first. \
-         Looked at {:?} and {:?}",
-        debug_path, release_path
-    );
+    None
 }
 
 /// Manages a test rkat process with its temp directory and config
@@ -121,20 +125,23 @@ impl RkatTestInstance {
     }
 
     /// Write the keypair to identity directory
-    pub fn write_identity(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(self.identity_dir())?;
+    pub async fn write_identity(&self) -> std::io::Result<()> {
+        let identity_dir = self.identity_dir();
+        tokio::fs::create_dir_all(&identity_dir).await?;
         self.keypair
-            .save(&self.identity_dir())
+            .save(&identity_dir)
+            .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(())
     }
 
     /// Write the config.toml file
-    pub fn write_config(&self, trusted_peers: &[&RkatTestInstance]) -> std::io::Result<()> {
-        std::fs::create_dir_all(self.config_dir())?;
+    pub async fn write_config(&self, trusted_peers: &[&RkatTestInstance]) -> std::io::Result<()> {
+        let config_dir = self.config_dir();
+        tokio::fs::create_dir_all(&config_dir).await?;
 
         // Write keypair first
-        self.write_identity()?;
+        self.write_identity().await?;
 
         // Write config.toml
         let config_content = format!(
@@ -152,8 +159,8 @@ ack_timeout_secs = 30
             trusted_peers_path = self.trusted_peers_path().display(),
         );
 
-        let config_path = self.config_dir().join("config.toml");
-        std::fs::write(&config_path, config_content)?;
+        let config_path = config_dir.join("config.toml");
+        tokio::fs::write(&config_path, config_content).await?;
 
         // Build TrustedPeers from instances
         let peers: Vec<TrustedPeer> = trusted_peers
@@ -168,6 +175,7 @@ ack_timeout_secs = 30
         let trusted = TrustedPeers { peers };
         trusted
             .save(&self.trusted_peers_path())
+            .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         Ok(())
@@ -175,7 +183,12 @@ ack_timeout_secs = 30
 
     /// Spawn the rkat process with a prompt
     pub fn spawn(&mut self, prompt: &str) -> std::io::Result<()> {
-        let binary = rkat_binary_path();
+        let Some(binary) = rkat_binary_path() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "rkat binary not found. Run 'cargo build -p meerkat-cli' first.",
+            ));
+        };
 
         let child = Command::new(&binary)
             .arg("run")
@@ -281,7 +294,7 @@ impl Drop for RkatTestInstance {
 }
 
 /// Set up mutual trust between N test instances
-pub fn setup_mutual_trust(instances: &mut [&mut RkatTestInstance]) -> std::io::Result<()> {
+pub async fn setup_mutual_trust(instances: &mut [&mut RkatTestInstance]) -> std::io::Result<()> {
     // Each instance writes its config with all others as trusted peers
     for i in 0..instances.len() {
         let trusted: Vec<&RkatTestInstance> = instances
@@ -291,7 +304,7 @@ pub fn setup_mutual_trust(instances: &mut [&mut RkatTestInstance]) -> std::io::R
             .map(|(_, inst)| *inst as &RkatTestInstance)
             .collect();
 
-        instances[i].write_config(&trusted)?;
+        instances[i].write_config(&trusted).await?;
     }
 
     Ok(())
@@ -303,6 +316,10 @@ pub fn setup_mutual_trust(instances: &mut [&mut RkatTestInstance]) -> std::io::R
 
 #[test]
 fn test_rkat_instance_spawn_kill() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     // Test that we can create an RkatTestInstance with real Ed25519 identity
     let instance = RkatTestInstance::new("test-agent");
 
@@ -319,8 +336,12 @@ fn test_rkat_instance_spawn_kill() {
     );
 }
 
-#[test]
-fn test_rkat_temp_setup() {
+#[tokio::test]
+async fn test_rkat_temp_setup() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     // Test temp directory setup with identity and config paths
     let instance = RkatTestInstance::new("test-agent");
 
@@ -338,24 +359,35 @@ fn test_rkat_temp_setup() {
     );
 
     // Write identity and verify files exist
-    instance.write_identity().expect("Should write identity");
+    instance
+        .write_identity()
+        .await
+        .expect("Should write identity");
     assert!(instance.identity_dir().exists());
 
     // Verify we can load the keypair back
-    let loaded = Keypair::load(&instance.identity_dir()).expect("Should load keypair");
+    let loaded = Keypair::load(&instance.identity_dir())
+        .await
+        .expect("Should load keypair");
     assert_eq!(
         loaded.public_key().to_peer_id(),
         instance.public_key().to_peer_id()
     );
 }
 
-#[test]
-fn test_rkat_mutual_trust_setup() {
+#[tokio::test]
+async fn test_rkat_mutual_trust_setup() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     // Test that mutual trust configuration is generated correctly with real keys
     let mut instance_a = RkatTestInstance::new("agent-a");
     let mut instance_b = RkatTestInstance::new("agent-b");
 
-    setup_mutual_trust(&mut [&mut instance_a, &mut instance_b]).expect("Should setup mutual trust");
+    setup_mutual_trust(&mut [&mut instance_a, &mut instance_b])
+        .await
+        .expect("Should setup mutual trust");
 
     // Verify config files exist
     assert!(instance_a.config_dir().join("config.toml").exists());
@@ -368,7 +400,9 @@ fn test_rkat_mutual_trust_setup() {
     assert!(instance_b.identity_dir().join("identity.key").exists());
 
     // Verify trusted_peers.json content using meerkat-comms types
-    let peers_a = TrustedPeers::load(&instance_a.trusted_peers_path()).expect("Load peers A");
+    let peers_a = TrustedPeers::load(&instance_a.trusted_peers_path())
+        .await
+        .expect("Load peers A");
     assert_eq!(peers_a.peers.len(), 1);
     assert_eq!(peers_a.peers[0].name, "agent-b");
     assert_eq!(
@@ -376,7 +410,9 @@ fn test_rkat_mutual_trust_setup() {
         instance_b.public_key().to_peer_id()
     );
 
-    let peers_b = TrustedPeers::load(&instance_b.trusted_peers_path()).expect("Load peers B");
+    let peers_b = TrustedPeers::load(&instance_b.trusted_peers_path())
+        .await
+        .expect("Load peers B");
     assert_eq!(peers_b.peers.len(), 1);
     assert_eq!(peers_b.peers[0].name, "agent-a");
     assert_eq!(
@@ -385,8 +421,12 @@ fn test_rkat_mutual_trust_setup() {
     );
 }
 
-#[test]
-fn test_rkat_wait_for_ready() {
+#[tokio::test]
+async fn test_rkat_wait_for_ready() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
     // Verify RkatTestInstance has proper methods for wait_for_ready logic
     let instance = RkatTestInstance::new("test-agent");
 
@@ -394,7 +434,10 @@ fn test_rkat_wait_for_ready() {
     assert!(instance.tcp_addr().starts_with("127.0.0.1:"));
 
     // Verify write_config works with empty trusted peers
-    instance.write_config(&[]).expect("Should write config");
+    instance
+        .write_config(&[])
+        .await
+        .expect("Should write config");
     assert!(instance.config_dir().join("config.toml").exists());
 
     let config_content =
@@ -410,22 +453,48 @@ fn test_rkat_wait_for_ready() {
 // E2E SCENARIOS (require ANTHROPIC_API_KEY and rkat binary)
 // ============================================================================
 
-fn skip_if_no_key() -> bool {
-    std::env::var("ANTHROPIC_API_KEY").is_err()
+fn skip_if_no_prereqs() -> bool {
+    let mut missing = Vec::new();
+
+    if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
+        missing.push("MEERKAT_LIVE_API_TESTS=1");
+    }
+
+    let has_api_key = std::env::var("RKAT_ANTHROPIC_API_KEY").is_ok()
+        || std::env::var("ANTHROPIC_API_KEY").is_ok();
+    if !has_api_key {
+        missing.push("ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
+    }
+
+    if rkat_binary_path().is_none() {
+        missing.push("rkat binary (build with cargo build -p meerkat-cli)");
+    }
+
+    if missing.is_empty() {
+        return false;
+    }
+
+    eprintln!("Skipping: missing {}", missing.join(" and "));
+    true
 }
 
-#[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
-fn test_e2e_rkat_tcp_message_exchange() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+#[tokio::test]
+#[ignore = "E2E network test"]
+async fn test_e2e_rkat_tcp_message_exchange() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
+    if skip_if_no_prereqs() {
         return;
     }
 
     let mut instance_a = RkatTestInstance::new("alice");
     let mut instance_b = RkatTestInstance::new("bob");
 
-    setup_mutual_trust(&mut [&mut instance_a, &mut instance_b]).expect("Should setup trust");
+    setup_mutual_trust(&mut [&mut instance_a, &mut instance_b])
+        .await
+        .expect("Should setup trust");
 
     // Spawn bob first (recipient) - listen for messages
     instance_b
@@ -469,11 +538,14 @@ fn test_e2e_rkat_tcp_message_exchange() {
     instance_b.kill();
 }
 
-#[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
-fn test_e2e_rkat_uds_message_exchange() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+#[tokio::test]
+#[ignore = "E2E network test"]
+async fn test_e2e_rkat_uds_message_exchange() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
+    if skip_if_no_prereqs() {
         return;
     }
 
@@ -485,8 +557,8 @@ fn test_e2e_rkat_uds_message_exchange() {
     std::fs::create_dir_all(instance_a.config_dir()).unwrap();
     std::fs::create_dir_all(instance_b.config_dir()).unwrap();
 
-    instance_a.write_identity().unwrap();
-    instance_b.write_identity().unwrap();
+    instance_a.write_identity().await.unwrap();
+    instance_b.write_identity().await.unwrap();
 
     let uds_a = instance_a.temp_dir.path().join("alice.sock");
     let uds_b = instance_b.temp_dir.path().join("bob.sock");
@@ -529,7 +601,10 @@ trusted_peers_path = "{}"
             addr: format!("uds://{}", uds_b.display()),
         }],
     };
-    peers_a.save(&instance_a.trusted_peers_path()).unwrap();
+    peers_a
+        .save(&instance_a.trusted_peers_path())
+        .await
+        .unwrap();
 
     // Write trusted peers for B (knows about A)
     let peers_b = TrustedPeers {
@@ -539,7 +614,10 @@ trusted_peers_path = "{}"
             addr: format!("uds://{}", uds_a.display()),
         }],
     };
-    peers_b.save(&instance_b.trusted_peers_path()).unwrap();
+    peers_b
+        .save(&instance_b.trusted_peers_path())
+        .await
+        .unwrap();
 
     // Spawn bob first
     instance_b
@@ -567,18 +645,23 @@ trusted_peers_path = "{}"
     instance_b.kill();
 }
 
-#[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
-fn test_e2e_rkat_request_response_flow() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+#[tokio::test]
+#[ignore = "E2E network test"]
+async fn test_e2e_rkat_request_response_flow() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
+    if skip_if_no_prereqs() {
         return;
     }
 
     let mut instance_a = RkatTestInstance::new("requester");
     let mut instance_b = RkatTestInstance::new("responder");
 
-    setup_mutual_trust(&mut [&mut instance_a, &mut instance_b]).expect("Should setup trust");
+    setup_mutual_trust(&mut [&mut instance_a, &mut instance_b])
+        .await
+        .expect("Should setup trust");
 
     // Spawn responder first
     instance_b
@@ -609,11 +692,14 @@ fn test_e2e_rkat_request_response_flow() {
     instance_b.kill();
 }
 
-#[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
-fn test_e2e_rkat_untrusted_rejected() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+#[tokio::test]
+#[ignore = "E2E network test"]
+async fn test_e2e_rkat_untrusted_rejected() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
+    if skip_if_no_prereqs() {
         return;
     }
 
@@ -623,10 +709,11 @@ fn test_e2e_rkat_untrusted_rejected() {
     // Set up A with B as trusted peer
     instance_a
         .write_config(&[&instance_b])
+        .await
         .expect("Write config A");
 
     // Set up B with NO trusted peers (doesn't trust anyone)
-    instance_b.write_config(&[]).expect("Write config B");
+    instance_b.write_config(&[]).await.expect("Write config B");
 
     // Spawn B first - it will reject connections from untrusted peers
     instance_b
@@ -663,11 +750,14 @@ fn test_e2e_rkat_untrusted_rejected() {
     instance_b.kill();
 }
 
-#[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
-fn test_e2e_rkat_three_peer_coordination() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+#[tokio::test]
+#[ignore = "E2E network test"]
+async fn test_e2e_rkat_three_peer_coordination() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
+    if skip_if_no_prereqs() {
         return;
     }
 
@@ -676,6 +766,7 @@ fn test_e2e_rkat_three_peer_coordination() {
     let mut instance_c = RkatTestInstance::new("worker-2");
 
     setup_mutual_trust(&mut [&mut instance_a, &mut instance_b, &mut instance_c])
+        .await
         .expect("Should setup trust");
 
     // Spawn workers first
@@ -728,18 +819,23 @@ fn test_e2e_rkat_three_peer_coordination() {
 ///
 /// When RKAT_TEST_LLM_DELAY_MS is set, it simulates slow LLM processing.
 /// The ack should still return within 100ms even if LLM takes >1s.
-#[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
-fn test_e2e_rkat_ack_is_immediate() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+#[tokio::test]
+#[ignore = "E2E network test"]
+async fn test_e2e_rkat_ack_is_immediate() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
+    if skip_if_no_prereqs() {
         return;
     }
 
     let mut instance_a = RkatTestInstance::new("sender");
     let mut instance_b = RkatTestInstance::new("slow-receiver");
 
-    setup_mutual_trust(&mut [&mut instance_a, &mut instance_b]).expect("Should setup trust");
+    setup_mutual_trust(&mut [&mut instance_a, &mut instance_b])
+        .await
+        .expect("Should setup trust");
 
     // Spawn receiver with simulated slow LLM
     // Note: RKAT_TEST_LLM_DELAY_MS would need to be implemented in meerkat-client
@@ -785,18 +881,23 @@ fn test_e2e_rkat_ack_is_immediate() {
 /// After sending a message and receiving ack, the sender should be able
 /// to continue working (exit or send more messages) without waiting for
 /// the recipient's LLM to generate a response.
-#[test]
-#[ignore = "Requires ANTHROPIC_API_KEY and rkat binary"]
-fn test_e2e_rkat_sender_nonblocking() {
-    if skip_if_no_key() {
-        eprintln!("Skipping: ANTHROPIC_API_KEY not set");
+#[tokio::test]
+#[ignore = "E2E network test"]
+async fn test_e2e_rkat_sender_nonblocking() {
+    if !e2e_enabled() {
+        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
+        return;
+    }
+    if skip_if_no_prereqs() {
         return;
     }
 
     let mut instance_a = RkatTestInstance::new("fast-sender");
     let mut instance_b = RkatTestInstance::new("slow-processor");
 
-    setup_mutual_trust(&mut [&mut instance_a, &mut instance_b]).expect("Should setup trust");
+    setup_mutual_trust(&mut [&mut instance_a, &mut instance_b])
+        .await
+        .expect("Should setup trust");
 
     // Spawn slow processor
     instance_b

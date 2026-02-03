@@ -68,8 +68,8 @@ impl Default for CommsManagerConfig {
 /// - Inbox for receiving messages
 /// - Router for sending messages
 pub struct CommsManager {
-    /// Our keypair for signing messages (stored as secret for recreation).
-    keypair_secret: [u8; 32],
+    /// Our keypair for signing messages.
+    keypair: Arc<Keypair>,
     /// List of trusted peers.
     trusted_peers: Arc<TrustedPeers>,
     /// The inbox for receiving messages.
@@ -82,50 +82,34 @@ pub struct CommsManager {
 
 impl CommsManager {
     /// Create a new CommsManager with the given configuration.
-    pub fn new(config: CommsManagerConfig) -> Self {
+    pub fn new(config: CommsManagerConfig) -> std::io::Result<Self> {
         let (inbox, inbox_sender) = Inbox::new();
         let trusted_peers = Arc::new(config.trusted_peers.clone());
 
-        // Get the secret bytes from the keypair before moving it
-        // We need to save/load to get the secret bytes since there's no direct accessor
-        let temp_dir = std::env::temp_dir().join(format!("meerkat-comms-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
-        config
-            .keypair
-            .save(&temp_dir)
-            .expect("Failed to save keypair");
-        let secret_bytes =
-            std::fs::read(temp_dir.join("identity.key")).expect("Failed to read key");
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        let router = Router::new(config.keypair, config.trusted_peers, config.comms_config);
+        let keypair = router.keypair_arc();
+        let router = Arc::new(router);
 
-        let mut keypair_secret = [0u8; 32];
-        keypair_secret.copy_from_slice(&secret_bytes);
-
-        // Recreate keypair for router (router takes ownership)
-        let router_keypair = Keypair::from_secret(keypair_secret);
-        let router = Arc::new(Router::new(
-            router_keypair,
-            config.trusted_peers,
-            config.comms_config,
-        ));
-
-        Self {
-            keypair_secret,
+        Ok(Self {
+            keypair,
             trusted_peers,
             inbox,
             inbox_sender,
             router,
-        }
+        })
     }
 
-    /// Get a fresh keypair instance (recreated from stored secret).
-    pub fn keypair(&self) -> Keypair {
-        Keypair::from_secret(self.keypair_secret)
+    pub fn keypair(&self) -> &Keypair {
+        self.keypair.as_ref()
+    }
+
+    pub fn keypair_arc(&self) -> Arc<Keypair> {
+        self.keypair.clone()
     }
 
     /// Get the public key.
     pub fn public_key(&self) -> meerkat_comms::PubKey {
-        self.keypair().public_key()
+        self.keypair.public_key()
     }
 
     /// Get the trusted peers.
@@ -175,6 +159,7 @@ impl CommsManager {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_comms::{Envelope, InboxItem, MessageKind, Signature, TrustedPeer};
@@ -197,7 +182,7 @@ mod tests {
     #[test]
     fn test_comms_manager_struct() {
         let config = CommsManagerConfig::new();
-        let manager = CommsManager::new(config);
+        let manager = CommsManager::new(config).unwrap();
         // Verify all fields are accessible
         let _ = manager.keypair();
         let _ = manager.public_key();
@@ -214,7 +199,7 @@ mod tests {
 
         let config = CommsManagerConfig::with_keypair(keypair).trusted_peers(trusted);
 
-        let manager = CommsManager::new(config);
+        let manager = CommsManager::new(config).unwrap();
 
         assert_eq!(manager.trusted_peers().peers.len(), 1);
         assert_eq!(manager.trusted_peers().peers[0].name, "test-peer");
@@ -223,7 +208,7 @@ mod tests {
     #[test]
     fn test_comms_manager_drain_empty() {
         let config = CommsManagerConfig::new();
-        let mut manager = CommsManager::new(config);
+        let mut manager = CommsManager::new(config).unwrap();
 
         let messages = manager.drain_messages();
         assert!(messages.is_empty());
@@ -239,7 +224,7 @@ mod tests {
 
         let config = CommsManagerConfig::with_keypair(our_keypair).trusted_peers(trusted);
 
-        let mut manager = CommsManager::new(config);
+        let mut manager = CommsManager::new(config).unwrap();
 
         // Send a message to the inbox
         let mut envelope = Envelope {
@@ -270,7 +255,7 @@ mod tests {
     #[test]
     fn test_comms_manager_router_access() {
         let config = CommsManagerConfig::new();
-        let manager = CommsManager::new(config);
+        let manager = CommsManager::new(config).unwrap();
 
         // Router should be accessible
         let router = manager.router();
@@ -294,7 +279,7 @@ mod tests {
             .comms_config(comms_config);
 
         // Config took ownership of keypair, verify via manager
-        let manager = CommsManager::new(config);
+        let manager = CommsManager::new(config).unwrap();
         assert_eq!(manager.public_key(), keypair_pubkey);
     }
 }

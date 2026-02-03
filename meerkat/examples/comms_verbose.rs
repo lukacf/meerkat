@@ -1,15 +1,17 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Verbose diagnostic for comms flow - shows actual API calls, tool calls, and network traffic
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
-use meerkat_comms::{Keypair, TrustedPeer, TrustedPeers};
-use meerkat_comms_agent::{
+use meerkat_comms::agent::{
     CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
 };
+use meerkat_comms::{Keypair, TrustedPeer, TrustedPeers};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::RwLock;
 
 static API_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static TOOL_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -40,11 +42,7 @@ impl ToolCallBuffer {
     fn try_complete(&self) -> Option<ToolCall> {
         let name = self.name.as_ref()?;
         let args: serde_json::Value = serde_json::from_str(&self.args_json).ok()?;
-        Some(ToolCall {
-            id: self.id.clone(),
-            name: name.clone(),
-            args,
-        })
+        Some(ToolCall::new(self.id.clone(), name.clone(), args))
     }
 }
 
@@ -53,7 +51,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&serde_json::Value>,
@@ -91,6 +89,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
         };
 
         let mut stream = self.client.stream(&request);
+        // ...
 
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -118,24 +117,37 @@ impl AgentLlmClient for LoggingLlmAdapter {
                         }
                         buffer.args_json.push_str(&args_delta);
                     }
-                    LlmEvent::ToolCallComplete { id, name, args } => {
+                    LlmEvent::ToolCallComplete { id, name, args, .. } => {
                         println!("\n┌─── LLM REQUESTED TOOL: {} ───┐", name);
                         println!(
                             "│ Args: {}",
-                            serde_json::to_string(&args).unwrap_or_default()
+                            serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
                         );
                         println!("└────────────────────────────────────────┘");
-                        tool_calls.push(ToolCall { id, name, args });
+                        tool_calls.push(ToolCall::new(id, name, args));
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
+                    LlmEvent::Done { outcome } => match outcome {
+                        LlmDoneOutcome::Success { stop_reason: sr } => {
+                            stop_reason = sr;
+                        }
+                        LlmDoneOutcome::Error { error } => {
+                            return Err(AgentError::llm(
+                                self.client.provider(),
+                                error.failure_reason(),
+                                error.to_string(),
+                            ));
+                        }
+                    },
                 },
                 Err(e) => {
-                    return Err(AgentError::LlmError(e.to_string()));
+                    return Err(AgentError::llm(
+                        self.client.provider(),
+                        e.failure_reason(),
+                        e.to_string(),
+                    ));
                 }
             }
         }
@@ -147,7 +159,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
                     println!("\n┌─── LLM REQUESTED TOOL: {} ───┐", tc.name);
                     println!(
                         "│ Args: {}",
-                        serde_json::to_string(&tc.args).unwrap_or_default()
+                        serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string())
                     );
                     println!("└────────────────────────────────────────┘");
                     tool_calls.push(tc);
@@ -162,12 +174,12 @@ impl AgentLlmClient for LoggingLlmAdapter {
             tool_calls.len()
         );
 
-        Ok(LlmStreamResult {
+        Ok(LlmStreamResult::new(
             content,
             tool_calls,
             stop_reason,
             usage,
-        })
+        ))
     }
 
     fn provider(&self) -> &'static str {
@@ -183,7 +195,7 @@ struct LoggingToolDispatcher {
 
 #[async_trait]
 impl AgentToolDispatcher for LoggingToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.inner.tools()
     }
 
@@ -202,7 +214,7 @@ impl AgentToolDispatcher for LoggingToolDispatcher {
         println!("┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫");
         println!(
             "┃ Args: {}",
-            serde_json::to_string_pretty(args).unwrap_or_default()
+            serde_json::to_string_pretty(args).unwrap_or_else(|_| "{}".to_string())
         );
 
         let result = self.inner.dispatch(name, args).await;
@@ -235,7 +247,9 @@ impl AgentSessionStore for NoStore {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY required");
+    // We need an API key
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "ANTHROPIC_API_KEY environment variable must be set")?;
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║     MEERKAT COMMS VERBOSE DIAGNOSTIC                         ║");
@@ -285,22 +299,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create separate CommsManagers (each agent has its own)
     println!("\n=== CREATING SEPARATE COMMS MANAGERS ===");
     let config_a = CommsManagerConfig::with_keypair(keypair_a).trusted_peers(trusted_for_a.clone());
-    let comms_manager_a = CommsManager::new(config_a);
+    let comms_manager_a = CommsManager::new(config_a)?;
     println!("Agent A CommsManager created");
 
     let config_b = CommsManagerConfig::with_keypair(keypair_b).trusted_peers(trusted_for_b.clone());
-    let comms_manager_b = CommsManager::new(config_b);
+    let comms_manager_b = CommsManager::new(config_b)?;
     println!("Agent B CommsManager created");
 
     // Start TCP listeners (these accept incoming connections)
     println!("\n=== STARTING TCP LISTENERS ===");
-    let secret_a = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_a.keypair());
-    let secret_b = meerkat_comms_agent::listener::keypair_to_secret(&comms_manager_b.keypair());
+
+    // Create shared trusted peers for each agent (allows dynamic updates)
+    let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a.clone()));
+    let trusted_b_shared = Arc::new(RwLock::new(trusted_for_b.clone()));
 
     let _handle_a = spawn_tcp_listener(
         &addr_a.to_string(),
-        secret_a,
-        Arc::new(trusted_for_a.clone()),
+        comms_manager_a.keypair_arc(),
+        trusted_a_shared.clone(),
         comms_manager_a.inbox_sender().clone(),
     )
     .await?;
@@ -308,8 +324,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _handle_b = spawn_tcp_listener(
         &addr_b.to_string(),
-        secret_b,
-        Arc::new(trusted_for_b.clone()),
+        comms_manager_b.keypair_arc(),
+        trusted_b_shared.clone(),
         comms_manager_b.inbox_sender().clone(),
     )
     .await?;
@@ -318,41 +334,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Show available tools
-    let tools_check = CommsToolDispatcher::new(
-        comms_manager_a.router().clone(),
-        Arc::new(trusted_for_a.clone()),
-    );
+    let tools_check =
+        CommsToolDispatcher::new(comms_manager_a.router().clone(), trusted_a_shared.clone());
     println!("\n=== COMMS TOOLS AVAILABLE TO EACH AGENT ===");
-    for tool in tools_check.tools() {
+    for tool in tools_check.tools().iter() {
         println!("  • {} - {}", tool.name, tool.description);
     }
 
     // Create logging tool dispatchers (separate for each agent)
     let tools_a = Arc::new(LoggingToolDispatcher {
-        inner: CommsToolDispatcher::new(comms_manager_a.router().clone(), Arc::new(trusted_for_a)),
+        inner: CommsToolDispatcher::new(comms_manager_a.router().clone(), trusted_a_shared),
         agent_name: "Agent A".to_string(),
     });
 
     let tools_b = Arc::new(LoggingToolDispatcher {
-        inner: CommsToolDispatcher::new(comms_manager_b.router().clone(), Arc::new(trusted_for_b)),
+        inner: CommsToolDispatcher::new(comms_manager_b.router().clone(), trusted_b_shared),
         agent_name: "Agent B".to_string(),
     });
 
     // Create separate LLM clients for each agent
     let model =
-        std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+        std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-3-sonnet-20240229".to_string());
     println!("\n=== LLM SETUP ===");
     println!("Model: {}", model);
     println!("Each agent has its own AnthropicClient instance");
 
     let llm_a = Arc::new(LoggingLlmAdapter {
-        client: AnthropicClient::new(api_key.clone()),
+        client: AnthropicClient::new(api_key.clone())?,
         model: model.clone(),
         agent_name: "Agent A".to_string(),
     });
 
     let llm_b = Arc::new(LoggingLlmAdapter {
-        client: AnthropicClient::new(api_key),
+        client: AnthropicClient::new(api_key)?,
         model: model.clone(),
         agent_name: "Agent B".to_string(),
     });
@@ -365,10 +379,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .model(&model)
         .max_tokens_per_turn(1024)
         .system_prompt(
-            "You are Agent A. You can communicate with other agents using the send_message tool. \
+            "You are Agent A. You can communicate with other agents using the send_message tool. \\
              Use list_peers to see available peers.",
         )
-        .build(llm_a, tools_a, store.clone());
+        .build(llm_a, tools_a, store.clone())
+        .await;
     println!("Agent A built with system prompt and comms tools");
 
     let agent_b_inner = AgentBuilder::new()
@@ -377,7 +392,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .system_prompt(
             "You are Agent B. When you receive messages from other agents, acknowledge them.",
         )
-        .build(llm_b, tools_b, store);
+        .build(llm_b, tools_b, store)
+        .await;
     println!("Agent B built with system prompt and comms tools");
 
     let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
@@ -449,7 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 from: msg.from_pubkey,
                 to: agent_b.comms_manager().keypair().public_key(),
                 kind: match msg.content {
-                    meerkat_comms_agent::CommsContent::Message { body } => {
+                    meerkat_comms::agent::CommsContent::Message { body } => {
                         meerkat_comms::MessageKind::Message { body }
                     }
                     _ => continue,
@@ -460,16 +476,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = agent_b.comms_manager().inbox_sender().send(item);
     }
 
-    let result_b = agent_b.run_inbox_only().await?;
+    let result_b = agent_b.run(String::new()).await?;
 
-    if let Some(result) = result_b {
-        println!("\n═══════════════════════════════════════════════════════════════");
-        println!("AGENT B FINAL RESULT:");
-        println!("  Response text: {}", result.text);
-        println!("  Tool calls executed: {}", result.tool_calls);
-        println!("  Turns: {}", result.turns);
-        println!("═══════════════════════════════════════════════════════════════");
-    }
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("AGENT B FINAL RESULT:");
+    println!("  Response text: {}", result_b.text);
+    println!("  Tool calls executed: {}", result_b.tool_calls);
+    println!("  Turns: {}", result_b.turns);
+    println!("═══════════════════════════════════════════════════════════════");
 
     println!("\n");
     println!("╔══════════════════════════════════════════════════════════════╗");

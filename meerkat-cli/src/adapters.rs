@@ -1,16 +1,20 @@
 //! Adapters to bridge existing crate types to agent traits
 
+#![allow(dead_code)]
+
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_client::{LlmClient, LlmEvent, LlmRequest};
+use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_core::{
     AgentError, Message, Session, SessionId, StopReason, ToolCall, ToolDef, Usage,
     agent::{AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult},
-    error::ToolError,
+    error::{invalid_session_id, store_error},
     event::AgentEvent,
 };
 use meerkat_store::SessionStore;
+use meerkat_tools::ToolError;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -18,7 +22,7 @@ use tokio::sync::mpsc;
 /// Dynamic dispatch adapter for runtime LLM provider selection
 pub struct DynLlmClientAdapter {
     client: Arc<dyn LlmClient>,
-    model: String,
+    model: Cow<'static, str>,
     /// Optional channel to emit streaming events (text deltas)
     event_tx: Option<mpsc::Sender<AgentEvent>>,
     /// Provider-specific parameters to pass with every request
@@ -26,10 +30,10 @@ pub struct DynLlmClientAdapter {
 }
 
 impl DynLlmClientAdapter {
-    pub fn new(client: Arc<dyn LlmClient>, model: String) -> Self {
+    pub fn new(client: Arc<dyn LlmClient>, model: impl Into<Cow<'static, str>>) -> Self {
         Self {
             client,
-            model,
+            model: model.into(),
             event_tx: None,
             provider_params: None,
         }
@@ -39,12 +43,12 @@ impl DynLlmClientAdapter {
     /// Text deltas will be sent to the provided channel as they arrive.
     pub fn with_event_channel(
         client: Arc<dyn LlmClient>,
-        model: String,
+        model: impl Into<Cow<'static, str>>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Self {
         Self {
             client,
-            model,
+            model: model.into(),
             event_tx: Some(event_tx),
             provider_params: None,
         }
@@ -62,7 +66,7 @@ impl AgentLlmClient for DynLlmClientAdapter {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&Value>,
@@ -74,7 +78,7 @@ impl AgentLlmClient for DynLlmClientAdapter {
 
         // Build request
         let request = LlmRequest {
-            model: self.model.clone(),
+            model: self.model.to_string(),
             messages: messages.to_vec(),
             tools: tools.to_vec(),
             max_tokens,
@@ -89,7 +93,7 @@ impl AgentLlmClient for DynLlmClientAdapter {
         // Accumulate response
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut tool_call_buffers: HashMap<String, ToolCallBuffer> = HashMap::new();
+        let mut tool_call_buffers: HashMap<Arc<str>, ToolCallBuffer> = HashMap::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = Usage::default();
 
@@ -112,27 +116,50 @@ impl AgentLlmClient for DynLlmClientAdapter {
                         name,
                         args_delta,
                     } => {
+                        let id: Arc<str> = id.into();
                         let buffer = tool_call_buffers
-                            .entry(id.clone())
-                            .or_insert_with(|| ToolCallBuffer::new(id));
+                            .entry(Arc::clone(&id))
+                            .or_insert_with(|| ToolCallBuffer::new(Arc::clone(&id)));
 
                         if let Some(n) = name {
-                            buffer.name = Some(n);
+                            buffer.name = Some(n.into());
                         }
                         buffer.args_json.push_str(&args_delta);
                     }
-                    LlmEvent::ToolCallComplete { id, name, args } => {
-                        tool_calls.push(ToolCall { id, name, args });
+                    LlmEvent::ToolCallComplete {
+                        id,
+                        name,
+                        args,
+                        thought_signature,
+                    } => {
+                        let tool_call = match thought_signature {
+                            Some(sig) => ToolCall::with_thought_signature(id, name, args, sig),
+                            None => ToolCall::new(id, name, args),
+                        };
+                        tool_calls.push(tool_call);
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }
-                    LlmEvent::Done { stop_reason: sr } => {
-                        stop_reason = sr;
-                    }
+                    LlmEvent::Done { outcome } => match outcome {
+                        LlmDoneOutcome::Success { stop_reason: sr } => {
+                            stop_reason = sr;
+                        }
+                        LlmDoneOutcome::Error { error } => {
+                            return Err(AgentError::llm(
+                                self.client.provider(),
+                                error.failure_reason(),
+                                error.to_string(),
+                            ));
+                        }
+                    },
                 },
                 Err(e) => {
-                    return Err(AgentError::LlmError(e.to_string()));
+                    return Err(AgentError::llm(
+                        self.client.provider(),
+                        e.failure_reason(),
+                        e.to_string(),
+                    ));
                 }
             }
         }
@@ -147,12 +174,12 @@ impl AgentLlmClient for DynLlmClientAdapter {
             }
         }
 
-        Ok(LlmStreamResult {
+        Ok(LlmStreamResult::new(
             content,
             tool_calls,
             stop_reason,
             usage,
-        })
+        ))
     }
 
     fn provider(&self) -> &'static str {
@@ -163,13 +190,13 @@ impl AgentLlmClient for DynLlmClientAdapter {
 /// Helper for accumulating tool call deltas
 #[derive(Debug, Default)]
 struct ToolCallBuffer {
-    id: String,
-    name: Option<String>,
+    id: Arc<str>,
+    name: Option<Cow<'static, str>>,
     args_json: String,
 }
 
 impl ToolCallBuffer {
-    fn new(id: String) -> Self {
+    fn new(id: Arc<str>) -> Self {
         Self {
             id,
             name: None,
@@ -180,11 +207,7 @@ impl ToolCallBuffer {
     fn try_complete(&self) -> Option<ToolCall> {
         let name = self.name.as_ref()?;
         let args: Value = serde_json::from_str(&self.args_json).ok()?;
-        Some(ToolCall {
-            id: self.id.clone(),
-            name: name.clone(),
-            args,
-        })
+        Some(ToolCall::new(self.id.to_string(), name.to_string(), args))
     }
 }
 
@@ -202,21 +225,14 @@ impl<S: SessionStore> SessionStoreAdapter<S> {
 #[async_trait]
 impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
     async fn save(&self, session: &Session) -> Result<(), AgentError> {
-        self.store
-            .save(session)
-            .await
-            .map_err(|e| AgentError::StoreError(e.to_string()))
+        self.store.save(session).await.map_err(store_error)
     }
 
     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
         // Parse the string ID to SessionId
-        let session_id = SessionId::parse(id)
-            .map_err(|e| AgentError::StoreError(format!("Invalid session ID: {}", e)))?;
+        let session_id = SessionId::parse(id).map_err(invalid_session_id)?;
 
-        self.store
-            .load(&session_id)
-            .await
-            .map_err(|e| AgentError::StoreError(e.to_string()))
+        self.store.load(&session_id).await.map_err(store_error)
     }
 }
 
@@ -225,8 +241,8 @@ pub struct EmptyToolDispatcher;
 
 #[async_trait]
 impl AgentToolDispatcher for EmptyToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        Vec::new()
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from([])
     }
 
     async fn dispatch(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
@@ -234,20 +250,88 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
     }
 }
 
-use meerkat_mcp_client::McpRouter;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::stream;
+    use futures::Stream;
+    use meerkat_client::LlmError;
+    use meerkat_core::UserMessage;
+    use std::pin::Pin;
+
+    struct MockClient;
+
+    #[async_trait]
+    impl LlmClient for MockClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::ToolCallComplete {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    args: serde_json::json!({"city": "Tokyo"}),
+                    thought_signature: Some("sig_123".to_string()),
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_complete_preserves_thought_signature() {
+        let client = Arc::new(MockClient);
+        let adapter = DynLlmClientAdapter::new(client, "mock-model");
+        let result = adapter
+            .stream_response(
+                &[Message::User(UserMessage {
+                    content: "test".to_string(),
+                })],
+                &[],
+                128,
+                None,
+                None,
+            )
+            .await
+            .expect("stream_response should succeed");
+
+        assert_eq!(result.tool_calls().len(), 1);
+        assert_eq!(
+            result.tool_calls()[0].thought_signature.as_deref(),
+            Some("sig_123")
+        );
+    }
+}
+
+use meerkat_mcp::McpRouter;
+use meerkat_tools::builtin::CompositeDispatcher;
 use tokio::sync::RwLock;
 
 /// Adapter that wraps an McpRouter to implement AgentToolDispatcher
 pub struct McpRouterAdapter {
     router: RwLock<Option<McpRouter>>,
-    cached_tools: RwLock<Vec<ToolDef>>,
+    cached_tools: RwLock<Arc<[Arc<ToolDef>]>>,
 }
 
 impl McpRouterAdapter {
     pub fn new(router: McpRouter) -> Self {
         Self {
             router: RwLock::new(Some(router)),
-            cached_tools: RwLock::new(Vec::new()),
+            cached_tools: RwLock::new(Arc::from([])),
         }
     }
 
@@ -257,7 +341,7 @@ impl McpRouterAdapter {
     pub async fn refresh_tools(&self) -> Result<(), String> {
         let router = self.router.read().await;
         if let Some(router) = router.as_ref() {
-            let tools = router.list_tools().to_vec();
+            let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
             let mut cached = self.cached_tools.write().await;
             *cached = tools;
         }
@@ -278,13 +362,13 @@ impl McpRouterAdapter {
 
 #[async_trait]
 impl AgentToolDispatcher for McpRouterAdapter {
-    fn tools(&self) -> Vec<ToolDef> {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         // Return the cached tools (blocking read in sync context)
         // Note: This requires refresh_tools() to be called before first use
         // We use try_read to avoid deadlocks, falling back to empty vec
         match self.cached_tools.try_read() {
-            Ok(tools) => tools.clone(),
-            Err(_) => Vec::new(),
+            Ok(tools) => Arc::clone(&tools),
+            Err(_) => Arc::from([]),
         }
     }
 
@@ -306,28 +390,39 @@ impl AgentToolDispatcher for McpRouterAdapter {
     }
 }
 
-/// Combined tool dispatcher that can be either empty or MCP-backed
+/// Combined tool dispatcher that can be empty, MCP-backed, or composite (with builtins)
 pub enum CliToolDispatcher {
     Empty(EmptyToolDispatcher),
     Mcp(Box<McpRouterAdapter>),
+    Composite(std::sync::Arc<CompositeDispatcher>),
+    /// Dispatcher wrapped with comms tools (uses Arc to match wrap_with_comms output)
+    WithComms(Arc<dyn AgentToolDispatcher>),
 }
 
 impl CliToolDispatcher {
-    /// Gracefully shutdown MCP connections (no-op for Empty)
+    /// Gracefully shutdown MCP connections (no-op for Empty and Composite)
     pub async fn shutdown(&self) {
         match self {
             CliToolDispatcher::Empty(_) => {}
             CliToolDispatcher::Mcp(adapter) => adapter.shutdown().await,
+            CliToolDispatcher::Composite(_) => {
+                // CompositeDispatcher doesn't have external connections to shut down
+            }
+            CliToolDispatcher::WithComms(_) => {
+                // Comms connections are managed by CommsRuntime
+            }
         }
     }
 }
 
 #[async_trait]
 impl AgentToolDispatcher for CliToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         match self {
             CliToolDispatcher::Empty(d) => d.tools(),
             CliToolDispatcher::Mcp(d) => d.tools(),
+            CliToolDispatcher::Composite(d) => d.tools(),
+            CliToolDispatcher::WithComms(d) => d.tools(),
         }
     }
 
@@ -335,6 +430,8 @@ impl AgentToolDispatcher for CliToolDispatcher {
         match self {
             CliToolDispatcher::Empty(d) => d.dispatch(name, args).await,
             CliToolDispatcher::Mcp(d) => d.dispatch(name, args).await,
+            CliToolDispatcher::Composite(d) => d.dispatch(name, args).await,
+            CliToolDispatcher::WithComms(d) => d.dispatch(name, args).await,
         }
     }
 }

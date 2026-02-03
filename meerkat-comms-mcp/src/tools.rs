@@ -1,14 +1,34 @@
 //! MCP tool implementations for Meerkat comms.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use meerkat_comms::{CommsConfig, Keypair, Router, Status, TrustedPeers};
 
+fn schema_for<T: JsonSchema>() -> Value {
+    let schema = schemars::schema_for!(T);
+    let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
+
+    // Some generators omit empty `properties`/`required` for `{}`.
+    // Our tool schema contract expects explicit presence of both keys.
+    if let Value::Object(ref mut obj) = value {
+        if obj.get("type").and_then(Value::as_str) == Some("object") {
+            obj.entry("properties".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            obj.entry("required".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
+    }
+
+    value
+}
+
 /// Input schema for send_message tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMessageInput {
     /// Name of the peer to send to
     pub peer: String,
@@ -17,7 +37,7 @@ pub struct SendMessageInput {
 }
 
 /// Input schema for send_request tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendRequestInput {
     /// Name of the peer to send to
     pub peer: String,
@@ -33,11 +53,12 @@ pub struct SendRequestInput {
 /// Note: `peer` is explicitly required (rather than auto-routing based on request origin)
 /// because being explicit is simpler and doesn't require tracking pending requests.
 /// The agent can easily extract the sender from the original request envelope's `from` field.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendResponseInput {
     /// Name of the peer to send the response to (typically the request originator)
     pub peer: String,
     /// ID of the request this is a response to
+    #[schemars(with = "String")]
     pub request_id: Uuid,
     /// Status of the response
     pub status: ResponseStatus,
@@ -47,7 +68,7 @@ pub struct SendResponseInput {
 }
 
 /// Response status for the send_response tool
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ResponseStatus {
     Accepted,
@@ -66,7 +87,7 @@ impl From<ResponseStatus> for Status {
 }
 
 /// Input schema for list_peers tool
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListPeersInput {}
 
 /// Output for list_peers tool
@@ -83,79 +104,22 @@ pub fn tools_list() -> Vec<Value> {
         json!({
             "name": "send_message",
             "description": "Send a message to a peer. Returns when the peer acknowledges receipt.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "peer": {
-                        "type": "string",
-                        "description": "Name of the peer to send to"
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Message body"
-                    }
-                },
-                "required": ["peer", "body"]
-            }
+            "inputSchema": schema_for::<SendMessageInput>()
         }),
         json!({
             "name": "send_request",
             "description": "Send a request to a peer. Returns when the peer acknowledges receipt.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "peer": {
-                        "type": "string",
-                        "description": "Name of the peer to send to"
-                    },
-                    "intent": {
-                        "type": "string",
-                        "description": "Intent of the request (e.g., 'review-pr', 'analyze-code')"
-                    },
-                    "params": {
-                        "type": "object",
-                        "description": "Parameters for the request"
-                    }
-                },
-                "required": ["peer", "intent"]
-            }
+            "inputSchema": schema_for::<SendRequestInput>()
         }),
         json!({
             "name": "send_response",
             "description": "Reply to a request. Does not wait for acknowledgement.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "peer": {
-                        "type": "string",
-                        "description": "Name of the peer to send to"
-                    },
-                    "request_id": {
-                        "type": "string",
-                        "format": "uuid",
-                        "description": "ID of the request this is a response to"
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["accepted", "completed", "failed"],
-                        "description": "Status of the response"
-                    },
-                    "result": {
-                        "type": "object",
-                        "description": "Result of the request"
-                    }
-                },
-                "required": ["peer", "request_id", "status"]
-            }
+            "inputSchema": schema_for::<SendResponseInput>()
         }),
         json!({
             "name": "list_peers",
             "description": "List trusted peers. Note: This returns the trusted list, not live online status. Use send_message to probe liveness.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+            "inputSchema": schema_for::<ListPeersInput>()
         }),
     ]
 }
@@ -163,14 +127,18 @@ pub fn tools_list() -> Vec<Value> {
 /// Context needed to handle tool calls
 pub struct ToolContext {
     pub router: Arc<Router>,
-    pub trusted_peers: Arc<TrustedPeers>,
+    pub trusted_peers: Arc<RwLock<TrustedPeers>>,
 }
 
 impl ToolContext {
     /// Create a new tool context
     pub fn new(keypair: Keypair, trusted_peers: TrustedPeers, config: CommsConfig) -> Self {
-        let trusted_peers = Arc::new(trusted_peers.clone());
-        let router = Arc::new(Router::new(keypair, trusted_peers.as_ref().clone(), config));
+        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let router = Arc::new(Router::with_shared_peers(
+            keypair,
+            trusted_peers.clone(),
+            config,
+        ));
         Self {
             router,
             trusted_peers,
@@ -254,8 +222,8 @@ async fn handle_send_response(
 }
 
 async fn handle_list_peers(ctx: &ToolContext) -> Result<Value, String> {
-    let peers: Vec<PeerInfo> = ctx
-        .trusted_peers
+    let trusted_peers = ctx.trusted_peers.read().await;
+    let peers: Vec<PeerInfo> = trusted_peers
         .peers
         .iter()
         .map(|p| PeerInfo {
@@ -271,6 +239,7 @@ async fn handle_list_peers(ctx: &ToolContext) -> Result<Value, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_comms::{PubKey, TrustedPeer};
@@ -291,16 +260,20 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_list_contains_all_four_tools() {
+    fn test_tools_list_contains_all_four_tools() -> Result<(), Box<dyn std::error::Error>> {
         let tools = tools_list();
         assert_eq!(tools.len(), 4, "Expected 4 tools");
 
-        let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let tool_names: Vec<&str> = tools
+            .iter()
+            .map(|t| t["name"].as_str().unwrap_or_default())
+            .collect();
 
         assert!(tool_names.contains(&"send_message"));
         assert!(tool_names.contains(&"send_request"));
         assert!(tool_names.contains(&"send_response"));
         assert!(tool_names.contains(&"list_peers"));
+        Ok(())
     }
 
     #[test]
@@ -317,33 +290,35 @@ mod tests {
     }
 
     #[test]
-    fn test_send_message_input_parsing() {
+    fn test_send_message_input_parsing() -> Result<(), Box<dyn std::error::Error>> {
         let input_json = json!({
             "peer": "review-meerkat",
             "body": "Hello!"
         });
 
-        let input: SendMessageInput = serde_json::from_value(input_json).unwrap();
+        let input: SendMessageInput = serde_json::from_value(input_json)?;
         assert_eq!(input.peer, "review-meerkat");
         assert_eq!(input.body, "Hello!");
+        Ok(())
     }
 
     #[test]
-    fn test_send_request_input_parsing() {
+    fn test_send_request_input_parsing() -> Result<(), Box<dyn std::error::Error>> {
         let input_json = json!({
             "peer": "review-meerkat",
             "intent": "review-pr",
             "params": { "pr": 42 }
         });
 
-        let input: SendRequestInput = serde_json::from_value(input_json).unwrap();
+        let input: SendRequestInput = serde_json::from_value(input_json)?;
         assert_eq!(input.peer, "review-meerkat");
         assert_eq!(input.intent, "review-pr");
         assert_eq!(input.params["pr"], 42);
+        Ok(())
     }
 
     #[test]
-    fn test_send_response_input_parsing() {
+    fn test_send_response_input_parsing() -> Result<(), Box<dyn std::error::Error>> {
         let input_json = json!({
             "peer": "coding-meerkat",
             "request_id": "01234567-89ab-cdef-0123-456789abcdef",
@@ -351,21 +326,23 @@ mod tests {
             "result": { "approved": true }
         });
 
-        let input: SendResponseInput = serde_json::from_value(input_json).unwrap();
+        let input: SendResponseInput = serde_json::from_value(input_json)?;
         assert_eq!(input.peer, "coding-meerkat");
         assert!(matches!(input.status, ResponseStatus::Completed));
         assert_eq!(input.result["approved"], true);
+        Ok(())
     }
 
     #[test]
-    fn test_list_peers_input_parsing() {
+    fn test_list_peers_input_parsing() -> Result<(), Box<dyn std::error::Error>> {
         let input_json = json!({});
-        let _input: ListPeersInput = serde_json::from_value(input_json).unwrap();
+        let _input: ListPeersInput = serde_json::from_value(input_json)?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_tool_send_message() {
-        let tmp = TempDir::new().unwrap();
+    async fn test_tool_send_message() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         let sock_path = tmp.path().join("peer.sock");
 
         let peer_keypair = make_keypair();
@@ -381,20 +358,27 @@ mod tests {
         let ctx = ToolContext::new(our_keypair, trusted_peers, CommsConfig::default());
 
         // Start mock peer server
-        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let listener = tokio::net::UnixListener::bind(&sock_path)?;
         let server_handle = tokio::spawn(async move {
             use meerkat_comms::{Envelope, MessageKind, Signature};
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
 
             // Read envelope
             let mut len_bytes = [0u8; 4];
-            stream.read_exact(&mut len_bytes).await.unwrap();
+            stream
+                .read_exact(&mut len_bytes)
+                .await
+                .map_err(|e| e.to_string())?;
             let len = u32::from_be_bytes(len_bytes);
             let mut payload = vec![0u8; len as usize];
-            stream.read_exact(&mut payload).await.unwrap();
-            let envelope: Envelope = ciborium::from_reader(&payload[..]).unwrap();
+            stream
+                .read_exact(&mut payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            let envelope: Envelope =
+                ciborium::from_reader(&payload[..]).map_err(|e| e.to_string())?;
 
             // Send ack
             let mut ack = Envelope {
@@ -409,11 +393,18 @@ mod tests {
             ack.sign(&peer_keypair);
 
             let mut ack_payload = Vec::new();
-            ciborium::into_writer(&ack, &mut ack_payload).unwrap();
+            ciborium::into_writer(&ack, &mut ack_payload).map_err(|e| e.to_string())?;
             let ack_len = ack_payload.len() as u32;
-            stream.write_all(&ack_len.to_be_bytes()).await.unwrap();
-            stream.write_all(&ack_payload).await.unwrap();
-            stream.flush().await.unwrap();
+            stream
+                .write_all(&ack_len.to_be_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            stream
+                .write_all(&ack_payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            stream.flush().await.map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
         });
 
         let result = handle_tools_call(
@@ -426,16 +417,21 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "send_message should succeed");
-        let output = result.unwrap();
+        assert!(
+            result.is_ok(),
+            "send_message should succeed: {:?}",
+            result.err()
+        );
+        let output = result?;
         assert_eq!(output["success"], true);
 
-        server_handle.await.unwrap();
+        server_handle.await??;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_tool_send_request() {
-        let tmp = TempDir::new().unwrap();
+    async fn test_tool_send_request() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         let sock_path = tmp.path().join("peer.sock");
 
         let peer_keypair = make_keypair();
@@ -451,20 +447,27 @@ mod tests {
         let ctx = ToolContext::new(our_keypair, trusted_peers, CommsConfig::default());
 
         // Start mock peer server
-        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let listener = tokio::net::UnixListener::bind(&sock_path)?;
         let server_handle = tokio::spawn(async move {
             use meerkat_comms::{Envelope, MessageKind, Signature};
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
 
             // Read envelope
             let mut len_bytes = [0u8; 4];
-            stream.read_exact(&mut len_bytes).await.unwrap();
+            stream
+                .read_exact(&mut len_bytes)
+                .await
+                .map_err(|e| e.to_string())?;
             let len = u32::from_be_bytes(len_bytes);
             let mut payload = vec![0u8; len as usize];
-            stream.read_exact(&mut payload).await.unwrap();
-            let envelope: Envelope = ciborium::from_reader(&payload[..]).unwrap();
+            stream
+                .read_exact(&mut payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            let envelope: Envelope =
+                ciborium::from_reader(&payload[..]).map_err(|e| e.to_string())?;
 
             // Send ack
             let mut ack = Envelope {
@@ -479,11 +482,18 @@ mod tests {
             ack.sign(&peer_keypair);
 
             let mut ack_payload = Vec::new();
-            ciborium::into_writer(&ack, &mut ack_payload).unwrap();
+            ciborium::into_writer(&ack, &mut ack_payload).map_err(|e| e.to_string())?;
             let ack_len = ack_payload.len() as u32;
-            stream.write_all(&ack_len.to_be_bytes()).await.unwrap();
-            stream.write_all(&ack_payload).await.unwrap();
-            stream.flush().await.unwrap();
+            stream
+                .write_all(&ack_len.to_be_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            stream
+                .write_all(&ack_payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            stream.flush().await.map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
         });
 
         let result = handle_tools_call(
@@ -498,15 +508,16 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "send_request should succeed");
-        let output = result.unwrap();
+        let output = result?;
         assert_eq!(output["success"], true);
 
-        server_handle.await.unwrap();
+        server_handle.await??;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_tool_send_response() {
-        let tmp = TempDir::new().unwrap();
+    async fn test_tool_send_response() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         let sock_path = tmp.path().join("peer.sock");
 
         let peer_keypair = make_keypair();
@@ -521,22 +532,30 @@ mod tests {
         let ctx = ToolContext::new(our_keypair, trusted_peers, CommsConfig::default());
 
         // Start mock peer server (no ack expected for Response)
-        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let listener = tokio::net::UnixListener::bind(&sock_path)?;
         let server_handle = tokio::spawn(async move {
             use meerkat_comms::Envelope;
             use tokio::io::AsyncReadExt;
 
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
 
             // Read envelope
             let mut len_bytes = [0u8; 4];
-            stream.read_exact(&mut len_bytes).await.unwrap();
+            stream
+                .read_exact(&mut len_bytes)
+                .await
+                .map_err(|e| e.to_string())?;
             let len = u32::from_be_bytes(len_bytes);
             let mut payload = vec![0u8; len as usize];
-            stream.read_exact(&mut payload).await.unwrap();
-            let _envelope: Envelope = ciborium::from_reader(&payload[..]).unwrap();
+            stream
+                .read_exact(&mut payload)
+                .await
+                .map_err(|e| e.to_string())?;
+            let _envelope: Envelope =
+                ciborium::from_reader(&payload[..]).map_err(|e| e.to_string())?;
 
             // No ack sent for Response
+            Ok::<(), String>(())
         });
 
         let result = handle_tools_call(
@@ -552,14 +571,15 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "send_response should succeed");
-        let output = result.unwrap();
+        let output = result?;
         assert_eq!(output["success"], true);
 
-        server_handle.await.unwrap();
+        server_handle.await??;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_tool_list_peers() {
+    async fn test_tool_list_peers() -> Result<(), Box<dyn std::error::Error>> {
         let peer1_keypair = make_keypair();
         let peer2_keypair = make_keypair();
         let our_keypair = make_keypair();
@@ -584,17 +604,29 @@ mod tests {
         let result = handle_tools_call(&ctx, "list_peers", &json!({})).await;
 
         assert!(result.is_ok());
-        let output = result.unwrap();
-        let peers = output["peers"].as_array().unwrap();
+        let output = result?;
+        let peers = output["peers"].as_array().ok_or("not an array")?;
         assert_eq!(peers.len(), 2);
 
         // Verify peer info
         assert_eq!(peers[0]["name"], "peer1");
-        assert!(peers[0]["pubkey"].as_str().unwrap().starts_with("ed25519:"));
+        assert!(
+            peers[0]["pubkey"]
+                .as_str()
+                .ok_or("not a string")?
+                .starts_with("ed25519:")
+        );
         assert_eq!(peers[0]["addr"], "tcp://192.168.1.1:4200");
 
         assert_eq!(peers[1]["name"], "peer2");
-        assert!(peers[1]["pubkey"].as_str().unwrap().starts_with("ed25519:"));
+        assert!(
+            peers[1]["pubkey"]
+                .as_str()
+                .ok_or("not a string")?
+                .starts_with("ed25519:")
+        );
         assert_eq!(peers[1]["addr"], "uds:///tmp/peer2.sock");
+
+        Ok(())
     }
 }

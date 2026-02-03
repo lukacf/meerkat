@@ -6,6 +6,47 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Configuration for structured output extraction.
+///
+/// When provided to an agent, the agent will perform an extraction turn after
+/// completing the agentic work, forcing the LLM to output validated JSON that
+/// conforms to the provided schema. The extraction JSON becomes the final
+/// response text (schema-only) in [`RunResult`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputSchema {
+    /// The JSON schema that the output must conform to
+    pub schema: Value,
+    /// Optional name for the schema (used by some providers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Whether to enforce strict schema validation (provider-specific)
+    #[serde(default)]
+    pub strict: bool,
+}
+
+impl OutputSchema {
+    /// Create a new output schema
+    pub fn new(schema: Value) -> Self {
+        Self {
+            schema,
+            name: None,
+            strict: false,
+        }
+    }
+
+    /// Set the schema name
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Enable strict mode for schema validation
+    pub fn strict(mut self) -> Self {
+        self.strict = true;
+        self
+    }
+}
+
 /// Unique identifier for a session (UUID v7 for time-ordering)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub Uuid);
@@ -93,6 +134,36 @@ pub struct ToolCall {
     pub name: String,
     /// Arguments as JSON
     pub args: Value,
+    /// Thought signature for Gemini 3+ models (must be passed back with tool result)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
+}
+
+impl ToolCall {
+    /// Create a new tool call (without thought signature)
+    pub fn new(id: String, name: String, args: Value) -> Self {
+        Self {
+            id,
+            name,
+            args,
+            thought_signature: None,
+        }
+    }
+
+    /// Create a new tool call with thought signature (for Gemini 3+)
+    pub fn with_thought_signature(
+        id: String,
+        name: String,
+        args: Value,
+        thought_signature: String,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            args,
+            thought_signature: Some(thought_signature),
+        }
+    }
 }
 
 /// Result of executing a tool
@@ -106,6 +177,46 @@ pub struct ToolResult {
     /// Whether this is an error result
     #[serde(default)]
     pub is_error: bool,
+    /// Thought signature for Gemini 3+ (must be passed back from original ToolCall)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
+}
+
+impl ToolResult {
+    /// Create a new tool result (without thought signature)
+    pub fn new(tool_use_id: String, content: String, is_error: bool) -> Self {
+        Self {
+            tool_use_id,
+            content,
+            is_error,
+            thought_signature: None,
+        }
+    }
+
+    /// Create a new tool result with thought signature (for Gemini 3+)
+    pub fn with_thought_signature(
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+        thought_signature: String,
+    ) -> Self {
+        Self {
+            tool_use_id,
+            content,
+            is_error,
+            thought_signature: Some(thought_signature),
+        }
+    }
+
+    /// Create a tool result from a ToolCall (preserves thought_signature)
+    pub fn from_tool_call(tool_call: &ToolCall, content: String, is_error: bool) -> Self {
+        Self {
+            tool_use_id: tool_call.id.clone(),
+            content,
+            is_error,
+            thought_signature: tool_call.thought_signature.clone(),
+        }
+    }
 }
 
 /// Why the model stopped generating
@@ -125,6 +236,19 @@ pub enum StopReason {
     ContentFilter,
     /// Request was cancelled
     Cancelled,
+}
+
+/// Security mode for tool execution (e.g. shell)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityMode {
+    /// No restrictions. (Default)
+    #[default]
+    Unrestricted,
+    /// Only allow commands matching specified patterns.
+    AllowList,
+    /// Block commands matching specified patterns.
+    DenyList,
 }
 
 /// Token usage statistics
@@ -169,7 +293,10 @@ pub struct ToolDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RunResult {
-    /// Final text response
+    /// Final text response.
+    ///
+    /// When `output_schema` is set, this is the raw JSON string produced by the
+    /// extraction turn (schema-only; no additional text).
     pub text: String,
     /// Session ID for resumption
     pub session_id: SessionId,
@@ -179,6 +306,12 @@ pub struct RunResult {
     pub turns: u32,
     /// Number of tool calls made
     pub tool_calls: u32,
+    /// Structured output (if output_schema was provided and extraction succeeded).
+    ///
+    /// This is the parsed JSON value corresponding to `text` when schema
+    /// extraction is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<Value>,
 }
 
 /// Reference to an artifact stored externally

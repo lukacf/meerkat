@@ -4,7 +4,13 @@
 //! Each provider implementation normalizes its streaming response to the common
 //! `LlmEvent` type, hiding provider-specific quirks.
 
+pub mod adapter;
 pub mod error;
+pub mod factory;
+mod http;
+pub mod provider;
+mod streaming;
+mod test_client;
 pub mod types;
 
 #[cfg(feature = "anthropic")]
@@ -16,8 +22,14 @@ pub mod openai;
 #[cfg(feature = "gemini")]
 pub mod gemini;
 
+pub use adapter::LlmClientAdapter;
 pub use error::LlmError;
-pub use types::{LlmClient, LlmEvent, LlmRequest, LlmResponse};
+pub use factory::{
+    DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClientFactory, LlmProvider,
+};
+pub use provider::ProviderResolver;
+pub use test_client::TestClient;
+pub use types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmResponse, ToolCallBuffer};
 
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicClient;

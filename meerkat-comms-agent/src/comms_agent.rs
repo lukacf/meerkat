@@ -11,6 +11,7 @@ use meerkat_core::retry::RetryPolicy;
 use meerkat_core::session::Session;
 use meerkat_core::types::RunResult;
 use meerkat_core::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
+use tokio::sync::watch;
 
 use crate::manager::CommsManager;
 use crate::types::CommsMessage;
@@ -93,6 +94,66 @@ where
         self.agent.run(combined_input).await
     }
 
+    /// Run the agent once, then stay alive processing incoming messages.
+    ///
+    /// This method:
+    /// 1. Runs the initial prompt (if any)
+    /// 2. Waits for incoming inbox messages
+    /// 3. Processes each message as a new turn
+    /// 4. Exits on a special "DISMISS" message or cancellation
+    ///
+    /// If `cancel_rx` is provided, any change to `true` triggers shutdown.
+    pub async fn run_stay_alive(
+        &mut self,
+        initial_prompt: String,
+        mut cancel_rx: Option<watch::Receiver<bool>>,
+    ) -> Result<RunResult, AgentError> {
+        let mut last_result = self.run(initial_prompt).await?;
+
+        loop {
+            // If cancellation already requested, exit cleanly.
+            if let Some(ref rx) = cancel_rx {
+                if *rx.borrow() {
+                    return Err(AgentError::Cancelled);
+                }
+            }
+
+            // Wait for a message or cancellation.
+            let first_msg = if let Some(ref mut rx) = cancel_rx {
+                tokio::select! {
+                    _ = rx.changed() => {
+                        if *rx.borrow() {
+                            return Err(AgentError::Cancelled);
+                        }
+                        // If changed to false, continue waiting for messages.
+                        continue;
+                    }
+                    msg = self.comms_manager.recv_message() => {
+                        msg.ok_or_else(|| AgentError::ToolError("Inbox closed".to_string()))?
+                    }
+                }
+            } else {
+                self.comms_manager
+                    .recv_message()
+                    .await
+                    .ok_or_else(|| AgentError::ToolError("Inbox closed".to_string()))?
+            };
+
+            // Drain any additional messages that arrived.
+            let mut messages = vec![first_msg];
+            messages.extend(self.comms_manager.drain_messages());
+
+            // Exit if a DISMISS message is received.
+            if contains_dismiss(&messages) {
+                return Ok(last_result);
+            }
+
+            // Process messages as a new turn.
+            let comms_text = format_inbox_messages(&messages);
+            last_result = self.agent.run(comms_text).await?;
+        }
+    }
+
     /// Run the agent with only inbox messages (no user input).
     ///
     /// Useful for agent-to-agent communication where the agent is
@@ -128,6 +189,14 @@ where
         let comms_text = format_inbox_messages(&messages);
         self.agent.run(comms_text).await
     }
+}
+
+/// Return true if any message is a "DISMISS" command.
+fn contains_dismiss(messages: &[CommsMessage]) -> bool {
+    messages.iter().any(|m| match &m.content {
+        crate::types::CommsContent::Message { body } => body.trim().eq_ignore_ascii_case("DISMISS"),
+        _ => false,
+    })
 }
 
 /// Format inbox messages for injection into the agent prompt.
@@ -199,7 +268,7 @@ impl CommsAgentBuilder {
     }
 
     /// Build the CommsAgent.
-    pub fn build<C, T, S>(
+    pub async fn build<C, T, S>(
         self,
         client: Arc<C>,
         tools: Arc<T>,
@@ -232,7 +301,7 @@ impl CommsAgentBuilder {
             builder = builder.resume_session(session);
         }
 
-        let agent = builder.build(client, tools, store);
+        let agent = builder.build(client, tools, store).await;
         CommsAgent::new(agent, comms_manager)
     }
 }
@@ -244,6 +313,7 @@ impl Default for CommsAgentBuilder {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::manager::CommsManagerConfig;
@@ -280,7 +350,7 @@ mod tests {
         async fn stream_response(
             &self,
             messages: &[meerkat_core::types::Message],
-            _tools: &[ToolDef],
+            _tools: &[Arc<ToolDef>],
             _max_tokens: u32,
             _temperature: Option<f32>,
             _provider_params: Option<&serde_json::Value>,
@@ -298,12 +368,12 @@ mod tests {
 
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
-                Ok(LlmStreamResult {
-                    content: "Default response".to_string(),
-                    tool_calls: vec![],
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                })
+                Ok(LlmStreamResult::new(
+                    "Default response".to_string(),
+                    vec![],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ))
             } else {
                 Ok(responses.remove(0))
             }
@@ -319,15 +389,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentToolDispatcher for MockToolDispatcher {
-        fn tools(&self) -> Vec<ToolDef> {
-            vec![]
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            vec![].into()
         }
 
         async fn dispatch(
             &self,
             _name: &str,
             _args: &serde_json::Value,
-        ) -> Result<serde_json::Value, meerkat_core::error::ToolError> {
+        ) -> Result<serde_json::Value, meerkat_tools::ToolError> {
             Ok(serde_json::Value::String("mock result".to_string()))
         }
     }
@@ -360,10 +430,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_comms_agent_struct() {
+    #[tokio::test]
+    async fn test_comms_agent_struct() {
         let config = CommsManagerConfig::new();
-        let comms_manager = CommsManager::new(config);
+        let comms_manager = CommsManager::new(config).unwrap();
 
         let client = Arc::new(MockLlmClient::new(vec![]));
         let tools = Arc::new(MockToolDispatcher);
@@ -371,7 +441,8 @@ mod tests {
 
         let agent = AgentBuilder::new()
             .model("test")
-            .build(client, tools, store);
+            .build(client, tools, store)
+            .await;
 
         let comms_agent = CommsAgent::new(agent, comms_manager);
 
@@ -389,7 +460,7 @@ mod tests {
         let trusted = make_trusted_peers("sender-agent", &sender_pubkey);
 
         let config = CommsManagerConfig::with_keypair(our_keypair).trusted_peers(trusted);
-        let comms_manager = CommsManager::new(config);
+        let comms_manager = CommsManager::new(config).unwrap();
 
         // Send a message to the inbox
         let mut envelope = Envelope {
@@ -409,19 +480,20 @@ mod tests {
             .unwrap();
 
         // Create mock LLM that records prompts
-        let client = Arc::new(MockLlmClient::new(vec![LlmStreamResult {
-            content: "I received the message".to_string(),
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-        }]));
+        let client = Arc::new(MockLlmClient::new(vec![LlmStreamResult::new(
+            "I received the message".to_string(),
+            vec![],
+            StopReason::EndTurn,
+            Usage::default(),
+        )]));
 
         let tools = Arc::new(MockToolDispatcher);
         let store = Arc::new(MockSessionStore);
 
         let agent = AgentBuilder::new()
             .model("test")
-            .build(client.clone(), tools, store);
+            .build(client.clone(), tools, store)
+            .await;
 
         let mut comms_agent = CommsAgent::new(agent, comms_manager);
 
@@ -439,10 +511,10 @@ mod tests {
         assert!(prompt.contains("Process this"));
     }
 
-    #[test]
-    fn test_comms_agent_builder() {
+    #[tokio::test]
+    async fn test_comms_agent_builder() {
         let config = CommsManagerConfig::new();
-        let comms_manager = CommsManager::new(config);
+        let comms_manager = CommsManager::new(config).unwrap();
 
         let client = Arc::new(MockLlmClient::new(vec![]));
         let tools = Arc::new(MockToolDispatcher);
@@ -452,7 +524,8 @@ mod tests {
             .model("test-model")
             .system_prompt("You are a helpful assistant")
             .max_tokens_per_turn(1000)
-            .build(client, tools, store, comms_manager);
+            .build(client, tools, store, comms_manager)
+            .await;
 
         // Should compile and create agent
         let _ = comms_agent.agent();

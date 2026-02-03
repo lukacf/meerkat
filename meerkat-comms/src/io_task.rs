@@ -8,11 +8,17 @@
 //! 5. Enqueues to inbox
 //! 6. Closes connection (or keeps alive)
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
+
+use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::codec::Framed;
 
 use crate::identity::{Keypair, Signature};
-use crate::inbox::InboxSender;
-use crate::transport::{TransportError, MAX_PAYLOAD_SIZE};
+use crate::inbox::{InboxError, InboxSender};
+use crate::transport::TransportError;
+use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::trust::TrustedPeers;
 use crate::types::{Envelope, InboxItem, MessageKind};
 
@@ -26,45 +32,78 @@ use crate::types::{Envelope, InboxItem, MessageKind};
 /// * `trusted` - The list of trusted peers
 /// * `inbox_sender` - Channel to send validated messages to the inbox
 pub async fn handle_connection<S>(
-    mut stream: S,
+    stream: S,
     keypair: &Keypair,
     trusted: &TrustedPeers,
     inbox_sender: &InboxSender,
 ) -> Result<(), IoTaskError>
 where
-    S: AsyncReadExt + AsyncWriteExt + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
-    // Read the envelope with length-prefix framing
-    let envelope = read_envelope_async(&mut stream).await?;
+    let mut framed = Framed::new(
+        stream,
+        TransportCodec::new(crate::transport::MAX_PAYLOAD_SIZE),
+    );
+    let envelope = match framed.next().await {
+        Some(Ok(frame)) => frame.envelope,
+        Some(Err(err)) => return Err(IoTaskError::Io(err)),
+        None => {
+            return Err(IoTaskError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed",
+            )));
+        }
+    };
 
     // Verify signature
     if !envelope.verify() {
-        // Drop silently - no ack, no inbox
+        tracing::warn!(
+            "Dropped message {} from {:?}: invalid signature",
+            envelope.id,
+            envelope.from
+        );
         return Ok(());
     }
 
     // Check trust
     if !trusted.is_trusted(&envelope.from) {
-        // Drop silently - no ack, no inbox
+        tracing::warn!(
+            "Dropped message {} from {:?}: sender not trusted",
+            envelope.id,
+            envelope.from
+        );
         return Ok(());
     }
 
     // Verify envelope is addressed to us
     if envelope.to != keypair.public_key() {
-        // Drop silently - misaddressed message
+        tracing::warn!(
+            "Dropped message {} from {:?}: misaddressed (to {:?}, we are {:?})",
+            envelope.id,
+            envelope.from,
+            envelope.to,
+            keypair.public_key()
+        );
         return Ok(());
     }
 
     // Send ack if appropriate (not for Ack or Response)
     if should_ack(&envelope.kind) {
         let ack = create_ack(&envelope, keypair);
-        write_envelope_async(&mut stream, &ack).await?;
+        let frame = EnvelopeFrame {
+            envelope: ack,
+            raw: Arc::new(Bytes::new()),
+        };
+        framed.send(frame).await?;
     }
 
     // Enqueue to inbox
     inbox_sender
         .send(InboxItem::External { envelope })
-        .map_err(|_| IoTaskError::InboxClosed)?;
+        .map_err(|err| match err {
+            InboxError::Closed => IoTaskError::InboxClosed,
+            InboxError::Full => IoTaskError::InboxFull,
+        })?;
 
     Ok(())
 }
@@ -98,50 +137,6 @@ fn create_ack(original: &Envelope, keypair: &Keypair) -> Envelope {
     ack
 }
 
-/// Read an envelope from an async stream with length-prefix framing.
-async fn read_envelope_async<R: AsyncReadExt + Unpin>(
-    reader: &mut R,
-) -> Result<Envelope, IoTaskError> {
-    let mut len_bytes = [0u8; 4];
-    reader.read_exact(&mut len_bytes).await?;
-    let len = u32::from_be_bytes(len_bytes);
-
-    if len > MAX_PAYLOAD_SIZE {
-        return Err(IoTaskError::Transport(TransportError::MessageTooLarge {
-            size: len,
-        }));
-    }
-
-    let mut payload = vec![0u8; len as usize];
-    reader.read_exact(&mut payload).await?;
-
-    let envelope: Envelope =
-        ciborium::from_reader(&payload[..]).map_err(|e| IoTaskError::Cbor(e.to_string()))?;
-
-    Ok(envelope)
-}
-
-/// Write an envelope to an async stream with length-prefix framing.
-async fn write_envelope_async<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    envelope: &Envelope,
-) -> Result<(), IoTaskError> {
-    let mut payload = Vec::new();
-    ciborium::into_writer(envelope, &mut payload).map_err(|e| IoTaskError::Cbor(e.to_string()))?;
-
-    let len = payload.len() as u32;
-    if len > MAX_PAYLOAD_SIZE {
-        return Err(IoTaskError::Transport(TransportError::MessageTooLarge {
-            size: len,
-        }));
-    }
-
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&payload).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
 /// Errors that can occur in IO task operations.
 #[derive(Debug, thiserror::Error)]
 pub enum IoTaskError {
@@ -153,14 +148,20 @@ pub enum IoTaskError {
     Cbor(String),
     #[error("Inbox closed")]
     InboxClosed,
+    #[error("Inbox full")]
+    InboxFull,
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::identity::PubKey;
     use crate::inbox::Inbox;
     use crate::trust::TrustedPeer;
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::codec::FramedRead;
     use uuid::Uuid;
 
     fn make_keypair() -> Keypair {
@@ -199,10 +200,28 @@ mod tests {
         bytes
     }
 
+    async fn read_one_envelope<R>(reader: &mut R) -> Result<Envelope, std::io::Error>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let mut framed = FramedRead::new(
+            reader,
+            TransportCodec::new(crate::transport::MAX_PAYLOAD_SIZE),
+        );
+        match framed.next().await {
+            Some(Ok(frame)) => Ok(frame.envelope),
+            Some(Err(err)) => Err(err),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed",
+            )),
+        }
+    }
+
     #[test]
     fn test_handle_connection_compiles() {
         // This test just verifies the function signature compiles
-        fn _check_signature<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+        fn _check_signature<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
             _stream: S,
             _keypair: &Keypair,
             _trusted: &TrustedPeers,
@@ -242,7 +261,7 @@ mod tests {
         });
 
         // Read just the envelope (not the full handle_connection)
-        let received = read_envelope_async(&mut server_read).await.unwrap();
+        let received = read_one_envelope(&mut server_read).await.unwrap();
         assert_eq!(received.id, envelope_id);
     }
 
@@ -344,7 +363,7 @@ mod tests {
         });
 
         // Read ack from client side
-        let ack = read_envelope_async(&mut client_read).await.unwrap();
+        let ack = read_one_envelope(&mut client_read).await.unwrap();
         handle.await.unwrap().unwrap();
 
         // Verify ack
@@ -428,7 +447,7 @@ mod tests {
         });
 
         // Should receive an ack
-        let ack = read_envelope_async(&mut client_read).await.unwrap();
+        let ack = read_one_envelope(&mut client_read).await.unwrap();
         handle.await.unwrap().unwrap();
 
         match ack.kind {
@@ -467,7 +486,7 @@ mod tests {
         });
 
         // Should receive an ack
-        let ack = read_envelope_async(&mut client_read).await.unwrap();
+        let ack = read_one_envelope(&mut client_read).await.unwrap();
         handle.await.unwrap().unwrap();
 
         match ack.kind {
@@ -504,7 +523,7 @@ mod tests {
             .unwrap();
 
         // Should NOT receive an ack - connection closes without data
-        let result = read_envelope_async(&mut client_read).await;
+        let result = read_one_envelope(&mut client_read).await;
         assert!(result.is_err(), "Should not receive ack for Ack message");
     }
 
@@ -538,7 +557,7 @@ mod tests {
             .unwrap();
 
         // Should NOT receive an ack - connection closes without data
-        let result = read_envelope_async(&mut client_read).await;
+        let result = read_one_envelope(&mut client_read).await;
         assert!(
             result.is_err(),
             "Should not receive ack for Response message"
@@ -576,7 +595,7 @@ mod tests {
             .unwrap();
 
         // No ack sent - connection closes without data
-        let result = read_envelope_async(&mut client_read).await;
+        let result = read_one_envelope(&mut client_read).await;
         assert!(result.is_err(), "Should not send ack for invalid signature");
 
         // No inbox item
@@ -613,7 +632,7 @@ mod tests {
             .unwrap();
 
         // No ack sent - connection closes without data
-        let result = read_envelope_async(&mut client_read).await;
+        let result = read_one_envelope(&mut client_read).await;
         assert!(result.is_err(), "Should not send ack for untrusted sender");
 
         // No inbox item

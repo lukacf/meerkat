@@ -2,15 +2,14 @@
 //!
 //! Provides length-prefix framing and address parsing for UDS and TCP transports.
 
+pub mod codec;
 pub mod tcp;
 pub mod uds;
 
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::PathBuf;
 
 use thiserror::Error;
-
-use crate::types::Envelope;
 
 /// Maximum payload size: 1 MB (1,048,576 bytes).
 pub const MAX_PAYLOAD_SIZE: u32 = 1_048_576;
@@ -40,6 +39,9 @@ pub enum PeerAddr {
     /// TCP address as "host:port" string (supports both IP addresses and hostnames).
     /// DNS resolution happens at connect time via ToSocketAddrs.
     Tcp(String),
+    /// In-process address for sub-agent communication.
+    /// Messages are delivered directly via in-memory channels.
+    Inproc(String),
 }
 
 impl PeerAddr {
@@ -48,6 +50,7 @@ impl PeerAddr {
     /// Supported formats:
     /// - `uds:///path/to/socket.sock`
     /// - `tcp://host:port` (host can be IP address or hostname)
+    /// - `inproc://agent-name` (in-process delivery via registry)
     pub fn parse(s: &str) -> Result<Self, TransportError> {
         if let Some(path) = s.strip_prefix("uds://") {
             Ok(PeerAddr::Uds(PathBuf::from(path)))
@@ -60,60 +63,45 @@ impl PeerAddr {
             }
             // Store as string for DNS resolution at connect time
             Ok(PeerAddr::Tcp(addr_str.to_string()))
+        } else if let Some(name) = s.strip_prefix("inproc://") {
+            if name.is_empty() {
+                return Err(TransportError::InvalidAddress(
+                    "Inproc address must include agent name".to_string(),
+                ));
+            }
+            Ok(PeerAddr::Inproc(name.to_string()))
         } else {
             Err(TransportError::InvalidAddress(format!(
-                "unknown scheme, expected uds:// or tcp://: {s}"
+                "unknown scheme, expected uds://, tcp://, or inproc://: {s}"
             )))
+        }
+    }
+
+    /// Check if this is an in-process address.
+    pub fn is_inproc(&self) -> bool {
+        matches!(self, PeerAddr::Inproc(_))
+    }
+
+    /// Get the agent name for inproc addresses.
+    pub fn inproc_name(&self) -> Option<&str> {
+        match self {
+            PeerAddr::Inproc(name) => Some(name),
+            _ => None,
         }
     }
 }
 
-/// Write an envelope to a writer with length-prefix framing.
-///
-/// Format: `[4 bytes: payload length (big-endian u32)] [payload: CBOR-encoded Envelope]`
-pub fn write_envelope<W: Write>(writer: &mut W, envelope: &Envelope) -> Result<(), TransportError> {
-    let mut payload = Vec::new();
-    ciborium::into_writer(envelope, &mut payload)
-        .map_err(|e| TransportError::Cbor(e.to_string()))?;
-
-    let len = payload.len() as u32;
-    if len > MAX_PAYLOAD_SIZE {
-        return Err(TransportError::MessageTooLarge { size: len });
-    }
-
-    writer.write_all(&len.to_be_bytes())?;
-    writer.write_all(&payload)?;
-    writer.flush()?;
-    Ok(())
-}
-
-/// Read an envelope from a reader with length-prefix framing.
-///
-/// Format: `[4 bytes: payload length (big-endian u32)] [payload: CBOR-encoded Envelope]`
-pub fn read_envelope<R: Read>(reader: &mut R) -> Result<Envelope, TransportError> {
-    let mut len_bytes = [0u8; 4];
-    reader.read_exact(&mut len_bytes)?;
-    let len = u32::from_be_bytes(len_bytes);
-
-    if len > MAX_PAYLOAD_SIZE {
-        return Err(TransportError::MessageTooLarge { size: len });
-    }
-
-    let mut payload = vec![0u8; len as usize];
-    reader.read_exact(&mut payload)?;
-
-    let envelope: Envelope = ciborium::from_reader(&payload[..])
-        .map_err(|e| TransportError::InvalidFrame(format!("CBOR decode error: {e}")))?;
-
-    Ok(envelope)
-}
-
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::identity::{Keypair, PubKey};
+    use crate::transport::codec::{EnvelopeFrame, TransportCodec};
+    use crate::types::Envelope;
     use crate::types::MessageKind;
-    use std::io::Cursor;
+    use bytes::{Bytes, BytesMut};
+    use std::sync::Arc;
+    use tokio_util::codec::{Decoder, Encoder};
     use uuid::Uuid;
 
     fn make_test_envelope() -> Envelope {
@@ -236,10 +224,65 @@ mod tests {
     }
 
     #[test]
-    fn test_write_envelope_format() {
+    fn test_peer_addr_inproc_variant() {
+        let addr = PeerAddr::Inproc("sub-agent-123".to_string());
+        match addr {
+            PeerAddr::Inproc(name) => assert_eq!(name, "sub-agent-123"),
+            _ => panic!("expected Inproc variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_inproc_addr() {
+        let addr = PeerAddr::parse("inproc://my-sub-agent").unwrap();
+        match addr {
+            PeerAddr::Inproc(name) => assert_eq!(name, "my-sub-agent"),
+            _ => panic!("expected Inproc variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_inproc_addr_empty_name() {
+        let result = PeerAddr::parse("inproc://");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("agent name"));
+    }
+
+    #[test]
+    fn test_inproc_is_inproc() {
+        let inproc = PeerAddr::Inproc("test".to_string());
+        let uds = PeerAddr::Uds(PathBuf::from("/tmp/test.sock"));
+        let tcp = PeerAddr::Tcp("localhost:8080".to_string());
+
+        assert!(inproc.is_inproc());
+        assert!(!uds.is_inproc());
+        assert!(!tcp.is_inproc());
+    }
+
+    #[test]
+    fn test_inproc_name() {
+        let inproc = PeerAddr::Inproc("my-agent".to_string());
+        let uds = PeerAddr::Uds(PathBuf::from("/tmp/test.sock"));
+
+        assert_eq!(inproc.inproc_name(), Some("my-agent"));
+        assert_eq!(uds.inproc_name(), None);
+    }
+
+    #[test]
+    fn test_transport_codec_encode_format() {
         let envelope = make_test_envelope();
-        let mut buf = Vec::new();
-        write_envelope(&mut buf, &envelope).unwrap();
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
+        let mut buf = BytesMut::new();
+        codec
+            .encode(
+                EnvelopeFrame {
+                    envelope,
+                    raw: Arc::new(Bytes::new()),
+                },
+                &mut buf,
+            )
+            .unwrap();
 
         // First 4 bytes are big-endian length
         let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
@@ -248,46 +291,61 @@ mod tests {
     }
 
     #[test]
-    fn test_read_envelope() {
+    fn test_transport_codec_decode_roundtrip() {
         let envelope = make_test_envelope();
-        let mut buf = Vec::new();
-        write_envelope(&mut buf, &envelope).unwrap();
+        let envelope_id = envelope.id;
+        let envelope_from = envelope.from;
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
+        let mut buf = BytesMut::new();
+        codec
+            .encode(
+                EnvelopeFrame {
+                    envelope,
+                    raw: Arc::new(Bytes::new()),
+                },
+                &mut buf,
+            )
+            .unwrap();
 
-        let mut cursor = Cursor::new(&buf);
-        let decoded = read_envelope(&mut cursor).unwrap();
-        assert_eq!(decoded.id, envelope.id);
-        assert_eq!(decoded.from, envelope.from);
+        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded.envelope.id, envelope_id);
+        assert_eq!(decoded.envelope.from, envelope_from);
     }
 
     #[test]
-    fn test_reject_oversized_payload() {
+    fn test_transport_codec_reject_oversized_payload() {
         // Craft a fake length prefix indicating > 1 MB
-        let mut buf = Vec::new();
+        let mut buf = BytesMut::new();
         buf.extend_from_slice(&2_000_000u32.to_be_bytes());
         buf.extend_from_slice(&[0u8; 100]); // partial payload
 
-        let mut cursor = Cursor::new(&buf);
-        let result = read_envelope(&mut cursor);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            TransportError::MessageTooLarge { size } => assert_eq!(size, 2_000_000),
-            e => panic!("expected MessageTooLarge, got {e:?}"),
-        }
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
+        let err = codec.decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("message too large"));
     }
 
     #[test]
-    fn test_envelope_roundtrip() {
+    fn test_transport_codec_envelope_roundtrip() {
         let envelope = make_test_envelope();
-        let mut buf = Vec::new();
-        write_envelope(&mut buf, &envelope).unwrap();
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
+        let mut buf = BytesMut::new();
+        codec
+            .encode(
+                EnvelopeFrame {
+                    envelope: envelope.clone(),
+                    raw: Arc::new(Bytes::new()),
+                },
+                &mut buf,
+            )
+            .unwrap();
 
-        let mut cursor = Cursor::new(&buf);
-        let decoded = read_envelope(&mut cursor).unwrap();
+        let decoded = codec.decode(&mut buf).unwrap().unwrap();
 
-        assert_eq!(decoded.id, envelope.id);
-        assert_eq!(decoded.from, envelope.from);
-        assert_eq!(decoded.to, envelope.to);
+        assert_eq!(decoded.envelope.id, envelope.id);
+        assert_eq!(decoded.envelope.from, envelope.from);
+        assert_eq!(decoded.envelope.to, envelope.to);
         // Verify signature is preserved
-        assert!(decoded.verify());
+        assert!(decoded.envelope.verify());
     }
 }

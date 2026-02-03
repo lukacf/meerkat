@@ -1,43 +1,17 @@
-//! Tool errors
+//! Tool error types for Meerkat.
 
-#[derive(Debug, thiserror::Error)]
-pub enum ToolError {
-    #[error("Tool not found: {0}")]
-    NotFound(String),
+pub use meerkat_core::error::{ToolError, ToolValidationError};
+use thiserror::Error;
 
-    #[error("Validation error: {0}")]
-    Validation(String),
-
-    #[error("Execution error: {0}")]
-    Execution(String),
-
-    #[error("Timeout: {0}")]
-    Timeout(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ToolValidationError {
-    #[error("Tool not found: {0}")]
-    ToolNotFound(String),
-
-    #[error("Schema validation failed: {0}")]
-    SchemaValidation(String),
-
-    #[error("Missing required field: {0}")]
-    MissingField(String),
-
-    #[error("Invalid type for field {field}: expected {expected}")]
-    InvalidType { field: String, expected: String },
-}
-
-#[derive(Debug, thiserror::Error)]
+/// Errors that can occur during tool dispatch
+#[derive(Debug, Error)]
 pub enum DispatchError {
-    #[error("Tool validation error: {0}")]
+    #[error("Validation error: {0}")]
     Validation(#[from] ToolValidationError),
-
+    #[error("Tool error: {0}")]
+    Tool(#[from] ToolError),
     #[error("MCP error: {0}")]
-    Mcp(#[from] meerkat_mcp_client::McpError),
-
-    #[error("Tool {tool} timed out after {timeout_ms}ms")]
-    Timeout { tool: String, timeout_ms: u64 },
+    Mcp(#[from] meerkat_mcp::McpError),
+    #[error("Timeout: tool execution took longer than {timeout_ms}ms")]
+    Timeout { timeout_ms: u64 },
 }

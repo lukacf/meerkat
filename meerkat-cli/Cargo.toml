@@ -18,7 +18,8 @@ meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
-meerkat-mcp-client = { workspace = true }
+meerkat-mcp = { workspace = true }
+meerkat-comms = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

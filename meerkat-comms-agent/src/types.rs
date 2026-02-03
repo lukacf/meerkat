@@ -6,6 +6,7 @@
 use meerkat_comms::{InboxItem, MessageKind, PubKey, TrustedPeers};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::borrow::Cow;
 use uuid::Uuid;
 
 /// Content variants for comms messages.
@@ -179,6 +180,12 @@ impl CommsMessage {
     }
 }
 
+impl meerkat_core::TurnBoundaryMessage for CommsMessage {
+    fn render_for_prompt(&self) -> Cow<'_, str> {
+        Cow::Owned(self.to_user_message_text())
+    }
+}
+
 /// Create a CommsMessage from an Envelope directly (for testing).
 #[cfg(test)]
 impl CommsMessage {
@@ -196,6 +203,7 @@ impl CommsMessage {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_comms::{Envelope, Keypair, Signature, TrustedPeer};
@@ -281,7 +289,7 @@ mod tests {
         assert_eq!(msg.from_peer, "sender-agent");
         match msg.content {
             CommsContent::Message { body } => assert_eq!(body, "hello world"),
-            _ => panic!("expected Message"),
+            _ => unreachable!("expected Message"),
         }
     }
 
@@ -314,7 +322,7 @@ mod tests {
                 assert_eq!(intent, "review-pr");
                 assert_eq!(params["pr"], 123);
             }
-            _ => panic!("expected Request"),
+            _ => unreachable!("expected Request"),
         }
     }
 
@@ -348,7 +356,7 @@ mod tests {
                 assert_eq!(status, CommsStatus::Completed);
                 assert_eq!(result["approved"], true);
             }
-            _ => panic!("expected Response"),
+            _ => unreachable!("expected Response"),
         }
     }
 

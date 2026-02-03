@@ -1,0 +1,21 @@
+            let content = match envelope.kind {
+                crate::MessageKind::Message { body } => CommsContent::Message { body },
+                crate::MessageKind::Request { intent, params } => CommsContent::Request {
+                    request_id: envelope.id,
+                    intent,
+                    params,
+                },
+                crate::MessageKind::Response {
+                    in_reply_to,
+                    status,
+                    result,
+                } => CommsContent::Response {
+                    in_reply_to,
+                    status: CommsStatus::from(status),
+                    result,
+                },
+                crate::MessageKind::Ack { .. } => {
+                    // Acks are not converted to CommsMessage
+                    return None;
+                }
+            };

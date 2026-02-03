@@ -4,18 +4,28 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,ignore
+//! ```text
 //! use meerkat::prelude::*;
+//! use meerkat::AgentFactory;
+//! use meerkat::AnthropicClient;
+//! use meerkat_store::{JsonlStore, StoreAdapter};
+//! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Create an agent with Anthropic
-//!     let result = meerkat::with_anthropic(std::env::var("ANTHROPIC_API_KEY")?)
-//!         .model("claude-sonnet-4")
-//!         .system_prompt("You are a helpful assistant.")
-//!         .run("What is 2 + 2?")
-//!         .await?;
+//!     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+//!     let factory = AgentFactory::new(std::path::PathBuf::from(".rkat/sessions"));
 //!
+//!     let client = Arc::new(AnthropicClient::new(api_key));
+//!     let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
+//!     let store = Arc::new(JsonlStore::new(&factory.store_path)?);
+//!     let store = Arc::new(StoreAdapter::new(store));
+//!     let tools = Arc::new(meerkat_tools::EmptyToolDispatcher::default());
+//!
+//!     let mut agent = AgentBuilder::new()
+//!         .model("claude-sonnet-4")
+//!         .build(Arc::new(llm), tools, store);
+//!     let result = agent.run("What is 2 + 2?".to_string()).await?;
 //!     println!("{}", result.text);
 //!     Ok(())
 //! }
@@ -36,6 +46,9 @@ pub use meerkat_core::{
     AgentToolDispatcher,
     ArtifactRef,
     AssistantMessage,
+    // Gateway for composing dispatchers
+    Availability,
+    AvailabilityCheck,
     // Budget
     Budget,
     BudgetConfig,
@@ -45,6 +58,7 @@ pub use meerkat_core::{
     ConcurrencyLimits,
     // Config
     Config,
+    ConfigDelta,
     ContextStrategy,
     ForkBranch,
     ForkBudgetPolicy,
@@ -58,6 +72,7 @@ pub use meerkat_core::{
     OperationPolicy,
     OperationResult,
     OperationSpec,
+    OutputSchema,
     ProviderConfig,
     ResultShape,
     RetryConfig,
@@ -70,9 +85,6 @@ pub use meerkat_core::{
     SessionId,
     SessionMeta,
     SpawnSpec,
-    SteeringHandle,
-    SteeringMessage,
-    SteeringStatus,
     StopReason,
     StorageConfig,
     // Sub-agents
@@ -82,7 +94,8 @@ pub use meerkat_core::{
     ToolAccessPolicy,
     ToolCall,
     ToolDef,
-    ToolError,
+    ToolGateway,
+    ToolGatewayBuilder,
     ToolResult,
     Usage,
     UserMessage,
@@ -90,8 +103,17 @@ pub use meerkat_core::{
     WorkKind,
 };
 
+// Re-export comms types from meerkat_comms
+pub use meerkat_comms::agent::{CommsContent, CommsMessage, CommsStatus};
+pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CoreCommsConfig};
+
 // Re-export client types
-pub use meerkat_client::{LlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse};
+pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};
+pub use meerkat_tools::ToolError;
+
+// AgentFactory
+mod factory;
+pub use factory::AgentFactory;
 
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;
@@ -116,17 +138,20 @@ pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidat
 
 // Re-export builtin tools infrastructure
 pub use meerkat_tools::{
-    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
-    CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore,
-    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir, find_project_root,
+    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CommsToolSurface,
+    CompositeDispatcher, CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore,
+    MemoryTaskStore, ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
+    find_project_root,
 };
 
 // Re-export MCP client
-pub use meerkat_mcp_client::{McpConnection, McpError, McpRouter, McpServerConfig};
+pub use meerkat_mcp::{McpConnection, McpError, McpRouter, McpServerConfig};
 
 // SDK module
 mod sdk;
 pub use sdk::*;
+mod sdk_config;
+pub use sdk_config::SdkConfigStore;
 
 /// Prelude module for convenient imports
 pub mod prelude {
@@ -145,14 +170,4 @@ pub mod prelude {
 
     #[cfg(feature = "gemini")]
     pub use super::GeminiClient;
-
-    // SDK helpers
-    #[cfg(feature = "anthropic")]
-    pub use super::with_anthropic;
-
-    #[cfg(feature = "openai")]
-    pub use super::with_openai;
-
-    #[cfg(feature = "gemini")]
-    pub use super::with_gemini;
 }

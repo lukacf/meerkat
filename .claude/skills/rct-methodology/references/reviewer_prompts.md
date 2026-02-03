@@ -1,14 +1,42 @@
 # Reviewer Agent Prompts
 
-These prompts are used to spawn reviewer sub-agents at the end of each implementation phase. Replace `{PHASE}` with the phase number and `{PHASE_SPECIFIC_COMMANDS}` with the verification commands listed in that phase's Gate Review section.
+These prompts are used to spawn reviewer sub-agents at the end of each implementation phase.
+Store reviewer prompts under `.rct/agents/` (one file per reviewer). Replace `{PHASE}` with the phase number and `{PHASE_SPECIFIC_COMMANDS}` with the `verification_commands` list from `.rct/checklist.yaml` for that phase.
 
 > **Philosophy**: Reviewers must be brutally honest and critical. A false APPROVE is worse than a false BLOCK. When evidence exists for a problem, reviewers MUST block - do not soften findings to be "helpful."
+
+---
+
+## CRITICAL: File Location Rules
+
+**All RCT artifacts are in `.rct/`:**
+- `.rct/spec.yaml` — authoritative specification (ONLY spec source)
+- `.rct/checklist.yaml` — task checklist (source of truth for task status)
+- `.rct/plan.md` — implementation plan
+- `.rct/outputs/CHECKLIST.md` — rendered view only (NOT source of truth)
+
+**There is NO `CHECKLIST.md` at repo root.**
+
+**You MUST ignore ALL files outside `.rct/`:**
+- `docs/` — may contain outdated or legacy content
+- `docs/legacy/` — explicitly deprecated, DO NOT USE
+- `README.md` — informational only, not authoritative
+
+If you find a conflict between `.rct/spec.yaml` and any document outside `.rct/`, the `.rct/spec.yaml` is ALWAYS correct. Do not cite external documents as evidence for blockers.
 
 ---
 
 ## CRITICAL: Reviewer Independence Rules
 
 **These rules prevent the most common failure modes in AI-assisted RCT execution.**
+
+### 0. YAML-Only Output (Luka Loop)
+
+When used with the Luka Loop, reviewers must output YAML **only** (no fences, no commentary).
+YAML must start with `verdict:` at column 1 and include:
+`verdict`, `gate`, `phase`, `blocking`, `non_blocking`.
+If a blocker belongs to an earlier phase, include `origin_phase` and `origin_tasks`.
+If you BLOCK, you MUST include an `evidence` field with a concrete test name or file+line.
 
 ### 1. No Status Echoing
 
@@ -224,14 +252,25 @@ BE BRUTALLY HONEST. Your job is to ensure the implementation matches the specifi
 
 IMPORTANT: You must INDEPENDENTLY discover the state of the codebase. Do not rely on any state descriptions provided in this prompt - run the commands yourself and report what YOU find.
 
+## CRITICAL: Specification Source
+
+The ONLY authoritative specification is `.rct/spec.yaml`.
+
+DO NOT read or cite:
+- `docs/` or `docs/legacy/` — these are outdated/deprecated
+- Any `.md` files outside `.rct/`
+- README files
+
+If you find yourself reading a file path that does NOT start with `.rct/`, STOP and use `.rct/spec.yaml` instead.
+
 Your scope is LIMITED to requirements compliance:
-- Spec requirements (MUST/REQUIRED statements)
-- User-facing behavior matching defined scenarios
-- Contract drift (implementation differs from spec without spec update)
+- Spec requirements (MUST/REQUIRED statements) **from `.rct/spec.yaml` ONLY**
+- User-facing behavior matching defined scenarios **from `.rct/spec.yaml` ONLY**
+- Contract drift (implementation differs from `.rct/spec.yaml`)
 
 ## Phase-to-Spec Mapping
 
-Each phase maps to specific spec sections. Only audit the relevant sections for Phase {PHASE}. Refer to the implementation plan for the mapping.
+Each phase maps to specific spec sections in `.rct/spec.yaml`. Only audit the relevant sections for Phase {PHASE}. Refer to `.rct/plan.md` for the mapping.
 
 ## Phase-Specific Expectations ("Red OK" Rules)
 
@@ -249,18 +288,20 @@ Run these commands yourself and analyze the output:
 ## Anti-Pattern Detection (REQUIRED)
 
 ### Infinite Deferral Detection
-Search for spec-required features being deferred:
+Search for spec-required features being deferred (search ONLY in `.rct/`):
 ```bash
-grep -ri "v0.2\|phase 0.2\|future work\|out of scope\|deferred\|later version" docs/ CHECKLIST.md README.md
+grep -ri "v0.2\|phase 0.2\|future work\|out of scope\|deferred\|later version" .rct/
 ```
 
-Cross-reference any deferred items against spec MUST/REQUIRED statements. If a user-requested or spec-required feature appears in a deferral list, you MUST block.
+Cross-reference any deferred items against `.rct/spec.yaml` MUST/REQUIRED statements. If a spec-required feature appears in a deferral list, you MUST block.
+
+**DO NOT search in `docs/` — those files are not authoritative.**
 
 ### Checklist Honesty Check
-Compare checklist [x] marks against actual implementation:
-- Read the CHECKLIST.md for tasks marked complete
-- Verify the "Done when" condition is actually satisfied
-- If a task is marked [x] but the condition is not met, block with CHECKLIST_DISHONESTY
+Compare checklist marks against actual implementation:
+- Read `.rct/checklist.yaml` (source of truth) or `.rct/outputs/CHECKLIST.md` (rendered view)
+- Verify the "done_when" condition is actually satisfied
+- If a task is marked complete but the condition is not met, block with CHECKLIST_DISHONESTY
 
 ## Blocking Rules
 
@@ -434,8 +475,8 @@ Your scope:
 ### 1. Process vs Product Ratio
 Count lines changed in methodology files vs implementation files:
 ```bash
-# Methodology artifacts
-wc -l CHECKLIST.md docs/*.md .claude/**/*.md 2>/dev/null | tail -1
+# Methodology artifacts (only count .rct/ - ignore docs/)
+wc -l .rct/**/*.md .rct/**/*.yaml 2>/dev/null | tail -1
 
 # Implementation code
 find src/ crates/ -name "*.rs" -o -name "*.py" | xargs wc -l 2>/dev/null | tail -1
@@ -459,10 +500,10 @@ Any results in supposedly-complete code = STUB_REMAINING.
 
 ### 4. Deferred Requirements Check
 ```bash
-grep -ri "v0.2\|deferred\|future work\|out of scope" docs/ CHECKLIST.md
+grep -ri "v0.2\|deferred\|future work\|out of scope" .rct/
 ```
 
-Cross-reference against original spec MUST statements.
+Cross-reference against `.rct/spec.yaml` MUST statements. DO NOT use `docs/` — it may contain legacy content.
 
 ## Blocking Rules
 

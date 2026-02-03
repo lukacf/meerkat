@@ -60,7 +60,7 @@ fn transport_label(kind: McpTransportKind) -> &'static str {
 }
 
 /// Add an MCP server to the configuration
-pub fn add_server(
+pub async fn add_server(
     name: String,
     transport: Option<McpTransportKind>,
     url: Option<String>,
@@ -76,7 +76,7 @@ pub fn add_server(
     };
 
     // Check if server already exists in this scope
-    if McpConfig::server_exists(&name, scope)? {
+    if McpConfig::server_exists(&name, scope).await? {
         anyhow::bail!(
             "MCP server '{}' already exists in {} scope. Remove it first with: rkat mcp remove {} --scope {}",
             name,
@@ -155,7 +155,13 @@ pub fn add_server(
     };
 
     // Add to file using toml_edit to preserve formatting
-    add_server_to_file(&path, &server)?;
+    {
+        let path = path.clone();
+        let server = server.clone();
+        tokio::task::spawn_blocking(move || add_server_to_file(&path, &server))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to update mcp.toml: {}", e))??;
+    }
 
     let (kind, target) = format_server_target(&server);
     println!(
@@ -199,9 +205,9 @@ fn parse_headers(headers: &[String]) -> anyhow::Result<HashMap<String, String>> 
 }
 
 /// Remove an MCP server from the configuration
-pub fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Result<()> {
+pub async fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Result<()> {
     // Find which scopes contain this server
-    let scopes = McpConfig::find_server_scopes(&name)?;
+    let scopes = McpConfig::find_server_scopes(&name).await?;
 
     if scopes.is_empty() {
         anyhow::bail!("MCP server '{}' not found", name);
@@ -238,7 +244,13 @@ pub fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Result<()
     };
 
     // Remove from file
-    remove_server_from_file(&path, &name)?;
+    {
+        let path = path.clone();
+        let name = name.clone();
+        tokio::task::spawn_blocking(move || remove_server_from_file(&path, &name))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to update mcp.toml: {}", e))??;
+    }
 
     println!(
         "Removed MCP server '{}' from {} config: {}",
@@ -250,17 +262,17 @@ pub fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Result<()
 }
 
 /// List configured MCP servers
-pub fn list_servers(scope: Option<McpScope>, json_output: bool) -> anyhow::Result<()> {
+pub async fn list_servers(scope: Option<McpScope>, json_output: bool) -> anyhow::Result<()> {
     let servers = match scope {
         Some(s) => {
-            let config = McpConfig::load_scope(s)?;
+            let config = McpConfig::load_scope(s).await?;
             config
                 .servers
                 .into_iter()
                 .map(|server| meerkat_core::mcp_config::McpServerWithScope { server, scope: s })
                 .collect()
         }
-        None => McpConfig::load_with_scopes()?,
+        None => McpConfig::load_with_scopes().await?,
     };
 
     if json_output {
@@ -315,10 +327,14 @@ pub fn list_servers(scope: Option<McpScope>, json_output: bool) -> anyhow::Resul
 }
 
 /// Get details of a specific MCP server
-pub fn get_server(name: String, scope: Option<McpScope>, json_output: bool) -> anyhow::Result<()> {
+pub async fn get_server(
+    name: String,
+    scope: Option<McpScope>,
+    json_output: bool,
+) -> anyhow::Result<()> {
     let servers = match scope {
         Some(s) => {
-            let config = McpConfig::load_scope(s)?;
+            let config = McpConfig::load_scope(s).await?;
             config
                 .servers
                 .into_iter()
@@ -326,7 +342,8 @@ pub fn get_server(name: String, scope: Option<McpScope>, json_output: bool) -> a
                 .map(|server| meerkat_core::mcp_config::McpServerWithScope { server, scope: s })
                 .collect::<Vec<_>>()
         }
-        None => McpConfig::load_with_scopes()?
+        None => McpConfig::load_with_scopes()
+            .await?
             .into_iter()
             .filter(|s| s.server.name == name)
             .collect(),
@@ -519,6 +536,7 @@ fn remove_server_from_file(path: &Path, name: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

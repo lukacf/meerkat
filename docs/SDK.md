@@ -61,21 +61,37 @@ meerkat = { version = "0.1", features = ["jsonl-store", "memory-store"] }
 
 ### Minimal Example
 
-The simplest way to use Meerkat is with the SDK helper functions:
+The simplest way to use Meerkat is with the shared AgentFactory and AgentBuilder:
 
 ```rust
-use meerkat::prelude::*;
+use meerkat::{AgentBuilder, AgentFactory, AnthropicClient};
+use meerkat_store::{JsonlStore, StoreAdapter};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
 
-    let result = meerkat::with_anthropic(api_key)
+    let store_dir = std::env::current_dir()?.join(".rkat").join("sessions");
+    std::fs::create_dir_all(&store_dir)?;
+
+    let factory = AgentFactory::new(store_dir.clone());
+    let client = Arc::new(AnthropicClient::new(api_key));
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
+
+    let store = Arc::new(JsonlStore::new(store_dir));
+    store.init().await?;
+    let store = Arc::new(StoreAdapter::new(store));
+
+    let tools = Arc::new(meerkat_tools::EmptyToolDispatcher::default());
+
+    let mut agent = AgentBuilder::new()
         .model("claude-sonnet-4")
         .system_prompt("You are a helpful assistant.")
-        .max_tokens(1024)
-        .run("What is the capital of France?")
-        .await?;
+        .max_tokens_per_turn(1024)
+        .build(Arc::new(llm), tools, store);
+
+    let result = agent.run("What is the capital of France?".to_string()).await?;
 
     println!("Response: {}", result.text);
     println!("Tokens used: {}", result.usage.total_tokens());

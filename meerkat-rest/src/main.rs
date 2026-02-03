@@ -5,19 +5,15 @@
 //! # Environment Variables
 //!
 //! - `ANTHROPIC_API_KEY`: Required API key for Anthropic
-//! - `RKAT_STORE_PATH`: Optional path for session storage (default: ~/.local/share/meerkat/sessions)
-//! - `RKAT_MODEL`: Default model to use (default: claude-opus-4-5)
-//! - `RKAT_MAX_TOKENS`: Default max tokens per turn (default: 4096)
-//! - `RKAT_HOST`: Host to bind to (default: 127.0.0.1)
-//! - `RKAT_PORT`: Port to bind to (default: 8080)
 
+use meerkat_core::{Config, ProviderConfig};
 use meerkat_rest::{AppState, router};
 use std::net::SocketAddr;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
@@ -27,16 +23,8 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Check for API key early
-    if std::env::var("ANTHROPIC_API_KEY").is_err() {
-        tracing::warn!(
-            "ANTHROPIC_API_KEY not set - API calls will fail. \
-             Set the environment variable before making requests."
-        );
-    }
-
     // Build app state
-    let state = AppState::default();
+    let state = AppState::load().await;
     tracing::info!(
         store_path = %state.store_path.display(),
         default_model = %state.default_model,
@@ -44,47 +32,66 @@ async fn main() {
         "Starting Meerkat REST server"
     );
 
+    // Check for API key early
+    let mut config = state
+        .config_store
+        .get()
+        .await
+        .unwrap_or_else(|_| Config::default());
+    if let Err(err) = config.apply_env_overrides() {
+        tracing::warn!("Failed to apply env overrides: {}", err);
+    }
+    let has_api_key = match &config.provider {
+        ProviderConfig::Anthropic { api_key, .. } => api_key.is_some(),
+        ProviderConfig::OpenAI { api_key, .. } => api_key.is_some(),
+        ProviderConfig::Gemini { api_key } => api_key.is_some(),
+    };
+    if !has_api_key {
+        tracing::warn!(
+            "No provider API key configured (config or environment). \
+             API calls will fail until a key is set."
+        );
+    }
+
+    // Parse host and port from config (non-secret settings)
+    let addr: SocketAddr = format!("{}:{}", state.rest_host, state.rest_port)
+        .parse()
+        .map_err(|e| format!("Invalid host:port combination: {}", e))?;
+
     // Build router with middleware
     let app = router(state)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
 
-    // Parse host and port
-    let host = std::env::var("RKAT_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port: u16 = std::env::var("RKAT_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8080);
-
-    let addr: SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .expect("Invalid host:port combination");
-
     tracing::info!("Listening on http://{}", addr);
 
     // Run server with graceful shutdown
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap();
+        .await?;
 
     tracing::info!("Server shutdown complete");
+    Ok(())
 }
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to install Ctrl+C handler: {}", e);
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("Failed to install signal handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to install signal handler: {}", e);
+            }
+        }
     };
 
     #[cfg(not(unix))]

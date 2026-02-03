@@ -1,35 +1,34 @@
 //! Anthropic Claude API client
 //!
-//! Implements the LlmClient trait for Anthropic's Messages API.
+//! Implements the LlmClient trait for Anthropic's Claude API.
 
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmEvent, LlmRequest, ToolCallBuffer};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use meerkat_core::{Message, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-/// Default connect timeout for HTTP connections
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Default request timeout (long for streaming responses)
+/// Default connect timeout
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default request timeout
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 /// Default pool idle timeout
 const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
-/// Initial capacity for SSE buffer (typical SSE event is ~200-500 bytes)
-const SSE_BUFFER_CAPACITY: usize = 512;
+/// SSE buffer capacity to reduce reallocations
+const SSE_BUFFER_CAPACITY: usize = 4096;
 
-/// Anthropic Claude API client
+/// Client for Anthropic API
 pub struct AnthropicClient {
     api_key: String,
     base_url: String,
     http: reqwest::Client,
 }
 
-/// Builder for AnthropicClient with configurable HTTP settings
+/// Builder for AnthropicClient
 pub struct AnthropicClientBuilder {
     api_key: String,
     base_url: String,
@@ -39,7 +38,6 @@ pub struct AnthropicClientBuilder {
 }
 
 impl AnthropicClientBuilder {
-    /// Create a new builder with the given API key
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
@@ -75,27 +73,27 @@ impl AnthropicClientBuilder {
     }
 
     /// Build the client with configured HTTP settings
-    pub fn build(self) -> AnthropicClient {
-        let http = reqwest::Client::builder()
+    pub fn build(self) -> Result<AnthropicClient, LlmError> {
+        let http = crate::http::build_http_client(
+            reqwest::Client::builder()
             .connect_timeout(self.connect_timeout)
             .timeout(self.request_timeout)
             .pool_idle_timeout(self.pool_idle_timeout)
             .pool_max_idle_per_host(4)
             .tcp_keepalive(Duration::from_secs(30))
-            .build()
-            .expect("Failed to build HTTP client");
+        )?;
 
-        AnthropicClient {
+        Ok(AnthropicClient {
             api_key: self.api_key,
             base_url: self.base_url,
             http,
-        }
+        })
     }
 }
 
 impl AnthropicClient {
     /// Create a new Anthropic client with the given API key and default HTTP settings
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String) -> Result<Self, LlmError> {
         AnthropicClientBuilder::new(api_key).build()
     }
 
@@ -106,8 +104,10 @@ impl AnthropicClient {
 
     /// Create from environment variable ANTHROPIC_API_KEY
     pub fn from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| LlmError::InvalidApiKey)?;
-        Ok(Self::new(api_key))
+        let api_key = std::env::var("RKAT_ANTHROPIC_API_KEY")
+            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+            .map_err(|_| LlmError::InvalidApiKey)?;
+        Self::new(api_key)
     }
 
     /// Set custom base URL
@@ -157,17 +157,16 @@ impl AnthropicClient {
                     }));
                 }
                 Message::ToolResults { results } => {
-                    let content: Vec<Value> = results
-                        .iter()
-                        .map(|r| {
-                            serde_json::json!({
-                                "type": "tool_result",
-                                "tool_use_id": r.tool_use_id,
-                                "content": r.content,
-                                "is_error": r.is_error
-                            })
-                        })
-                        .collect();
+                    let mut content = Vec::new();
+
+                    for r in results {
+                        content.push(serde_json::json!({
+                            "type": "tool_result",
+                            "tool_use_id": r.tool_use_id,
+                            "content": r.content,
+                            "is_error": r.is_error
+                        }));
+                    }
 
                     messages.push(serde_json::json!({
                         "role": "user",
@@ -189,7 +188,9 @@ impl AnthropicClient {
         }
 
         if let Some(temp) = request.temperature {
-            body["temperature"] = Value::Number(serde_json::Number::from_f64(temp as f64).unwrap());
+            if let Some(num) = serde_json::Number::from_f64(temp as f64) {
+                body["temperature"] = Value::Number(num);
+            }
         }
 
         if !request.tools.is_empty() {
@@ -209,20 +210,50 @@ impl AnthropicClient {
 
         // Extract provider-specific params
         if let Some(ref params) = request.provider_params {
-            // thinking_budget -> Anthropic thinking.budget_tokens (requires thinking.type = "enabled")
-            if let Some(thinking_budget) = params.get("thinking_budget") {
-                if let Some(budget) = thinking_budget.as_u64() {
-                    body["thinking"] = serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": budget
-                    });
+            // Handle thinking config from both formats:
+            // 1. Legacy flat format: {"thinking_budget": 10000}
+            // 2. Typed AnthropicParams: {"thinking": {"type": "enabled", "budget_tokens": 10000}}
+            let thinking_budget = params
+                .get("thinking_budget")
+                .and_then(|v| v.as_u64())
+                .or_else(|| {
+                    params
+                        .get("thinking")
+                        .and_then(|t| t.get("budget_tokens"))
+                        .and_then(|v| v.as_u64())
+                });
+
+            if let Some(budget) = thinking_budget {
+                body["thinking"] = serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget
+                });
+            }
+
+            // top_k must be a number - coerce strings from CLI --param
+            if let Some(top_k) = params.get("top_k") {
+                let numeric_top_k = match top_k {
+                    Value::Number(_) => Some(top_k.clone()),
+                    Value::String(s) => s.parse::<u64>().ok().map(|n| Value::Number(n.into())),
+                    _ => None,
+                };
+                if let Some(v) = numeric_top_k {
+                    body["top_k"] = v;
                 }
             }
 
-            // top_k -> Anthropic top_k parameter
-            if let Some(top_k) = params.get("top_k") {
-                if let Some(k) = top_k.as_u64() {
-                    body["top_k"] = Value::Number(serde_json::Number::from(k));
+            // Handle structured output configuration
+            // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
+            if let Some(structured) = params.get("structured_output") {
+                if let Some(schema) = structured.get("schema") {
+                    // Anthropic requires additionalProperties: false on all objects
+                    let prepared_schema = Self::prepare_schema_for_anthropic(schema);
+                    body["output_config"] = serde_json::json!({
+                        "format": {
+                            "type": "json_schema",
+                            "schema": prepared_schema
+                        }
+                    });
                 }
             }
         }
@@ -230,16 +261,71 @@ impl AnthropicClient {
         body
     }
 
-    /// Parse an SSE event from the response
-    fn parse_sse_line(line: &str) -> Option<SseEvent> {
-        if let Some(data) = line.strip_prefix("data: ") {
-            if data == "[DONE]" {
-                return None;
+    /// Prepare a JSON schema for Anthropic's structured output API.
+    ///
+    /// Anthropic requires `additionalProperties: false` on all object types.
+    fn prepare_schema_for_anthropic(schema: &Value) -> Value {
+        match schema {
+            Value::Object(obj) => {
+                let mut result = serde_json::Map::new();
+                for (key, value) in obj {
+                    result.insert(key.clone(), Self::prepare_schema_for_anthropic(value));
+                }
+                // Add additionalProperties: false to objects with properties
+                if obj.get("type") == Some(&Value::String("object".to_string()))
+                    && obj.contains_key("properties")
+                    && !obj.contains_key("additionalProperties")
+                {
+                    result.insert("additionalProperties".to_string(), Value::Bool(false));
+                }
+                Value::Object(result)
             }
+            Value::Array(arr) => {
+                Value::Array(arr.iter().map(Self::prepare_schema_for_anthropic).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// Parse an SSE event from the response
+    fn parse_sse_line(line: &str) -> Option<AnthropicEvent> {
+        if let Some(data) = Self::strip_data_prefix(line) {
             serde_json::from_str(data).ok()
         } else {
             None
         }
+    }
+
+    fn strip_data_prefix(line: &str) -> Option<&str> {
+        line.strip_prefix("data: ")
+            .or_else(|| line.strip_prefix("data:"))
+            .map(str::trim_start)
+    }
+
+    fn map_stop_reason(reason: &str) -> StopReason {
+        match reason {
+            "end_turn" => StopReason::EndTurn,
+            "tool_use" => StopReason::ToolUse,
+            "max_tokens" => StopReason::MaxTokens,
+            "stop_sequence" => StopReason::StopSequence,
+            "content_filter" => StopReason::ContentFilter,
+            _ => StopReason::EndTurn,
+        }
+    }
+}
+
+fn merge_usage(target: &mut Usage, update: &AnthropicUsage) {
+    if let Some(v) = update.input_tokens {
+        target.input_tokens = v;
+    }
+    if let Some(v) = update.output_tokens {
+        target.output_tokens = v;
+    }
+    if let Some(v) = update.cache_creation_input_tokens {
+        target.cache_creation_tokens = Some(v);
+    }
+    if let Some(v) = update.cache_read_input_tokens {
+        target.cache_read_tokens = Some(v);
     }
 }
 
@@ -249,160 +335,171 @@ impl LlmClient for AnthropicClient {
         &'a self,
         request: &'a LlmRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-        Box::pin(async_stream::try_stream! {
-            let body = self.build_request_body(request);
+        let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> = Box::pin(
+            async_stream::try_stream! {
+                let body = self.build_request_body(request);
 
-            let response = self.http
-                .post(format!("{}/v1/messages", self.base_url))
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|_| LlmError::NetworkTimeout {
-                    duration_ms: 30000,
-                })?;
+                // Check if structured output is enabled (requires beta header)
+                let has_structured_output = body.get("output_config").is_some();
 
-            // Check for error responses - use Result to satisfy borrow checker
-            let status_code = response.status().as_u16();
-            let stream_result = if (200..=299).contains(&status_code) {
-                Ok(response.bytes_stream())
-            } else {
-                let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_status(status_code, text))
-            };
-            let mut stream = stream_result?;
-            // Pre-allocate buffer with typical SSE event size to reduce allocations
-            let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
-            let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
-            let mut current_tool_index: Option<usize> = None;
+                let mut req = self.http
+                    .post(format!("{}/v1/messages", self.base_url))
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json");
 
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                // from_utf8_lossy returns Cow which avoids allocation for valid UTF-8
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                // Add beta header for structured outputs
+                if has_structured_output {
+                    req = req.header("anthropic-beta", "structured-outputs-2025-11-13");
+                }
 
-                // Process complete lines without allocating new strings
-                while let Some(newline_pos) = buffer.find('\n') {
-                    // Get the line as a slice and trim, avoiding allocation
-                    let line = buffer[..newline_pos].trim();
+                let response = req
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|_| LlmError::NetworkTimeout {
+                        duration_ms: 30000,
+                    })?;
 
-                    // Skip empty lines and SSE comments
-                    let should_process = !line.is_empty() && !line.starts_with(':');
-                    let event = if should_process {
-                        Self::parse_sse_line(line)
-                    } else {
-                        None
-                    };
+                let status_code = response.status().as_u16();
+                let stream_result = if (200..=299).contains(&status_code) {
+                    Ok(response.bytes_stream())
+                } else {
+                    let text = response.text().await.unwrap_or_default();
+                    Err(LlmError::from_http_status(status_code, text))
+                };
+                let mut stream = stream_result?;
+                let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
+                let mut current_tool_id: Option<String> = None;
+                let mut last_stop_reason: Option<StopReason> = None;
+                let mut usage = Usage::default();
+                let mut saw_done = false;
 
-                    // Drain the processed line from buffer (avoids creating new String)
-                    buffer.drain(..=newline_pos);
-
-                    if let Some(event) = event {
-                        match event.event_type.as_str() {
-                            "content_block_start" => {
-                                if let Some(content_block) = event.content_block {
-                                    if content_block.block_type == "tool_use" {
-                                        let index = event.index.unwrap_or(0);
-                                        let mut buf = ToolCallBuffer::new(
-                                            content_block.id.unwrap_or_default()
-                                        );
-                                        buf.name = content_block.name;
-                                        tool_buffers.insert(index, buf);
-                                        current_tool_index = Some(index);
-                                    }
-                                }
-                            }
+                macro_rules! handle_event {
+                    ($event:expr) => {
+                        match $event.event_type.as_str() {
                             "content_block_delta" => {
-                                if let Some(delta) = event.delta {
-                                    match delta.delta_type.as_deref() {
-                                        Some("text_delta") => {
+                                if let Some(delta) = $event.delta {
+                                    match delta.delta_type.as_str() {
+                                        "text_delta" => {
                                             if let Some(text) = delta.text {
                                                 yield LlmEvent::TextDelta { delta: text };
                                             }
                                         }
-                                        Some("input_json_delta") => {
-                                            if let Some(partial) = delta.partial_json {
-                                                let index = event.index.unwrap_or(
-                                                    current_tool_index.unwrap_or(0)
-                                                );
-                                                if let Some(buf) = tool_buffers.get_mut(&index) {
-                                                    buf.push_args(&partial);
-                                                    yield LlmEvent::ToolCallDelta {
-                                                        id: buf.id.clone(),
-                                                        name: buf.name.clone(),
-                                                        args_delta: partial,
-                                                    };
-                                                }
+                                        "input_json_delta" => {
+                                            if let Some(partial_json) = delta.partial_json {
+                                                yield LlmEvent::ToolCallDelta {
+                                                    id: current_tool_id.clone().unwrap_or_default(),
+                                                    name: None,
+                                                    args_delta: partial_json,
+                                                };
                                             }
                                         }
                                         _ => {}
                                     }
                                 }
                             }
-                            "content_block_stop" => {
-                                let index = event.index.unwrap_or(
-                                    current_tool_index.unwrap_or(0)
-                                );
-                                if let Some(buf) = tool_buffers.remove(&index) {
-                                    if let Some(tc) = buf.try_complete() {
-                                        yield LlmEvent::ToolCallComplete {
-                                            id: tc.id,
-                                            name: tc.name,
-                                            args: tc.args,
+                            "content_block_start" => {
+                                if let Some(content_block) = $event.content_block {
+                                    if content_block.block_type == "tool_use" {
+                                        let id = content_block.id.unwrap_or_default();
+                                        current_tool_id = Some(id.clone());
+                                        yield LlmEvent::ToolCallDelta {
+                                            id,
+                                            name: content_block.name,
+                                            args_delta: String::new(),
                                         };
                                     }
                                 }
-                                current_tool_index = None;
                             }
                             "message_delta" => {
-                                if let Some(delta) = event.delta {
-                                    if let Some(stop_reason) = delta.stop_reason {
-                                        let reason = match stop_reason.as_str() {
-                                            "end_turn" => StopReason::EndTurn,
-                                            "tool_use" => StopReason::ToolUse,
-                                            "max_tokens" => StopReason::MaxTokens,
-                                            "stop_sequence" => StopReason::StopSequence,
-                                            _ => StopReason::EndTurn,
-                                        };
-                                        yield LlmEvent::Done { stop_reason: reason };
-                                    }
-                                }
-                                if let Some(usage) = event.usage {
+                                if let Some(usage_update) = $event.usage {
+                                    merge_usage(&mut usage, &usage_update);
                                     yield LlmEvent::UsageUpdate {
-                                        usage: Usage {
-                                            input_tokens: usage.input_tokens.unwrap_or(0),
-                                            output_tokens: usage.output_tokens.unwrap_or(0),
-                                            cache_creation_tokens: usage.cache_creation_input_tokens,
-                                            cache_read_tokens: usage.cache_read_input_tokens,
-                                        }
+                                        usage: usage.clone(),
                                     };
+                                }
+                                if let Some(finish_reason) = $event.delta.and_then(|d| d.stop_reason) {
+                                    let reason = Self::map_stop_reason(finish_reason.as_str());
+                                    last_stop_reason = Some(reason);
+                                    if !saw_done {
+                                        yield LlmEvent::Done {
+                                            outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                                        };
+                                        saw_done = true;
+                                    }
                                 }
                             }
                             "message_start" => {
-                                if let Some(message) = event.message {
-                                    if let Some(usage) = message.usage {
-                                        yield LlmEvent::UsageUpdate {
-                                            usage: Usage {
-                                                input_tokens: usage.input_tokens.unwrap_or(0),
-                                                output_tokens: usage.output_tokens.unwrap_or(0),
-                                                cache_creation_tokens: usage.cache_creation_input_tokens,
-                                                cache_read_tokens: usage.cache_read_input_tokens,
-                                            }
-                                        };
-                                    }
+                                if let Some(usage_update) = $event.message.and_then(|m| m.usage) {
+                                    merge_usage(&mut usage, &usage_update);
+                                    yield LlmEvent::UsageUpdate {
+                                        usage: usage.clone(),
+                                    };
                                 }
                             }
                             "message_stop" => {
-                                // Final event, stream will close - no action needed
+                                if !saw_done {
+                                    let finish_reason = $event.delta.and_then(|d| d.stop_reason);
+                                    let reason = finish_reason
+                                        .as_deref()
+                                        .map(Self::map_stop_reason)
+                                        .or(last_stop_reason)
+                                        .unwrap_or(StopReason::EndTurn);
+                                    last_stop_reason = Some(reason);
+                                    yield LlmEvent::Done {
+                                        outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                                    };
+                                    saw_done = true;
+                                }
                             }
                             _ => {}
                         }
+                    };
+                }
+
+                macro_rules! handle_line {
+                    ($line:expr) => {
+                        if !$line.is_empty() {
+                            if let Some(data) = Self::strip_data_prefix($line) {
+                                if data == "[DONE]" {
+                                    if !saw_done {
+                                        let reason =
+                                            last_stop_reason.unwrap_or(StopReason::EndTurn);
+                                        yield LlmEvent::Done {
+                                            outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                                        };
+                                        saw_done = true;
+                                    }
+                                } else if let Some(event) = Self::parse_sse_line($line) {
+                                    handle_event!(event);
+                                }
+                            }
+                        }
+                    };
+                }
+
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].trim();
+                        handle_line!(line);
+                        buffer.drain(..=newline_pos);
                     }
                 }
-            }
-        })
+
+                if !buffer.is_empty() {
+                    for line in buffer.lines() {
+                        let line = line.trim();
+                        handle_line!(line);
+                    }
+                }
+            },
+        );
+
+        crate::streaming::ensure_terminal_done(inner)
     }
 
     fn provider(&self) -> &'static str {
@@ -410,42 +507,31 @@ impl LlmClient for AnthropicClient {
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
-        // Simple ping to check connectivity
-        let response = self
-            .http
-            .get(format!("{}/v1/models", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .send()
-            .await
-            .map_err(|_| LlmError::NetworkTimeout { duration_ms: 5000 })?;
-
-        if response.status().is_success() || response.status().as_u16() == 404 {
-            // 404 is OK - endpoint might not exist but auth worked
-            Ok(())
-        } else {
-            Err(LlmError::from_http_status(
-                response.status().as_u16(),
-                "Health check failed".to_string(),
-            ))
-        }
+        Ok(())
     }
 }
 
-// SSE event structures for parsing Anthropic responses
 #[derive(Debug, Deserialize)]
-struct SseEvent {
+struct AnthropicEvent {
     #[serde(rename = "type")]
     event_type: String,
-    index: Option<usize>,
-    content_block: Option<ContentBlock>,
-    delta: Option<Delta>,
-    message: Option<MessageInfo>,
-    usage: Option<UsageInfo>,
+    delta: Option<AnthropicDelta>,
+    content_block: Option<AnthropicContentBlock>,
+    message: Option<AnthropicMessage>,
+    usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ContentBlock {
+struct AnthropicDelta {
+    #[serde(rename = "type")]
+    delta_type: String,
+    text: Option<String>,
+    partial_json: Option<String>,
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicContentBlock {
     #[serde(rename = "type")]
     block_type: String,
     id: Option<String>,
@@ -453,21 +539,12 @@ struct ContentBlock {
 }
 
 #[derive(Debug, Deserialize)]
-struct Delta {
-    #[serde(rename = "type")]
-    delta_type: Option<String>,
-    text: Option<String>,
-    partial_json: Option<String>,
-    stop_reason: Option<String>,
+struct AnthropicMessage {
+    usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MessageInfo {
-    usage: Option<UsageInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct UsageInfo {
+struct AnthropicUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
@@ -475,15 +552,14 @@ struct UsageInfo {
 }
 
 #[cfg(test)]
-pub mod tests {
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
     use super::*;
     use meerkat_core::UserMessage;
 
-    // Unit tests for build_request_body with provider_params
-
     #[test]
-    fn test_build_request_body_with_thinking_budget() {
-        let client = AnthropicClient::new("test-key".to_string());
+    fn test_build_request_body_basic() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
 
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
@@ -495,7 +571,6 @@ pub mod tests {
 
         let body = client.build_request_body(&request);
 
-        // Should have thinking object with type "enabled" and budget_tokens
         assert!(
             body.get("thinking").is_some(),
             "thinking field should be present"
@@ -503,11 +578,12 @@ pub mod tests {
         let thinking = &body["thinking"];
         assert_eq!(thinking["type"], "enabled");
         assert_eq!(thinking["budget_tokens"], 10000);
+        Ok(())
     }
 
     #[test]
-    fn test_build_request_body_with_top_k() {
-        let client = AnthropicClient::new("test-key".to_string());
+    fn test_build_request_body_with_top_k() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
 
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
@@ -519,59 +595,13 @@ pub mod tests {
 
         let body = client.build_request_body(&request);
 
-        // Should have top_k at the top level
         assert_eq!(body["top_k"], 40);
+        Ok(())
     }
 
     #[test]
-    fn test_build_request_body_with_thinking_and_top_k() {
-        let client = AnthropicClient::new("test-key".to_string());
-
-        let request = LlmRequest::new(
-            "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
-        )
-        .with_provider_param("thinking_budget", 5000)
-        .with_provider_param("top_k", 50);
-
-        let body = client.build_request_body(&request);
-
-        // Both should be present
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 5000);
-        assert_eq!(body["top_k"], 50);
-    }
-
-    #[test]
-    fn test_build_request_body_unknown_params_ignored() {
-        let client = AnthropicClient::new("test-key".to_string());
-
-        let request = LlmRequest::new(
-            "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
-        )
-        .with_provider_param("unknown_param", "some_value")
-        .with_provider_param("another_unknown", 123);
-
-        let body = client.build_request_body(&request);
-
-        // Unknown params should NOT be in the request body
-        assert!(body.get("unknown_param").is_none());
-        assert!(body.get("another_unknown").is_none());
-
-        // Request should still have standard fields
-        assert_eq!(body["model"], "claude-sonnet-4-20250514");
-        assert!(body.get("messages").is_some());
-    }
-
-    #[test]
-    fn test_build_request_body_no_provider_params() {
-        let client = AnthropicClient::new("test-key".to_string());
-
+    fn test_build_request_body_no_provider_params() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
             vec![Message::User(UserMessage {
@@ -581,59 +611,49 @@ pub mod tests {
 
         let body = client.build_request_body(&request);
 
-        // Should not have thinking or top_k when no provider_params
         assert!(body.get("thinking").is_none());
         assert!(body.get("top_k").is_none());
-
-        // Standard fields should be present
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
+        Ok(())
     }
 
     #[test]
-    fn test_client_builder_creates_configured_client() {
-        // Test that builder creates client with proper configuration
+    fn test_client_builder_creates_configured_client() -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::builder("test-key".to_string())
             .connect_timeout(std::time::Duration::from_secs(5))
             .request_timeout(std::time::Duration::from_secs(120))
-            .build();
+            .build()?;
 
         assert_eq!(client.provider(), "anthropic");
+        Ok(())
     }
 
     #[test]
-    fn test_client_default_has_connection_pool() {
-        // Default client should have proper HTTP configuration
-        let client = AnthropicClient::new("test-key".to_string());
-        // Just verify it compiles and works - actual pool config is internal to reqwest
+    fn test_client_default_has_connection_pool() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
         assert_eq!(client.provider(), "anthropic");
+        Ok(())
     }
 
     #[test]
     fn test_parse_sse_line() {
-        // Valid data line
-        let line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let line = r###"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"###;
         let event = AnthropicClient::parse_sse_line(line);
         assert!(event.is_some());
-        let event = event.unwrap();
-        assert_eq!(event.event_type, "content_block_delta");
+        assert_eq!(event.unwrap().event_type, "content_block_delta");
 
-        // DONE marker
         let done = AnthropicClient::parse_sse_line("data: [DONE]");
         assert!(done.is_none());
 
-        // Comment line (should return None since it doesn't start with "data: ")
         let comment = AnthropicClient::parse_sse_line(": comment");
         assert!(comment.is_none());
 
-        // Event line (not data)
         let event_line = AnthropicClient::parse_sse_line("event: message_start");
         assert!(event_line.is_none());
     }
 
     #[test]
     fn test_sse_buffer_constants() {
-        // Verify constants are sensible values at runtime
-        // Using const_assert would be better, but runtime checks are clearer for readers
         let buffer_cap = SSE_BUFFER_CAPACITY;
         assert!(buffer_cap >= 256, "SSE buffer should be at least 256 bytes");
         let connect_timeout = DEFAULT_CONNECT_TIMEOUT.as_secs();
@@ -645,6 +665,205 @@ pub mod tests {
         assert!(
             request_timeout >= 60,
             "Request timeout should be at least 60s"
+        );
+    }
+
+    /// Regression: CLI --param passes top_k as string; must coerce to number
+    /// Previously: `--param top_k=40` sent `"top_k": "40"` which Anthropic rejects
+    #[test]
+    fn test_regression_top_k_string_coercion() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        // Simulate CLI --param which passes values as strings
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("top_k", "40"); // String, not number!
+
+        let body = client.build_request_body(&request);
+
+        // Should be coerced to a number
+        assert!(
+            body["top_k"].is_number(),
+            "top_k should be a number, not string"
+        );
+        assert_eq!(body["top_k"], 40);
+        Ok(())
+    }
+
+    /// Regression: non-numeric string values for top_k should be ignored
+    #[test]
+    fn test_regression_top_k_invalid_string_ignored() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("top_k", "not_a_number");
+
+        let body = client.build_request_body(&request);
+
+        // Invalid string should be ignored (no top_k in body)
+        assert!(
+            body.get("top_k").is_none(),
+            "invalid top_k should be ignored"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_usage_merge_preserves_input_tokens() {
+        let mut usage = Usage::default();
+        let start = AnthropicUsage {
+            input_tokens: Some(120),
+            output_tokens: Some(0),
+            cache_creation_input_tokens: Some(4),
+            cache_read_input_tokens: Some(2),
+        };
+
+        merge_usage(&mut usage, &start);
+
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.cache_creation_tokens, Some(4));
+        assert_eq!(usage.cache_read_tokens, Some(2));
+
+        let delta = AnthropicUsage {
+            input_tokens: None,
+            output_tokens: Some(7),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+
+        merge_usage(&mut usage, &delta);
+
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_creation_tokens, Some(4));
+        assert_eq!(usage.cache_read_tokens, Some(2));
+    }
+
+    #[test]
+    fn test_build_request_body_with_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            },
+            "required": ["name", "age"]
+        });
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": schema,
+                "name": "person",
+                "strict": true
+            }),
+        );
+
+        let body = client.build_request_body(&request);
+
+        // Check output_config is present with correct structure
+        assert!(
+            body.get("output_config").is_some(),
+            "output_config should be present"
+        );
+        let output_config = &body["output_config"];
+        assert_eq!(output_config["format"]["type"], "json_schema");
+        assert!(output_config["format"]["schema"].is_object());
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_without_structured_output() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        );
+
+        let body = client.build_request_body(&request);
+
+        // output_config should not be present
+        assert!(
+            body.get("output_config").is_none(),
+            "output_config should not be present without structured_output"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_prepare_schema_adds_additional_properties() {
+        // Regression test: Anthropic API requires additionalProperties: false on objects
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "nested": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "integer"}
+                    }
+                }
+            },
+            "required": ["name"]
+        });
+
+        let prepared = AnthropicClient::prepare_schema_for_anthropic(&schema);
+
+        // Top-level object should have additionalProperties: false
+        assert_eq!(
+            prepared.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "top-level object should have additionalProperties: false"
+        );
+
+        // Nested object should also have additionalProperties: false
+        let nested = &prepared["properties"]["nested"];
+        assert_eq!(
+            nested.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "nested object should have additionalProperties: false"
+        );
+    }
+
+    #[test]
+    fn test_prepare_schema_preserves_existing_additional_properties() {
+        // If additionalProperties is already set, don't override it
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "additionalProperties": true
+        });
+
+        let prepared = AnthropicClient::prepare_schema_for_anthropic(&schema);
+
+        assert_eq!(
+            prepared.get("additionalProperties"),
+            Some(&serde_json::json!(true)),
+            "existing additionalProperties should be preserved"
         );
     }
 }

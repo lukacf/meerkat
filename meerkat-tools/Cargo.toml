@@ -10,7 +10,9 @@ repository.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
-meerkat-mcp-client = { workspace = true }
+meerkat-client = { workspace = true }
+meerkat-comms = { workspace = true }
+meerkat-mcp = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -18,9 +20,21 @@ tokio = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 jsonschema = { workspace = true }
+schemars = { workspace = true }
 tracing = { workspace = true }
-ulid = { workspace = true }
+humantime = { workspace = true }
+uuid = { workspace = true }
 chrono = { workspace = true }
+ciborium = "0.2"
+toml = { workspace = true }
+shlex = "1.3"
+globset = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[dependencies.which]
+workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

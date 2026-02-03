@@ -16,6 +16,8 @@ path = "src/main.rs"
 meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
 meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
+meerkat-store = { workspace = true }
+meerkat-tools = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -33,7 +35,10 @@ chrono = { workspace = true }
 dirs = { workspace = true }
 
 [dev-dependencies]
+hyper = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = { workspace = true }
+http-body-util = { workspace = true }
 
 [lints]
 workspace = true

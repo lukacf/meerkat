@@ -383,8 +383,9 @@ url = "http://localhost:8080/mcp"
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 | `OPENAI_API_KEY` | OpenAI API key |
 | `GOOGLE_API_KEY` | Google AI (Gemini) API key |
-| `RKAT_MODEL` | Default model |
-| `RKAT_MAX_TOKENS` | Default max tokens per turn |
+
+Non-secret settings (model, max tokens, storage, server ports) are configured in
+`~/.rkat/config.toml` or `.rkat/config.toml`.
 
 ### Feature Flags
 

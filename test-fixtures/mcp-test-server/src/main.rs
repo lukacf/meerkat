@@ -6,17 +6,66 @@
 //! - slow: Sleeps for N seconds (for timeout testing)
 //! - fail: Always returns an error
 
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde_json::{Map, Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
-fn main() {
+fn schema_for<T: JsonSchema>() -> Value {
+    let schema = schemars::schema_for!(T);
+    let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
+
+    // Some generators omit empty `properties`/`required` for `{}`.
+    // Our tool schema contract expects explicit presence of both keys.
+    if let Value::Object(ref mut obj) = value {
+        if obj.get("type").and_then(Value::as_str) == Some("object") {
+            obj.entry("properties".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            obj.entry("required".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
+    }
+
+    value
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+struct EchoArgs {
+    /// Message to echo
+    message: String,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+struct AddArgs {
+    /// First number
+    a: f64,
+    /// Second number
+    b: f64,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+struct SlowArgs {
+    /// Seconds to sleep
+    seconds: f64,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+struct FailArgs {
+    /// Error message
+    message: String,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let reader = BufReader::new(stdin.lock());
 
     for line in reader.lines() {
-        let Ok(line) = line else { break };
+        let line = line?;
 
         if line.is_empty() {
             continue;
@@ -33,8 +82,8 @@ fn main() {
                         "message": format!("Parse error: {e}")
                     }
                 });
-                writeln!(stdout, "{error}").unwrap();
-                stdout.flush().unwrap();
+                writeln!(stdout, "{error}")?;
+                stdout.flush()?;
                 continue;
             }
         };
@@ -60,9 +109,11 @@ fn main() {
 
         // This is a request, send a response
         let response = handle_request(&request);
-        writeln!(stdout, "{response}").unwrap();
-        stdout.flush().unwrap();
+        writeln!(stdout, "{response}")?;
+        stdout.flush()?;
     }
+
+    Ok(())
 }
 
 fn handle_request(request: &Value) -> Value {
@@ -102,62 +153,22 @@ fn handle_request(request: &Value) -> Value {
                         {
                             "name": "echo",
                             "description": "Returns the input message as output",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "message": {
-                                        "type": "string",
-                                        "description": "Message to echo"
-                                    }
-                                },
-                                "required": ["message"]
-                            }
+                            "inputSchema": schema_for::<EchoArgs>()
                         },
                         {
                             "name": "add",
                             "description": "Adds two numbers",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "a": {
-                                        "type": "number",
-                                        "description": "First number"
-                                    },
-                                    "b": {
-                                        "type": "number",
-                                        "description": "Second number"
-                                    }
-                                },
-                                "required": ["a", "b"]
-                            }
+                            "inputSchema": schema_for::<AddArgs>()
                         },
                         {
                             "name": "slow",
                             "description": "Sleeps for N seconds",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "seconds": {
-                                        "type": "number",
-                                        "description": "Seconds to sleep"
-                                    }
-                                },
-                                "required": ["seconds"]
-                            }
+                            "inputSchema": schema_for::<SlowArgs>()
                         },
                         {
                             "name": "fail",
                             "description": "Always returns an error",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "message": {
-                                        "type": "string",
-                                        "description": "Error message"
-                                    }
-                                },
-                                "required": ["message"]
-                            }
+                            "inputSchema": schema_for::<FailArgs>()
                         }
                     ]
                 }

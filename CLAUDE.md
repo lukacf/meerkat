@@ -11,7 +11,7 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 - CLI binary: **rkat**
 - Crate names: `meerkat`, `meerkat-core`, `meerkat-client`, etc.
 - Config directory: `.rkat/`
-- Environment variables: `RKAT_MODEL`, `RKAT_MAX_TOKENS`, etc.
+- Environment variables: API keys only (RKAT_* secrets and provider-native keys)
 
 ## Build and Test Commands
 
@@ -19,14 +19,14 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 # Build everything
 cargo build --workspace
 
-# Run all unit tests
+# Run all unit/integration tests (FAST - ~10s, skips slow doc-test compilation)
+cargo test --workspace --lib --bins --tests
+
+# Run all tests including doc-tests (SLOW - ~1min due to doc-test compilation)
 cargo test --workspace
 
-# Run integration tests
-cargo test --package meerkat --test integration
-
-# Run E2E tests (requires ANTHROPIC_API_KEY)
-cargo test --package meerkat --test e2e -- --ignored
+# Run E2E tests (tests marked #[ignore = "e2e: ..."], spawns real processes)
+cargo test --workspace -- --ignored
 
 # Cargo aliases (defined in .cargo/config.toml)
 cargo rct    # Run all unit tests
@@ -86,3 +86,15 @@ Config stored in `.rkat/mcp.toml` (project) or `~/.config/rkat/mcp.toml` (user).
 - `meerkat-client/src/anthropic.rs` - Anthropic streaming implementation
 - `meerkat-mcp-client/src/router.rs` - MCP tool routing
 - `meerkat-cli/src/main.rs` - CLI entry point
+
+## Testing with Multiple Providers
+
+When running tests or demos that involve multiple LLM providers/models, use these model names:
+
+| Provider | Model Name |
+|----------|------------|
+| OpenAI | `gpt-5.2` |
+| Gemini | `gemini-3-flash-preview` or `gemini-3-pro-preview` |
+| Anthropic | `claude-opus-4-5` or `claude-sonnet-4-5` |
+
+Do NOT use older model names like `gpt-4o-mini` or `gemini-2.0-flash`.

@@ -1,0 +1,33 @@
+        // Spawn the agent execution task
+        tokio::spawn(async move {
+            let result = if host_mode {
+                use meerkat_core::agent::comms_impl::*;
+                agent.run_host_mode(String::new()).await
+            } else {
+                // The session already has the user prompt, so we use an empty string
+                // to avoid adding a duplicate.
+                agent.run(String::new()).await
+            };
+
+            let duration_ms = started_at.elapsed().as_millis() as u64;
+
+            match result {
+                Ok(run_result) => {
+                    manager_for_task
+                        .complete(
+                            &id_for_task,
+                            OperationResult {
+                                id: id_for_task.clone(),
+                                content: run_result.text,
+                                is_error: false,
+                                duration_ms,
+                                tokens_used: run_result.usage.total_tokens(),
+                            },
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    manager_for_task.fail(&id_for_task, e.to_string()).await;
+                }
+            }
+        });

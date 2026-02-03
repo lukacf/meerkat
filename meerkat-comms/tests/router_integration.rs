@@ -2,9 +2,11 @@
 //!
 //! These tests verify actual network I/O behavior and are slower than unit tests.
 
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use meerkat_comms::{
-    CommsConfig, Envelope, Keypair, MessageKind, Router, SendError, Signature, Status, TrustedPeer,
-    TrustedPeers, DEFAULT_MAX_MESSAGE_BYTES,
+    CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, Envelope, Keypair, MessageKind, Router, SendError,
+    Signature, Status, TrustedPeer, TrustedPeers,
 };
 use std::time::Duration;
 use tempfile::TempDir;
@@ -77,7 +79,13 @@ async fn test_router_send() {
     );
 
     let our_pubkey = our_keypair.public_key();
-    let router = Router::new(our_keypair, trusted_peers, CommsConfig::default());
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(
+        our_keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        inbox_sender,
+    );
 
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
     let server_handle = tokio::spawn(async move {
@@ -111,7 +119,8 @@ async fn test_router_resolves_peer_name() {
         &peer_keypair.public_key(),
         "tcp://127.0.0.1:9999",
     );
-    let router = Router::new(keypair, trusted_peers, CommsConfig::default());
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(keypair, trusted_peers, CommsConfig::default(), inbox_sender);
 
     let result = router
         .send_message("unknown-peer", "hello".to_string())
@@ -137,7 +146,13 @@ async fn test_router_connects_to_peer() {
         &format!("uds://{}", sock_path.display()),
     );
 
-    let router = Router::new(our_keypair, trusted_peers, CommsConfig::default());
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(
+        our_keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        inbox_sender,
+    );
 
     // No server listening - should fail with IO error
     let result = router.send_message("test-peer", "hello".to_string()).await;
@@ -159,7 +174,13 @@ async fn test_router_signs_envelope() {
         &format!("uds://{}", sock_path.display()),
     );
 
-    let router = Router::new(our_keypair, trusted_peers, CommsConfig::default());
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(
+        our_keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        inbox_sender,
+    );
 
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
     let server_handle = tokio::spawn(async move {
@@ -205,7 +226,8 @@ async fn test_router_waits_for_ack() {
         ack_timeout_secs: 1,
         ..Default::default()
     };
-    let router = Router::new(our_keypair, trusted_peers, config);
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(our_keypair, trusted_peers, config, inbox_sender);
 
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
     let server_handle = tokio::spawn(async move {
@@ -248,7 +270,8 @@ async fn test_router_timeout_returns_offline() {
         ack_timeout_secs: 1,
         ..Default::default()
     };
-    let router = Router::new(our_keypair, trusted_peers, config);
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(our_keypair, trusted_peers, config, inbox_sender);
 
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
     let server_handle = tokio::spawn(async move {
@@ -279,7 +302,13 @@ async fn test_send_message() {
         &format!("uds://{}", sock_path.display()),
     );
 
-    let router = Router::new(our_keypair, trusted_peers, CommsConfig::default());
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(
+        our_keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        inbox_sender,
+    );
 
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
     let server_handle = tokio::spawn(async move {
@@ -328,7 +357,13 @@ async fn test_send_request() {
         &format!("uds://{}", sock_path.display()),
     );
 
-    let router = Router::new(our_keypair, trusted_peers, CommsConfig::default());
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(
+        our_keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        inbox_sender,
+    );
 
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
     let server_handle = tokio::spawn(async move {
@@ -381,7 +416,13 @@ async fn test_send_response() {
         &format!("uds://{}", sock_path.display()),
     );
 
-    let router = Router::new(our_keypair, trusted_peers, CommsConfig::default());
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(
+        our_keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        inbox_sender,
+    );
     let request_id = Uuid::new_v4();
 
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
@@ -433,7 +474,8 @@ async fn test_send_response_no_ack_wait() {
         ack_timeout_secs: 1,
         ..Default::default()
     };
-    let router = Router::new(our_keypair, trusted_peers, config);
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(our_keypair, trusted_peers, config, inbox_sender);
 
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
     let server_handle = tokio::spawn(async move {
@@ -461,4 +503,156 @@ async fn test_send_response_no_ack_wait() {
     );
 
     server_handle.abort();
+}
+
+// === Inproc transport tests ===
+
+#[tokio::test]
+async fn test_router_inproc_send() {
+    use meerkat_comms::{Inbox, InprocRegistry};
+
+    // Clear any existing state
+    InprocRegistry::global().clear();
+
+    // Create receiver
+    let receiver_keypair = make_keypair();
+    let receiver_pubkey = receiver_keypair.public_key();
+    let (mut inbox, inbox_sender) = Inbox::new();
+
+    // Register receiver in inproc registry
+    InprocRegistry::global().register("receiver-agent", receiver_pubkey, inbox_sender);
+
+    // Create sender with inproc peer
+    let sender_keypair = make_keypair();
+    let sender_pubkey = sender_keypair.public_key();
+    let trusted_peers = make_trusted_peers_with_addr(
+        "receiver-agent",
+        &receiver_pubkey,
+        "inproc://receiver-agent",
+    );
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(
+        sender_keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        inbox_sender,
+    );
+
+    // Send via router
+    let result = router
+        .send_message("receiver-agent", "hello via inproc".to_string())
+        .await;
+    assert!(result.is_ok(), "inproc send should succeed: {:?}", result);
+
+    // Verify message was received
+    let items = inbox.try_drain();
+    assert_eq!(items.len(), 1, "should have received one message");
+
+    match &items[0] {
+        meerkat_comms::InboxItem::External { envelope } => {
+            assert_eq!(envelope.from, sender_pubkey);
+            assert_eq!(envelope.to, receiver_pubkey);
+            match &envelope.kind {
+                MessageKind::Message { body } => {
+                    assert_eq!(body, "hello via inproc");
+                }
+                _ => panic!("expected Message kind"),
+            }
+            assert!(envelope.verify(), "signature should be valid");
+        }
+        _ => panic!("expected External inbox item"),
+    }
+
+    // Cleanup
+    InprocRegistry::global().clear();
+}
+
+#[tokio::test]
+async fn test_router_inproc_peer_not_found() {
+    use meerkat_comms::InprocRegistry;
+
+    // Clear any existing state
+    InprocRegistry::global().clear();
+
+    // Create sender with inproc peer that's NOT registered
+    let sender_keypair = make_keypair();
+    let fake_pubkey = make_keypair().public_key();
+    let trusted_peers =
+        make_trusted_peers_with_addr("missing-agent", &fake_pubkey, "inproc://missing-agent");
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(
+        sender_keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        inbox_sender,
+    );
+
+    // Send should fail - peer not in registry
+    let result = router
+        .send_message("missing-agent", "hello".to_string())
+        .await;
+    assert!(result.is_err(), "should fail for missing inproc peer");
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(_))),
+        "should be PeerNotFound error"
+    );
+
+    // Cleanup
+    InprocRegistry::global().clear();
+}
+
+#[tokio::test]
+async fn test_router_inproc_request_response() {
+    use meerkat_comms::{Inbox, InprocRegistry};
+
+    // Clear any existing state
+    InprocRegistry::global().clear();
+
+    // Create receiver
+    let receiver_keypair = make_keypair();
+    let receiver_pubkey = receiver_keypair.public_key();
+    let (mut inbox, inbox_sender) = Inbox::new();
+
+    // Register receiver
+    InprocRegistry::global().register("service-agent", receiver_pubkey, inbox_sender);
+
+    // Create sender
+    let sender_keypair = make_keypair();
+    let trusted_peers =
+        make_trusted_peers_with_addr("service-agent", &receiver_pubkey, "inproc://service-agent");
+    let (_, inbox_sender) = meerkat_comms::Inbox::new();
+    let router = Router::new(
+        sender_keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        inbox_sender,
+    );
+
+    // Send request
+    let result = router
+        .send_request(
+            "service-agent",
+            "analyze".to_string(),
+            serde_json::json!({"file": "main.rs"}),
+        )
+        .await;
+    assert!(result.is_ok());
+
+    // Verify request was received
+    let items = inbox.try_drain();
+    assert_eq!(items.len(), 1);
+
+    match &items[0] {
+        meerkat_comms::InboxItem::External { envelope } => match &envelope.kind {
+            MessageKind::Request { intent, params } => {
+                assert_eq!(intent, "analyze");
+                assert_eq!(params["file"], "main.rs");
+            }
+            _ => panic!("expected Request kind"),
+        },
+        _ => panic!("expected External inbox item"),
+    }
+
+    // Cleanup
+    InprocRegistry::global().clear();
 }

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use meerkat_comms::{InboxSender, Keypair, TrustedPeers, handle_connection};
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 /// Handle to a spawned listener task.
@@ -41,44 +42,51 @@ impl ListenerHandle {
 ///
 /// # Arguments
 /// * `path` - Path for the UDS socket
-/// * `keypair_secret` - 32-byte secret key for signing acks
-/// * `trusted` - Trusted peers list for validation
+/// * `keypair` - Our keypair for signing acks
+/// * `trusted` - Trusted peers list for validation (shared for dynamic updates)
 /// * `inbox_sender` - Channel to send validated messages to
 ///
 /// # Returns
 /// A handle to the spawned listener task.
 #[cfg(unix)]
-pub fn spawn_uds_listener(
+pub async fn spawn_uds_listener(
     path: impl AsRef<Path>,
-    keypair_secret: [u8; 32],
-    trusted: Arc<TrustedPeers>,
+    keypair: Arc<Keypair>,
+    trusted: Arc<RwLock<TrustedPeers>>,
     inbox_sender: InboxSender,
 ) -> std::io::Result<ListenerHandle> {
+    use std::io::ErrorKind;
     use tokio::net::UnixListener;
 
     let path = path.as_ref().to_path_buf();
 
-    // Remove existing socket file if present
-    let _ = std::fs::remove_file(&path);
+    // Remove existing socket file if present.
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
 
-    // Bind the listener synchronously to get any errors immediately
-    let listener = std::os::unix::net::UnixListener::bind(&path)?;
-    listener.set_nonblocking(true)?;
+    let listener = UnixListener::bind(&path)?;
 
     let handle = tokio::spawn(async move {
-        let listener =
-            UnixListener::from_std(listener).expect("Failed to convert to tokio listener");
-
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
-                    let keypair = Keypair::from_secret(keypair_secret);
+                    let keypair = keypair.clone();
                     let trusted = trusted.clone();
                     let inbox_sender = inbox_sender.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, &keypair, &trusted, &inbox_sender).await
+                        // Get a snapshot of trusted peers for this connection
+                        let trusted_snapshot = trusted.read().await.clone();
+                        if let Err(e) = handle_connection(
+                            stream,
+                            keypair.as_ref(),
+                            &trusted_snapshot,
+                            &inbox_sender,
+                        )
+                        .await
                         {
                             tracing::warn!("UDS connection error: {}", e);
                         }
@@ -102,16 +110,16 @@ pub fn spawn_uds_listener(
 ///
 /// # Arguments
 /// * `addr` - Address to bind to (e.g., "127.0.0.1:4200")
-/// * `keypair_secret` - 32-byte secret key for signing acks
-/// * `trusted` - Trusted peers list for validation
+/// * `keypair` - Our keypair for signing acks
+/// * `trusted` - Trusted peers list for validation (shared for dynamic updates)
 /// * `inbox_sender` - Channel to send validated messages to
 ///
 /// # Returns
 /// A handle to the spawned listener task.
 pub async fn spawn_tcp_listener(
     addr: &str,
-    keypair_secret: [u8; 32],
-    trusted: Arc<TrustedPeers>,
+    keypair: Arc<Keypair>,
+    trusted: Arc<RwLock<TrustedPeers>>,
     inbox_sender: InboxSender,
 ) -> std::io::Result<ListenerHandle> {
     let listener = TcpListener::bind(addr).await?;
@@ -120,13 +128,20 @@ pub async fn spawn_tcp_listener(
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
-                    let keypair = Keypair::from_secret(keypair_secret);
+                    let keypair = keypair.clone();
                     let trusted = trusted.clone();
                     let inbox_sender = inbox_sender.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, &keypair, &trusted, &inbox_sender).await
+                        // Get a snapshot of trusted peers for this connection
+                        let trusted_snapshot = trusted.read().await.clone();
+                        if let Err(e) = handle_connection(
+                            stream,
+                            keypair.as_ref(),
+                            &trusted_snapshot,
+                            &inbox_sender,
+                        )
+                        .await
                         {
                             tracing::warn!("TCP connection error: {}", e);
                         }
@@ -143,23 +158,8 @@ pub async fn spawn_tcp_listener(
     Ok(ListenerHandle { handle })
 }
 
-/// Helper to extract secret bytes from a Keypair.
-///
-/// This is a workaround since Keypair doesn't expose the secret directly.
-pub fn keypair_to_secret(keypair: &Keypair) -> [u8; 32] {
-    let temp_dir =
-        std::env::temp_dir().join(format!("meerkat-key-extract-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
-    keypair.save(&temp_dir).expect("Failed to save keypair");
-    let secret_bytes = std::fs::read(temp_dir.join("identity.key")).expect("Failed to read key");
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    let mut secret = [0u8; 32];
-    secret.copy_from_slice(&secret_bytes);
-    secret
-}
-
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_comms::{Envelope, Inbox, MessageKind, PubKey, Signature, TrustedPeer};
@@ -201,14 +201,19 @@ mod tests {
         let sender_pubkey = sender_keypair.public_key();
         let receiver_keypair = make_keypair();
         let receiver_pubkey = receiver_keypair.public_key();
-        let receiver_secret = keypair_to_secret(&receiver_keypair);
+        let receiver_keypair = Arc::new(receiver_keypair);
         let trusted = make_trusted_peers("sender", &sender_pubkey);
 
         let (mut inbox, inbox_sender) = Inbox::new();
 
-        let handle =
-            spawn_uds_listener(&sock_path, receiver_secret, Arc::new(trusted), inbox_sender)
-                .unwrap();
+        let handle = spawn_uds_listener(
+            &sock_path,
+            receiver_keypair,
+            Arc::new(RwLock::new(trusted)),
+            inbox_sender,
+        )
+        .await
+        .unwrap();
 
         // Give listener time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -246,7 +251,7 @@ mod tests {
             meerkat_comms::InboxItem::External { envelope } => {
                 assert_eq!(envelope.id, envelope_id);
             }
-            _ => panic!("expected External"),
+            _ => unreachable!("expected External"),
         }
 
         handle.abort();
@@ -258,7 +263,7 @@ mod tests {
         let sender_pubkey = sender_keypair.public_key();
         let receiver_keypair = make_keypair();
         let receiver_pubkey = receiver_keypair.public_key();
-        let receiver_secret = keypair_to_secret(&receiver_keypair);
+        let receiver_keypair = Arc::new(receiver_keypair);
         let trusted = make_trusted_peers("sender", &sender_pubkey);
 
         let (mut inbox, inbox_sender) = Inbox::new();
@@ -270,8 +275,8 @@ mod tests {
 
         let handle = spawn_tcp_listener(
             &addr.to_string(),
-            receiver_secret,
-            Arc::new(trusted),
+            receiver_keypair,
+            Arc::new(RwLock::new(trusted)),
             inbox_sender,
         )
         .await
@@ -313,7 +318,7 @@ mod tests {
             meerkat_comms::InboxItem::External { envelope } => {
                 assert_eq!(envelope.id, envelope_id);
             }
-            _ => panic!("expected External"),
+            _ => unreachable!("expected External"),
         }
 
         handle.abort();
@@ -333,21 +338,21 @@ mod tests {
         let config =
             CommsManagerConfig::with_keypair(receiver_keypair).trusted_peers(trusted.clone());
 
-        let mut manager = CommsManager::new(config);
+        let mut manager = CommsManager::new(config).unwrap();
 
         let tmp = TempDir::new().unwrap();
         let sock_path = tmp.path().join("manager.sock");
 
-        // Get secret from manager's keypair
-        let keypair_secret = keypair_to_secret(&manager.keypair());
+        let keypair = manager.router().keypair_arc();
 
         // Start listener using manager's components
         let handle = spawn_uds_listener(
             &sock_path,
-            keypair_secret,
-            Arc::new(trusted),
+            keypair,
+            Arc::new(RwLock::new(trusted)),
             manager.inbox_sender().clone(),
         )
+        .await
         .unwrap();
 
         // Give listener time to start
@@ -393,11 +398,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock_path = tmp.path().join("abort.sock");
         let keypair = make_keypair();
-        let secret = keypair_to_secret(&keypair);
-        let trusted = Arc::new(TrustedPeers::new());
+        let keypair = Arc::new(keypair);
+        let trusted = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, inbox_sender) = Inbox::new();
 
-        let handle = spawn_uds_listener(&sock_path, secret, trusted, inbox_sender).unwrap();
+        let handle = spawn_uds_listener(&sock_path, keypair, trusted, inbox_sender)
+            .await
+            .unwrap();
 
         // Give it a moment to start
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

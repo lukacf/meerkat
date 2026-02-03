@@ -236,6 +236,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
+name = "bstr"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -554,6 +564,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "either"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
 name = "email_address"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -570,6 +586,12 @@ checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "env_home"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7f84e12ccf0a7ddc17a6c41c93326024c42920d7ee630d04950e6926645c0fe"
 
 [[package]]
 name = "equivalent"
@@ -787,6 +809,19 @@ dependencies = [
  "libc",
  "r-efi",
  "wasip2",
+]
+
+[[package]]
+name = "globset"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -1246,6 +1281,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 name = "mcp-test-server"
 version = "0.1.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
  "tokio",
@@ -1260,15 +1296,19 @@ dependencies = [
  "futures",
  "meerkat-client",
  "meerkat-comms",
- "meerkat-comms-agent",
  "meerkat-core",
- "meerkat-mcp-client",
+ "meerkat-mcp",
+ "meerkat-mcp-server",
  "meerkat-store",
  "meerkat-tools",
+ "nix 0.29.0",
+ "schemars",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "toml",
+ "which",
 ]
 
 [[package]]
@@ -1286,7 +1326,7 @@ dependencies = [
  "meerkat-client",
  "meerkat-comms",
  "meerkat-core",
- "meerkat-mcp-client",
+ "meerkat-mcp",
  "meerkat-store",
  "meerkat-tools",
  "serde",
@@ -1306,9 +1346,11 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "axum",
  "futures",
  "meerkat-core",
  "reqwest",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1320,50 +1362,27 @@ dependencies = [
 name = "meerkat-comms"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64",
+ "bytes",
  "ciborium",
  "ed25519-dalek",
+ "futures",
+ "meerkat-core",
+ "parking_lot",
  "rand 0.8.5",
+ "schemars",
  "serde",
  "serde_bytes",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "meerkat-comms-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ciborium",
- "meerkat-comms",
- "meerkat-comms-mcp",
- "meerkat-core",
- "serde",
- "serde_json",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
+ "toml",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "meerkat-comms-mcp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ciborium",
- "meerkat-comms",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1372,9 +1391,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dirs",
  "futures",
  "humantime-serde",
- "meerkat-comms",
+ "jsonschema",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -1386,7 +1407,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "meerkat-mcp-client"
+name = "meerkat-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "meerkat",
+ "meerkat-client",
+ "meerkat-core",
+ "meerkat-store",
+ "meerkat-tools",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "meerkat-mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -1409,14 +1443,15 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dirs",
- "futures",
- "futures-util",
  "meerkat",
  "meerkat-client",
  "meerkat-core",
+ "meerkat-mcp",
+ "meerkat-tools",
+ "rmcp",
+ "schemars",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -1431,11 +1466,16 @@ dependencies = [
  "chrono",
  "dirs",
  "futures",
+ "http-body-util",
+ "hyper",
  "meerkat",
  "meerkat-client",
  "meerkat-core",
+ "meerkat-store",
+ "meerkat-tools",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tower",
@@ -1451,6 +1491,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "meerkat-core",
+ "redb",
  "serde",
  "serde_json",
  "tempfile",
@@ -1465,17 +1506,27 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ciborium",
  "futures",
+ "globset",
+ "humantime",
  "jsonschema",
+ "meerkat-client",
+ "meerkat-comms",
  "meerkat-core",
- "meerkat-mcp-client",
+ "meerkat-mcp",
+ "nix 0.29.0",
+ "schemars",
  "serde",
  "serde_json",
+ "shlex",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
  "tracing",
- "ulid",
+ "uuid",
+ "which",
 ]
 
 [[package]]
@@ -1516,6 +1567,18 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -1784,7 +1847,7 @@ checksum = "fd1395947e69c07400ef4d43db0051d6f773c21f647ad8b97382fc01f0204c60"
 dependencies = [
  "futures",
  "indexmap",
- "nix",
+ "nix 0.30.1",
  "tokio",
  "tracing",
  "windows",
@@ -1862,6 +1925,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -1994,18 +2066,23 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1815dbc06c414d720f8bc1951eccd66bc99efc6376331f1e7093a119b3eb508"
+checksum = "0a621b37a548ff6ab6292d57841eb25785a7f146d89391a19c9f199414bd13da"
 dependencies = [
  "async-trait",
+ "axum",
  "base64",
+ "bytes",
  "chrono",
  "futures",
  "http",
+ "http-body",
+ "http-body-util",
  "pastey",
  "pin-project-lite",
  "process-wrap",
+ "rand 0.9.2",
  "reqwest",
  "rmcp-macros",
  "schemars",
@@ -2016,14 +2093,16 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "rmcp-macros"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11f0bc7008fa102e771a76c6d2c9b253be3f2baa5964e060464d038ae1cbc573"
+checksum = "6b79ed92303f9262db79575aa8c3652581668e9d136be6fd0b9ededa78954c95"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -2732,16 +2811,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
-name = "ulid"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
-dependencies = [
- "rand 0.9.2",
- "web-time",
-]
-
-[[package]]
 name = "unicode-ident"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2931,13 +3000,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "web-time"
-version = "1.1.0"
+name = "which"
+version = "7.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
+checksum = "24d643ce3fd3e5b54854602a080f34fb10ab75e0b813ee32d00ca2b44fa74762"
 dependencies = [
- "js-sys",
- "wasm-bindgen",
+ "either",
+ "env_home",
+ "rustix",
+ "winsafe",
 ]
 
 [[package]]
@@ -3291,6 +3362,12 @@ checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "winsafe"
+version = "0.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "wit-bindgen"

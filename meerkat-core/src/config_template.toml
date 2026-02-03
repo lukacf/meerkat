@@ -1,0 +1,25 @@
+# Meerkat default configuration template.
+# This file is used to bootstrap ~/.rkat/config.toml when missing.
+
+[agent]
+model = "claude-3-7-sonnet-20250219"
+max_tokens_per_turn = 8192
+checkpoint_interval = 5
+budget_warning_threshold = 0.8
+
+[models]
+anthropic = "claude-3-7-sonnet-20250219"
+openai = "gpt-4.1"
+gemini = "gemini-1.5-pro"
+
+max_tokens = 8192
+
+[shell]
+program = "nu"
+timeout_secs = 30
+security_mode = "unrestricted"
+security_patterns = []
+
+[rest]
+host = "127.0.0.1"
+port = 8080

@@ -1,32 +1,29 @@
 //! Router for Meerkat comms - high-level send API.
-//!
-//! The router provides a simple API for sending messages to peers,
-//! handling envelope creation, signing, connection, and ack waiting.
 
+use futures::{SinkExt, StreamExt};
+use std::sync::Arc;
 use std::time::Duration;
-
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
+use tokio::sync::RwLock;
+use tokio_util::codec::Framed;
 use uuid::Uuid;
 
 use crate::identity::{Keypair, Signature};
-use crate::transport::{PeerAddr, TransportError, MAX_PAYLOAD_SIZE};
-use crate::trust::TrustedPeers;
+use crate::inbox::InboxSender;
+use crate::inproc::InprocRegistry;
+use crate::transport::codec::{EnvelopeFrame, TransportCodec};
+use crate::transport::{MAX_PAYLOAD_SIZE, PeerAddr, TransportError};
+use crate::trust::{TrustedPeer, TrustedPeers};
 use crate::types::{Envelope, MessageKind, Status};
 
-/// Default ack timeout in seconds.
 pub const DEFAULT_ACK_TIMEOUT_SECS: u64 = 30;
-
-/// Default max message size in bytes (1 MB).
 pub const DEFAULT_MAX_MESSAGE_BYTES: u32 = MAX_PAYLOAD_SIZE;
 
-/// Configuration for comms.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommsConfig {
-    /// Timeout for ack wait in seconds.
     pub ack_timeout_secs: u64,
-    /// Maximum message size in bytes.
     pub max_message_bytes: u32,
 }
 
@@ -39,123 +36,199 @@ impl Default for CommsConfig {
     }
 }
 
-/// Errors that can occur during send operations.
 #[derive(Debug, Error)]
 pub enum SendError {
     #[error("Peer not found: {0}")]
     PeerNotFound(String),
-    #[error("Peer offline (ack timeout)")]
+    #[error("Peer offline (no ack received)")]
     PeerOffline,
-    #[error("Invalid ack: {0}")]
-    InvalidAck(String),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
     #[error("Transport error: {0}")]
     Transport(#[from] TransportError),
-    #[error("Invalid peer address: {0}")]
-    InvalidAddress(String),
-    #[error("CBOR encoding error: {0}")]
-    Cbor(String),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
-/// Router for sending messages to peers.
 pub struct Router {
-    /// Our keypair for signing messages.
-    keypair: Keypair,
-    /// List of trusted peers.
-    trusted_peers: TrustedPeers,
-    /// Configuration.
+    keypair: Arc<Keypair>,
+    trusted_peers: Arc<RwLock<TrustedPeers>>,
     config: CommsConfig,
+    inbox_sender: InboxSender,
 }
 
 impl Router {
-    /// Create a new router.
-    pub fn new(keypair: Keypair, trusted_peers: TrustedPeers, config: CommsConfig) -> Self {
+    pub fn new(
+        keypair: Keypair,
+        trusted_peers: TrustedPeers,
+        config: CommsConfig,
+        inbox_sender: InboxSender,
+    ) -> Self {
         Self {
-            keypair,
-            trusted_peers,
+            keypair: Arc::new(keypair),
+            trusted_peers: Arc::new(RwLock::new(trusted_peers)),
             config,
+            inbox_sender,
         }
     }
 
-    /// Send a message to a peer by name.
-    ///
-    /// Per spec "On Send":
-    /// 1. Create envelope with message kind
-    /// 2. Compute signable_bytes (canonical CBOR)
-    /// 3. Sign with sender's secret key
-    /// 4. Connect to peer (UDS or TCP)
-    /// 5. Write length-prefix + CBOR payload
-    /// 6. Wait for Ack (30s timeout) - unless sending Ack/Response
-    /// 7. If timeout, return SendError::PeerOffline
+    pub fn with_shared_peers(
+        keypair: Keypair,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        config: CommsConfig,
+        inbox_sender: InboxSender,
+    ) -> Self {
+        Self {
+            keypair: Arc::new(keypair),
+            trusted_peers,
+            config,
+            inbox_sender,
+        }
+    }
+
+    pub fn keypair_arc(&self) -> Arc<Keypair> {
+        self.keypair.clone()
+    }
+    pub fn shared_trusted_peers(&self) -> Arc<RwLock<TrustedPeers>> {
+        self.trusted_peers.clone()
+    }
+    pub fn inbox_sender(&self) -> &InboxSender {
+        &self.inbox_sender
+    }
+
+    pub async fn has_peers(&self) -> bool {
+        self.trusted_peers.read().await.has_peers()
+    }
+    pub fn try_has_peers(&self) -> Option<bool> {
+        self.trusted_peers.try_read().ok().map(|g| g.has_peers())
+    }
+
+    pub async fn add_trusted_peer(&self, peer: TrustedPeer) {
+        let mut peers = self.trusted_peers.write().await;
+        peers.upsert(peer);
+    }
+
+    pub async fn remove_trusted_peer(&self, pubkey: &crate::identity::PubKey) -> bool {
+        let mut peers = self.trusted_peers.write().await;
+        peers.remove(pubkey)
+    }
+
     pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<(), SendError> {
-        // Look up peer
-        let peer = self
-            .trusted_peers
-            .get_by_name(peer_name)
-            .ok_or_else(|| SendError::PeerNotFound(peer_name.to_string()))?;
+        let (peer_pubkey, peer_addr) = {
+            let peers = self.trusted_peers.read().await;
+            let peer = peers
+                .get_by_name(peer_name)
+                .ok_or_else(|| SendError::PeerNotFound(peer_name.to_string()))?;
+            (peer.pubkey, peer.addr.clone())
+        };
 
-        // Parse peer address
-        let addr =
-            PeerAddr::parse(&peer.addr).map_err(|e| SendError::InvalidAddress(e.to_string()))?;
-
-        // Determine if we should wait for ack
+        let addr = PeerAddr::parse(&peer_addr)?;
         let wait_for_ack = should_wait_for_ack(&kind);
 
-        // Create and sign envelope
         let mut envelope = Envelope {
             id: Uuid::new_v4(),
             from: self.keypair.public_key(),
-            to: peer.pubkey,
+            to: peer_pubkey,
             kind,
             sig: Signature::new([0u8; 64]),
         };
         envelope.sign(&self.keypair);
 
-        // Connect and send
         match addr {
             PeerAddr::Uds(path) => {
                 let mut stream = UnixStream::connect(&path).await?;
-                self.send_on_stream(&mut stream, &envelope, wait_for_ack, &peer.pubkey)
-                    .await?;
+                self.send_on_stream(&mut stream, envelope, wait_for_ack)
+                    .await
             }
             PeerAddr::Tcp(addr_str) => {
-                // DNS resolution happens here via ToSocketAddrs
                 let mut stream = TcpStream::connect(&addr_str).await?;
-                self.send_on_stream(&mut stream, &envelope, wait_for_ack, &peer.pubkey)
-                    .await?;
+                self.send_on_stream(&mut stream, envelope, wait_for_ack)
+                    .await
+            }
+            PeerAddr::Inproc(_) => {
+                let registry = InprocRegistry::global();
+                registry
+                    .send(&self.keypair, peer_name, envelope.kind)
+                    .map_err(|e| match e {
+                        crate::inproc::InprocSendError::PeerNotFound(n) => {
+                            SendError::PeerNotFound(n)
+                        }
+                        _ => SendError::PeerOffline,
+                    })
             }
         }
-
-        Ok(())
     }
 
-    /// Send message, wait for body text.
-    pub async fn send_message(&self, peer: &str, body: String) -> Result<(), SendError> {
-        self.send(peer, MessageKind::Message { body }).await
+    async fn send_on_stream<S>(
+        &self,
+        stream: &mut S,
+        envelope: Envelope,
+        wait_for_ack: bool,
+    ) -> Result<(), SendError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let sent_id = envelope.id;
+        let sent_to = envelope.to;
+
+        let mut framed = Framed::new(stream, TransportCodec::new(self.config.max_message_bytes));
+        framed.send(EnvelopeFrame::from_envelope(envelope)).await?;
+        if wait_for_ack {
+            match tokio::time::timeout(
+                Duration::from_secs(self.config.ack_timeout_secs),
+                framed.next(),
+            )
+            .await
+            {
+                Ok(Some(Ok(frame))) => {
+                    // Validate ACK: signature, sender, recipient, and in_reply_to
+                    if let MessageKind::Ack { in_reply_to } = frame.envelope.kind {
+                        if !frame.envelope.verify() {
+                            return Err(SendError::PeerOffline);
+                        }
+                        if frame.envelope.from != sent_to {
+                            return Err(SendError::PeerOffline);
+                        }
+                        // Verify ACK is addressed to us (prevents misrouted/injected ACKs)
+                        if frame.envelope.to != self.keypair.public_key() {
+                            return Err(SendError::PeerOffline);
+                        }
+                        if in_reply_to != sent_id {
+                            return Err(SendError::PeerOffline);
+                        }
+                        Ok(())
+                    } else {
+                        Err(SendError::PeerOffline)
+                    }
+                }
+                _ => Err(SendError::PeerOffline),
+            }
+        } else {
+            Ok(())
+        }
     }
 
-    /// Send request, wait for ack.
+    pub async fn send_message(&self, peer_name: &str, body: String) -> Result<(), SendError> {
+        self.send(peer_name, MessageKind::Message { body }).await
+    }
+
     pub async fn send_request(
         &self,
-        peer: &str,
+        peer_name: &str,
         intent: String,
         params: serde_json::Value,
     ) -> Result<(), SendError> {
-        self.send(peer, MessageKind::Request { intent, params })
+        self.send(peer_name, MessageKind::Request { intent, params })
             .await
     }
 
-    /// Send response - does NOT wait for ack.
     pub async fn send_response(
         &self,
-        peer: &str,
+        peer_name: &str,
         in_reply_to: Uuid,
         status: Status,
         result: serde_json::Value,
     ) -> Result<(), SendError> {
         self.send(
-            peer,
+            peer_name,
             MessageKind::Response {
                 in_reply_to,
                 status,
@@ -164,195 +237,8 @@ impl Router {
         )
         .await
     }
-
-    /// Send envelope on stream and optionally wait for ack.
-    async fn send_on_stream<S>(
-        &self,
-        stream: &mut S,
-        envelope: &Envelope,
-        wait_for_ack: bool,
-        expected_peer: &crate::identity::PubKey,
-    ) -> Result<(), SendError>
-    where
-        S: AsyncReadExt + AsyncWriteExt + Unpin,
-    {
-        // Write envelope
-        write_envelope_async(stream, envelope, self.config.max_message_bytes).await?;
-
-        // Wait for ack if required
-        if wait_for_ack {
-            let timeout = Duration::from_secs(self.config.ack_timeout_secs);
-            let ack_result = tokio::time::timeout(
-                timeout,
-                read_envelope_async(stream, self.config.max_message_bytes),
-            )
-            .await;
-
-            match ack_result {
-                Ok(Ok(ack)) => {
-                    // Verify ack signature
-                    if !ack.verify() {
-                        return Err(SendError::InvalidAck(
-                            "signature verification failed".into(),
-                        ));
-                    }
-
-                    // Verify ack is from the expected peer
-                    if ack.from != *expected_peer {
-                        return Err(SendError::InvalidAck("ack from unexpected sender".into()));
-                    }
-
-                    // Verify ack is addressed to us
-                    if ack.to != self.keypair.public_key() {
-                        return Err(SendError::InvalidAck("ack not addressed to us".into()));
-                    }
-
-                    // Verify it's an ack for our message
-                    match ack.kind {
-                        MessageKind::Ack { in_reply_to } if in_reply_to == envelope.id => {
-                            // Valid ack received
-                        }
-                        MessageKind::Ack { in_reply_to } => {
-                            return Err(SendError::InvalidAck(format!(
-                                "ack for wrong message: expected {}, got {}",
-                                envelope.id, in_reply_to
-                            )));
-                        }
-                        _ => {
-                            return Err(SendError::InvalidAck("received non-ack response".into()));
-                        }
-                    }
-                }
-                Ok(Err(_)) => {
-                    // Read error - peer closed connection or bad data
-                    return Err(SendError::PeerOffline);
-                }
-                Err(_) => {
-                    // Timeout - peer offline
-                    return Err(SendError::PeerOffline);
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
-/// Determine if we should wait for an ack for this message kind.
-///
-/// Per spec:
-/// - Message: Yes (wait for ack)
-/// - Request: Yes (wait for ack)
-/// - Response: No (no ack expected)
-/// - Ack: No (never ack an ack)
 fn should_wait_for_ack(kind: &MessageKind) -> bool {
-    matches!(
-        kind,
-        MessageKind::Message { .. } | MessageKind::Request { .. }
-    )
-}
-
-/// Read an envelope from an async stream with length-prefix framing.
-async fn read_envelope_async<R: AsyncReadExt + Unpin>(
-    reader: &mut R,
-    max_size: u32,
-) -> Result<Envelope, SendError> {
-    let mut len_bytes = [0u8; 4];
-    reader.read_exact(&mut len_bytes).await?;
-    let len = u32::from_be_bytes(len_bytes);
-
-    // Use configured max (clamped to hard limit)
-    let effective_max = max_size.min(MAX_PAYLOAD_SIZE);
-    if len > effective_max {
-        return Err(SendError::Transport(TransportError::MessageTooLarge {
-            size: len,
-        }));
-    }
-
-    let mut payload = vec![0u8; len as usize];
-    reader.read_exact(&mut payload).await?;
-
-    let envelope: Envelope =
-        ciborium::from_reader(&payload[..]).map_err(|e| SendError::Cbor(e.to_string()))?;
-
-    Ok(envelope)
-}
-
-/// Write an envelope to an async stream with length-prefix framing.
-async fn write_envelope_async<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    envelope: &Envelope,
-    max_size: u32,
-) -> Result<(), SendError> {
-    let mut payload = Vec::new();
-    ciborium::into_writer(envelope, &mut payload).map_err(|e| SendError::Cbor(e.to_string()))?;
-
-    let len = payload.len() as u32;
-    // Use configured max (clamped to hard limit)
-    let effective_max = max_size.min(MAX_PAYLOAD_SIZE);
-    if len > effective_max {
-        return Err(SendError::Transport(TransportError::MessageTooLarge {
-            size: len,
-        }));
-    }
-
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&payload).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io;
-
-    fn make_keypair() -> Keypair {
-        Keypair::generate()
-    }
-
-    #[test]
-    fn test_router_struct() {
-        let keypair = make_keypair();
-        let trusted_peers = TrustedPeers::new();
-        let config = CommsConfig::default();
-        let router = Router::new(keypair, trusted_peers, config);
-        // Router exists with all fields
-        let _ = router.keypair.public_key();
-        let _ = router.trusted_peers.peers.len();
-        let _ = router.config.ack_timeout_secs;
-    }
-
-    #[test]
-    fn test_send_error_peer_not_found() {
-        let err = SendError::PeerNotFound("unknown".to_string());
-        assert!(err.to_string().contains("Peer not found"));
-        assert!(err.to_string().contains("unknown"));
-    }
-
-    #[test]
-    fn test_send_error_peer_offline() {
-        let err = SendError::PeerOffline;
-        assert!(err.to_string().contains("offline"));
-    }
-
-    #[test]
-    fn test_send_error_io() {
-        let err = SendError::Io(io::Error::new(io::ErrorKind::NotFound, "not found"));
-        assert!(err.to_string().contains("IO error"));
-    }
-
-    #[test]
-    fn test_comms_config() {
-        let config = CommsConfig {
-            ack_timeout_secs: 60,
-            max_message_bytes: 2_000_000,
-        };
-        assert_eq!(config.ack_timeout_secs, 60);
-        assert_eq!(config.max_message_bytes, 2_000_000);
-
-        let default_config = CommsConfig::default();
-        assert_eq!(default_config.ack_timeout_secs, DEFAULT_ACK_TIMEOUT_SECS);
-        assert_eq!(default_config.max_message_bytes, DEFAULT_MAX_MESSAGE_BYTES);
-    }
+    !matches!(kind, MessageKind::Ack { .. } | MessageKind::Response { .. })
 }

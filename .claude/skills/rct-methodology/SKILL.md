@@ -53,6 +53,38 @@ Integration tests validating cross-component wiring:
 ### Gate 3 - Unit tests as needed
 Unit tests support integration tests, not replace them.
 
+## Strict Spec → Plan → Checklist Pipeline (REQUIRED)
+
+You MUST follow the strict 2→3→4 pipeline.
+See `references/strict_pipeline.md` for the required structure, file locations, and rules.
+
+Rendering: use the **repo-local** `.rct/scripts/render_checklist.py` (scaffolded) to render
+`.rct/checklist.yaml` → `.rct/outputs/CHECKLIST.md`.
+
+## Luka Loop (Generalized Ralph Loop)
+
+Use the Luka Loop to automate implementation + gates across projects.
+See `references/luka_loop.md` for scaffolding, prompts, scripts, and folder layout.
+
+Scaffold with:
+`scripts/luka_scaffold.py /path/to/repo`
+
+## Luka Loop Setup Flow (REQUIRED)
+
+Follow the required setup procedure in `references/luka_setup_flow.md`:
+- discovery questions
+- spec → plan → checklist generation
+- scaffold + render + run instructions
+
+## After Loading This Skill (REQUIRED)
+
+Immediately respond with a short user guide (3–6 bullets) that explains:
+- the spec → plan → checklist flow,
+- what the AI will create under `.rct/`,
+- what the user must provide/confirm (answers, repo path, approvals),
+- how to run the Luka Loop (`.rct/scripts/luka_loop.sh`),
+- where to view progress (`.rct/outputs/CHECKLIST.md`).
+
 ## Creating an Agent-Ready Checklist
 
 To create an executable checklist from a specification:
@@ -99,6 +131,9 @@ Spawn reviewers IN PARALLEL:
 - **Spec Auditor**: [Scope for this phase]
 ```
 
+For YAML checklists, store these commands in the phase field:
+`verification_commands: ["cmd1", "cmd2"]`.
+
 ### Step 4: Apply Atomic Task Format
 
 Every task MUST be:
@@ -122,7 +157,7 @@ Every task MUST be:
 
 ### Step 5: Add Reviewer Prompts
 
-Include reviewer agent prompts in an appendix. Each reviewer needs:
+Create reviewer agent prompts under `.rct/agents/` (used by `review_harness.sh`). Each reviewer needs:
 - Narrow veto scope
 - Phase-specific instructions
 - "Red OK" handling rules for early phases

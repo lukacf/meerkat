@@ -51,6 +51,17 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+  # Clippy lint check on push
+  - repo: local
+    hooks:
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
   # Documentation build on push
   - repo: local
     hooks:

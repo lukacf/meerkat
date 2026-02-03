@@ -3,7 +3,9 @@
 //! This module defines [`ShellConfig`] which controls shell tool behavior,
 //! and [`ShellError`] for shell-related errors.
 
+use super::security::SecurityEngine;
 use meerkat_core::ShellDefaults;
+use meerkat_core::types::SecurityMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -15,8 +17,8 @@ pub enum ShellError {
     #[error("Shell not installed: {0}. Install from https://nushell.sh")]
     ShellNotInstalled(String),
 
-    /// Command matches a blocked pattern
-    #[error("Command blocked: contains '{0}'")]
+    /// Command matches a blocked pattern or violates policy
+    #[error("Security policy violation: {0}")]
     BlockedCommand(String),
 
     /// Working directory escapes project root
@@ -93,13 +95,13 @@ pub struct ShellConfig {
     #[serde(default = "default_max_concurrent_processes")]
     pub max_concurrent_processes: usize,
 
-    /// Allowlist of commands that can be executed (default: empty = all allowed)
-    ///
-    /// If non-empty, only commands whose first word (executable name) matches
-    /// one of these entries will be allowed to execute. An empty allowlist
-    /// means all commands are allowed (subject to other restrictions).
+    /// Security mode: unrestricted, allow_list, deny_list
     #[serde(default)]
-    pub allowlist: Vec<String>,
+    pub security_mode: SecurityMode,
+
+    /// Patterns for allow/deny lists (glob format)
+    #[serde(default)]
+    pub security_patterns: Vec<String>,
 }
 
 fn default_max_completed_jobs() -> usize {
@@ -127,12 +129,18 @@ impl Default for ShellConfig {
             max_completed_jobs: default_max_completed_jobs(),
             completed_job_ttl_secs: default_completed_job_ttl_secs(),
             max_concurrent_processes: default_max_concurrent_processes(),
-            allowlist: defaults.allowlist,
+            security_mode: defaults.security_mode,
+            security_patterns: defaults.security_patterns,
         }
     }
 }
 
 impl ShellConfig {
+    /// Returns a compiled security engine based on the current configuration.
+    pub fn security_engine(&self) -> Result<SecurityEngine, ShellError> {
+        SecurityEngine::new(self.security_mode, &self.security_patterns)
+    }
+
     fn fallback_shell_candidates(&self) -> Vec<String> {
         if self.shell != "nu" {
             return Vec::new();
@@ -174,28 +182,18 @@ impl ShellConfig {
         }
     }
 
-    /// Check if a command is allowed by the allowlist.
+    /// Check if a command is allowed by the security policy.
     ///
-    /// Returns `Ok(())` if the command is allowed, or `Err(ShellError::BlockedCommand)`
-    /// if the command's executable is not in the allowlist.
-    ///
-    /// An empty allowlist means all commands are allowed.
-    pub fn check_allowlist(&self, command: &str) -> Result<(), ShellError> {
-        if self.allowlist.is_empty() {
-            return Ok(());
-        }
-
-        // Extract the first word (executable name) from the command
-        let executable = command.split_whitespace().next().unwrap_or("").trim();
-
-        if self.allowlist.iter().any(|allowed| allowed == executable) {
-            Ok(())
-        } else {
-            Err(ShellError::BlockedCommand(format!(
-                "'{}' is not in the allowlist",
-                executable
-            )))
-        }
+    /// Returns `Ok(CommandInvocation)` if the command is allowed, or `Err(ShellError::BlockedCommand)`
+    /// if it violates the policy.
+    pub fn check_allowlist(
+        &self,
+        command: &str,
+    ) -> Result<super::security::CommandInvocation, ShellError> {
+        let engine = self.security_engine()?;
+        let invocation = super::security::CommandInvocation::parse(command)?;
+        engine.check_invocation(&invocation)?;
+        Ok(invocation)
     }
 
     /// Validate and resolve a working directory
@@ -384,7 +382,8 @@ mod tests {
             max_completed_jobs: 50,
             completed_job_ttl_secs: 600,
             max_concurrent_processes: 5,
-            allowlist: vec!["echo".to_string(), "cat".to_string()],
+            security_mode: SecurityMode::AllowList,
+            security_patterns: vec!["echo".to_string(), "cat".to_string()],
         };
 
         assert!(config.enabled);
@@ -397,7 +396,7 @@ mod tests {
         assert_eq!(config.completed_job_ttl_secs, 600);
         assert_eq!(config.max_concurrent_processes, 5);
         assert_eq!(
-            config.allowlist,
+            config.security_patterns,
             vec!["echo".to_string(), "cat".to_string()]
         );
     }
@@ -436,9 +435,10 @@ mod tests {
             config.max_concurrent_processes, 10,
             "max_concurrent_processes should default to 10"
         );
+        assert_eq!(config.security_mode, SecurityMode::Unrestricted);
         assert!(
-            config.allowlist.is_empty(),
-            "allowlist should default to empty (all commands allowed)"
+            config.security_patterns.is_empty(),
+            "security_patterns should default to empty"
         );
     }
 
@@ -456,7 +456,8 @@ mod tests {
             max_completed_jobs: 200,
             completed_job_ttl_secs: 600,
             max_concurrent_processes: 15,
-            allowlist: vec!["ls".to_string(), "cat".to_string()],
+            security_mode: SecurityMode::AllowList,
+            security_patterns: vec!["ls".to_string(), "cat".to_string()],
         };
 
         // Serialize to JSON
@@ -470,7 +471,8 @@ mod tests {
         assert!(json.contains("\"shell_path\":\"/usr/bin/bash\""));
         assert!(json.contains("\"project_root\":\"/tmp/test\""));
         assert!(json.contains("\"max_concurrent_processes\":15"));
-        assert!(json.contains("\"allowlist\":[\"ls\",\"cat\"]"));
+        assert!(json.contains("\"security_mode\":\"allow_list\""));
+        assert!(json.contains("\"security_patterns\":[\"ls\",\"cat\"]"));
 
         // Deserialize back
         let parsed: ShellConfig = serde_json::from_str(&json).unwrap();
@@ -487,7 +489,8 @@ mod tests {
             parsed.max_concurrent_processes,
             config.max_concurrent_processes
         );
-        assert_eq!(parsed.allowlist, config.allowlist);
+        assert_eq!(parsed.security_mode, config.security_mode);
+        assert_eq!(parsed.security_patterns, config.security_patterns);
     }
 
     #[test]
@@ -507,7 +510,8 @@ mod tests {
             parsed.max_concurrent_processes,
             config.max_concurrent_processes
         );
-        assert_eq!(parsed.allowlist, config.allowlist);
+        assert_eq!(parsed.security_mode, config.security_mode);
+        assert_eq!(parsed.security_patterns, config.security_patterns);
     }
 
     // ==================== with_project_root Test ====================
@@ -609,7 +613,7 @@ mod tests {
         );
 
         let err = ShellError::BlockedCommand("rm -rf /".to_string());
-        assert_eq!(err.to_string(), "Command blocked: contains 'rm -rf /'");
+        assert_eq!(err.to_string(), "Security policy violation: rm -rf /");
 
         let err = ShellError::WorkingDirEscape("../../../etc".to_string());
         assert_eq!(
@@ -671,13 +675,14 @@ mod tests {
         assert!(matches!(err, ShellError::Io(_)));
     }
 
-    // ==================== Allowlist Tests ====================
+    // ==================== Security Mode Tests ====================
 
-    /// Regression test: Empty allowlist allows all commands
+    /// Regression test: Unrestricted mode allows all commands
     #[test]
-    fn test_shell_config_allowlist_empty_allows_all() {
+    fn test_shell_config_unrestricted_allows_all() {
         let config = ShellConfig {
-            allowlist: vec![],
+            security_mode: SecurityMode::Unrestricted,
+            security_patterns: vec![],
             ..Default::default()
         };
 
@@ -686,17 +691,20 @@ mod tests {
         assert!(config.check_allowlist("anything").is_ok());
     }
 
-    /// Regression test: Non-empty allowlist blocks unlisted commands
-    /// Previously, allowlist was not enforced in ShellTool::call, making
-    /// the config option ineffective for security restrictions.
+    /// Regression test: AllowList blocks non-matching commands
     #[test]
-    fn test_regression_shell_config_allowlist_blocks_unlisted() {
+    fn test_shell_config_allow_list_enforcement() {
         let config = ShellConfig {
-            allowlist: vec!["ls".to_string(), "cat".to_string(), "echo".to_string()],
+            security_mode: SecurityMode::AllowList,
+            security_patterns: vec![
+                "ls *".to_string(),
+                "cat file.txt".to_string(),
+                "echo *".to_string(),
+            ],
             ..Default::default()
         };
 
-        // Allowed commands should pass
+        // Allowed commands should pass (must match entire glob)
         assert!(config.check_allowlist("ls -la").is_ok());
         assert!(config.check_allowlist("cat file.txt").is_ok());
         assert!(config.check_allowlist("echo hello world").is_ok());
@@ -705,33 +713,32 @@ mod tests {
         let result = config.check_allowlist("rm -rf /");
         assert!(matches!(result, Err(ShellError::BlockedCommand(_))));
 
-        let result = config.check_allowlist("wget http://example.com");
+        // Command with wrong args should be blocked
+        let result = config.check_allowlist("cat other.txt");
         assert!(matches!(result, Err(ShellError::BlockedCommand(_))));
     }
 
-    /// Regression test: Allowlist checks first word (executable) only
+    /// Regression test: Glob matching for security patterns
     #[test]
-    fn test_shell_config_allowlist_checks_executable_only() {
+    fn test_shell_config_glob_patterns() {
         let config = ShellConfig {
-            allowlist: vec!["ls".to_string()],
+            security_mode: SecurityMode::AllowList,
+            security_patterns: vec!["git commit *".to_string()],
             ..Default::default()
         };
 
-        // "ls" is allowed, even if arguments contain other commands
-        assert!(config.check_allowlist("ls cat rm wget").is_ok());
-
-        // But "cat" is not allowed as an executable
-        assert!(config.check_allowlist("cat ls").is_err());
+        assert!(config.check_allowlist("git commit -m 'test'").is_ok());
+        assert!(config.check_allowlist("git push").is_err());
     }
 
     /// Test allowlist is populated from ShellDefaults
     #[test]
-    fn test_shell_config_default_has_allowlist_from_defaults() {
+    fn test_shell_config_default_has_security_from_defaults() {
         let config = ShellConfig::default();
-        // Default allowlist from config template is empty
+        assert_eq!(config.security_mode, SecurityMode::Unrestricted);
         assert!(
-            config.allowlist.is_empty(),
-            "Default allowlist should be empty (from config template)"
+            config.security_patterns.is_empty(),
+            "Default patterns should be empty"
         );
     }
 }

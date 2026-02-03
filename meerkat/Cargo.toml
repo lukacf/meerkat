@@ -30,6 +30,7 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 schemars = { workspace = true }
 which = { workspace = true }
+meerkat-mcp-server = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 nix = { workspace = true }

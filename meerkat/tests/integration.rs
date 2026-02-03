@@ -37,7 +37,7 @@ mod llm_normalization {
 
         let client = AnthropicClient::new(api_key).unwrap();
         let request = LlmRequest::new(
-            "claude-sonnet-4-20250514",
+            "claude-3-7-sonnet-20250219",
             vec![Message::User(UserMessage {
                 content: "Say 'hello' and nothing else".to_string(),
             })],
@@ -943,51 +943,20 @@ mod mcp_protocol {
 
     #[tokio::test]
     async fn test_meerkat_mcp_server_tools_list() {
-        // Test with meerkat-mcp-server if available
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-        let workspace_root = std::path::Path::new(&manifest_dir)
-            .parent()
-            .unwrap_or(std::path::Path::new("."));
-        let server_path = workspace_root.join("target/debug/meerkat-mcp-server");
+        let tools = meerkat_mcp_server::tools_list();
+        let names: std::collections::HashSet<&str> = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(|n| n.as_str()))
+            .collect();
 
-        if !server_path.exists() {
-            eprintln!(
-                "Skipping: meerkat-mcp-server not built (run cargo build -p meerkat-mcp-server)"
-            );
-            return;
-        }
-
-        let config = McpServerConfig::stdio(
-            "meerkat",
-            server_path.to_string_lossy().to_string(),
-            vec![],
-            HashMap::new(),
+        assert!(
+            names.contains("meerkat_run"),
+            "meerkat-mcp-server should expose meerkat_run"
         );
-
-        // Connect to server
-        let connection = McpConnection::connect(&config)
-            .await
-            .expect("Should connect to meerkat-mcp-server");
-
-        // List tools
-        let tools = connection.list_tools().await.expect("Should list tools");
-
-        // Verify meerkat_run tool exists
-        let meerkat_run = tools
-            .iter()
-            .find(|t| t.name == "meerkat_run")
-            .expect("meerkat-mcp-server should have meerkat_run tool");
-        assert_eq!(meerkat_run.name, "meerkat_run");
-
-        // Verify meerkat_resume tool exists
-        let meerkat_resume = tools
-            .iter()
-            .find(|t| t.name == "meerkat_resume")
-            .expect("meerkat-mcp-server should have meerkat_resume tool");
-        assert_eq!(meerkat_resume.name, "meerkat_resume");
-
-        // Clean up
-        connection.close().await.expect("Should close cleanly");
+        assert!(
+            names.contains("meerkat_resume"),
+            "meerkat-mcp-server should expose meerkat_resume"
+        );
     }
 }
 
@@ -1121,7 +1090,7 @@ mod combined {
         ];
 
         let request = LlmRequest::new(
-            "claude-sonnet-4-20250514",
+            "claude-3-7-sonnet-20250219",
             vec![Message::User(UserMessage {
                 content: "Read the file".to_string(),
             })],
@@ -1130,7 +1099,7 @@ mod combined {
         .with_max_tokens(4096)
         .with_temperature(0.7);
 
-        assert_eq!(request.model, "claude-sonnet-4-20250514");
+        assert_eq!(request.model, "claude-3-7-sonnet-20250219");
         assert_eq!(request.tools.len(), 2);
         assert_eq!(request.max_tokens, 4096);
         assert_eq!(request.temperature, Some(0.7));

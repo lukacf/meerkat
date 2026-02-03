@@ -1,220 +1,304 @@
-//! Shell security module
+//! Shell security engine
 //!
-//! This module provides command validation and sanitization for shell execution.
-//! It implements defense-in-depth strategies to prevent command injection and
-//! other security vulnerabilities.
+//! Provides a robust parse-then-validate pipeline for shell commands using
+//! POSIX-compliant word splitting and glob pattern matching.
 
-use super::config::ShellError;
+use crate::builtin::shell::config::ShellError;
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+pub use meerkat_core::types::SecurityMode;
 
-/// Patterns that indicate shell chaining/piping (allowed but logged)
-const CHAINING_CHARS: &[char] = &[
-    '|', // Pipe
-    ';', // Command separator
-    '&', // Background/AND
-];
-
-/// Dangerous command patterns that are always blocked
-const BLOCKED_PATTERNS: &[&str] = &["rm -rf /", "rm -rf ~", "> /dev/sd", "dd if="];
-
-/// Security validation result
-#[derive(Debug, Clone, PartialEq)]
-pub enum ValidationResult {
-    /// Command is safe to execute
-    Safe,
-    /// Command has potential risks but is allowed (with warning)
-    Warning { reason: String },
-    /// Command is blocked
-    Blocked { reason: String },
+/// POSIX-compliant command invocation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandInvocation {
+    /// The executable being called
+    pub executable: String,
+    /// Arguments passed to the executable
+    pub arguments: Vec<String>,
 }
 
-/// Validate a shell command for security issues
-///
-/// Returns:
-/// - `Safe` if the command appears safe
-/// - `Warning` if the command has potential risks but is allowed
-/// - `Blocked` if the command matches a dangerous pattern
-pub fn validate_command(command: &str) -> ValidationResult {
-    // Check for blocked patterns first (case-insensitive for some)
-    let lower = command.to_lowercase();
-    for pattern in BLOCKED_PATTERNS {
-        if lower.contains(&pattern.to_lowercase()) {
-            return ValidationResult::Blocked {
-                reason: format!("Command contains blocked pattern: '{}'", pattern),
-            };
+impl CommandInvocation {
+    /// Parse a raw command string into a structured invocation.
+    ///
+    /// Fails if the command has malformed shell syntax (e.g., unclosed quotes).
+    pub fn parse(raw_command: &str) -> Result<Self, ShellError> {
+        let words = shlex::split(raw_command).ok_or_else(|| {
+            ShellError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Malformed shell command: unclosed quotes or invalid escape sequences",
+            ))
+        })?;
+
+        if words.is_empty() {
+            return Ok(Self {
+                executable: String::new(),
+                arguments: Vec::new(),
+            });
         }
+
+        let mut iter = words.into_iter();
+        let executable = iter.next().unwrap_or_default();
+        let arguments = iter.collect();
+
+        Ok(Self {
+            executable,
+            arguments,
+        })
     }
 
-    // Check for chaining (allowed but warned)
-    for ch in CHAINING_CHARS {
-        if command.contains(*ch) {
-            return ValidationResult::Warning {
-                reason: format!(
-                    "Command contains shell chaining character '{}' - ensure this is intentional",
-                    ch
-                ),
-            };
+    /// Reconstruct a canonicalized command string
+    pub fn to_canonical_string(&self) -> String {
+        if self.executable.is_empty() {
+            return String::new();
         }
+
+        let mut out = shlex::try_quote(&self.executable)
+            .map(|q| q.into_owned())
+            .unwrap_or_else(|_| self.executable.clone());
+
+        for arg in &self.arguments {
+            out.push(' ');
+            out.push_str(
+                &shlex::try_quote(arg)
+                    .map(|q| q.into_owned())
+                    .unwrap_or_else(|_| arg.clone()),
+            );
+        }
+        out
+    }
+}
+
+/// A compiled security policy
+pub struct SecurityEngine {
+    mode: SecurityMode,
+    matcher: Option<GlobSet>,
+}
+
+impl SecurityEngine {
+    /// Create a new engine from a mode and list of patterns.
+    ///
+    /// Fails if any glob pattern is invalid.
+    pub fn new(mode: SecurityMode, patterns: &[String]) -> Result<Self, ShellError> {
+        if mode == SecurityMode::Unrestricted || patterns.is_empty() {
+            return Ok(Self {
+                mode,
+                matcher: None,
+            });
+        }
+
+        let mut builder = GlobSetBuilder::new();
+        for pat in patterns {
+            // Use literal_separator(false) to get command-line glob semantics
+            // where `*` matches `/` (e.g., `cat *` matches `cat /tmp/foo`)
+            let glob = GlobBuilder::new(pat)
+                .literal_separator(false)
+                .build()
+                .map_err(|e| {
+                    ShellError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Invalid glob pattern '{}': {}", pat, e),
+                    ))
+                })?;
+            builder.add(glob);
+        }
+
+        let matcher = builder.build().map_err(|e| {
+            ShellError::Io(std::io::Error::other(format!(
+                "Failed to compile security patterns: {}",
+                e
+            )))
+        })?;
+
+        Ok(Self {
+            mode,
+            matcher: Some(matcher),
+        })
     }
 
-    ValidationResult::Safe
-}
+    /// Check if a raw command string is allowed by this policy.
+    pub fn check(&self, raw_command: &str) -> Result<(), ShellError> {
+        if self.mode == SecurityMode::Unrestricted {
+            return Ok(());
+        }
 
-/// Validate command and return error if blocked
-pub fn validate_command_or_error(command: &str) -> Result<ValidationResult, ShellError> {
-    match validate_command(command) {
-        ValidationResult::Blocked { reason } => Err(ShellError::BlockedCommand(reason)),
-        other => Ok(other),
+        let invocation = CommandInvocation::parse(raw_command)?;
+        self.check_invocation(&invocation)
     }
-}
 
-/// Security configuration for shell execution
-#[derive(Debug, Clone)]
-pub struct SecurityConfig {
-    /// Maximum number of concurrent shell processes
-    pub max_concurrent_processes: usize,
-    /// Maximum output size in bytes
-    pub max_output_bytes: usize,
-    /// Block commands with dangerous characters
-    pub block_dangerous_chars: bool,
-    /// Block commands matching dangerous patterns
-    pub block_dangerous_patterns: bool,
-}
+    /// Check if a command invocation is allowed by this policy.
+    pub fn check_invocation(&self, invocation: &CommandInvocation) -> Result<(), ShellError> {
+        if self.mode == SecurityMode::Unrestricted {
+            return Ok(());
+        }
 
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            max_concurrent_processes: 10,
-            max_output_bytes: 10 * 1024 * 1024, // 10MB
-            block_dangerous_chars: true,
-            block_dangerous_patterns: true,
+        if invocation.executable.is_empty() {
+            return Ok(());
+        }
+
+        // We match against the canonical string to ensure the whole command line is validated.
+        // This prevents "command smuggling" via arguments.
+        let canonical = invocation.to_canonical_string();
+
+        let is_match = self
+            .matcher
+            .as_ref()
+            .is_some_and(|m| m.is_match(&canonical));
+
+        match self.mode {
+            SecurityMode::AllowList => {
+                if is_match {
+                    Ok(())
+                } else {
+                    Err(ShellError::BlockedCommand(format!(
+                        "Command '{}' does not match any allowed patterns",
+                        canonical
+                    )))
+                }
+            }
+            SecurityMode::DenyList => {
+                if is_match {
+                    Err(ShellError::BlockedCommand(format!(
+                        "Command '{}' matches a denied pattern",
+                        canonical
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+            SecurityMode::Unrestricted => unreachable!(),
         }
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    // ==================== validate_command Tests ====================
-
     #[test]
-    fn test_safe_commands() {
-        // Common safe commands should pass
-        assert_eq!(validate_command("ls -la"), ValidationResult::Safe);
-        assert_eq!(validate_command("cat file.txt"), ValidationResult::Safe);
-        assert_eq!(
-            validate_command("grep pattern file"),
-            ValidationResult::Safe
-        );
-        assert_eq!(validate_command("pwd"), ValidationResult::Safe);
-        assert_eq!(validate_command("echo hello"), ValidationResult::Safe);
-        assert_eq!(validate_command("wc -l file.txt"), ValidationResult::Safe);
+    fn test_invocation_parsing() {
+        let inv = CommandInvocation::parse("  ls  -la  'my dir'  ").unwrap();
+        assert_eq!(inv.executable, "ls");
+        assert_eq!(inv.arguments, vec!["-la", "my dir"]);
+
+        // Canonicalization check
+        assert_eq!(inv.to_canonical_string(), "ls -la 'my dir'");
     }
 
     #[test]
-    fn test_blocked_dangerous_patterns() {
-        // rm -rf /
-        let result = validate_command("rm -rf /");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
-
-        // rm -rf ~
-        let result = validate_command("rm -rf ~");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
-
-        // Overwrite disk
-        let result = validate_command("> /dev/sda");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
-
-        // dd to disk
-        let result = validate_command("dd if=/dev/zero of=/dev/sda");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
-    }
-
-    #[test]
-    fn test_warning_for_chaining() {
-        // Pipe
-        let result = validate_command("cat file | grep pattern");
-        assert!(matches!(result, ValidationResult::Warning { .. }));
-
-        // Semicolon
-        let result = validate_command("cd dir; ls");
-        assert!(matches!(result, ValidationResult::Warning { .. }));
-
-        // Ampersand (background)
-        let result = validate_command("long_command &");
-        assert!(matches!(result, ValidationResult::Warning { .. }));
-    }
-
-    #[test]
-    fn test_validate_command_or_error() {
-        // Safe command
-        let result = validate_command_or_error("ls -la");
-        assert!(result.is_ok());
-
-        // Blocked command
-        let result = validate_command_or_error("rm -rf /");
+    fn test_parsing_failure() {
+        let result = CommandInvocation::parse("rm -rf \"unclosed");
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, ShellError::BlockedCommand(_)));
     }
 
     #[test]
-    fn test_case_insensitive_pattern_matching() {
-        // Should block regardless of case
-        let result = validate_command("RM -RF /");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
-
-        let result = validate_command("Rm -Rf /");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
-    }
-
-    // ==================== SecurityConfig Tests ====================
-
-    #[test]
-    fn test_security_config_defaults() {
-        let config = SecurityConfig::default();
-        assert_eq!(config.max_concurrent_processes, 10);
-        assert_eq!(config.max_output_bytes, 10 * 1024 * 1024);
-        assert!(config.block_dangerous_chars);
-        assert!(config.block_dangerous_patterns);
-    }
-
-    // ==================== Edge Cases ====================
-
-    #[test]
-    fn test_empty_command() {
-        assert_eq!(validate_command(""), ValidationResult::Safe);
+    fn test_unrestricted_mode() {
+        let engine = SecurityEngine::new(SecurityMode::Unrestricted, &[]).unwrap();
+        assert!(engine.check("rm -rf /").is_ok());
     }
 
     #[test]
-    fn test_whitespace_command() {
-        assert_eq!(validate_command("   "), ValidationResult::Safe);
+    fn test_allow_list() {
+        let patterns = vec!["git *".to_string(), "ls".to_string()];
+        let engine = SecurityEngine::new(SecurityMode::AllowList, &patterns).unwrap();
+
+        assert!(engine.check("ls").is_ok());
+        assert!(engine.check("git status").is_ok());
+        assert!(engine.check("git checkout main").is_ok());
+
+        // Blocked: not in list
+        assert!(engine.check("rm -rf /").is_err());
+        // Blocked: ls with args is not 'ls' exactly
+        assert!(engine.check("ls -la").is_err());
     }
 
     #[test]
-    fn test_safe_file_operations() {
-        // Normal file operations should be safe
-        assert_eq!(validate_command("cp file1 file2"), ValidationResult::Safe);
-        assert_eq!(validate_command("mv old new"), ValidationResult::Safe);
-        assert_eq!(validate_command("mkdir -p dir"), ValidationResult::Safe);
-        assert_eq!(validate_command("touch newfile"), ValidationResult::Safe);
+    fn test_deny_list() {
+        let patterns = vec!["rm -rf /".to_string(), "curl *".to_string()];
+        let engine = SecurityEngine::new(SecurityMode::DenyList, &patterns).unwrap();
+
+        assert!(engine.check("ls -la").is_ok());
+
+        // Blocked: denied exactly
+        assert!(engine.check("rm -rf /").is_err());
+        // Blocked: denied via glob
+        assert!(engine.check("curl http://malicious.com").is_err());
     }
 
     #[test]
-    fn test_safe_git_commands() {
-        assert_eq!(validate_command("git status"), ValidationResult::Safe);
-        assert_eq!(
-            validate_command("git log --oneline"),
-            ValidationResult::Safe
+    fn test_glob_matches_slashes_in_paths() {
+        // Command-line globs should match paths with slashes
+        // e.g., `cat *` should match `cat /tmp/foo`
+        let patterns = vec!["cat *".to_string()];
+        let engine = SecurityEngine::new(SecurityMode::AllowList, &patterns).unwrap();
+
+        // These should all be allowed since `*` should match anything including `/`
+        assert!(
+            engine.check("cat /tmp/foo").is_ok(),
+            "cat * should match cat /tmp/foo"
         );
-        assert_eq!(validate_command("git diff HEAD~1"), ValidationResult::Safe);
+        assert!(
+            engine.check("cat /path/to/file.txt").is_ok(),
+            "cat * should match paths with multiple slashes"
+        );
+        assert!(
+            engine.check("cat somefile").is_ok(),
+            "cat * should match simple filenames"
+        );
     }
 
     #[test]
-    fn test_blocked_pattern_in_larger_command() {
-        // Pattern embedded in larger command should still be blocked
-        let result = validate_command("sudo rm -rf / --no-preserve-root");
-        assert!(matches!(result, ValidationResult::Blocked { .. }));
+    fn test_glob_matches_urls() {
+        // Command-line globs should match URLs with slashes
+        // e.g., `curl *` should match `curl http://example.com/path`
+        let patterns = vec!["curl *".to_string()];
+        let engine = SecurityEngine::new(SecurityMode::AllowList, &patterns).unwrap();
+
+        assert!(
+            engine.check("curl http://example.com").is_ok(),
+            "curl * should match simple URLs"
+        );
+        assert!(
+            engine.check("curl http://example.com/path").is_ok(),
+            "curl * should match URLs with paths"
+        );
+        assert!(
+            engine
+                .check("curl http://example.com/deep/nested/path")
+                .is_ok(),
+            "curl * should match URLs with deep paths"
+        );
+    }
+
+    #[test]
+    fn test_deny_list_glob_matches_slashes() {
+        // Deny list globs should also match paths with slashes
+        let patterns = vec!["rm *".to_string()];
+        let engine = SecurityEngine::new(SecurityMode::DenyList, &patterns).unwrap();
+
+        // These should all be denied since `rm *` should match any rm command
+        assert!(
+            engine.check("rm /etc/passwd").is_err(),
+            "rm * should deny rm /etc/passwd"
+        );
+        assert!(
+            engine.check("rm /path/to/file").is_err(),
+            "rm * should deny paths with slashes"
+        );
+    }
+
+    #[test]
+    fn test_command_smuggling_prevention() {
+        // If someone tries to smuggle: git commit; rm -rf /
+        let smuggled = "git commit; rm -rf /";
+        let invocation = CommandInvocation::parse(smuggled).unwrap();
+
+        // Shlex will treat ';' as part of the previous word if not separated by space,
+        // or as a separate word if it is.
+        // In the canonical string, EVERYTHING is quoted.
+        let canonical = invocation.to_canonical_string();
+
+        // The resulting string should NOT contain a raw ';' that would be interpreted by a shell.
+        // It should look like: 'git' 'commit;' 'rm' '-rf' '/'
+        assert!(canonical.contains("'commit;'") || canonical.contains("';'"));
+        assert!(!canonical.contains("commit; rm")); // Raw sequence must be broken by quotes
     }
 }

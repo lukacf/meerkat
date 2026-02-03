@@ -1,6 +1,6 @@
 use meerkat_core::{
     CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta, ConfigScope, ConfigStore,
-    ProviderConfig, SystemPromptConfig,
+    ProviderConfig, SecurityMode, SystemPromptConfig,
 };
 use serde_json::json;
 
@@ -16,6 +16,20 @@ fn test_agent_factory_config_contract() {
     assert!(!config.tools.shell_enabled);
     assert_eq!(config.comms.mode, CommsRuntimeMode::Inproc);
     assert!(config.agent.tool_instructions.is_none());
+}
+
+#[test]
+fn test_shell_allowlist_backward_compat() {
+    let toml_str = r#"
+[shell]
+allowlist = ["git *", "ls -la"]
+"#;
+    let config: Config = toml::from_str(toml_str).expect("Should parse config");
+    assert_eq!(config.shell.security_mode, SecurityMode::AllowList);
+    assert_eq!(
+        config.shell.security_patterns,
+        vec!["git *".to_string(), "ls -la".to_string()]
+    );
 }
 
 #[test]

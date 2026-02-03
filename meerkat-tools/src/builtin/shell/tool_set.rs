@@ -41,7 +41,7 @@ impl ShellToolSet {
         let job_manager = Arc::new(JobManager::new(config.clone()));
 
         Self {
-            shell: ShellTool::new(config),
+            shell: ShellTool::with_job_manager(config, Arc::clone(&job_manager)),
             job_status: ShellJobStatusTool::new(Arc::clone(&job_manager)),
             jobs_list: ShellJobsListTool::new(Arc::clone(&job_manager)),
             job_cancel: ShellJobCancelTool::new(Arc::clone(&job_manager)),
@@ -60,7 +60,7 @@ impl ShellToolSet {
         let job_manager = Arc::new(JobManager::new(config.clone()).with_event_sender(tx));
 
         let tool_set = Self {
-            shell: ShellTool::new(config),
+            shell: ShellTool::with_job_manager(config, Arc::clone(&job_manager)),
             job_status: ShellJobStatusTool::new(Arc::clone(&job_manager)),
             jobs_list: ShellJobsListTool::new(Arc::clone(&job_manager)),
             job_cancel: ShellJobCancelTool::new(Arc::clone(&job_manager)),
@@ -185,8 +185,8 @@ mod tests {
 
         // All job tools should share the same JobManager
         // We can verify this by checking the Arc reference count
-        // 4 references: tool_set.job_manager + job_status + jobs_list + job_cancel
-        assert_eq!(Arc::strong_count(&tool_set.job_manager), 4);
+        // 5 references: tool_set.job_manager + shell + job_status + jobs_list + job_cancel
+        assert_eq!(Arc::strong_count(&tool_set.job_manager), 5);
     }
 
     // ==================== ShellToolSet::tools Tests ====================

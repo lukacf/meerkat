@@ -10,7 +10,8 @@ use uuid::Uuid;
 ///
 /// When provided to an agent, the agent will perform an extraction turn after
 /// completing the agentic work, forcing the LLM to output validated JSON that
-/// conforms to the provided schema.
+/// conforms to the provided schema. The extraction JSON becomes the final
+/// response text (schema-only) in [`RunResult`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSchema {
     /// The JSON schema that the output must conform to
@@ -237,6 +238,19 @@ pub enum StopReason {
     Cancelled,
 }
 
+/// Security mode for tool execution (e.g. shell)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityMode {
+    /// No restrictions. (Default)
+    #[default]
+    Unrestricted,
+    /// Only allow commands matching specified patterns.
+    AllowList,
+    /// Block commands matching specified patterns.
+    DenyList,
+}
+
 /// Token usage statistics
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -279,7 +293,10 @@ pub struct ToolDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RunResult {
-    /// Final text response
+    /// Final text response.
+    ///
+    /// When `output_schema` is set, this is the raw JSON string produced by the
+    /// extraction turn (schema-only; no additional text).
     pub text: String,
     /// Session ID for resumption
     pub session_id: SessionId,
@@ -289,7 +306,10 @@ pub struct RunResult {
     pub turns: u32,
     /// Number of tool calls made
     pub tool_calls: u32,
-    /// Structured output (if output_schema was provided and extraction succeeded)
+    /// Structured output (if output_schema was provided and extraction succeeded).
+    ///
+    /// This is the parsed JSON value corresponding to `text` when schema
+    /// extraction is enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<Value>,
 }

@@ -163,6 +163,8 @@ pub struct JobManager {
     cancel_notifiers: Arc<Mutex<HashMap<JobId, Arc<Notify>>>>,
     /// Map of job ID to completion time (for cleanup)
     completed_at: Arc<Mutex<HashMap<JobId, Instant>>>,
+    /// Number of synchronous slots currently occupied
+    sync_slots: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl JobManager {
@@ -176,6 +178,7 @@ impl JobManager {
             handles: Arc::new(Mutex::new(HashMap::new())),
             cancel_notifiers: Arc::new(Mutex::new(HashMap::new())),
             completed_at: Arc::new(Mutex::new(HashMap::new())),
+            sync_slots: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -267,6 +270,7 @@ impl JobManager {
             command: command.to_string(),
             working_dir: resolved_dir.as_ref().map(|p| p.display().to_string()),
             timeout_secs,
+            started_at_unix,
             status: JobStatus::Running { started_at_unix },
         };
 
@@ -473,23 +477,19 @@ impl JobManager {
             .await
             .values()
             .map(|job| {
-                let (status_str, started_at) = match &job.status {
-                    JobStatus::Running { started_at_unix } => ("running", *started_at_unix),
-                    JobStatus::Completed { .. } => ("completed", 0),
-                    JobStatus::Failed { .. } => ("failed", 0),
-                    JobStatus::TimedOut { .. } => ("timed_out", 0),
-                    JobStatus::Cancelled { .. } => ("cancelled", 0),
+                let status_str = match &job.status {
+                    JobStatus::Running { .. } => "running",
+                    JobStatus::Completed { .. } => "completed",
+                    JobStatus::Failed { .. } => "failed",
+                    JobStatus::TimedOut { .. } => "timed_out",
+                    JobStatus::Cancelled { .. } => "cancelled",
                 };
-
-                // For non-running jobs, we need to extract started_at from the job somehow
-                // For now, use 0 as fallback (could be improved by storing started_at in job)
-                let started_at_unix = if started_at > 0 { started_at } else { 0 };
 
                 JobSummary {
                     id: job.id.clone(),
                     command: job.command.clone(),
                     status: status_str.to_string(),
-                    started_at_unix,
+                    started_at_unix: job.started_at_unix,
                 }
             })
             .collect();
@@ -632,12 +632,92 @@ impl JobManager {
 
     /// Get the number of currently running jobs
     ///
-    /// Returns the count of jobs that are in Running state.
+    /// Returns the count of jobs that are in Running state plus active synchronous slots.
     pub async fn running_job_count(&self) -> usize {
         let jobs = self.jobs.lock().await;
-        jobs.values()
+        let background = jobs
+            .values()
             .filter(|job| matches!(job.status, JobStatus::Running { .. }))
-            .count()
+            .count();
+        let sync = self.sync_slots.load(std::sync::atomic::Ordering::Relaxed);
+        background + sync
+    }
+
+    /// Acquire a slot for synchronous execution.
+    ///
+    /// Returns a guard that decrements the count when dropped, or an error if
+    /// the concurrency limit is reached.
+    ///
+    /// Uses atomic compare_exchange to prevent TOCTOU race conditions where
+    /// multiple concurrent calls could all pass the limit check before any
+    /// increments the counter.
+    pub async fn acquire_sync_slot(&self) -> Result<SyncSlotGuard, ShellError> {
+        use std::sync::atomic::Ordering;
+
+        let limit = self.config.max_concurrent_processes;
+
+        // If unlimited, just increment and return
+        if limit == 0 {
+            self.sync_slots.fetch_add(1, Ordering::SeqCst);
+            return Ok(SyncSlotGuard {
+                sync_slots: Arc::clone(&self.sync_slots),
+            });
+        }
+
+        // Lock jobs map to get consistent count of running background jobs.
+        // We hold this lock during the compare_exchange to ensure background job
+        // count doesn't change between our read and the atomic increment.
+        let jobs = self.jobs.lock().await;
+        let background = jobs
+            .values()
+            .filter(|job| matches!(job.status, JobStatus::Running { .. }))
+            .count();
+
+        // Atomic compare_exchange loop to prevent TOCTOU race.
+        // Multiple concurrent calls will race on compare_exchange; only one wins,
+        // others retry and may find the limit exceeded.
+        loop {
+            let current_sync = self.sync_slots.load(Ordering::Acquire);
+            let total = background + current_sync;
+
+            if total >= limit {
+                return Err(ShellError::Io(std::io::Error::other(format!(
+                    "Concurrency limit exceeded: {total} processes, limit is {limit}"
+                ))));
+            }
+
+            // Try to atomically increment sync_slots
+            match self.sync_slots.compare_exchange_weak(
+                current_sync,
+                current_sync + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    // Successfully acquired the slot
+                    return Ok(SyncSlotGuard {
+                        sync_slots: Arc::clone(&self.sync_slots),
+                    });
+                }
+                Err(_) => {
+                    // Another thread modified sync_slots, retry
+                    continue;
+                }
+            }
+        }
+    }
+}
+
+/// Guard for a synchronous execution slot that releases it when dropped
+#[derive(Debug)]
+pub struct SyncSlotGuard {
+    sync_slots: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for SyncSlotGuard {
+    fn drop(&mut self) {
+        self.sync_slots
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -645,6 +725,7 @@ impl JobManager {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::builtin::shell::security::SecurityMode;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -673,7 +754,8 @@ mod tests {
             max_completed_jobs: 100,
             completed_job_ttl_secs: 300,
             max_concurrent_processes: 10,
-            allowlist: vec![],
+            security_mode: SecurityMode::Unrestricted,
+            security_patterns: vec![],
         };
 
         let manager = JobManager::new(config);
@@ -846,6 +928,42 @@ mod tests {
         let ids: Vec<_> = jobs.iter().map(|j| j.id.clone()).collect();
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
+    }
+
+    #[tokio::test]
+    async fn test_job_summary_preserves_started_at_unit() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let manager = JobManager::new(config);
+
+        let job_id = JobId::new();
+        let started_at_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let job = BackgroundJob {
+            id: job_id.clone(),
+            command: "echo done".to_string(),
+            working_dir: None,
+            timeout_secs: 10,
+            started_at_unix,
+            status: JobStatus::Completed {
+                exit_code: Some(0),
+                stdout: "done".to_string(),
+                stderr: String::new(),
+                duration_secs: 0.01,
+            },
+        };
+
+        manager.jobs.lock().await.insert(job_id.clone(), job);
+
+        let summaries = manager.list_jobs().await;
+        let summary = summaries
+            .iter()
+            .find(|s| s.id == job_id)
+            .expect("Job should be in list");
+        assert_eq!(summary.started_at_unix, started_at_unix);
     }
 
     // ==================== Cancel Job Tests ====================
@@ -1978,39 +2096,248 @@ mod tests {
         }
     }
 
-    /// Test that completed jobs don't count toward concurrency limit
+    /// Regression test for P3: JobSummary should preserve started_at_unix for completed jobs
+    ///
+    /// When a job completes, its started_at_unix should still be available in JobSummary,
+    /// not reset to 0. This is important for displaying job history with accurate timestamps.
     #[tokio::test]
     #[ignore = "e2e: spawns shell processes"]
-    async fn test_concurrency_limit_excludes_completed() {
+    async fn test_job_summary_preserves_started_at_for_completed_jobs() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
-        config.max_concurrent_processes = 2;
 
         let manager = JobManager::new(config);
 
-        // Spawn a quick job that will complete
-        let job1 = manager.spawn_job("echo done", None, 30).await.unwrap();
+        // Spawn a quick job
+        let job_id = manager.spawn_job("echo hello", None, 30).await.unwrap();
 
         // Wait for it to complete
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
-        // Verify it completed
-        let status = manager.get_status(&job1).await.unwrap();
+        // Verify job completed
+        let job = manager.get_status(&job_id).await.unwrap();
         assert!(
-            matches!(status.status, JobStatus::Completed { .. }),
-            "Job should be completed"
+            matches!(job.status, JobStatus::Completed { .. }),
+            "Job should be completed, got {:?}",
+            job.status
         );
 
-        // Should still be able to spawn 2 more jobs (completed doesn't count)
-        let job2 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
-        let job3 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
+        // Get the job summary via list_jobs
+        let summaries = manager.list_jobs().await;
+        let summary = summaries
+            .iter()
+            .find(|s| s.id == job_id)
+            .expect("Job should be in list");
 
-        // Now at limit - next should fail
-        let result = manager.spawn_job("sleep 60", None, 120).await;
-        assert!(result.is_err(), "Should reject when at limit");
+        // The started_at_unix should be a valid timestamp, not 0
+        assert!(
+            summary.started_at_unix > 0,
+            "Completed job's started_at_unix should be preserved (> 0), got {}",
+            summary.started_at_unix
+        );
 
-        let _ = manager.cancel_job(&job2).await;
-        let _ = manager.cancel_job(&job3).await;
+        // Verify it's a reasonable timestamp (within last minute)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            summary.started_at_unix <= now && summary.started_at_unix > now - 60,
+            "started_at_unix should be recent, got {} vs now {}",
+            summary.started_at_unix,
+            now
+        );
+    }
+
+    // ==================== P3: Atomic Concurrency Limit Tests ====================
+
+    /// Stress test for P3: acquire_sync_slot TOCTOU race condition
+    ///
+    /// This test spawns many concurrent tasks that all try to acquire sync slots
+    /// simultaneously. Without atomic compare_exchange, multiple tasks could pass
+    /// the limit check before any increments, exceeding the configured limit.
+    ///
+    /// The test verifies that at no point do we have more active slots than the limit.
+    #[tokio::test]
+    async fn test_acquire_sync_slot_atomic_stress() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.shell = "sh".to_string();
+        config.max_concurrent_processes = 2; // Low limit to make race easier to trigger
+
+        let manager = Arc::new(JobManager::new(config));
+
+        // Track concurrent active slots and max observed
+        let active_slots = Arc::new(AtomicUsize::new(0));
+        let max_observed = Arc::new(AtomicUsize::new(0));
+        let success_count = Arc::new(AtomicUsize::new(0));
+        let failure_count = Arc::new(AtomicUsize::new(0));
+
+        // Spawn many concurrent tasks trying to acquire slots
+        let num_tasks = 20;
+        let mut handles = Vec::new();
+
+        for _ in 0..num_tasks {
+            let mgr = Arc::clone(&manager);
+            let active = Arc::clone(&active_slots);
+            let max_obs = Arc::clone(&max_observed);
+            let successes = Arc::clone(&success_count);
+            let failures = Arc::clone(&failure_count);
+
+            handles.push(tokio::spawn(async move {
+                match mgr.acquire_sync_slot().await {
+                    Ok(guard) => {
+                        // We got a slot - increment active count
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+
+                        // Track max concurrent slots ever observed
+                        let mut max = max_obs.load(Ordering::SeqCst);
+                        while current > max {
+                            match max_obs.compare_exchange_weak(
+                                max,
+                                current,
+                                Ordering::SeqCst,
+                                Ordering::Relaxed,
+                            ) {
+                                Ok(_) => break,
+                                Err(actual) => max = actual,
+                            }
+                        }
+
+                        successes.fetch_add(1, Ordering::SeqCst);
+
+                        // Hold the slot briefly to increase chance of race
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+
+                        // Decrement active count before guard drops
+                        active.fetch_sub(1, Ordering::SeqCst);
+
+                        // Guard drops here, releasing the slot
+                        drop(guard);
+                    }
+                    Err(_) => {
+                        // Slot acquisition failed (at limit) - this is expected
+                        failures.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            handle.await.expect("Task should not panic");
+        }
+
+        let final_max = max_observed.load(Ordering::SeqCst);
+        let total_successes = success_count.load(Ordering::SeqCst);
+        let total_failures = failure_count.load(Ordering::SeqCst);
+
+        // The critical assertion: max concurrent slots should never exceed limit
+        assert!(
+            final_max <= 2,
+            "TOCTOU race detected! Max concurrent slots was {}, limit is 2. \
+             Successes: {}, Failures: {}",
+            final_max,
+            total_successes,
+            total_failures
+        );
+
+        // Sanity check: all tasks completed
+        assert_eq!(
+            total_successes + total_failures,
+            num_tasks,
+            "All tasks should complete"
+        );
+
+        // With limit=2 and 20 tasks, we expect some failures
+        assert!(
+            total_failures > 0,
+            "Should have some failures when 20 tasks compete for 2 slots"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_acquire_sync_slot_enforces_limit() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.max_concurrent_processes = 1;
+
+        let manager = JobManager::new(config);
+
+        let _guard = manager
+            .acquire_sync_slot()
+            .await
+            .expect("first slot should be available");
+        let err = manager
+            .acquire_sync_slot()
+            .await
+            .expect_err("second slot should be rejected");
+
+        assert!(
+            err.to_string().contains("Concurrency limit exceeded"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Additional stress test: run acquire_sync_slot stress test multiple times
+    /// to catch intermittent race conditions
+    #[tokio::test]
+    async fn test_acquire_sync_slot_atomic_repeated() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Run the stress test 10 times to catch flaky races
+        for iteration in 0..10 {
+            let temp_dir = TempDir::new().unwrap();
+            let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+            config.shell = "sh".to_string();
+            config.max_concurrent_processes = 2;
+
+            let manager = Arc::new(JobManager::new(config));
+            let max_observed = Arc::new(AtomicUsize::new(0));
+            let active_slots = Arc::new(AtomicUsize::new(0));
+
+            let mut handles = Vec::new();
+            for _ in 0..10 {
+                let mgr = Arc::clone(&manager);
+                let max_obs = Arc::clone(&max_observed);
+                let active = Arc::clone(&active_slots);
+
+                handles.push(tokio::spawn(async move {
+                    if let Ok(guard) = mgr.acquire_sync_slot().await {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        let mut max = max_obs.load(Ordering::SeqCst);
+                        while current > max {
+                            match max_obs.compare_exchange_weak(
+                                max,
+                                current,
+                                Ordering::SeqCst,
+                                Ordering::Relaxed,
+                            ) {
+                                Ok(_) => break,
+                                Err(actual) => max = actual,
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        drop(guard);
+                    }
+                }));
+            }
+
+            for handle in handles {
+                handle.await.expect("Task should not panic");
+            }
+
+            let final_max = max_observed.load(Ordering::SeqCst);
+            assert!(
+                final_max <= 2,
+                "TOCTOU race on iteration {}! Max concurrent was {}, limit is 2",
+                iteration,
+                final_max
+            );
+        }
     }
 }

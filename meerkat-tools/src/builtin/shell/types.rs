@@ -103,6 +103,8 @@ pub struct BackgroundJob {
     pub working_dir: Option<String>,
     /// Timeout in seconds for the command
     pub timeout_secs: u64,
+    /// Unix timestamp when the job started (preserved across status transitions)
+    pub started_at_unix: u64,
     /// Current status of the job
     pub status: JobStatus,
 }
@@ -326,6 +328,7 @@ mod tests {
             command: "cargo build".to_string(),
             working_dir: Some("/project".to_string()),
             timeout_secs: 300,
+            started_at_unix: 1706123456,
             status: JobStatus::Running {
                 started_at_unix: 1706123456,
             },
@@ -335,6 +338,7 @@ mod tests {
         assert_eq!(job.command, "cargo build");
         assert_eq!(job.working_dir, Some("/project".to_string()));
         assert_eq!(job.timeout_secs, 300);
+        assert_eq!(job.started_at_unix, 1706123456);
         assert!(matches!(job.status, JobStatus::Running { .. }));
     }
 
@@ -345,6 +349,7 @@ mod tests {
             command: "cargo test".to_string(),
             working_dir: None,
             timeout_secs: 60,
+            started_at_unix: 1706123400,
             status: JobStatus::Completed {
                 exit_code: Some(0),
                 stdout: "All tests passed".to_string(),
@@ -360,6 +365,7 @@ mod tests {
         assert_eq!(parsed.command, job.command);
         assert_eq!(parsed.working_dir, job.working_dir);
         assert_eq!(parsed.timeout_secs, job.timeout_secs);
+        assert_eq!(parsed.started_at_unix, job.started_at_unix);
 
         // Verify status
         if let JobStatus::Completed {

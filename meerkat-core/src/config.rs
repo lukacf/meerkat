@@ -3,9 +3,13 @@
 //! Supports layered configuration: defaults → file → env (secrets only) → CLI
 
 use crate::{
-    budget::BudgetLimits, mcp_config::McpServerConfig, retry::RetryPolicy, types::OutputSchema,
+    budget::BudgetLimits,
+    mcp_config::McpServerConfig,
+    retry::RetryPolicy,
+    types::{OutputSchema, SecurityMode},
 };
 use serde::{Deserialize, Serialize};
+use serde::de::Deserializer;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -253,6 +257,14 @@ impl Config {
         if let Some(calls) = cli.max_tool_calls {
             self.budget.max_tool_calls = Some(calls);
         }
+        // Apply JSON merge patch override if present
+        if let Some(delta) = cli.override_config {
+            let mut value = serde_json::to_value(&self).unwrap_or_default();
+            crate::config_store::merge_patch(&mut value, delta.0);
+            if let Ok(updated) = serde_json::from_value(value) {
+                *self = updated;
+            }
+        }
     }
 }
 
@@ -263,6 +275,8 @@ pub struct CliOverrides {
     pub max_tokens: Option<u64>,
     pub max_duration: Option<Duration>,
     pub max_tool_calls: Option<usize>,
+    /// Arbitrary configuration overrides via JSON merge patch
+    pub override_config: Option<ConfigDelta>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -301,7 +315,8 @@ pub struct AgentConfig {
     /// Output schema for structured output extraction.
     ///
     /// When set, the agent will perform an extraction turn after completing
-    /// the agentic work, forcing the LLM to output validated JSON.
+    /// the agentic work, forcing the LLM to output validated JSON. The final
+    /// response text becomes the schema-only JSON string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<OutputSchema>,
     /// Maximum retries for structured output validation failures.
@@ -361,13 +376,66 @@ impl Default for ModelDefaults {
     }
 }
 
+/// Default shell program
+pub const DEFAULT_SHELL_PROGRAM: &str = "nu";
+/// Default shell timeout in seconds
+pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 30;
+/// Default shell security mode
+pub const DEFAULT_SHELL_SECURITY_MODE: SecurityMode = SecurityMode::Unrestricted;
+
 /// Shell defaults configured at the config layer.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(default)]
 pub struct ShellDefaults {
     pub program: String,
     pub timeout_secs: u64,
-    pub allowlist: Vec<String>,
+    /// Security mode: unrestricted, allow_list, deny_list
+    pub security_mode: SecurityMode,
+    /// Patterns for allow/deny lists (glob format)
+    pub security_patterns: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct ShellDefaultsSeed {
+    program: Option<String>,
+    timeout_secs: Option<u64>,
+    security_mode: Option<SecurityMode>,
+    security_patterns: Option<Vec<String>>,
+    #[serde(alias = "allowlist")]
+    allowlist: Option<Vec<String>>,
+}
+
+impl<'de> Deserialize<'de> for ShellDefaults {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let seed = ShellDefaultsSeed::deserialize(deserializer)?;
+        let mut defaults = ShellDefaults::default();
+
+        if let Some(program) = seed.program {
+            defaults.program = program;
+        }
+        if let Some(timeout_secs) = seed.timeout_secs {
+            defaults.timeout_secs = timeout_secs;
+        }
+        if let Some(security_mode) = seed.security_mode {
+            defaults.security_mode = security_mode;
+        }
+        if let Some(security_patterns) = seed
+            .security_patterns
+            .or(seed.allowlist.clone())
+        {
+            defaults.security_patterns = security_patterns;
+        }
+
+        if seed.security_mode.is_none() && seed.allowlist.is_some() {
+            defaults.security_mode = SecurityMode::AllowList;
+        }
+
+        Ok(defaults)
+    }
 }
 
 impl Default for ShellDefaults {
@@ -377,10 +445,15 @@ impl Default for ShellDefaults {
         Self {
             program: shell
                 .and_then(|cfg| cfg.program.clone())
-                .unwrap_or_default(),
-            timeout_secs: shell.and_then(|cfg| cfg.timeout_secs).unwrap_or_default(),
-            allowlist: shell
-                .and_then(|cfg| cfg.allowlist.clone())
+                .unwrap_or_else(|| DEFAULT_SHELL_PROGRAM.to_string()),
+            timeout_secs: shell
+                .and_then(|cfg| cfg.timeout_secs)
+                .unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS),
+            security_mode: shell
+                .and_then(|cfg| cfg.security_mode)
+                .unwrap_or(DEFAULT_SHELL_SECURITY_MODE),
+            security_patterns: shell
+                .and_then(|cfg| cfg.security_patterns.clone())
                 .unwrap_or_default(),
         }
     }
@@ -407,7 +480,8 @@ struct TemplateModelDefaults {
 struct TemplateShellDefaults {
     program: Option<String>,
     timeout_secs: Option<u64>,
-    allowlist: Option<Vec<String>>,
+    security_mode: Option<SecurityMode>,
+    security_patterns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -811,7 +885,7 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        assert_eq!(config.agent.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.agent.model, "claude-3-7-sonnet-20250219");
         assert_eq!(config.agent.max_tokens_per_turn, 8192);
         assert_eq!(config.retry.max_retries, 3);
     }
@@ -832,7 +906,7 @@ mod tests {
 
         // 1. Test defaults
         let config = Config::default();
-        assert_eq!(config.agent.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.agent.model, "claude-3-7-sonnet-20250219");
         assert_eq!(config.budget.max_tokens, None);
 
         // 2. Test env override (secrets only) using child process

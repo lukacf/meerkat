@@ -35,7 +35,7 @@ pub use job_cancel_tool::ShellJobCancelTool;
 pub use job_manager::JobManager;
 pub use job_status_tool::ShellJobStatusTool;
 pub use jobs_list_tool::ShellJobsListTool;
-pub use security::{SecurityConfig, ValidationResult, validate_command, validate_command_or_error};
+pub use security::{CommandInvocation, SecurityEngine, SecurityMode};
 pub use tool::{ShellOutput, ShellTool};
 pub use tool_set::ShellToolSet;
 pub use types::{BackgroundJob, JobId, JobStatus, JobSummary};

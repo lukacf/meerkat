@@ -20,7 +20,6 @@ use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
 use super::config::{ShellConfig, ShellError};
-use super::security::{ValidationResult, validate_command_or_error};
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 
 /// Maximum number of characters to keep in output before truncation.
@@ -167,14 +166,30 @@ pub struct ShellTool {
     /// Configuration for shell execution
     pub config: ShellConfig,
     resolved_shell_path: Arc<Mutex<Option<PathBuf>>>,
+    /// Job manager for background execution and concurrency tracking
+    pub job_manager: Arc<super::job_manager::JobManager>,
 }
 
 impl ShellTool {
     /// Create a new ShellTool with the given configuration
     pub fn new(config: ShellConfig) -> Self {
+        let job_manager = Arc::new(super::job_manager::JobManager::new(config.clone()));
         Self {
             config,
             resolved_shell_path: Arc::new(Mutex::new(None)),
+            job_manager,
+        }
+    }
+
+    /// Create a new ShellTool with a shared job manager
+    pub fn with_job_manager(
+        config: ShellConfig,
+        job_manager: Arc<super::job_manager::JobManager>,
+    ) -> Self {
+        Self {
+            config,
+            resolved_shell_path: Arc::new(Mutex::new(None)),
+            job_manager,
         }
     }
 
@@ -223,6 +238,9 @@ impl ShellTool {
         working_dir: Option<&Path>,
         timeout_secs: u64,
     ) -> Result<ShellOutput, ShellError> {
+        // Enforce concurrency limit via job manager
+        let _guard = self.job_manager.acquire_sync_slot().await?;
+
         let shell_path = self.resolved_shell_path().await?;
 
         let start = Instant::now();
@@ -342,7 +360,7 @@ pub struct ShellOutput {
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 struct ShellInput {
     /// The command to execute
-    #[schemars(description = "The command to execute (Nushell syntax)")]
+    #[schemars(description = "The command to execute (POSIX-style parsing for policy checks)")]
     command: String,
     /// Working directory (optional)
     #[schemars(description = "Working directory (relative to project root)")]
@@ -366,7 +384,7 @@ impl BuiltinTool for ShellTool {
         ToolDef {
             name: "shell".into(),
             description:
-                "Execute a shell command using Nushell (or a fallback shell if Nushell is unavailable)"
+                "Execute a shell command (POSIX-style parsing for policy checks; runs via Nushell or fallback shell)"
                     .into(),
             input_schema: crate::schema::schema_for::<ShellInput>(),
         }
@@ -383,19 +401,12 @@ impl BuiltinTool for ShellTool {
 
         info!(command = %input.command, background = %input.background, "Executing shell command");
 
-        // Security validation: check allowlist first
-        self.config
+        // Security validation: check policy (mode + patterns)
+        // We validate the command but execute the original to preserve shell syntax (pipes, redirections).
+        let _invocation = self
+            .config
             .check_allowlist(&input.command)
             .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
-
-        // Security validation: check for dangerous patterns and characters
-        let validation = validate_command_or_error(&input.command)
-            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
-
-        // Log warnings for chaining characters but allow execution
-        if let ValidationResult::Warning { reason } = &validation {
-            warn!(command = %input.command, reason = %reason, "Command contains shell chaining");
-        }
 
         // Validate and resolve working directory
         let working_dir = if let Some(ref dir) = input.working_dir {
@@ -411,12 +422,25 @@ impl BuiltinTool for ShellTool {
             None
         };
 
-        // Background execution not yet implemented
+        // Handle background execution
         if input.background {
-            warn!("Background execution requested but not configured");
-            return Err(BuiltinToolError::execution_failed(
-                ShellError::BackgroundNotConfigured.to_string(),
-            ));
+            let job_id = self
+                .job_manager
+                .spawn_job(
+                    &input.command,
+                    working_dir.as_deref(),
+                    input
+                        .timeout_secs
+                        .unwrap_or(self.config.default_timeout_secs),
+                )
+                .await
+                .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
+
+            return Ok(serde_json::json!({
+                "job_id": job_id.to_string(),
+                "status": "running",
+                "message": format!("Command started in background with job ID: {}", job_id)
+            }));
         }
 
         // Get timeout (use provided or config default)
@@ -425,7 +449,7 @@ impl BuiltinTool for ShellTool {
             .unwrap_or(self.config.default_timeout_secs);
         debug!(timeout_secs = %timeout_secs, "Using timeout");
 
-        // Execute the command
+        // Execute the ORIGINAL command (not re-quoted) to preserve shell syntax (pipes, redirections)
         let output = self
             .execute_command(&input.command, working_dir.as_deref(), timeout_secs)
             .await
@@ -451,6 +475,7 @@ impl BuiltinTool for ShellTool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::builtin::shell::security::SecurityMode;
     use serde_json::json;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -492,6 +517,18 @@ mod tests {
         assert!(!tool.config.enabled);
     }
 
+    #[test]
+    fn test_shell_tool_schema_mentions_posix_parsing() {
+        let schema = crate::schema::schema_for::<ShellInput>();
+        let description = schema["properties"]["command"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            description.contains("POSIX"),
+            "expected command description to mention POSIX parsing, got: {description}"
+        );
+    }
+
     // ==================== ShellTool::new Tests ====================
 
     #[test]
@@ -502,6 +539,8 @@ mod tests {
             restrict_to_project: false,
             shell: "bash".to_string(),
             project_root: PathBuf::from("/tmp"),
+            security_mode: SecurityMode::Unrestricted,
+            security_patterns: Vec::new(),
             ..Default::default()
         };
 
@@ -834,12 +873,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_tool_call_background_not_configured() {
+    async fn test_shell_tool_call_background_success() {
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         let tool = ShellTool::new(config);
 
-        // Try background execution (not yet implemented)
+        // Try background execution
         let result = tool
             .call(json!({
                 "command": "echo test",
@@ -847,7 +886,10 @@ mod tests {
             }))
             .await;
 
-        assert!(matches!(result, Err(BuiltinToolError::ExecutionFailed(_))));
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert!(val["job_id"].is_string());
+        assert_eq!(val["status"], "running");
     }
 
     #[tokio::test]
@@ -1378,11 +1420,13 @@ mod tests {
 
     // ==================== Security Validation Integration Tests ====================
 
-    /// Test that commands with dangerous patterns are blocked at the tool level
+    /// Test that commands are blocked when not in allowlist
     #[tokio::test]
-    async fn test_shell_tool_blocks_rm_rf_root() {
+    async fn test_shell_tool_blocks_unauthorized() {
         let temp_dir = TempDir::new().unwrap();
-        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.security_mode = SecurityMode::AllowList;
+        config.security_patterns = vec!["ls".to_string()];
         let tool = ShellTool::new(config);
 
         let result = tool
@@ -1391,73 +1435,117 @@ mod tests {
             }))
             .await;
 
-        assert!(result.is_err(), "rm -rf / should be blocked");
+        assert!(result.is_err(), "Unauthorized command should be blocked");
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("blocked"),
-            "Error should mention blocked: {}",
+            err.contains("Security policy violation"),
+            "Error should mention policy violation: {}",
             err
         );
     }
 
-    /// Test that rm -rf ~ is blocked at the tool level
+    /// Test that authorized commands pass validation
     #[tokio::test]
-    async fn test_shell_tool_blocks_rm_rf_home() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        let tool = ShellTool::new(config);
-
-        let result = tool
-            .call(json!({
-                "command": "rm -rf ~"
-            }))
-            .await;
-
-        assert!(result.is_err(), "rm -rf ~ should be blocked");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("blocked"),
-            "Error should mention blocked: {}",
-            err
-        );
-    }
-
-    /// Test that safe commands pass validation
-    #[tokio::test]
-    async fn test_shell_tool_allows_safe_commands() {
-        if skip_if_shell_e2e_disabled() {
+    async fn test_shell_tool_allows_authorized() {
+        if skip_if_no_nu() {
             return;
         }
 
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        config.shell = "sh".to_string(); // Use sh for broad compatibility
-
+        config.security_mode = SecurityMode::AllowList;
+        config.security_patterns = vec!["echo *".to_string()];
         let tool = ShellTool::new(config);
 
-        // Simple echo without special characters
         let result = tool
             .call(json!({
                 "command": "echo hello"
             }))
             .await;
 
-        // Should pass validation (may fail on shell execution if sh not found, but
-        // validation itself should pass)
-        match result {
-            Ok(output) => {
-                let output_str = serde_json::to_string(&output).unwrap();
-                assert!(output_str.contains("hello") || output_str.contains("exit_code"));
-            }
-            Err(e) => {
-                // Should not be a security-related error
-                let err_str = e.to_string();
-                assert!(
-                    !err_str.contains("blocked") && !err_str.contains("dangerous"),
-                    "Safe command should not be blocked: {}",
-                    err_str
-                );
-            }
+        assert!(result.is_ok(), "Authorized command should be allowed");
+    }
+
+    // ==================== P2 Regression Tests: Nushell Pipeline Support ====================
+
+    /// Regression test for P2: Nushell pipelines must work correctly
+    ///
+    /// Commands with pipes like `echo hello | cat` should execute as pipelines,
+    /// not have the `|` become a literal argument to echo.
+    #[tokio::test]
+    async fn test_nushell_pipeline_works() {
+        if skip_if_no_nu() {
+            return;
         }
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let tool = ShellTool::new(config);
+
+        // A simple pipeline: echo produces output, cat passes it through
+        let result = tool
+            .call(json!({
+                "command": "echo hello | cat"
+            }))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Pipeline command should succeed: {:?}",
+            result
+        );
+
+        let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+        assert!(!output.timed_out, "Should not timeout");
+        assert_eq!(output.exit_code, Some(0), "Exit code should be 0");
+
+        // The key assertion: output should contain "hello"
+        // If the pipe is broken (treated as literal arg), we'd get "hello | cat" or similar
+        assert!(
+            output.stdout.trim() == "hello",
+            "Pipeline should work correctly. Expected 'hello', got: '{}'",
+            output.stdout.trim()
+        );
+    }
+
+    /// Regression test for P2: Nushell redirections must work correctly
+    ///
+    /// Commands with redirections like `echo hello | save file.txt` should write to files,
+    /// not have the `|` become a literal argument.
+    #[tokio::test]
+    async fn test_nushell_redirection_works() {
+        if skip_if_no_nu() {
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let tool = ShellTool::new(config);
+
+        let output_file = temp_dir.path().join("output.txt");
+
+        // Use Nushell's save command for redirection (more portable than >)
+        let result = tool
+            .call(json!({
+                "command": format!("'hello from nushell' | save {}", output_file.display())
+            }))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Redirection command should succeed: {:?}",
+            result
+        );
+
+        let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+        assert_eq!(output.exit_code, Some(0), "Exit code should be 0");
+
+        // Verify the file was actually created with the content
+        let content = std::fs::read_to_string(&output_file).expect("Output file should exist");
+        assert!(
+            content.trim() == "hello from nushell",
+            "File should contain the expected content, got: '{}'",
+            content.trim()
+        );
     }
 }

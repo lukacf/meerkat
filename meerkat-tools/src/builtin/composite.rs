@@ -73,7 +73,10 @@ impl CompositeDispatcher {
                 use crate::builtin::shell::{
                     ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool, ShellTool,
                 };
-                builtin_tools.push(Arc::new(ShellTool::new(cfg)));
+                // Use with_job_manager to share the same JobManager between ShellTool
+                // and job control tools. This ensures background jobs spawned via
+                // ShellTool are visible to shell_jobs/shell_job_status/shell_job_cancel.
+                builtin_tools.push(Arc::new(ShellTool::with_job_manager(cfg, mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobStatusTool::new(mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobsListTool::new(mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobCancelTool::new(mgr.clone())));

@@ -137,7 +137,8 @@ impl ConfigStore for FileConfigStore {
     }
 }
 
-fn merge_patch(base: &mut Value, patch: Value) {
+/// Internal utility for JSON merge patch application
+pub(crate) fn merge_patch(base: &mut Value, patch: Value) {
     match (base, patch) {
         (Value::Object(base_map), Value::Object(patch_map)) => {
             for (k, v) in patch_map {

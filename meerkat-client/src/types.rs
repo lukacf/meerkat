@@ -5,7 +5,7 @@
 use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
-use meerkat_core::{Message, StopReason, ToolDef, Usage};
+use meerkat_core::{Message, OutputSchema, StopReason, ToolDef, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::pin::Pin;
@@ -261,6 +261,12 @@ impl LlmRequest {
             obj.insert(key.to_string(), value.into());
         }
         self.provider_params = Some(params);
+        self
+    }
+
+    /// Set structured output schema using the unified OutputSchema wrapper.
+    pub fn with_output_schema(mut self, schema: OutputSchema) -> Self {
+        self = self.with_provider_param("structured_output", schema.to_value());
         self
     }
 

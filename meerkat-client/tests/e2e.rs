@@ -369,7 +369,7 @@ async fn test_anthropic_stream_end_without_done_yields_success()
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(LlmEvent::TextDelta { delta }) => {
+            Ok(LlmEvent::TextDelta { delta, .. }) => {
                 if !delta.is_empty() {
                     got_text = true;
                 }

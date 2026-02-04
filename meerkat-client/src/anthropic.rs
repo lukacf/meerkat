@@ -770,7 +770,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
         let messages = body["messages"].as_array().unwrap();
 
         // Second message should be the assistant with thinking + text
@@ -818,7 +818,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
         let messages = body["messages"].as_array().unwrap();
 
         // Assistant content should only have the text block (thinking skipped)
@@ -861,7 +861,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
         let messages = body["messages"].as_array().unwrap();
         let assistant_content = messages[1]["content"].as_array().unwrap();
 
@@ -888,7 +888,7 @@ mod tests {
         )
         .with_provider_param("thinking_budget", 10000);
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
 
         // The beta header is added during the HTTP request, not in the body
         // But the thinking config should be in the body

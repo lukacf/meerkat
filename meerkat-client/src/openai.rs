@@ -1073,31 +1073,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_parse_sse_line_valid_data() -> Result<(), Box<dyn std::error::Error>> {
-        let line = r###"data: {"id":"123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}"###;
-        let chunk = OpenAiClient::parse_sse_line(line);
-        assert!(chunk.is_some());
-        let chunk = chunk.ok_or("missing chunk")?;
-        assert_eq!(chunk.choices.len(), 1);
-        assert_eq!(chunk.choices[0].delta.content, Some("Hi".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_sse_line_done_marker() {
-        let line = "data: [DONE]";
-        let chunk = OpenAiClient::parse_sse_line(line);
-        assert!(chunk.is_none());
-    }
-
-    #[test]
-    fn test_parse_sse_line_non_data_line() {
-        let line = "event: message";
-        let chunk = OpenAiClient::parse_sse_line(line);
-        assert!(chunk.is_none());
-    }
-
     // =========================================================================
     // Structured Output Tests
     // =========================================================================

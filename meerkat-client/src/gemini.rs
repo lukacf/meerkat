@@ -1132,7 +1132,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request);
+        let body = client.build_request_body(&request)?;
         let contents = body
             .get("contents")
             .and_then(|c| c.as_array())

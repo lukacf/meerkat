@@ -336,6 +336,64 @@ async fn test_anthropic_message_stop_without_space_prefix_yields_done()
 }
 
 #[tokio::test]
+async fn test_anthropic_stream_end_without_done_yields_success()
+-> Result<(), Box<dyn std::error::Error>> {
+    const SSE_BODY: &str = concat!(
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n",
+        "\n"
+    );
+
+    let app = Router::new().route(
+        "/v1/messages",
+        post(|| async { (StatusCode::OK, SSE_BODY) }),
+    );
+    let (base_url, _server) = spawn_test_server(app).await?;
+
+    let client = AnthropicClient::new("test-key".to_string())?.with_base_url(base_url);
+    let request = LlmRequest::new(
+        "claude-3-haiku-20240307",
+        vec![Message::User(UserMessage {
+            content: "test".to_string(),
+        })],
+    );
+
+    let mut stream = client.stream(&request);
+    let mut got_text = false;
+    let mut got_done = false;
+    let mut stop_reason = None;
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(LlmEvent::TextDelta { delta, .. }) => {
+                if !delta.is_empty() {
+                    got_text = true;
+                }
+            }
+            Ok(LlmEvent::Done {
+                outcome:
+                    LlmDoneOutcome::Success {
+                        stop_reason: reason,
+                    },
+            }) => {
+                got_done = true;
+                stop_reason = Some(reason);
+                break;
+            }
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            }) => return Err(format!("Unexpected error: {:?}", error).into()),
+            Ok(_) => {}
+            Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
+        }
+    }
+
+    assert!(got_text);
+    assert!(got_done);
+    assert_eq!(stop_reason, Some(StopReason::EndTurn));
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "e2e: live API"]
 async fn e2e_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = openai_api_key() else {

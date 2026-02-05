@@ -254,6 +254,7 @@ fn test_run_result_json_schema() {
         turns: 3,
         tool_calls: 5,
         structured_output: None,
+        schema_warnings: None,
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -454,7 +455,7 @@ fn test_session_meta_timestamps() {
 }
 
 #[test]
-fn test_output_schema_new() {
+fn test_output_schema_new() -> Result<(), Box<dyn std::error::Error>> {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -464,56 +465,117 @@ fn test_output_schema_new() {
         "required": ["name", "age"]
     });
 
-    let output_schema = OutputSchema::new(schema.clone());
+    let output_schema = OutputSchema::new(schema.clone())?;
 
-    assert_eq!(output_schema.schema, schema);
+    assert_eq!(output_schema.schema.as_value(), &schema);
     assert!(output_schema.name.is_none());
     assert!(!output_schema.strict);
+    Ok(())
 }
 
 #[test]
-fn test_output_schema_with_name() {
+fn test_output_schema_with_name() -> Result<(), Box<dyn std::error::Error>> {
     let schema = json!({"type": "string"});
-    let output_schema = OutputSchema::new(schema).with_name("my_output");
+    let output_schema = OutputSchema::new(schema)?.with_name("my_output");
 
     assert_eq!(output_schema.name, Some("my_output".to_string()));
+    Ok(())
 }
 
 #[test]
-fn test_output_schema_strict() {
+fn test_output_schema_strict() -> Result<(), Box<dyn std::error::Error>> {
     let schema = json!({"type": "string"});
-    let output_schema = OutputSchema::new(schema).strict();
+    let output_schema = OutputSchema::new(schema)?.strict();
 
     assert!(output_schema.strict);
+    Ok(())
 }
 
 #[test]
-fn test_output_schema_serde_roundtrip() {
+fn test_output_schema_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let schema = json!({
         "type": "object",
         "properties": {"field": {"type": "string"}}
     });
-    let output_schema = OutputSchema::new(schema.clone())
+    let output_schema = OutputSchema::new(schema.clone())?
         .with_name("test_schema")
         .strict();
 
     let json = serde_json::to_string(&output_schema).unwrap();
     let parsed: OutputSchema = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(parsed.schema, schema);
+    let mut expected = schema.clone();
+    expected["required"] = json!([]);
+    assert_eq!(parsed.schema.as_value(), &expected);
     assert_eq!(parsed.name, Some("test_schema".to_string()));
     assert!(parsed.strict);
+    Ok(())
 }
 
 #[test]
-fn test_output_schema_serde_skip_none_name() {
+fn test_output_schema_serde_skip_none_name() -> Result<(), Box<dyn std::error::Error>> {
     let schema = json!({"type": "string"});
-    let output_schema = OutputSchema::new(schema);
+    let output_schema = OutputSchema::new(schema)?;
 
     let json = serde_json::to_value(&output_schema).unwrap();
 
     // name should be skipped when None
     assert!(json.get("name").is_none() || json.get("name") == Some(&Value::Null));
+    Ok(())
+}
+
+#[test]
+fn test_output_schema_deserialize_wrapper() -> Result<(), Box<dyn std::error::Error>> {
+    let input = json!({
+        "schema": {"type": "object"},
+        "name": "wrapped",
+        "strict": true,
+        "compat": "lossy",
+        "format": "meerkat_v1"
+    });
+    let parsed: OutputSchema = serde_json::from_value(input)?;
+    assert_eq!(parsed.name, Some("wrapped".to_string()));
+    assert!(parsed.strict);
+    Ok(())
+}
+
+#[test]
+fn test_output_schema_deserialize_raw() -> Result<(), Box<dyn std::error::Error>> {
+    let input = json!({"type": "object"});
+    let parsed: OutputSchema = serde_json::from_value(input)?;
+    assert!(parsed.name.is_none());
+    assert_eq!(parsed.schema.as_value()["type"], "object");
+    Ok(())
+}
+
+#[test]
+fn test_output_schema_deserialize_raw_with_schema_key() -> Result<(), Box<dyn std::error::Error>> {
+    let input = json!({
+        "type": "object",
+        "schema": {"type": "string"},
+        "properties": {"value": {"type": "string"}}
+    });
+    let parsed: OutputSchema = serde_json::from_value(input)?;
+    assert!(parsed.name.is_none());
+    assert_eq!(parsed.schema.as_value()["type"], "object");
+    Ok(())
+}
+
+#[test]
+fn test_output_schema_from_type() -> Result<(), Box<dyn std::error::Error>> {
+    #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+    struct Payload {
+        label: String,
+        count: u32,
+    }
+
+    let output_schema = OutputSchema::from_type::<Payload>()?;
+    let schema = output_schema.schema.as_value();
+
+    assert_eq!(schema["type"], "object");
+    assert!(schema["properties"]["label"].is_object());
+    assert!(schema["properties"]["count"].is_object());
+    Ok(())
 }
 
 #[test]
@@ -525,6 +587,7 @@ fn test_run_result_with_structured_output() {
         turns: 2,
         tool_calls: 0,
         structured_output: Some(json!({"name": "Alice", "age": 30})),
+        schema_warnings: None,
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -546,6 +609,7 @@ fn test_run_result_without_structured_output_skips_field() {
         turns: 1,
         tool_calls: 0,
         structured_output: None,
+        schema_warnings: None,
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -554,6 +618,10 @@ fn test_run_result_without_structured_output_skips_field() {
     assert!(
         json.get("structured_output").is_none()
             || json.get("structured_output") == Some(&Value::Null)
+    );
+    assert!(
+        json.get("schema_warnings").is_none()
+            || json.get("schema_warnings") == Some(&Value::Null)
     );
 }
 

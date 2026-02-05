@@ -500,6 +500,14 @@ interface RunResult {
   turns: number;
   toolCalls: number;
   usage: Usage;
+  structuredOutput?: Record<string, unknown>;
+  schemaWarnings?: SchemaWarning[];
+}
+
+interface SchemaWarning {
+  provider: "openai" | "anthropic" | "gemini" | "other";
+  path: string;
+  message: string;
 }
 
 interface Usage {

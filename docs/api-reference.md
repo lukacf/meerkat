@@ -428,8 +428,11 @@ pub struct RunResult {
     /// Total token usage
     pub usage: Usage,
 
-    /// How the agent stopped
-    pub stop_reason: StopReason,
+    /// Structured output (if output_schema was provided)
+    pub structured_output: Option<serde_json::Value>,
+
+    /// Warnings from schema compilation (if any)
+    pub schema_warnings: Option<Vec<SchemaWarning>>,
 }
 ```
 

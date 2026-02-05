@@ -175,7 +175,7 @@ struct Person {
 }
 
 #[tokio::test]
-async fn sdk_structured_output_extraction_succeeds() {
+async fn sdk_structured_output_extraction_succeeds() -> Result<(), Box<dyn std::error::Error>> {
     let calls = Arc::new(AtomicUsize::new(0));
 
     let factory = AgentFactory::new(".rkat/sessions");
@@ -192,7 +192,7 @@ async fn sdk_structured_output_extraction_succeeds() {
     let mut agent = AgentBuilder::new()
         .model("mock-model")
         .max_tokens_per_turn(64)
-        .output_schema(OutputSchema::new(person_schema()))
+        .output_schema(OutputSchema::new(person_schema())?)
         .build(llm_adapter, tools, store_adapter)
         .await;
 
@@ -216,10 +216,12 @@ async fn sdk_structured_output_extraction_succeeds() {
 
     // Verify extraction turn was called (2 calls total: agentic + extraction)
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    Ok(())
 }
 
 #[tokio::test]
-async fn sdk_structured_output_retry_on_invalid_json() {
+async fn sdk_structured_output_retry_on_invalid_json() -> Result<(), Box<dyn std::error::Error>>
+{
     let calls = Arc::new(AtomicUsize::new(0));
 
     let factory = AgentFactory::new(".rkat/sessions");
@@ -236,7 +238,7 @@ async fn sdk_structured_output_retry_on_invalid_json() {
     let mut agent = AgentBuilder::new()
         .model("mock-model")
         .max_tokens_per_turn(64)
-        .output_schema(OutputSchema::new(person_schema()))
+        .output_schema(OutputSchema::new(person_schema())?)
         .structured_output_retries(2) // Allow retries
         .build(llm_adapter, tools, store_adapter)
         .await;
@@ -255,6 +257,7 @@ async fn sdk_structured_output_retry_on_invalid_json() {
 
     // Verify retry occurred (3 calls: agentic + invalid extraction + valid extraction)
     assert_eq!(calls.load(Ordering::SeqCst), 3);
+    Ok(())
 }
 
 #[tokio::test]
@@ -290,15 +293,16 @@ async fn sdk_no_structured_output_without_schema() {
 }
 
 #[tokio::test]
-async fn sdk_output_schema_builder_pattern() {
+async fn sdk_output_schema_builder_pattern() -> Result<(), Box<dyn std::error::Error>> {
     // Test the OutputSchema builder API
     let schema = person_schema();
 
-    let output_schema = OutputSchema::new(schema.clone())
+    let output_schema = OutputSchema::new(schema.clone())?
         .with_name("person")
         .strict();
 
     assert!(output_schema.strict);
     assert_eq!(output_schema.name, Some("person".to_string()));
-    assert_eq!(output_schema.schema, schema);
+    assert_eq!(output_schema.schema.as_value(), &schema);
+    Ok(())
 }

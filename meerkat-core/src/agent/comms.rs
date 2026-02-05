@@ -105,6 +105,8 @@ where
                 turns: 0,
                 tool_calls: 0,
                 usage: Usage::default(),
+                structured_output: None,
+                schema_warnings: None,
             }
         };
 
@@ -233,6 +235,8 @@ where
                 turns: 0,
                 tool_calls: 0,
                 usage: Usage::default(),
+                structured_output: None,
+                schema_warnings: None,
             }
         };
 

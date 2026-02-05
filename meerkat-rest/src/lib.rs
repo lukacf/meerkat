@@ -33,8 +33,8 @@ use meerkat_client::{LlmClient, LlmClientAdapter, ProviderResolver};
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::{
-    Config, ConfigDelta, ConfigStore, FileConfigStore, Provider, SessionMetadata, SessionTooling,
-    SystemPromptConfig, ToolCallView, format_verbose_event,
+    Config, ConfigDelta, ConfigStore, FileConfigStore, Provider, SchemaWarning, SessionMetadata,
+    SessionTooling, SystemPromptConfig, ToolCallView, format_verbose_event,
 };
 use meerkat_store::StoreAdapter;
 use meerkat_tools::builtin::{
@@ -211,9 +211,9 @@ pub struct CreateSessionRequest {
     pub provider: Option<Provider>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// JSON schema for structured output extraction.
+    /// JSON schema for structured output extraction (wrapper or raw schema).
     #[serde(default)]
-    pub output_schema: Option<Value>,
+    pub output_schema: Option<OutputSchema>,
     /// Max retries for structured output validation (default: 2).
     #[serde(default = "default_structured_output_retries")]
     pub structured_output_retries: u32,
@@ -240,9 +240,9 @@ pub struct ContinueSessionRequest {
     pub prompt: String,
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// JSON schema for structured output extraction.
+    /// JSON schema for structured output extraction (wrapper or raw schema).
     #[serde(default)]
-    pub output_schema: Option<Value>,
+    pub output_schema: Option<OutputSchema>,
     /// Max retries for structured output validation (default: 2).
     #[serde(default = "default_structured_output_retries")]
     pub structured_output_retries: u32,
@@ -274,6 +274,9 @@ pub struct SessionResponse {
     /// Validated structured output (if output_schema was provided)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<Value>,
+    /// Warnings produced during schema compilation (if any)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_warnings: Option<Vec<SchemaWarning>>,
 }
 
 /// Usage response
@@ -513,7 +516,7 @@ async fn create_session(
 
     // Add output schema if provided
     if let Some(ref schema) = req.output_schema {
-        builder = builder.output_schema(OutputSchema::new(schema.clone()));
+        builder = builder.output_schema(schema.clone());
     }
 
     // Use caller-provided system prompt if set, otherwise use default
@@ -592,6 +595,7 @@ async fn create_session(
             total_tokens: result.usage.total_tokens(),
         },
         structured_output: result.structured_output,
+        schema_warnings: result.schema_warnings,
     }))
 }
 
@@ -771,7 +775,7 @@ async fn continue_session(
 
     // Add output schema if provided
     if let Some(ref schema) = req.output_schema {
-        builder = builder.output_schema(OutputSchema::new(schema.clone()));
+        builder = builder.output_schema(schema.clone());
     }
 
     let mut system_prompt = match req.system_prompt.clone() {
@@ -842,6 +846,7 @@ async fn continue_session(
             total_tokens: result.usage.total_tokens(),
         },
         structured_output: result.structured_output,
+        schema_warnings: result.schema_warnings,
     }))
 }
 

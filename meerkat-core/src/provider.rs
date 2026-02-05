@@ -11,3 +11,15 @@ pub enum Provider {
     Gemini,
     Other,
 }
+
+impl Provider {
+    /// Map a provider name to a Provider enum.
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "anthropic" => Self::Anthropic,
+            "openai" => Self::OpenAI,
+            "gemini" => Self::Gemini,
+            _ => Self::Other,
+        }
+    }
+}

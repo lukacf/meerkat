@@ -44,8 +44,8 @@ fn skip_if_no_prereqs() -> bool {
 }
 
 #[tokio::test]
-#[ignore = "E2E CLI test"]
-async fn e2e_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "integration-real: spawns rkat binary"]
+async fn integration_real_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_prereqs() {
         return Ok(());
     }

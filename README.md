@@ -444,20 +444,34 @@ Those tools are **excellent for interactive development**—coding alongside an 
 # Build
 cargo build --workspace
 
-# Test
-cargo test --workspace
+# Fast tests (unit + integration-fast; skips doctests; default for hooks)
+cargo test --workspace --lib --bins --tests
 
-# Integration tests
-cargo test --package meerkat --test integration
+# Unit tests only
+cargo test --workspace --lib --bins
 
-# E2E tests (requires API keys)
-cargo test --package meerkat --test e2e -- --ignored
+# Integration-fast tests only
+cargo test --workspace --tests
 
-# Cargo aliases
-cargo rct    # Run all unit tests
-cargo int    # Integration tests
-cargo e2e    # E2E tests
+# Integration-real tests (spawns processes / requires binaries)
+cargo test --workspace integration_real -- --ignored --test-threads=1
+
+# E2E tests (live APIs; requires keys + MEERKAT_LIVE_API_TESTS=1)
+MEERKAT_LIVE_API_TESTS=1 cargo test --workspace e2e_ -- --ignored --test-threads=1
+
+# Cargo aliases (defined in .cargo/config.toml)
+cargo rct       # Fast tests (unit + integration-fast)
+cargo unit      # Unit tests only
+cargo int       # Integration-fast tests only
+cargo int-real  # Integration-real tests (ignored by default)
+cargo e2e       # E2E tests (ignored by default)
 ```
+
+**Test categories (convention):**
+- **Unit**: no real API calls or process spawning (run via `cargo unit`)
+- **Integration-fast**: mocked integrations, fast by default (run via `cargo int`)
+- **Integration-real**: tests named `integration_real_*` and marked `#[ignore = "integration-real: ..."]`
+- **E2E**: tests named `e2e_*` and marked `#[ignore = "e2e: ..."]`
 
 ### CI/CD Pipeline
 
@@ -479,26 +493,30 @@ pre-commit install --hook-type pre-push
 make fmt        # Format code with rustfmt
 make fmt-check  # Check formatting (CI mode)
 make lint       # Run clippy with strict warnings
-make test       # Run unit tests
-make test-all   # Run all tests including integration
+make test       # Fast tests (unit + integration-fast)
+make test-unit  # Unit tests only
+make test-int   # Integration-fast tests only
+make test-int-real # Integration-real tests (ignored by default)
+make test-e2e   # E2E tests (ignored by default)
+make test-all   # Full test suite (all-features + all-targets)
 make audit      # Security audit with cargo-deny
 make ci         # Full CI pipeline (fmt + lint + test + audit)
 ```
 
-**Pre-commit hooks (~14s on full codebase):**
+**Pre-commit hooks:**
 
 | Hook | Stage | Description |
 |------|-------|-------------|
-| `cargo fmt` | commit | Code formatting |
-| `cargo clippy` | commit | Lint checks |
-| `cargo test` (unit) | commit | Fast unit tests |
-| `cargo test` (all) | push | Full test suite |
+| `cargo test` (fast) | commit | Fast tests (unit + integration-fast) |
+| `cargo test` (fast) | push | Fast tests (unit + integration-fast) |
+| `cargo clippy` | push | Lint checks |
+| `cargo doc` | push | Documentation build |
 | `cargo deny` | push | Security/license audit |
-| `gitleaks` | commit | Secret detection |
+| `gitleaks` | push | Secret detection |
 
 The hooks run automatically:
-- **On commit:** Fast checks (~14s) - formatting, linting, unit tests
-- **On push:** Full checks - all tests + security audit
+- **On commit:** Fast tests
+- **On push:** Fast tests + lint/docs/audit/secret checks
 
 **Rust version:** Pinned to `1.89.0` via `rust-toolchain.toml` for consistent builds.
 

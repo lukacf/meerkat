@@ -19,8 +19,7 @@ use tempfile::TempDir;
 
 /// Get an available TCP port for testing
 fn get_available_port() -> u16 {
-    let listener =
-        TcpListener::bind("127.0.0.1:0").expect("failed to bind to an ephemeral port");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind to an ephemeral port");
     let port = listener
         .local_addr()
         .expect("failed to read local addr")
@@ -479,7 +478,7 @@ fn skip_if_no_prereqs() -> bool {
 }
 
 #[tokio::test]
-#[ignore = "E2E network test"]
+#[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_tcp_message_exchange() {
     if !e2e_enabled() {
         eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
@@ -539,7 +538,7 @@ async fn test_e2e_rkat_tcp_message_exchange() {
 }
 
 #[tokio::test]
-#[ignore = "E2E network test"]
+#[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_uds_message_exchange() {
     if !e2e_enabled() {
         eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
@@ -646,7 +645,7 @@ trusted_peers_path = "{}"
 }
 
 #[tokio::test]
-#[ignore = "E2E network test"]
+#[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_request_response_flow() {
     if !e2e_enabled() {
         eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
@@ -693,7 +692,7 @@ async fn test_e2e_rkat_request_response_flow() {
 }
 
 #[tokio::test]
-#[ignore = "E2E network test"]
+#[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_untrusted_rejected() {
     if !e2e_enabled() {
         eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
@@ -751,7 +750,7 @@ async fn test_e2e_rkat_untrusted_rejected() {
 }
 
 #[tokio::test]
-#[ignore = "E2E network test"]
+#[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_three_peer_coordination() {
     if !e2e_enabled() {
         eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
@@ -820,7 +819,7 @@ async fn test_e2e_rkat_three_peer_coordination() {
 /// When RKAT_TEST_LLM_DELAY_MS is set, it simulates slow LLM processing.
 /// The ack should still return within 100ms even if LLM takes >1s.
 #[tokio::test]
-#[ignore = "E2E network test"]
+#[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_ack_is_immediate() {
     if !e2e_enabled() {
         eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
@@ -882,7 +881,7 @@ async fn test_e2e_rkat_ack_is_immediate() {
 /// to continue working (exit or send more messages) without waiting for
 /// the recipient's LLM to generate a response.
 #[tokio::test]
-#[ignore = "E2E network test"]
+#[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_sender_nonblocking() {
     if !e2e_enabled() {
         eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");

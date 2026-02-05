@@ -3,7 +3,9 @@ use futures::Stream;
 use meerkat_client::error::LlmError;
 use meerkat_client::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
-use meerkat_core::{AgentEvent, AgentLlmClient, AssistantBlock, Provider, ProviderMeta, StopReason};
+use meerkat_core::{
+    AgentEvent, AgentLlmClient, AssistantBlock, Provider, ProviderMeta, StopReason,
+};
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -88,7 +90,13 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
     let mut tc1 = None;
     let mut tc2 = None;
     for block in result.blocks() {
-        if let AssistantBlock::ToolUse { id, name, args, meta } = block {
+        if let AssistantBlock::ToolUse {
+            id,
+            name,
+            args,
+            meta,
+        } = block
+        {
             match id.as_str() {
                 "tc1" => tc1 = Some((name, args, meta)),
                 "tc2" => tc2 = Some((name, args, meta)),
@@ -125,12 +133,6 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("RUN_TEST_RESOLUTION_INNER").is_ok() {
-        let key = ProviderResolver::api_key_for(Provider::OpenAI);
-        assert_eq!(key.as_deref(), Some("rk-test"));
-        return Ok(());
-    }
-
     assert_eq!(
         ProviderResolver::infer_from_model("claude-3"),
         Provider::Anthropic
@@ -148,13 +150,12 @@ fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>>
         Provider::Other
     );
 
-    let status = std::process::Command::new(std::env::current_exe()?)
-        .arg("test_provider_resolution_contract")
-        .env("RUN_TEST_RESOLUTION_INNER", "1")
-        .env("RKAT_OPENAI_API_KEY", "rk-test")
-        .env("OPENAI_API_KEY", "native-test")
-        .status()?;
-    assert!(status.success());
+    let env = std::collections::HashMap::from([
+        ("RKAT_OPENAI_API_KEY".to_string(), "rk-test".to_string()),
+        ("OPENAI_API_KEY".to_string(), "native-test".to_string()),
+    ]);
+    let key = ProviderResolver::api_key_for_with_env(Provider::OpenAI, |key| env.get(key).cloned());
+    assert_eq!(key.as_deref(), Some("rk-test"));
 
     Ok(())
 }

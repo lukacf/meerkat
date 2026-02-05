@@ -1,13 +1,18 @@
 # Meerkat cargo configuration
 
-[env]
-# Run provider tests serially to avoid rate limits
-RUST_TEST_THREADS = "1"
-
 [alias]
-# Run all unit/integration tests FAST (skips slow doc-test compilation)
+# Fast test suite (unit + integration-fast, skips doctests)
+fast = "test --workspace --lib --bins --tests"
 rct = "test --workspace --lib --bins --tests"
-# Run integration tests only
-int = "test --package meerkat --test integration"
-# Run E2E tests (all tests marked #[ignore = "e2e: ..."])
-e2e = "test --workspace -- --ignored"
+
+# Unit tests only (no integration tests, skips doctests)
+unit = "test --workspace --lib --bins"
+
+# Integration-fast tests only (ignored tests are not run)
+int = "test --workspace --tests"
+
+# Integration tests that spawn real processes / need binaries (ignored by default)
+int-real = "test --workspace integration_real -- --ignored --test-threads=1"
+
+# End-to-end tests (live APIs / full-system resources, ignored by default)
+e2e = "test --workspace e2e_ -- --ignored --test-threads=1"

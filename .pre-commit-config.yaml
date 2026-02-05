@@ -5,11 +5,11 @@
 default_stages: [pre-commit]
 
 repos:
-  # Fast unit tests on commit
+  # Fast tests on commit (unit + integration-fast)
   - repo: local
     hooks:
       - id: cargo-test
-        name: cargo test (unit)
+        name: cargo test (fast)
         entry: make test
         language: system
         types: [rust]
@@ -40,12 +40,12 @@ repos:
         args: ['--maxkb=1000']
         stages: [pre-push]
 
-  # Full test suite on push only
+  # Fast tests on push (unit + integration-fast)
   - repo: local
     hooks:
-      - id: cargo-test-all
-        name: cargo test (full suite)
-        entry: make test-all
+      - id: cargo-test-fast
+        name: cargo test (fast)
+        entry: make test
         language: system
         types: [rust]
         pass_filenames: false

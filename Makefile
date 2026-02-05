@@ -9,7 +9,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-all lint fmt fmt-check audit ci clean doc release install-hooks coverage check help
+.PHONY: all build test test-unit test-int test-int-real test-e2e test-all lint fmt fmt-check audit ci clean doc release install-hooks coverage check help
 
 # Default target
 all: ci
@@ -24,13 +24,33 @@ release:
 	@echo "$(GREEN)Building release version...$(NC)"
 	cargo build --workspace --release
 
-# Fast unit tests (for pre-commit hooks)
-# Only runs lib tests, no integration tests
+# Fast test suite (for commit/push hooks)
+# Unit + integration-fast, skips doctests and ignored tests
 test:
+	@echo "$(GREEN)Running fast tests (unit + integration-fast)...$(NC)"
+	cargo test --workspace --lib --bins --tests
+
+# Unit tests only
+test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
 	cargo test --workspace --lib --bins
 
-# Full test suite (for CI and pre-push)
+# Integration-fast tests only (no unit tests)
+test-int:
+	@echo "$(GREEN)Running integration-fast tests...$(NC)"
+	cargo test --workspace --tests
+
+# Integration-real tests (ignored by default)
+test-int-real:
+	@echo "$(YELLOW)Running integration-real tests (ignored by default)...$(NC)"
+	cargo test --workspace integration_real -- --ignored --test-threads=1
+
+# End-to-end tests (ignored by default)
+test-e2e:
+	@echo "$(YELLOW)Running e2e tests (ignored by default)...$(NC)"
+	cargo test --workspace e2e_ -- --ignored --test-threads=1
+
+# Full test suite (for CI)
 # Includes all tests with all features
 test-all:
 	@echo "$(GREEN)Running full test suite...$(NC)"
@@ -142,7 +162,11 @@ help:
 	@echo "Available targets:"
 	@echo "  $(GREEN)build$(NC)         - Build the project (debug)"
 	@echo "  $(GREEN)release$(NC)       - Build optimized release version"
-	@echo "  $(GREEN)test$(NC)          - Run fast unit tests (pre-commit)"
+	@echo "  $(GREEN)test$(NC)          - Run fast tests (unit + integration-fast)"
+	@echo "  $(GREEN)test-unit$(NC)     - Run unit tests only"
+	@echo "  $(GREEN)test-int$(NC)      - Run integration-fast tests only"
+	@echo "  $(GREEN)test-int-real$(NC) - Run integration-real tests (ignored)"
+	@echo "  $(GREEN)test-e2e$(NC)      - Run e2e tests (ignored)"
 	@echo "  $(GREEN)test-all$(NC)      - Run full test suite (CI)"
 	@echo "  $(GREEN)lint$(NC)          - Run clippy linter"
 	@echo "  $(GREEN)fmt$(NC)           - Fix code formatting"

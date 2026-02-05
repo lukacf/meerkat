@@ -310,28 +310,41 @@ fn merge_project_over_user(user: McpConfig, project: McpConfig) -> McpConfig {
 }
 
 fn expand_env_in_config(config: McpConfig) -> Result<McpConfig, McpConfigError> {
+    expand_env_in_config_with(config, &|key| std::env::var(key).ok())
+}
+
+fn expand_env_in_config_with<F>(config: McpConfig, env: &F) -> Result<McpConfig, McpConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut servers = Vec::with_capacity(config.servers.len());
     for server in config.servers {
-        servers.push(expand_env_in_server(server)?);
+        servers.push(expand_env_in_server_with(server, env)?);
     }
     Ok(McpConfig { servers })
 }
 
-fn expand_env_in_server(server: McpServerConfig) -> Result<McpServerConfig, McpConfigError> {
+fn expand_env_in_server_with<F>(
+    server: McpServerConfig,
+    env: &F,
+) -> Result<McpServerConfig, McpConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let transport = match server.transport {
         McpTransportConfig::Stdio(stdio) => {
-            let command = expand_env_in_string(&stdio.command, "servers[].command")?;
+            let command = expand_env_in_string_with(&stdio.command, "servers[].command", env)?;
             let args = stdio
                 .args
                 .into_iter()
-                .map(|arg| expand_env_in_string(&arg, "servers[].args"))
+                .map(|arg| expand_env_in_string_with(&arg, "servers[].args", env))
                 .collect::<Result<Vec<_>, _>>()?;
-            let env = expand_env_in_map(stdio.env, "servers[].env")?;
+            let env = expand_env_in_map_with(stdio.env, "servers[].env", env)?;
             McpTransportConfig::Stdio(McpStdioConfig { command, args, env })
         }
         McpTransportConfig::Http(http) => {
-            let url = expand_env_in_string(&http.url, "servers[].url")?;
-            let headers = expand_env_in_map(http.headers, "servers[].headers")?;
+            let url = expand_env_in_string_with(&http.url, "servers[].url", env)?;
+            let headers = expand_env_in_map_with(http.headers, "servers[].headers", env)?;
             McpTransportConfig::Http(McpHttpConfig {
                 url,
                 headers,
@@ -345,19 +358,26 @@ fn expand_env_in_server(server: McpServerConfig) -> Result<McpServerConfig, McpC
     })
 }
 
-fn expand_env_in_map(
+fn expand_env_in_map_with<F>(
     map: HashMap<String, String>,
     field: &str,
-) -> Result<HashMap<String, String>, McpConfigError> {
+    env: &F,
+) -> Result<HashMap<String, String>, McpConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut expanded = HashMap::with_capacity(map.len());
     for (key, value) in map {
-        let value = expand_env_in_string(&value, field)?;
+        let value = expand_env_in_string_with(&value, field, env)?;
         expanded.insert(key, value);
     }
     Ok(expanded)
 }
 
-fn expand_env_in_string(value: &str, field: &str) -> Result<String, McpConfigError> {
+fn expand_env_in_string_with<F>(value: &str, field: &str, env: &F) -> Result<String, McpConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut output = String::with_capacity(value.len());
     let mut remaining = value;
     while let Some(start) = remaining.find("${") {
@@ -376,7 +396,7 @@ fn expand_env_in_string(value: &str, field: &str) -> Result<String, McpConfigErr
                 value: value.to_string(),
             });
         }
-        let var_value = std::env::var(var_name).map_err(|_| McpConfigError::MissingEnvVar {
+        let var_value = env(var_name).ok_or_else(|| McpConfigError::MissingEnvVar {
             field: field.to_string(),
             var: var_name.to_string(),
         })?;
@@ -664,28 +684,7 @@ url = "https://example.com/mcp"
 
     #[tokio::test]
     async fn test_env_expansion_in_config() {
-        if std::env::var("RUN_TEST_EXPANSION_INNER").is_ok() {
-            let config_path = std::env::var("TEST_CONFIG_PATH").expect("TEST_CONFIG_PATH not set");
-            let config = McpConfig::load_from_paths(Some(config_path.as_ref()), None)
-                .await
-                .unwrap();
-            let server = &config.servers[0];
-            match &server.transport {
-                McpTransportConfig::Http(http) => {
-                    assert_eq!(
-                        http.headers.get("Authorization"),
-                        Some(&"Bearer secret".to_string())
-                    );
-                }
-                _ => unreachable!("Expected http transport"),
-            }
-            return;
-        }
-
-        let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("mcp.toml");
-        tokio::fs::write(
-            &config_path,
+        let parsed: McpConfig = toml::from_str(
             r#"
 [[servers]]
 name = "remote"
@@ -693,17 +692,20 @@ url = "https://mcp.example.com/mcp"
 headers = { Authorization = "Bearer ${RKAT_TEST_API_KEY}" }
 "#,
         )
-        .await
         .unwrap();
 
-        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
-            .arg("test_env_expansion_in_config")
-            .env("RUN_TEST_EXPANSION_INNER", "1")
-            .env("RKAT_TEST_API_KEY", "secret")
-            .env("TEST_CONFIG_PATH", &config_path)
-            .status()
-            .expect("failed to spawn test child process");
+        let env = HashMap::from([("RKAT_TEST_API_KEY".to_string(), "secret".to_string())]);
+        let config = expand_env_in_config_with(parsed, &|key| env.get(key).cloned()).unwrap();
 
-        assert!(status.success());
+        let server = &config.servers[0];
+        match &server.transport {
+            McpTransportConfig::Http(http) => {
+                assert_eq!(
+                    http.headers.get("Authorization"),
+                    Some(&"Bearer secret".to_string())
+                );
+            }
+            _ => unreachable!("Expected http transport"),
+        }
     }
 }

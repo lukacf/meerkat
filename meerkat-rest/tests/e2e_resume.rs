@@ -3,9 +3,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use meerkat::{Config, JsonlStore, SessionId, SessionStore};
+use meerkat_client::TestClient;
 use meerkat_core::MemoryConfigStore;
 use meerkat_rest::{AppState, router};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::time::{Duration, timeout};
 use tower::ServiceExt;
@@ -15,22 +17,11 @@ fn skip_if_no_prereqs() -> bool {
 }
 
 #[tokio::test]
-async fn e2e_rest_resume_metadata() {
+async fn integration_rest_resume_metadata() {
     if skip_if_no_prereqs() {
         return;
     }
-    if std::env::var("RUN_TEST_REST_RESUME_INNER").is_ok() {
-        inner_test_rest_resume_metadata().await;
-        return;
-    }
-
-    let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
-        .arg("e2e_rest_resume_metadata")
-        .env("RUN_TEST_REST_RESUME_INNER", "1")
-        .env("RKAT_TEST_CLIENT", "1")
-        .status()
-        .expect("failed to spawn test child process");
-    assert!(status.success());
+    inner_test_rest_resume_metadata().await;
 }
 
 async fn inner_test_rest_resume_metadata() {
@@ -54,6 +45,7 @@ async fn inner_test_rest_resume_metadata() {
         enable_builtins: true,
         enable_shell: true,
         project_root: Some(project_root.clone()),
+        llm_client_override: Some(Arc::new(TestClient::default())),
         config_store: std::sync::Arc::new(config_store),
         event_tx,
     };
@@ -113,6 +105,7 @@ async fn inner_test_rest_resume_metadata() {
         enable_builtins: true,
         enable_shell: true,
         project_root: Some(project_root.clone()),
+        llm_client_override: Some(Arc::new(TestClient::default())),
         config_store: std::sync::Arc::new(MemoryConfigStore::new(config.clone())),
         event_tx: tokio::sync::broadcast::channel(16).0,
     };

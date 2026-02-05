@@ -105,7 +105,8 @@ fn skip_if_no_gemini_key() -> Option<String> {
 }
 
 #[tokio::test]
-async fn test_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "e2e: live API"]
+async fn e2e_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_anthropic_key() else {
         return Ok(());
     };
@@ -139,7 +140,8 @@ async fn test_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "e2e: live API"]
+async fn e2e_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_anthropic_key() else {
         return Ok(());
     };
@@ -341,7 +343,8 @@ async fn test_anthropic_message_stop_without_space_prefix_yields_done()
 }
 
 #[tokio::test]
-async fn test_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "e2e: live API"]
+async fn e2e_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_openai_key() else {
         return Ok(());
     };
@@ -375,7 +378,8 @@ async fn test_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "e2e: live API"]
+async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_openai_key() else {
         return Ok(());
     };
@@ -420,7 +424,8 @@ async fn test_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "e2e: live API"]
+async fn e2e_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_gemini_key() else {
         return Ok(());
     };
@@ -454,7 +459,8 @@ async fn test_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "e2e: live API"]
+async fn e2e_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_gemini_key() else {
         return Ok(());
     };
@@ -584,7 +590,8 @@ async fn collect_stream_text(
 }
 
 #[tokio::test]
-async fn test_anthropic_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "e2e: live API"]
+async fn e2e_anthropic_structured_output() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_anthropic_key() else {
         return Ok(());
     };
@@ -612,7 +619,8 @@ async fn test_anthropic_structured_output() -> Result<(), Box<dyn std::error::Er
 }
 
 #[tokio::test]
-async fn test_openai_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "e2e: live API"]
+async fn e2e_openai_structured_output() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_openai_key() else {
         return Ok(());
     };
@@ -640,7 +648,8 @@ async fn test_openai_structured_output() -> Result<(), Box<dyn std::error::Error
 }
 
 #[tokio::test]
-async fn test_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "e2e: live API"]
+async fn e2e_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = skip_if_no_gemini_key() else {
         return Ok(());
     };

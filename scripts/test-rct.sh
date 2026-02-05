@@ -1,34 +1,19 @@
 #!/bin/bash
-# Run all RCT tests for Meerkat
-# Provider tests run serially to avoid rate limits
+# Run the fast test suite for Meerkat (unit + integration-fast).
+# Slow suites (integration-real, e2e) are ignored by default.
 
 set -e
 
-echo "=== Running Meerkat RCT Tests ==="
+echo "=== Running Meerkat FAST Tests ==="
 echo ""
 
-# Check for required API keys
-if [ -z "$ANTHROPIC_API_KEY" ]; then
-    echo "Warning: ANTHROPIC_API_KEY not set"
-fi
-if [ -z "$OPENAI_API_KEY" ]; then
-    echo "Warning: OPENAI_API_KEY not set"
-fi
-if [ -z "$GOOGLE_API_KEY" ]; then
-    echo "Warning: GOOGLE_API_KEY not set (required for Gemini)"
-fi
+echo "Running fast suite (unit + integration-fast)..."
+cargo test --workspace --lib --bins --tests
 
 echo ""
-echo "Running meerkat-core tests..."
-cargo test --package meerkat-core --lib
+echo "=== Fast Tests Complete ==="
 
 echo ""
-echo "Running meerkat-store tests..."
-cargo test --package meerkat-store --lib
-
-echo ""
-echo "Running meerkat-client tests (provider RCTs - serial)..."
-RUST_TEST_THREADS=1 cargo test --package meerkat-client --lib
-
-echo ""
-echo "=== All RCT Tests Complete ==="
+echo "Optional slow suites:"
+echo "  cargo test --workspace integration_real -- --ignored --test-threads=1"
+echo "  MEERKAT_LIVE_API_TESTS=1 cargo test --workspace e2e_ -- --ignored --test-threads=1"

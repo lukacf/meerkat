@@ -28,8 +28,7 @@ async fn dispatch_json(
         args: &args_raw,
     };
     let result = dispatcher.dispatch(call).await?;
-    serde_json::from_str(&result.content)
-        .or(Ok(serde_json::Value::String(result.content)))
+    serde_json::from_str(&result.content).or(Ok(serde_json::Value::String(result.content)))
 }
 
 /// Create a CompositeDispatcher with shell tools enabled.
@@ -65,7 +64,8 @@ fn create_dispatcher_with_shell(
 /// This test will FAIL if ShellTool creates its own internal JobManager instead of
 /// sharing the JobManager with job control tools.
 #[tokio::test]
-async fn test_p1_shell_tool_shares_job_manager_with_job_control_tools()
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_p1_shell_tool_shares_job_manager_with_job_control_tools()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let dispatcher = create_dispatcher_with_shell(&temp_dir)?;
@@ -198,7 +198,9 @@ async fn test_p1_shell_tool_shares_job_manager_with_job_control_tools()
 
 /// Regression test: Multiple background jobs should all be tracked.
 #[tokio::test]
-async fn test_multiple_background_jobs_tracked() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_multiple_background_jobs_tracked()
+-> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let dispatcher = create_dispatcher_with_shell(&temp_dir)?;
 
@@ -244,8 +246,7 @@ async fn test_multiple_background_jobs_tracked() -> Result<(), Box<dyn std::erro
 
     // Clean up: cancel all jobs
     for job_id in &job_ids {
-        let _ =
-            dispatch_json(&dispatcher, "shell_job_cancel", json!({ "job_id": job_id })).await;
+        let _ = dispatch_json(&dispatcher, "shell_job_cancel", json!({ "job_id": job_id })).await;
     }
 
     Ok(())

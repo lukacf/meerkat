@@ -17,7 +17,8 @@ fn rkat_binary_path() -> Option<PathBuf> {
 }
 
 #[tokio::test]
-async fn e2e_rkat_init_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "integration-real: spawns rkat binary"]
+async fn integration_real_rkat_init_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
     let temp_dir = TempDir::new()?;

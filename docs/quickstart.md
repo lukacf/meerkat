@@ -157,7 +157,7 @@ rkat run "Your prompt here"
 rkat run [OPTIONS] <PROMPT>
 
 Options:
-  --model <MODEL>           Model to use (default: claude-sonnet-4-20250514)
+  --model <MODEL>           Model to use (default: claude-opus-4-6)
   -p, --provider <PROVIDER> LLM provider: anthropic, openai, gemini (auto-detected from model)
   --max-tokens <N>          Maximum tokens per turn (default: 4096)
   --max-total-tokens <N>    Maximum total tokens for the entire run
@@ -172,7 +172,7 @@ Options:
 
 ```bash
 # Use a different model
-rkat run --model claude-opus-4-5 "Explain quantum computing"
+rkat run --model claude-opus-4-6 "Explain quantum computing"
 
 # Use OpenAI
 rkat run --model gpt-4o "Write a haiku"

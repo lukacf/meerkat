@@ -2,13 +2,13 @@
 # This file is used to bootstrap ~/.rkat/config.toml when missing.
 
 [agent]
-model = "claude-3-7-sonnet-20250219"
-max_tokens_per_turn = 8192
+model = "claude-opus-4-6"
+max_tokens_per_turn = 16384
 checkpoint_interval = 5
 budget_warning_threshold = 0.8
 
 [models]
-anthropic = "claude-3-7-sonnet-20250219"
+anthropic = "claude-opus-4-6"
 openai = "gpt-4.1"
 gemini = "gemini-1.5-pro"
 

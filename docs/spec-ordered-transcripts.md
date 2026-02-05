@@ -131,7 +131,7 @@ This spec requires model features (interleaved thinking, reasoning summaries, th
 
 | Provider | Minimum Model | Required Features |
 |----------|---------------|-------------------|
-| Anthropic | `claude-sonnet-4-5`, `claude-opus-4-5` | Interleaved thinking with signatures (`interleaved-thinking-2025-05-14` beta) |
+| Anthropic | `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-opus-4-6` | Interleaved thinking with signatures (`interleaved-thinking-2025-05-14` beta) |
 | OpenAI | `gpt-5.2`, `gpt-5.2-pro`, `gpt-5.2-codex` | Responses API with reasoning items and `encrypted_content` |
 | Gemini | `gemini-3-pro-preview`, `gemini-3-flash-preview` | `thoughtSignature` on function calls and text parts |
 

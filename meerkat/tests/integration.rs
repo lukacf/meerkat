@@ -35,7 +35,7 @@ mod llm_normalization {
 
         let client = AnthropicClient::new(api_key).unwrap();
         let request = LlmRequest::new(
-            "claude-3-7-sonnet-20250219",
+            "claude-opus-4-6",
             vec![Message::User(UserMessage {
                 content: "Say 'hello' and nothing else".to_string(),
             })],
@@ -1079,7 +1079,7 @@ mod combined {
         ];
 
         let request = LlmRequest::new(
-            "claude-3-7-sonnet-20250219",
+            "claude-opus-4-6",
             vec![Message::User(UserMessage {
                 content: "Read the file".to_string(),
             })],
@@ -1088,7 +1088,7 @@ mod combined {
         .with_max_tokens(4096)
         .with_temperature(0.7);
 
-        assert_eq!(request.model, "claude-3-7-sonnet-20250219");
+        assert_eq!(request.model, "claude-opus-4-6");
         assert_eq!(request.tools.len(), 2);
         assert_eq!(request.max_tokens, 4096);
         assert_eq!(request.temperature, Some(0.7));

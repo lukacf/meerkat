@@ -16,7 +16,7 @@ Meerkat supports configuration through configuration files and programmatic sett
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ANTHROPIC_MODEL` | Model for Anthropic E2E tests | `claude-opus-4-5` |
+| `ANTHROPIC_MODEL` | Model for Anthropic E2E tests | `claude-opus-4-6` |
 | `OPENAI_MODEL` | Model for OpenAI E2E tests | `gpt-5.2` |
 | `GEMINI_MODEL` | Model for Gemini E2E tests | `gemini-3-flash-preview` |
 
@@ -108,7 +108,7 @@ use meerkat::BudgetLimits;
 use std::time::Duration;
 
 let result = meerkat::with_anthropic(api_key)
-    .model("claude-opus-4-5")           // Model selection
+    .model("claude-opus-4-6")           // Model selection
     .system_prompt("You are helpful.")   // System prompt
     .max_tokens(2048)                    // Tokens per turn
     .with_budget(BudgetLimits {          // Resource limits
@@ -135,7 +135,7 @@ use meerkat::{AgentBuilder, BudgetLimits, RetryPolicy};
 
 let mut agent = AgentBuilder::new()
     // Model settings
-    .model("claude-opus-4-5")
+    .model("claude-opus-4-6")
     .system_prompt("You are a helpful assistant.")
     .max_tokens_per_turn(4096)
 
@@ -165,11 +165,12 @@ let mut agent = AgentBuilder::new()
 
 ### Anthropic Models
 
-| Model | Context | Best For |
-|-------|---------|----------|
-| `claude-opus-4-5` | 200K | Complex reasoning, highest quality |
-| `claude-sonnet-4` | 200K | Balanced performance and cost |
-| `claude-haiku-3-5` | 200K | Fast, simple tasks |
+| Model | Context | Max Output | Best For |
+|-------|---------|------------|----------|
+| `claude-opus-4-6` | 200K / 1M (beta) | 128K | Complex reasoning, highest quality |
+| `claude-opus-4-5` | 200K | 64K | Complex reasoning, high quality |
+| `claude-sonnet-4` | 200K | 64K | Balanced performance and cost |
+| `claude-haiku-3-5` | 200K | 64K | Fast, simple tasks |
 
 ### OpenAI Models
 
@@ -305,7 +306,7 @@ host = "0.0.0.0"
 port = 3000
 
 [agent]
-model = "claude-opus-4-5"
+model = "claude-opus-4-6"
 max_tokens_per_turn = 8192
 ```
 

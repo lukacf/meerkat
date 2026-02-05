@@ -259,20 +259,24 @@ impl AnthropicClient {
 
         // Extract provider-specific params
         if let Some(ref params) = request.provider_params {
-            // Handle thinking config from both formats:
-            // 1. Legacy flat format: {"thinking_budget": 10000}
-            // 2. Typed AnthropicParams: {"thinking": {"type": "enabled", "budget_tokens": 10000}}
-            let thinking_budget = params
-                .get("thinking_budget")
-                .and_then(|v| v.as_u64())
-                .or_else(|| {
-                    params
-                        .get("thinking")
-                        .and_then(|t| t.get("budget_tokens"))
-                        .and_then(|v| v.as_u64())
-                });
-
-            if let Some(budget) = thinking_budget {
+            // Handle thinking config from three formats:
+            // 1. Adaptive (Opus 4.6): {"thinking": {"type": "adaptive"}}
+            // 2. Legacy flat format: {"thinking_budget": 10000}
+            // 3. Typed enabled: {"thinking": {"type": "enabled", "budget_tokens": 10000}}
+            if let Some(thinking) = params.get("thinking") {
+                if thinking.get("type").and_then(|t| t.as_str()) == Some("adaptive") {
+                    // Opus 4.6 adaptive thinking — pass through directly
+                    body["thinking"] = serde_json::json!({"type": "adaptive"});
+                } else if let Some(budget) = thinking.get("budget_tokens").and_then(|v| v.as_u64())
+                {
+                    // Explicit enabled format with budget
+                    body["thinking"] = serde_json::json!({
+                        "type": "enabled",
+                        "budget_tokens": budget
+                    });
+                }
+            } else if let Some(budget) = params.get("thinking_budget").and_then(|v| v.as_u64()) {
+                // Legacy flat format
                 body["thinking"] = serde_json::json!({
                     "type": "enabled",
                     "budget_tokens": budget
@@ -291,6 +295,16 @@ impl AnthropicClient {
                 }
             }
 
+            // Handle effort parameter (GA on Opus 4.6, no beta header needed)
+            // Format: {"effort": "low"|"medium"|"high"|"max"}
+            if let Some(effort) = params.get("effort").and_then(|v| v.as_str()) {
+                // Ensure output_config exists (may already be set by structured output below)
+                if body.get("output_config").is_none() {
+                    body["output_config"] = serde_json::json!({});
+                }
+                body["output_config"]["effort"] = Value::String(effort.to_string());
+            }
+
             // Handle structured output configuration
             // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
             if let Some(structured) = params.get("structured_output") {
@@ -306,11 +320,13 @@ impl AnthropicClient {
                         .map_err(|e| LlmError::InvalidRequest {
                             message: e.to_string(),
                         })?;
-                body["output_config"] = serde_json::json!({
-                    "format": {
-                        "type": "json_schema",
-                        "schema": compiled.schema
-                    }
+                // Ensure output_config exists (may already have effort set above)
+                if body.get("output_config").is_none() {
+                    body["output_config"] = serde_json::json!({});
+                }
+                body["output_config"]["format"] = serde_json::json!({
+                    "type": "json_schema",
+                    "schema": compiled.schema
                 });
             }
         }
@@ -372,10 +388,16 @@ impl LlmClient for AnthropicClient {
             async_stream::try_stream! {
                 let body = self.build_request_body(request)?;
 
-                // Check if structured output is enabled (requires beta header)
-                let has_structured_output = body.get("output_config").is_some();
+                // Check if structured output format is present (requires beta header)
+                let has_structured_output = body.get("output_config")
+                    .and_then(|c| c.get("format"))
+                    .is_some();
                 // Check if thinking is enabled (requires interleaved-thinking beta header)
-                let has_thinking = body.get("thinking").is_some();
+                // Adaptive thinking (Opus 4.6) does NOT need the beta header
+                let thinking_type = body.get("thinking")
+                    .and_then(|t| t.get("type"))
+                    .and_then(|t| t.as_str());
+                let has_legacy_thinking = thinking_type == Some("enabled");
 
                 let mut req = self.http
                     .post(format!("{}/v1/messages", self.base_url))
@@ -383,16 +405,16 @@ impl LlmClient for AnthropicClient {
                     .header("anthropic-version", "2023-06-01")
                     .header("Content-Type", "application/json");
 
-                // Add beta header for interleaved thinking (Claude 4.5)
-                if has_thinking {
-                    req = req.header("anthropic-beta", "interleaved-thinking-2025-05-14");
-                }
-                // Add beta header for structured outputs (can be combined)
-                if has_structured_output && !has_thinking {
-                    req = req.header("anthropic-beta", "structured-outputs-2025-11-13");
-                } else if has_structured_output && has_thinking {
-                    // Combine beta headers
+                // Add beta headers as needed:
+                // - Legacy thinking (type: "enabled") requires interleaved-thinking header
+                // - Adaptive thinking (type: "adaptive", Opus 4.6) needs NO thinking beta header
+                // - Structured output format requires structured-outputs header
+                if has_legacy_thinking && has_structured_output {
                     req = req.header("anthropic-beta", "interleaved-thinking-2025-05-14,structured-outputs-2025-11-13");
+                } else if has_legacy_thinking {
+                    req = req.header("anthropic-beta", "interleaved-thinking-2025-05-14");
+                } else if has_structured_output {
+                    req = req.header("anthropic-beta", "structured-outputs-2025-11-13");
                 }
 
                 let response = req
@@ -1163,4 +1185,126 @@ mod tests {
     }
 
     // AdditionalProperties handling is covered by core schema compiler tests.
+
+    // =========================================================================
+    // Opus 4.6: Adaptive thinking & effort parameter tests
+    // =========================================================================
+
+    #[test]
+    fn test_build_request_body_adaptive_thinking() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-opus-4-6",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("thinking", serde_json::json!({"type": "adaptive"}));
+
+        let body = client.build_request_body(&request)?;
+
+        assert!(body.get("thinking").is_some(), "thinking field should be present");
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        // adaptive mode should NOT have budget_tokens
+        assert!(body["thinking"].get("budget_tokens").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_effort_parameter() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-opus-4-6",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("effort", "medium");
+
+        let body = client.build_request_body(&request)?;
+
+        assert!(body.get("output_config").is_some(), "output_config should be present");
+        assert_eq!(body["output_config"]["effort"], "medium");
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_effort_with_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "required": ["name"]
+        });
+
+        let mut request = LlmRequest::new(
+            "claude-opus-4-6",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        );
+        request.provider_params = Some(serde_json::json!({
+            "effort": "high",
+            "structured_output": {
+                "schema": schema,
+                "name": "output",
+                "strict": true
+            }
+        }));
+
+        let body = client.build_request_body(&request)?;
+
+        // output_config should have BOTH effort and format
+        let output_config = &body["output_config"];
+        assert_eq!(output_config["effort"], "high");
+        assert_eq!(output_config["format"]["type"], "json_schema");
+        assert!(output_config["format"]["schema"].is_object());
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_adaptive_thinking_does_not_set_interleaved_beta() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-opus-4-6",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("thinking", serde_json::json!({"type": "adaptive"}));
+
+        let body = client.build_request_body(&request)?;
+
+        // Adaptive thinking should be in the body
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(body["thinking"].get("budget_tokens").is_none(),
+            "adaptive thinking should not have budget_tokens");
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_legacy_thinking_still_works() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        // Legacy flat format should still produce type: enabled
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("thinking_budget", 10000);
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 10000);
+        Ok(())
+    }
 }

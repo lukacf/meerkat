@@ -167,10 +167,10 @@ let mut agent = AgentBuilder::new()
 
 | Model | Context | Max Output | Best For |
 |-------|---------|------------|----------|
-| `claude-opus-4-6` | 200K / 1M (beta) | 128K | Complex reasoning, highest quality |
-| `claude-opus-4-5` | 200K | 64K | Complex reasoning, high quality |
-| `claude-sonnet-4` | 200K | 64K | Balanced performance and cost |
-| `claude-haiku-3-5` | 200K | 64K | Fast, simple tasks |
+| `claude-opus-4-6` | 200K / 1M (beta) | 128K | Complex reasoning, highest quality (default) |
+| `claude-sonnet-4-5` | 200K / 1M (beta) | 64K | Balanced performance and cost |
+| `claude-opus-4-5` | 200K | 64K | Legacy Opus (still supported) |
+| `claude-haiku-4-5` | 200K | 64K | Fast, simple tasks |
 
 ### OpenAI Models
 

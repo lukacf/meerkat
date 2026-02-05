@@ -477,7 +477,6 @@ mod tests {
     use super::*;
     use crate::builtin::shell::security::SecurityMode;
     use serde_json::json;
-    use std::ffi::OsString;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -491,15 +490,6 @@ mod tests {
         }
 
         eprintln!("Skipping: Nushell not installed (install `nu` to run this test)");
-        true
-    }
-
-    fn skip_if_shell_e2e_disabled() -> bool {
-        if std::env::var_os("RKAT_SHELL_E2E").is_some() {
-            return false;
-        }
-
-        eprintln!("Skipping: set RKAT_SHELL_E2E=1 to run shell E2E tests");
         true
     }
 
@@ -637,7 +627,7 @@ mod tests {
         let shell_value = fake_shell.to_string_lossy().to_string();
         let config = ShellConfig::default();
         let result = config
-            .resolve_shell_path_auto_in(Some(OsString::from("")), Some(shell_value.as_str()))
+            .resolve_shell_path_auto_in(Some(std::ffi::OsStr::new("")), Some(shell_value.as_str()))
             .expect("fallback shell should resolve");
         assert_eq!(result, fake_shell);
     }
@@ -672,7 +662,7 @@ mod tests {
             shell: "definitely_not_a_real_shell_xyz123".to_string(),
             ..Default::default()
         };
-        let result = config.resolve_shell_path_auto_in(Some(OsString::from("")), Some("/bin/sh"));
+        let result = config.resolve_shell_path_auto_in(Some(std::ffi::OsStr::new("")), Some("/bin/sh"));
         match result {
             Err(ShellError::ShellNotInstalled(details)) => {
                 assert!(details.contains("definitely_not_a_real_shell_xyz123"));
@@ -692,7 +682,7 @@ mod tests {
         let tool = ShellTool::new(config);
         let result = tool
             .config
-            .resolve_shell_path_with_fallbacks_in(&[], Some(OsString::from("")));
+            .resolve_shell_path_with_fallbacks_in(&[], Some(std::ffi::OsStr::new("")));
         match result {
             Err(ShellError::ShellNotInstalled(details)) => {
                 assert!(details.contains("definitely_not_a_real_shell_xyz123"));
@@ -707,9 +697,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_sync_execute() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }
@@ -731,9 +718,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_timeout() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }
@@ -754,9 +738,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_output_format() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }
@@ -782,9 +763,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_env_inheritance() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }
@@ -806,9 +784,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_pwd_override() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }
@@ -851,9 +826,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_call_background_success() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         let tool = ShellTool::new(config);
@@ -875,9 +847,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_call_success() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }
@@ -903,9 +872,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_call_with_working_dir() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }
@@ -999,9 +965,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_timeout_enforced_sync() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }
@@ -1045,10 +1008,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_non_utf8_output() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
-
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
@@ -1082,9 +1041,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_long_output_captured() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }
@@ -1122,10 +1078,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_sync_parallel_execution() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
-
         use std::time::Instant;
 
         let temp_dir = TempDir::new().unwrap();
@@ -1336,7 +1288,8 @@ mod tests {
             shell: "definitely_not_a_real_shell_xyz123".to_string(),
             ..Default::default()
         };
-        let result = config.resolve_shell_path_auto_in(Some(OsString::from("")), Some("/bin/sh"));
+        let result =
+            config.resolve_shell_path_auto_in(Some(std::ffi::OsStr::new("")), Some("/bin/sh"));
         match result {
             Err(ShellError::ShellNotInstalled(details)) => {
                 assert!(details.contains("definitely_not_a_real_shell_xyz123"));
@@ -1450,9 +1403,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_nushell_pipeline_works() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }
@@ -1494,9 +1444,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_nushell_redirection_works() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
         if skip_if_no_nu() {
             return;
         }

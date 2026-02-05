@@ -7,7 +7,7 @@ use super::security::SecurityEngine;
 use meerkat_core::ShellDefaults;
 use meerkat_core::types::SecurityMode;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -258,24 +258,26 @@ impl ShellConfig {
     ///
     /// Uses the explicit `shell_path` if present, then PATH lookup.
     pub fn resolve_shell_path(&self) -> Result<PathBuf, ShellError> {
-        self.resolve_shell_path_with_fallbacks_in(&[], std::env::var_os("PATH"))
+        let path_list = std::env::var_os("PATH");
+        self.resolve_shell_path_with_fallbacks_in(&[], path_list.as_deref())
     }
 
     pub(crate) fn resolve_shell_path_auto(&self) -> Result<PathBuf, ShellError> {
         let shell_env = std::env::var("SHELL").ok();
-        self.resolve_shell_path_auto_in(std::env::var_os("PATH"), shell_env.as_deref())
+        let path_list = std::env::var_os("PATH");
+        self.resolve_shell_path_auto_in(path_list.as_deref(), shell_env.as_deref())
     }
 
     pub(crate) fn resolve_shell_path_auto_in(
         &self,
-        path_list: Option<OsString>,
+        path_list: Option<&OsStr>,
         shell_env: Option<&str>,
     ) -> Result<PathBuf, ShellError> {
         if self.shell != "nu" {
             return self.resolve_shell_path_with_fallbacks_in(&[], path_list);
         }
 
-        match self.resolve_shell_path_with_fallbacks_in(&[], path_list.clone()) {
+        match self.resolve_shell_path_with_fallbacks_in(&[], path_list) {
             Ok(path) => Ok(path),
             Err(err @ ShellError::ShellNotInstalled(_)) => {
                 let fallbacks = self.fallback_shell_candidates_in(shell_env);
@@ -292,7 +294,7 @@ impl ShellConfig {
     pub(crate) fn resolve_shell_path_with_fallbacks_in(
         &self,
         fallbacks: &[&str],
-        path_list: Option<OsString>,
+        path_list: Option<&OsStr>,
     ) -> Result<PathBuf, ShellError> {
         let mut tried = Vec::new();
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -307,7 +309,7 @@ impl ShellConfig {
                 if path.exists() {
                     return Some(path);
                 }
-            } else if let Ok(found) = which::which_in(candidate, path_list.as_deref(), &cwd) {
+            } else if let Ok(found) = which::which_in(candidate, path_list, &cwd) {
                 return Some(found);
             }
 
@@ -326,7 +328,7 @@ impl ShellConfig {
         }
 
         // 2. Try configured shell name via which
-        if let Ok(path) = which::which_in(&self.shell, path_list.as_deref(), &cwd) {
+        if let Ok(path) = which::which_in(&self.shell, path_list, &cwd) {
             return Ok(path);
         }
         if !tried.iter().any(|entry| entry == &self.shell) {

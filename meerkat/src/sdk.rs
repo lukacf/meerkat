@@ -250,27 +250,6 @@ pub fn spawn_event_logger(
 mod tests {
     use super::*;
     use meerkat_core::ToolCallView;
-    use std::sync::{LazyLock, Mutex};
-
-    static CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    struct CwdGuard {
-        original: std::path::PathBuf,
-    }
-
-    impl CwdGuard {
-        fn change_to(path: &std::path::Path) -> Self {
-            let original = std::env::current_dir().expect("current_dir");
-            std::env::set_current_dir(path).expect("set_current_dir");
-            Self { original }
-        }
-    }
-
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.original);
-        }
-    }
 
     async fn dispatch_json(
         dispatcher: &dyn AgentToolDispatcher,
@@ -318,47 +297,39 @@ mod tests {
         assert_eq!(tasks.len(), 1);
     }
 
-    #[test]
-    fn test_create_dispatcher_in_project_dir() {
-        let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
-
-        // Test the helper function (uses tempdir to avoid polluting the workspace)
+    #[tokio::test]
+    async fn test_create_dispatcher_in_project_dir() {
+        // Test the helper function (uses tempdir to avoid polluting the workspace).
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_path = temp_dir.path().to_path_buf();
 
         // Create a .rkat directory to mark it as a project
         std::fs::create_dir_all(temp_path.join(".rkat")).unwrap();
 
-        let _cwd_guard = CwdGuard::change_to(&temp_path);
+        let factory = AgentFactory::new(temp_path.join(".rkat").join("sessions"))
+            .project_root(temp_path.clone());
 
-        let factory = AgentFactory::new(temp_path.join(".rkat").join("sessions"));
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-
-        // Create dispatcher using the helper.
-        let dispatcher = rt
-            .block_on(create_dispatcher_with_builtins_in_project(
-                &factory,
-                BuiltinToolConfig::default(),
-                None,
-                None,
-                Some("test-123".to_string()),
-            ))
-            .unwrap();
+        let dispatcher = create_dispatcher_with_builtins_in_project(
+            &factory,
+            BuiltinToolConfig::default(),
+            None,
+            None,
+            Some("test-123".to_string()),
+        )
+        .await
+        .unwrap();
 
         let tools = dispatcher.tools();
         assert!(tools.iter().any(|t| t.name == "task_create"));
         assert!(tools.iter().any(|t| t.name == "wait"));
 
-        let _ = rt
-            .block_on(dispatch_json(
-                dispatcher.as_ref(),
-                "task_create",
-                serde_json::json!({"subject":"Test","description":"Persist"}),
-            ))
-            .unwrap();
+        let _ = dispatch_json(
+            dispatcher.as_ref(),
+            "task_create",
+            serde_json::json!({"subject":"Test","description":"Persist"}),
+        )
+        .await
+        .unwrap();
 
         // Verify tasks.json was created in .rkat directory.
         let tasks_file = temp_path.join(".rkat").join("tasks.json");

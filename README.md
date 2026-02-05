@@ -456,8 +456,8 @@ cargo test --workspace --tests
 # Integration-real tests (spawns processes / requires binaries)
 cargo test --workspace integration_real -- --ignored --test-threads=1
 
-# E2E tests (live APIs; requires keys + MEERKAT_LIVE_API_TESTS=1)
-MEERKAT_LIVE_API_TESTS=1 cargo test --workspace e2e_ -- --ignored --test-threads=1
+# E2E tests (live APIs; requires keys)
+cargo test --workspace e2e_ -- --ignored --test-threads=1
 
 # Cargo aliases (defined in .cargo/config.toml)
 cargo rct       # Fast tests (unit + integration-fast)

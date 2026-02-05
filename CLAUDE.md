@@ -29,7 +29,7 @@ cargo test --workspace
 cargo test --workspace integration_real -- --ignored --test-threads=1
 
 # Run E2E tests (ignored by default; live APIs / full-system resources)
-MEERKAT_LIVE_API_TESTS=1 cargo test --workspace e2e_ -- --ignored --test-threads=1
+cargo test --workspace e2e_ -- --ignored --test-threads=1
 
 # Cargo aliases (defined in .cargo/config.toml)
 cargo rct       # Fast tests (unit + integration-fast)

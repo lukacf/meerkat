@@ -214,13 +214,17 @@ impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
 // HELPER FUNCTIONS
 // ============================================================================
 
-fn skip_if_no_anthropic_key() -> Option<String> {
-    if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
-        return None;
+fn require_first_env(vars: &[&str]) -> String {
+    for name in vars {
+        if let Ok(value) = std::env::var(name) {
+            return value;
+        }
     }
-    std::env::var("RKAT_ANTHROPIC_API_KEY")
-        .ok()
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+    panic!("missing required env var: one of {vars:?}");
+}
+
+fn anthropic_api_key() -> String {
+    require_first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"])
 }
 
 /// Get the Anthropic model to use in tests (configurable via ANTHROPIC_MODEL env var)
@@ -392,11 +396,8 @@ mod two_agent_message {
 
     #[tokio::test]
     #[ignore = "e2e: live API"]
-    async fn test_e2e_llm_message_exchange() {
-        let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
-            return;
-        };
+    async fn e2e_llm_message_exchange() {
+        let api_key = anthropic_api_key();
 
         let (mut agent_a, mut agent_b, handle_a, handle_b, _temp_a, _temp_b) =
             create_agent_pair(&api_key).await;
@@ -449,11 +450,8 @@ mod request_response {
 
     #[tokio::test]
     #[ignore = "e2e: live API"]
-    async fn test_e2e_llm_request_response() {
-        let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
-            return;
-        };
+    async fn e2e_llm_request_response() {
+        let api_key = anthropic_api_key();
 
         let (mut agent_a, mut agent_b, handle_a, handle_b, _temp_a, _temp_b) =
             create_agent_pair(&api_key).await;
@@ -509,11 +507,8 @@ mod multi_turn_comms {
 
     #[tokio::test]
     #[ignore = "e2e: live API"]
-    async fn test_e2e_llm_multi_turn() {
-        let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
-            return;
-        };
+    async fn e2e_llm_multi_turn() {
+        let api_key = anthropic_api_key();
 
         let (mut agent_a, mut agent_b, handle_a, handle_b, _temp_a, _temp_b) =
             create_agent_pair(&api_key).await;
@@ -574,11 +569,8 @@ mod three_agent_coordination {
 
     #[tokio::test]
     #[ignore = "e2e: live API"]
-    async fn test_e2e_llm_three_agent_coordination() {
-        let Some(api_key) = skip_if_no_anthropic_key() else {
-            eprintln!("Skipping: live API tests disabled or missing ANTHROPIC_API_KEY");
-            return;
-        };
+    async fn e2e_llm_three_agent_coordination() {
+        let api_key = anthropic_api_key();
 
         // Generate keypairs for all three agents
         let keypair_a = Keypair::generate();

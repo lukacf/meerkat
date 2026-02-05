@@ -28,10 +28,6 @@ fn get_available_port() -> u16 {
     port
 }
 
-fn e2e_enabled() -> bool {
-    std::env::var("RKAT_E2E").ok().as_deref() == Some("1")
-}
-
 /// Get path to the rkat binary
 fn rkat_binary_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rkat") {
@@ -315,10 +311,6 @@ pub async fn setup_mutual_trust(instances: &mut [&mut RkatTestInstance]) -> std:
 
 #[test]
 fn test_rkat_instance_spawn_kill() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     // Test that we can create an RkatTestInstance with real Ed25519 identity
     let instance = RkatTestInstance::new("test-agent");
 
@@ -337,10 +329,6 @@ fn test_rkat_instance_spawn_kill() {
 
 #[tokio::test]
 async fn test_rkat_temp_setup() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     // Test temp directory setup with identity and config paths
     let instance = RkatTestInstance::new("test-agent");
 
@@ -376,10 +364,6 @@ async fn test_rkat_temp_setup() {
 
 #[tokio::test]
 async fn test_rkat_mutual_trust_setup() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     // Test that mutual trust configuration is generated correctly with real keys
     let mut instance_a = RkatTestInstance::new("agent-a");
     let mut instance_b = RkatTestInstance::new("agent-b");
@@ -422,10 +406,6 @@ async fn test_rkat_mutual_trust_setup() {
 
 #[tokio::test]
 async fn test_rkat_wait_for_ready() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     // Verify RkatTestInstance has proper methods for wait_for_ready logic
     let instance = RkatTestInstance::new("test-agent");
 
@@ -455,10 +435,6 @@ async fn test_rkat_wait_for_ready() {
 fn skip_if_no_prereqs() -> bool {
     let mut missing = Vec::new();
 
-    if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
-        missing.push("MEERKAT_LIVE_API_TESTS=1");
-    }
-
     let has_api_key = std::env::var("RKAT_ANTHROPIC_API_KEY").is_ok()
         || std::env::var("ANTHROPIC_API_KEY").is_ok();
     if !has_api_key {
@@ -480,10 +456,6 @@ fn skip_if_no_prereqs() -> bool {
 #[tokio::test]
 #[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_tcp_message_exchange() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -540,10 +512,6 @@ async fn test_e2e_rkat_tcp_message_exchange() {
 #[tokio::test]
 #[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_uds_message_exchange() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -647,10 +615,6 @@ trusted_peers_path = "{}"
 #[tokio::test]
 #[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_request_response_flow() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -694,10 +658,6 @@ async fn test_e2e_rkat_request_response_flow() {
 #[tokio::test]
 #[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_untrusted_rejected() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -752,10 +712,6 @@ async fn test_e2e_rkat_untrusted_rejected() {
 #[tokio::test]
 #[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_three_peer_coordination() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -821,10 +777,6 @@ async fn test_e2e_rkat_three_peer_coordination() {
 #[tokio::test]
 #[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_ack_is_immediate() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     if skip_if_no_prereqs() {
         return;
     }
@@ -883,10 +835,6 @@ async fn test_e2e_rkat_ack_is_immediate() {
 #[tokio::test]
 #[ignore = "e2e: network + live API"]
 async fn test_e2e_rkat_sender_nonblocking() {
-    if !e2e_enabled() {
-        eprintln!("Skipping: set RKAT_E2E=1 to run e2e comms tests");
-        return;
-    }
     if skip_if_no_prereqs() {
         return;
     }

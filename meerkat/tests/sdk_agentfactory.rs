@@ -105,7 +105,7 @@ impl AgentToolDispatcher for RecordingDispatcher {
 }
 
 #[tokio::test]
-async fn e2e_sdk_agentfactory_tool_dispatch() {
+async fn test_sdk_agentfactory_tool_dispatch() {
     let calls = Arc::new(AtomicUsize::new(0));
     let dispatcher_called = Arc::new(AtomicBool::new(false));
 

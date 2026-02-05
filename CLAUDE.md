@@ -19,19 +19,24 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 # Build everything
 cargo build --workspace
 
-# Run all unit/integration tests (FAST - ~10s, skips slow doc-test compilation)
+# Run fast tests (unit + integration-fast; skips doctests)
 cargo test --workspace --lib --bins --tests
 
-# Run all tests including doc-tests (SLOW - ~1min due to doc-test compilation)
+# Run all tests including doc-tests (SLOW due to doc-test compilation)
 cargo test --workspace
 
-# Run E2E tests (tests marked #[ignore = "e2e: ..."], spawns real processes)
-cargo test --workspace -- --ignored
+# Run integration-real tests (ignored by default; spawns processes / requires binaries)
+cargo test --workspace integration_real -- --ignored --test-threads=1
+
+# Run E2E tests (ignored by default; live APIs / full-system resources)
+cargo test --workspace e2e_ -- --ignored --test-threads=1
 
 # Cargo aliases (defined in .cargo/config.toml)
-cargo rct    # Run all unit tests
-cargo int    # Run integration tests
-cargo e2e    # Run E2E tests
+cargo rct       # Fast tests (unit + integration-fast)
+cargo unit      # Unit tests only
+cargo int       # Integration-fast tests only
+cargo int-real  # Integration-real tests (ignored)
+cargo e2e       # E2E tests (ignored)
 
 # Run the CLI
 cargo run -p meerkat-cli -- run "prompt"

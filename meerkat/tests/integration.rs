@@ -1,5 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
 //! These tests verify the integration points between components.
 //! Per RCT methodology, tests are COMPLETE - they exercise real code paths.
@@ -17,22 +16,21 @@ mod llm_normalization {
     use super::*;
     use futures::StreamExt;
 
-    #[tokio::test]
-    async fn test_anthropic_normalizes_to_llm_event() {
-        if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
-            eprintln!("Skipping: live API tests disabled (set MEERKAT_LIVE_API_TESTS=1)");
-            return;
-        }
-
-        // Skip if no API key - this is expected for CI without keys
-        let api_key = match std::env::var("RKAT_ANTHROPIC_API_KEY")
-            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
-        {
-            Ok(key) => key,
-            Err(_) => {
-                eprintln!("Skipping: missing ANTHROPIC_API_KEY");
-                return;
+    fn first_env(vars: &[&str]) -> Option<String> {
+        for name in vars {
+            if let Ok(value) = std::env::var(name) {
+                return Some(value);
             }
+        }
+        None
+    }
+
+    #[tokio::test]
+    #[ignore = "e2e: live API"]
+    async fn e2e_anthropic_normalizes_to_llm_event() {
+        let Some(api_key) = first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]) else {
+            eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
+            return;
         };
 
         let client = AnthropicClient::new(api_key).unwrap();
@@ -95,20 +93,11 @@ mod llm_normalization {
 
     #[cfg(feature = "openai")]
     #[tokio::test]
-    async fn test_openai_normalizes_to_llm_event() {
-        if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
-            eprintln!("Skipping: live API tests disabled (set MEERKAT_LIVE_API_TESTS=1)");
+    #[ignore = "e2e: live API"]
+    async fn e2e_openai_normalizes_to_llm_event() {
+        let Some(api_key) = first_env(&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]) else {
+            eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
             return;
-        }
-
-        let api_key = match std::env::var("RKAT_OPENAI_API_KEY")
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        {
-            Ok(key) => key,
-            Err(_) => {
-                eprintln!("Skipping: missing OPENAI_API_KEY");
-                return;
-            }
         };
 
         let client = OpenAiClient::new(api_key);
@@ -142,21 +131,13 @@ mod llm_normalization {
 
     #[cfg(feature = "gemini")]
     #[tokio::test]
-    async fn test_gemini_normalizes_to_llm_event() {
-        if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
-            eprintln!("Skipping: live API tests disabled (set MEERKAT_LIVE_API_TESTS=1)");
+    #[ignore = "e2e: live API"]
+    async fn e2e_gemini_normalizes_to_llm_event() {
+        let Some(api_key) =
+            first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
+        else {
+            eprintln!("Skipping: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)");
             return;
-        }
-
-        let api_key = match std::env::var("RKAT_GEMINI_API_KEY")
-            .or_else(|_| std::env::var("GEMINI_API_KEY"))
-            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
-        {
-            Ok(key) => key,
-            Err(_) => {
-                eprintln!("Skipping: missing GOOGLE_API_KEY");
-                return;
-            }
         };
 
         let client = GeminiClient::new(api_key);
@@ -896,7 +877,8 @@ mod mcp_protocol {
     }
 
     #[tokio::test]
-    async fn test_mcp_tool_call_roundtrip() {
+    #[ignore = "integration-real: requires built mcp-test-server binary"]
+    async fn integration_real_mcp_tool_call_roundtrip() {
         // Test with real MCP test server if available
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
         let workspace_root = std::path::Path::new(&manifest_dir)

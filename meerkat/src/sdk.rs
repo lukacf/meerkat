@@ -256,16 +256,15 @@ mod tests {
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, ToolError> {
-        let args_raw = serde_json::value::RawValue::from_string(args.to_string())
-            .expect("valid args json");
+        let args_raw =
+            serde_json::value::RawValue::from_string(args.to_string()).expect("valid args json");
         let call = ToolCallView {
             id: "test-1",
             name,
             args: &args_raw,
         };
         let result = dispatcher.dispatch(call).await?;
-        serde_json::from_str(&result.content)
-            .or(Ok(serde_json::Value::String(result.content)))
+        serde_json::from_str(&result.content).or(Ok(serde_json::Value::String(result.content)))
     }
 
     #[tokio::test]
@@ -298,63 +297,43 @@ mod tests {
         assert_eq!(tasks.len(), 1);
     }
 
-    #[test]
-    fn test_create_dispatcher_in_project_dir() {
-        if std::env::var("RUN_TEST_DISPATCHER_INNER").is_ok() {
-            let temp_path = std::env::var("TEST_TEMP_PATH").expect("TEST_TEMP_PATH not set");
-            let temp_path = std::path::PathBuf::from(temp_path);
-            std::env::set_current_dir(&temp_path).expect("set cwd failed");
-
-            let factory = AgentFactory::new(temp_path.join(".rkat").join("sessions"));
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime");
-
-            // Create dispatcher using the helper.
-            let dispatcher = rt
-                .block_on(create_dispatcher_with_builtins_in_project(
-                    &factory,
-                    BuiltinToolConfig::default(),
-                    None,
-                    None,
-                    Some("test-123".to_string()),
-                ))
-                .unwrap();
-
-            let tools = dispatcher.tools();
-            assert!(tools.iter().any(|t| t.name == "task_create"));
-            assert!(tools.iter().any(|t| t.name == "wait"));
-
-            let _ = rt
-                .block_on(dispatch_json(
-                    dispatcher.as_ref(),
-                    "task_create",
-                    serde_json::json!({"subject":"Test","description":"Persist"}),
-                ))
-                .unwrap();
-
-            // Verify tasks.json was created in .rkat directory.
-            let tasks_file = temp_path.join(".rkat").join("tasks.json");
-            assert!(tasks_file.exists(), "tasks.json should be created");
-            return;
-        }
-
-        // Test the helper function (uses tempdir to avoid polluting the workspace)
+    #[tokio::test]
+    async fn test_create_dispatcher_in_project_dir() {
+        // Test the helper function (uses tempdir to avoid polluting the workspace).
         let temp_dir = tempfile::tempdir().unwrap();
-        let temp_path = temp_dir.path();
+        let temp_path = temp_dir.path().to_path_buf();
 
         // Create a .rkat directory to mark it as a project
         std::fs::create_dir_all(temp_path.join(".rkat")).unwrap();
 
-        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
-            .arg("test_create_dispatcher_in_project_dir")
-            .env("RUN_TEST_DISPATCHER_INNER", "1")
-            .env("TEST_TEMP_PATH", temp_path)
-            .status()
-            .expect("failed to spawn test child process");
+        let factory = AgentFactory::new(temp_path.join(".rkat").join("sessions"))
+            .project_root(temp_path.clone());
 
-        assert!(status.success());
+        let dispatcher = create_dispatcher_with_builtins_in_project(
+            &factory,
+            BuiltinToolConfig::default(),
+            None,
+            None,
+            Some("test-123".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let tools = dispatcher.tools();
+        assert!(tools.iter().any(|t| t.name == "task_create"));
+        assert!(tools.iter().any(|t| t.name == "wait"));
+
+        let _ = dispatch_json(
+            dispatcher.as_ref(),
+            "task_create",
+            serde_json::json!({"subject":"Test","description":"Persist"}),
+        )
+        .await
+        .unwrap();
+
+        // Verify tasks.json was created in .rkat directory.
+        let tasks_file = temp_path.join(".rkat").join("tasks.json");
+        assert!(tasks_file.exists(), "tasks.json should be created");
     }
 
     #[tokio::test]
@@ -399,9 +378,12 @@ mod tests {
         assert!(tasks_file.exists(), "tasks.json should be created");
 
         // Get the task back
-        let get_result =
-            dispatch_json(dispatcher.as_ref(), "task_get", serde_json::json!({"id": task_id}))
-                .await;
+        let get_result = dispatch_json(
+            dispatcher.as_ref(),
+            "task_get",
+            serde_json::json!({"id": task_id}),
+        )
+        .await;
         assert!(get_result.is_ok());
         let retrieved = get_result.unwrap();
         assert_eq!(retrieved.get("subject").unwrap(), "File store test");

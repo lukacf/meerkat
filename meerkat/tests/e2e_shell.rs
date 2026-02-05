@@ -34,7 +34,7 @@ fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
         project_root: temp_dir.path().to_path_buf(),
         max_completed_jobs: 100,
         completed_job_ttl_secs: 300,
-        max_concurrent_processes: 0, // Unlimited for e2e tests
+        max_concurrent_processes: 0,       // Unlimited for e2e tests
         security_mode: Default::default(), // Unrestricted for e2e tests
         security_patterns: vec![],
     }
@@ -46,8 +46,8 @@ fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
 
 /// E2E: Agent executes sync shell command and receives output
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_sync_execute() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_sync_execute() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -75,8 +75,8 @@ async fn test_e2e_shell_sync_execute() {
 
 /// E2E: Agent handles command timeout
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_sync_timeout() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_sync_timeout() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -105,8 +105,8 @@ async fn test_e2e_shell_sync_timeout() {
 
 /// E2E: Agent receives exit code from command
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_exit_code() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_exit_code() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -133,8 +133,8 @@ async fn test_e2e_shell_exit_code() {
 
 /// E2E: Agent handles command with stderr output
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_stderr() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_stderr() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -164,8 +164,8 @@ async fn test_e2e_shell_stderr() {
 
 /// E2E: Agent spawns background job and receives job_id
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_background_spawn() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_background_spawn() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);
@@ -200,8 +200,8 @@ async fn test_e2e_shell_background_spawn() {
 
 /// E2E: Agent receives completion event after background job finishes
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_background_completion() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_background_completion() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let (tool_set, mut rx) = ShellToolSet::with_event_channel(config);
@@ -228,8 +228,8 @@ async fn test_e2e_shell_background_completion() {
 
 /// E2E: Agent can cancel running background job
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_background_cancel() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_background_cancel() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);
@@ -267,8 +267,8 @@ async fn test_e2e_shell_background_cancel() {
 
 /// E2E: Agent can list multiple concurrent jobs
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_multiple_jobs() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_multiple_jobs() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);
@@ -313,8 +313,8 @@ async fn test_e2e_shell_multiple_jobs() {
 /// Note: On Unix, this test may pass with a fallback shell if /bin/sh exists.
 /// We configure shell_path to a non-existent path to prevent fallback.
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_not_installed() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_not_installed() {
     let temp_dir = TempDir::new().unwrap();
     let config = ShellConfig {
         enabled: true,
@@ -369,8 +369,8 @@ async fn test_e2e_shell_not_installed() {
 
 /// E2E: Agent receives error for invalid working directory
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_invalid_workdir() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_invalid_workdir() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -404,8 +404,8 @@ async fn test_e2e_shell_invalid_workdir() {
 
 /// E2E: Agent receives error when checking non-existent job
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_job_not_found() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_job_not_found() {
     let temp_dir = TempDir::new().unwrap();
     // Use sh for this test - doesn't need nu-specific features
     let config = create_sh_config(&temp_dir);
@@ -435,7 +435,7 @@ async fn test_e2e_shell_job_not_found() {
 
 /// E2E: Shell tool returns correct name
 #[test]
-fn test_e2e_shell_tool_name() {
+fn test_shell_tool_name() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -445,7 +445,7 @@ fn test_e2e_shell_tool_name() {
 
 /// E2E: Shell tool returns valid schema
 #[test]
-fn test_e2e_shell_tool_schema() {
+fn test_shell_tool_schema() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -470,7 +470,7 @@ fn test_e2e_shell_tool_schema() {
 
 /// E2E: ShellToolSet provides all four tools
 #[test]
-fn test_e2e_shell_tool_set() {
+fn test_shell_tool_set() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool_set = ShellToolSet::new(config);
@@ -494,7 +494,7 @@ fn test_e2e_shell_tool_set() {
 
 /// E2E: Shell tool is disabled by default
 #[test]
-fn test_e2e_shell_disabled_by_default() {
+fn test_shell_disabled_by_default() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -511,8 +511,8 @@ fn test_e2e_shell_disabled_by_default() {
 
 /// E2E: Basic shell execution works with /bin/sh
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_shell_basic_sh_execution() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_shell_basic_sh_execution() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -534,8 +534,8 @@ async fn test_e2e_shell_basic_sh_execution() {
 
 /// E2E: Job manager basic operations with sh
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_job_manager_basic_sh() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_job_manager_basic_sh() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);
@@ -564,8 +564,8 @@ async fn test_e2e_job_manager_basic_sh() {
 
 /// E2E: Event channel receives completion events with sh
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_e2e_event_channel_sh() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_event_channel_sh() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let (tool_set, mut rx) = ShellToolSet::with_event_channel(config);
@@ -597,8 +597,8 @@ async fn test_e2e_event_channel_sh() {
 /// Spawning multiple jobs should return immediately without waiting for
 /// any command to complete.
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_regression_async_execution_nonblocking() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_regression_async_execution_nonblocking() {
     use std::time::Instant;
 
     let temp_dir = TempDir::new().unwrap();
@@ -648,8 +648,8 @@ async fn test_regression_async_execution_nonblocking() {
 /// Jobs that run longer than their timeout should be terminated and marked
 /// as TimedOut.
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_regression_timeout_enforced() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_regression_timeout_enforced() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);
@@ -689,9 +689,9 @@ async fn test_regression_timeout_enforced() {
 /// When a job is cancelled, the underlying process should be terminated,
 /// not left running as an orphan.
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
+#[ignore = "integration-real: spawns shell processes"]
 #[cfg(unix)]
-async fn test_regression_kill_terminates_process() {
+async fn integration_real_regression_kill_terminates_process() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);
@@ -779,8 +779,8 @@ async fn test_regression_kill_terminates_process() {
 /// Commands that produce non-UTF-8 bytes should not crash and should use
 /// lossy UTF-8 conversion.
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_regression_non_utf8_output() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_regression_non_utf8_output() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -810,8 +810,8 @@ async fn test_regression_non_utf8_output() {
 /// not the beginning, since the end usually contains the most important info
 /// (errors, final results).
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_regression_truncation_keeps_tail() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_regression_truncation_keeps_tail() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -849,8 +849,8 @@ async fn test_regression_truncation_keeps_tail() {
 /// When spawning many jobs concurrently, each should get a unique ID with
 /// no collisions.
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_regression_concurrent_job_spawning() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_regression_concurrent_job_spawning() {
     use std::sync::Arc;
 
     let temp_dir = TempDir::new().unwrap();
@@ -911,8 +911,8 @@ async fn test_regression_concurrent_job_spawning() {
 /// When many jobs are spawned, old completed jobs should be cleaned up to
 /// prevent unbounded memory growth.
 #[tokio::test]
-#[ignore = "e2e: spawns shell processes"]
-async fn test_regression_job_cleanup_prevents_leak() {
+#[ignore = "integration-real: spawns shell processes"]
+async fn integration_real_regression_job_cleanup_prevents_leak() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let job_manager = JobManager::new(config);

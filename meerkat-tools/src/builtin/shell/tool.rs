@@ -481,11 +481,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn nu_available() -> bool {
-        std::process::Command::new("nu")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        which::which("nu").is_ok()
     }
 
     fn skip_if_no_nu() -> bool {
@@ -494,15 +490,6 @@ mod tests {
         }
 
         eprintln!("Skipping: Nushell not installed (install `nu` to run this test)");
-        true
-    }
-
-    fn skip_if_shell_e2e_disabled() -> bool {
-        if std::env::var_os("RKAT_SHELL_E2E").is_some() {
-            return false;
-        }
-
-        eprintln!("Skipping: set RKAT_SHELL_E2E=1 to run shell E2E tests");
         true
     }
 
@@ -628,18 +615,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_shell_tool_falls_back_when_nu_missing() {
-        if std::env::var("RUN_TEST_SHELL_FALLBACK_INNER").is_ok() {
-            let expected = PathBuf::from(
-                std::env::var("TEST_FALLBACK_SHELL").expect("missing TEST_FALLBACK_SHELL"),
-            );
-            let tool = ShellTool::new(ShellConfig::default());
-            let result = tool
-                .find_shell()
-                .expect("Expected fallback shell to resolve");
-            assert_eq!(result, expected);
-            return;
-        }
-
         let temp_dir = TempDir::new().unwrap();
         let fake_shell = temp_dir.path().join("fallback_shell");
         std::fs::write(&fake_shell, "#!/bin/sh\necho test").unwrap();
@@ -649,18 +624,12 @@ mod tests {
             std::fs::set_permissions(&fake_shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
-            .arg("test_shell_tool_falls_back_when_nu_missing")
-            .env("RUN_TEST_SHELL_FALLBACK_INNER", "1")
-            .env("PATH", "")
-            .env("SHELL", fake_shell.to_string_lossy().to_string())
-            .env(
-                "TEST_FALLBACK_SHELL",
-                fake_shell.to_string_lossy().to_string(),
-            )
-            .status()
-            .expect("failed to spawn test child process");
-        assert!(status.success());
+        let shell_value = fake_shell.to_string_lossy().to_string();
+        let config = ShellConfig::default();
+        let result = config
+            .resolve_shell_path_auto_in(Some(std::ffi::OsStr::new("")), Some(shell_value.as_str()))
+            .expect("fallback shell should resolve");
+        assert_eq!(result, fake_shell);
     }
 
     #[test]
@@ -689,67 +658,45 @@ mod tests {
 
     #[test]
     fn test_shell_tool_find_shell_custom() {
-        if std::env::var("RUN_TEST_FIND_SHELL_INNER").is_ok() {
-            let config = ShellConfig {
-                shell: "definitely_not_a_real_shell_xyz123".to_string(),
-                ..Default::default()
-            };
-            let tool = ShellTool::new(config);
-            let result = tool.find_shell();
-            match result {
-                Err(ShellError::ShellNotInstalled(details)) => {
-                    assert!(details.contains("definitely_not_a_real_shell_xyz123"));
-                }
-                Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
-                Err(e) => unreachable!("Unexpected error: {}", e),
+        let config = ShellConfig {
+            shell: "definitely_not_a_real_shell_xyz123".to_string(),
+            ..Default::default()
+        };
+        let result = config.resolve_shell_path_auto_in(Some(std::ffi::OsStr::new("")), Some("/bin/sh"));
+        match result {
+            Err(ShellError::ShellNotInstalled(details)) => {
+                assert!(details.contains("definitely_not_a_real_shell_xyz123"));
             }
-            return;
+            Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
+            Err(e) => unreachable!("Unexpected error: {}", e),
         }
-
-        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
-            .arg("test_shell_tool_find_shell_custom")
-            .env("RUN_TEST_FIND_SHELL_INNER", "1")
-            .env("PATH", "")
-            .env("SHELL", "/bin/sh")
-            .status()
-            .expect("failed to spawn test child process");
-        assert!(status.success());
     }
 
     #[test]
     fn test_shell_tool_not_installed_error() {
-        if std::env::var("RUN_TEST_NOT_INSTALLED_INNER").is_ok() {
-            let config = ShellConfig {
-                shell: "definitely_not_a_real_shell_xyz123".to_string(),
-                shell_path: Some(PathBuf::from("/nonexistent/path/to/shell")),
-                ..Default::default()
-            };
-            let tool = ShellTool::new(config);
-            let result = tool.config.resolve_shell_path_with_fallbacks(&[]);
-            match result {
-                Err(ShellError::ShellNotInstalled(details)) => {
-                    assert!(details.contains("definitely_not_a_real_shell_xyz123"));
-                }
-                Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
-                Err(other) => unreachable!("Unexpected error: {}", other),
+        let config = ShellConfig {
+            shell: "definitely_not_a_real_shell_xyz123".to_string(),
+            shell_path: Some(PathBuf::from("/nonexistent/path/to/shell")),
+            ..Default::default()
+        };
+        let tool = ShellTool::new(config);
+        let result = tool
+            .config
+            .resolve_shell_path_with_fallbacks_in(&[], Some(std::ffi::OsStr::new("")));
+        match result {
+            Err(ShellError::ShellNotInstalled(details)) => {
+                assert!(details.contains("definitely_not_a_real_shell_xyz123"));
             }
-            return;
+            Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
+            Err(other) => unreachable!("Unexpected error: {}", other),
         }
-
-        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
-            .arg("test_shell_tool_not_installed_error")
-            .env("RUN_TEST_NOT_INSTALLED_INNER", "1")
-            .env("PATH", "")
-            .env("SHELL", "/definitely/not/here")
-            .status()
-            .expect("failed to spawn test child process");
-        assert!(status.success());
     }
 
     // ==================== Synchronous Execution Tests ====================
 
     #[tokio::test]
-    async fn test_shell_tool_sync_execute() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_shell_tool_sync_execute() {
         if skip_if_no_nu() {
             return;
         }
@@ -769,7 +716,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_tool_timeout() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_shell_tool_timeout() {
         if skip_if_no_nu() {
             return;
         }
@@ -788,7 +736,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_tool_output_format() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_shell_tool_output_format() {
         if skip_if_no_nu() {
             return;
         }
@@ -812,7 +761,8 @@ mod tests {
     // ==================== Environment Tests ====================
 
     #[tokio::test]
-    async fn test_shell_tool_env_inheritance() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_shell_tool_env_inheritance() {
         if skip_if_no_nu() {
             return;
         }
@@ -832,7 +782,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_tool_pwd_override() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_shell_tool_pwd_override() {
         if skip_if_no_nu() {
             return;
         }
@@ -873,7 +824,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_tool_call_background_success() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_shell_tool_call_background_success() {
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         let tool = ShellTool::new(config);
@@ -893,7 +845,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_tool_call_success() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_shell_tool_call_success() {
         if skip_if_no_nu() {
             return;
         }
@@ -917,7 +870,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_tool_call_with_working_dir() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_shell_tool_call_with_working_dir() {
         if skip_if_no_nu() {
             return;
         }
@@ -1009,7 +963,8 @@ mod tests {
     /// Commands that run longer than the specified timeout should be
     /// terminated and return timed_out: true in the output.
     #[tokio::test]
-    async fn test_timeout_enforced_sync() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_timeout_enforced_sync() {
         if skip_if_no_nu() {
             return;
         }
@@ -1051,11 +1006,8 @@ mod tests {
     /// Commands that produce non-UTF-8 bytes should not crash and should
     /// use lossy UTF-8 conversion.
     #[tokio::test]
-    async fn test_non_utf8_output() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
-
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_non_utf8_output() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
@@ -1087,7 +1039,8 @@ mod tests {
     ///
     /// Commands with large output should capture all of it (within reason).
     #[tokio::test]
-    async fn test_long_output_captured() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_long_output_captured() {
         if skip_if_no_nu() {
             return;
         }
@@ -1123,11 +1076,8 @@ mod tests {
     ///
     /// Multiple sync tool calls should be able to run concurrently via tokio.
     #[tokio::test]
-    async fn test_sync_parallel_execution() {
-        if skip_if_shell_e2e_disabled() {
-            return;
-        }
-
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_sync_parallel_execution() {
         use std::time::Instant;
 
         let temp_dir = TempDir::new().unwrap();
@@ -1334,31 +1284,19 @@ mod tests {
     /// Verifies that when configured shell is not found, the SHELL env var is ignored.
     #[test]
     fn test_shell_detection_env_fallback() {
-        if std::env::var("RUN_TEST_ENV_FALLBACK_INNER").is_ok() {
-            let config = ShellConfig {
-                shell: "definitely_not_a_real_shell_xyz123".to_string(),
-                ..Default::default()
-            };
-            let tool = ShellTool::new(config);
-            let result = tool.find_shell();
-            match result {
-                Err(ShellError::ShellNotInstalled(details)) => {
-                    assert!(details.contains("definitely_not_a_real_shell_xyz123"));
-                }
-                Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
-                Err(e) => unreachable!("Unexpected error: {:?}", e),
+        let config = ShellConfig {
+            shell: "definitely_not_a_real_shell_xyz123".to_string(),
+            ..Default::default()
+        };
+        let result =
+            config.resolve_shell_path_auto_in(Some(std::ffi::OsStr::new("")), Some("/bin/sh"));
+        match result {
+            Err(ShellError::ShellNotInstalled(details)) => {
+                assert!(details.contains("definitely_not_a_real_shell_xyz123"));
             }
-            return;
+            Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
+            Err(e) => unreachable!("Unexpected error: {:?}", e),
         }
-
-        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
-            .arg("test_shell_detection_env_fallback")
-            .env("RUN_TEST_ENV_FALLBACK_INNER", "1")
-            .env("PATH", "")
-            .env("SHELL", "/bin/sh")
-            .status()
-            .expect("failed to spawn test child process");
-        assert!(status.success());
     }
 
     /// Regression test for Task #11: Shell detection does not use platform fallbacks
@@ -1445,24 +1383,14 @@ mod tests {
     }
 
     /// Test that authorized commands pass validation
-    #[tokio::test]
-    async fn test_shell_tool_allows_authorized() {
-        if skip_if_no_nu() {
-            return;
-        }
-
+    #[test]
+    fn test_shell_tool_allows_authorized() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.security_mode = SecurityMode::AllowList;
         config.security_patterns = vec!["echo *".to_string()];
-        let tool = ShellTool::new(config);
 
-        let result = tool
-            .call(json!({
-                "command": "echo hello"
-            }))
-            .await;
-
+        let result = config.check_allowlist("echo hello");
         assert!(result.is_ok(), "Authorized command should be allowed");
     }
 
@@ -1473,7 +1401,8 @@ mod tests {
     /// Commands with pipes like `echo hello | cat` should execute as pipelines,
     /// not have the `|` become a literal argument to echo.
     #[tokio::test]
-    async fn test_nushell_pipeline_works() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_nushell_pipeline_works() {
         if skip_if_no_nu() {
             return;
         }
@@ -1513,7 +1442,8 @@ mod tests {
     /// Commands with redirections like `echo hello | save file.txt` should write to files,
     /// not have the `|` become a literal argument.
     #[tokio::test]
-    async fn test_nushell_redirection_works() {
+    #[ignore = "integration-real: executes shell commands"]
+    async fn integration_real_nushell_redirection_works() {
         if skip_if_no_nu() {
             return;
         }

@@ -7,6 +7,7 @@ use super::security::SecurityEngine;
 use meerkat_core::ShellDefaults;
 use meerkat_core::types::SecurityMode;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -141,14 +142,14 @@ impl ShellConfig {
         SecurityEngine::new(self.security_mode, &self.security_patterns)
     }
 
-    fn fallback_shell_candidates(&self) -> Vec<String> {
+    fn fallback_shell_candidates_in(&self, shell_env: Option<&str>) -> Vec<String> {
         if self.shell != "nu" {
             return Vec::new();
         }
 
         let mut candidates = Vec::new();
 
-        if let Ok(shell_env) = std::env::var("SHELL") {
+        if let Some(shell_env) = shell_env {
             let trimmed = shell_env.trim();
             if !trimmed.is_empty() && trimmed != self.shell {
                 candidates.push(trimmed.to_string());
@@ -257,33 +258,46 @@ impl ShellConfig {
     ///
     /// Uses the explicit `shell_path` if present, then PATH lookup.
     pub fn resolve_shell_path(&self) -> Result<PathBuf, ShellError> {
-        self.resolve_shell_path_with_fallbacks(&[])
+        let path_list = std::env::var_os("PATH");
+        self.resolve_shell_path_with_fallbacks_in(&[], path_list.as_deref())
     }
 
     pub(crate) fn resolve_shell_path_auto(&self) -> Result<PathBuf, ShellError> {
+        let shell_env = std::env::var("SHELL").ok();
+        let path_list = std::env::var_os("PATH");
+        self.resolve_shell_path_auto_in(path_list.as_deref(), shell_env.as_deref())
+    }
+
+    pub(crate) fn resolve_shell_path_auto_in(
+        &self,
+        path_list: Option<&OsStr>,
+        shell_env: Option<&str>,
+    ) -> Result<PathBuf, ShellError> {
         if self.shell != "nu" {
-            return self.resolve_shell_path();
+            return self.resolve_shell_path_with_fallbacks_in(&[], path_list);
         }
 
-        match self.resolve_shell_path() {
+        match self.resolve_shell_path_with_fallbacks_in(&[], path_list) {
             Ok(path) => Ok(path),
             Err(err @ ShellError::ShellNotInstalled(_)) => {
-                let fallbacks = self.fallback_shell_candidates();
+                let fallbacks = self.fallback_shell_candidates_in(shell_env);
                 if fallbacks.is_empty() {
                     return Err(err);
                 }
                 let fallback_refs: Vec<&str> = fallbacks.iter().map(String::as_str).collect();
-                self.resolve_shell_path_with_fallbacks(&fallback_refs)
+                self.resolve_shell_path_with_fallbacks_in(&fallback_refs, path_list)
             }
             Err(other) => Err(other),
         }
     }
 
-    pub(crate) fn resolve_shell_path_with_fallbacks(
+    pub(crate) fn resolve_shell_path_with_fallbacks_in(
         &self,
         fallbacks: &[&str],
+        path_list: Option<&OsStr>,
     ) -> Result<PathBuf, ShellError> {
         let mut tried = Vec::new();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         let try_candidate = |candidate: &str, tried: &mut Vec<String>| -> Option<PathBuf> {
             if candidate.is_empty() {
@@ -295,7 +309,7 @@ impl ShellConfig {
                 if path.exists() {
                     return Some(path);
                 }
-            } else if let Ok(found) = which::which(candidate) {
+            } else if let Ok(found) = which::which_in(candidate, path_list, &cwd) {
                 return Some(found);
             }
 
@@ -314,7 +328,7 @@ impl ShellConfig {
         }
 
         // 2. Try configured shell name via which
-        if let Ok(path) = which::which(&self.shell) {
+        if let Ok(path) = which::which_in(&self.shell, path_list, &cwd) {
             return Ok(path);
         }
         if !tried.iter().any(|entry| entry == &self.shell) {

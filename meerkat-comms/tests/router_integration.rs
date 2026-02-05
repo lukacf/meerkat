@@ -8,9 +8,12 @@ use meerkat_comms::{
     CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, Envelope, Keypair, MessageKind, Router, SendError,
     Signature, Status, TrustedPeer, TrustedPeers,
 };
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::LazyLock, time::Duration};
 use tempfile::TempDir;
 use uuid::Uuid;
+
+static INPROC_REGISTRY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 fn make_keypair() -> Keypair {
     Keypair::generate()
@@ -549,6 +552,8 @@ async fn test_send_response_no_ack_wait() {
 async fn test_router_inproc_send() {
     use meerkat_comms::{Inbox, InprocRegistry};
 
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+
     // Clear any existing state
     InprocRegistry::global().clear();
 
@@ -609,6 +614,8 @@ async fn test_router_inproc_send() {
 async fn test_router_inproc_peer_not_found() {
     use meerkat_comms::InprocRegistry;
 
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+
     // Clear any existing state
     InprocRegistry::global().clear();
 
@@ -642,6 +649,8 @@ async fn test_router_inproc_peer_not_found() {
 #[tokio::test]
 async fn test_router_inproc_request_response() {
     use meerkat_comms::{Inbox, InprocRegistry};
+
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
 
     // Clear any existing state
     InprocRegistry::global().clear();

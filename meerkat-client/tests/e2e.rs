@@ -76,40 +76,34 @@ struct WeatherArgs {
     city: String,
 }
 
-fn skip_if_no_anthropic_key() -> Option<String> {
-    if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
-        return None;
+fn first_env(vars: &[&str]) -> Option<String> {
+    for name in vars {
+        if let Ok(value) = std::env::var(name) {
+            return Some(value);
+        }
     }
-    std::env::var("RKAT_ANTHROPIC_API_KEY")
-        .ok()
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+    None
 }
 
-fn skip_if_no_openai_key() -> Option<String> {
-    if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
-        return None;
-    }
-    std::env::var("RKAT_OPENAI_API_KEY")
-        .ok()
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+fn anthropic_api_key() -> Option<String> {
+    first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"])
 }
 
-fn skip_if_no_gemini_key() -> Option<String> {
-    if std::env::var("MEERKAT_LIVE_API_TESTS").ok().as_deref() != Some("1") {
-        return None;
-    }
-    std::env::var("RKAT_GEMINI_API_KEY")
-        .ok()
-        .or_else(|| std::env::var("GEMINI_API_KEY").ok())
-        .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
+fn openai_api_key() -> Option<String> {
+    first_env(&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"])
+}
+
+fn gemini_api_key() -> Option<String> {
+    first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
 }
 
 #[tokio::test]
-async fn test_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(api_key) = skip_if_no_anthropic_key() else {
+#[ignore = "e2e: live API"]
+async fn e2e_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
         return Ok(());
     };
-
     let client = AnthropicClient::new(api_key)?;
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
@@ -139,11 +133,12 @@ async fn test_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(api_key) = skip_if_no_anthropic_key() else {
+#[ignore = "e2e: live API"]
+async fn e2e_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
         return Ok(());
     };
-
     let client = AnthropicClient::new(api_key)?;
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
@@ -399,11 +394,12 @@ async fn test_anthropic_stream_end_without_done_yields_success()
 }
 
 #[tokio::test]
-async fn test_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(api_key) = skip_if_no_openai_key() else {
+#[ignore = "e2e: live API"]
+async fn e2e_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = openai_api_key() else {
+        eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
         return Ok(());
     };
-
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
         "gpt-4o-mini",
@@ -433,11 +429,12 @@ async fn test_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(api_key) = skip_if_no_openai_key() else {
+#[ignore = "e2e: live API"]
+async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = openai_api_key() else {
+        eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
         return Ok(());
     };
-
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
         "gpt-4o-mini",
@@ -478,11 +475,12 @@ async fn test_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(api_key) = skip_if_no_gemini_key() else {
+#[ignore = "e2e: live API"]
+async fn e2e_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = gemini_api_key() else {
+        eprintln!("Skipping: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)");
         return Ok(());
     };
-
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
         "gemini-1.5-flash",
@@ -512,11 +510,12 @@ async fn test_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(api_key) = skip_if_no_gemini_key() else {
+#[ignore = "e2e: live API"]
+async fn e2e_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = gemini_api_key() else {
+        eprintln!("Skipping: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)");
         return Ok(());
     };
-
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
         "gemini-1.5-flash",
@@ -601,7 +600,7 @@ async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
 // =============================================================================
 //
 // These tests verify structured output works with real API calls.
-// Run with: MEERKAT_LIVE_API_TESTS=1 cargo test -p meerkat-client structured_output
+// Run with: ANTHROPIC_API_KEY=... cargo test -p meerkat-client structured_output -- --ignored
 
 fn person_schema() -> Value {
     serde_json::json!({
@@ -642,11 +641,12 @@ async fn collect_stream_text(
 }
 
 #[tokio::test]
-async fn test_anthropic_structured_output() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(api_key) = skip_if_no_anthropic_key() else {
+#[ignore = "e2e: live API"]
+async fn e2e_anthropic_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
         return Ok(());
     };
-
     let client = AnthropicClient::new(api_key)?;
     let request = LlmRequest::new(
         "claude-sonnet-4-5",
@@ -670,11 +670,12 @@ async fn test_anthropic_structured_output() -> Result<(), Box<dyn std::error::Er
 }
 
 #[tokio::test]
-async fn test_openai_structured_output() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(api_key) = skip_if_no_openai_key() else {
+#[ignore = "e2e: live API"]
+async fn e2e_openai_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = openai_api_key() else {
+        eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
         return Ok(());
     };
-
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
         "gpt-4o-mini",
@@ -698,11 +699,12 @@ async fn test_openai_structured_output() -> Result<(), Box<dyn std::error::Error
 }
 
 #[tokio::test]
-async fn test_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(api_key) = skip_if_no_gemini_key() else {
+#[ignore = "e2e: live API"]
+async fn e2e_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = gemini_api_key() else {
+        eprintln!("Skipping: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)");
         return Ok(());
     };
-
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
         "gemini-2.0-flash",

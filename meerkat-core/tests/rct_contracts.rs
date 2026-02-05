@@ -56,28 +56,27 @@ allowlist = ["git *", "ls -la"]
 
 #[test]
 fn test_config_env_contract() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("RUN_TEST_ENV_INNER").is_ok() {
-        let mut config = Config::default();
-        config.apply_env_overrides()?;
-        assert_eq!(config.agent.model, Config::default().agent.model);
-        match config.provider {
-            ProviderConfig::Anthropic { api_key, .. } => {
-                assert_eq!(api_key.as_deref(), Some("rkat-secret"));
-            }
-            _ => return Err("expected anthropic provider".into()),
+    let env = std::collections::HashMap::from([
+        ("RKAT_MODEL".to_string(), "env-model".to_string()),
+        (
+            "RKAT_ANTHROPIC_API_KEY".to_string(),
+            "rkat-secret".to_string(),
+        ),
+        (
+            "ANTHROPIC_API_KEY".to_string(),
+            "anthropic-secret".to_string(),
+        ),
+    ]);
+
+    let mut config = Config::default();
+    config.apply_env_overrides_from(|key| env.get(key).cloned())?;
+    assert_eq!(config.agent.model, Config::default().agent.model);
+    match config.provider {
+        ProviderConfig::Anthropic { api_key, .. } => {
+            assert_eq!(api_key.as_deref(), Some("rkat-secret"));
         }
-        return Ok(());
+        _ => return Err("expected anthropic provider".into()),
     }
-
-    let status = std::process::Command::new(std::env::current_exe()?)
-        .arg("test_config_env_contract")
-        .env("RUN_TEST_ENV_INNER", "1")
-        .env("RKAT_MODEL", "env-model")
-        .env("RKAT_ANTHROPIC_API_KEY", "rkat-secret")
-        .env("ANTHROPIC_API_KEY", "anthropic-secret")
-        .status()?;
-
-    assert!(status.success());
     Ok(())
 }
 
@@ -181,22 +180,16 @@ async fn test_config_store_contract() -> Result<(), Box<dyn std::error::Error>> 
 
 #[test]
 fn test_secrets_env_contract() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("RUN_TEST_SECRETS_INNER").is_ok() {
-        let mut config = Config::default();
-        config.apply_env_overrides()?;
-        if let ProviderConfig::Anthropic { .. } = config.provider {
-            // Default provider remains Anthropic; ensure no panic.
-        }
-        return Ok(());
+    let env = std::collections::HashMap::from([(
+        "OPENAI_API_KEY".to_string(),
+        "secret-openai".to_string(),
+    )]);
+
+    let mut config = Config::default();
+    config.apply_env_overrides_from(|key| env.get(key).cloned())?;
+    if let ProviderConfig::Anthropic { .. } = config.provider {
+        // Default provider remains Anthropic; ensure no panic.
     }
-
-    let status = std::process::Command::new(std::env::current_exe()?)
-        .arg("test_secrets_env_contract")
-        .env("RUN_TEST_SECRETS_INNER", "1")
-        .env("OPENAI_API_KEY", "secret-openai")
-        .status()?;
-
-    assert!(status.success());
     Ok(())
 }
 
@@ -283,43 +276,22 @@ fn test_inv_008_comms_runtime_defaults_consistent() {
 
 #[tokio::test]
 async fn test_inv_009_local_replaces_global() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("RUN_TEST_009_INNER").is_ok() {
-        let project_dir = std::env::var("TEST_PROJECT_DIR")?;
-        let project_dir = std::path::PathBuf::from(project_dir);
-        std::env::set_current_dir(&project_dir)?;
-
-        let config = Config::load().await?;
-        assert_eq!(config.agent.model, "local");
-        assert_eq!(config.budget.max_tokens, None);
-        return Ok(());
-    }
-
     let dir = tempfile::tempdir()?;
     let project_dir = dir.path().join("project");
     let project_config_dir = project_dir.join(".rkat");
     std::fs::create_dir_all(&project_config_dir)?;
 
-    let global_path = dir
-        .path()
-        .join(".config")
-        .join("meerkat")
-        .join("config.toml");
+    let global_path = dir.path().join(".rkat/config.toml");
     std::fs::create_dir_all(global_path.parent().ok_or("no parent")?)?;
-
     std::fs::write(&global_path, "[budget]\nmax_tokens = 1234\n")?;
     std::fs::write(
         project_config_dir.join("config.toml"),
         "[agent]\nmodel = \"local\"\n",
     )?;
 
-    let status = std::process::Command::new(std::env::current_exe()?)
-        .arg("test_inv_009_local_replaces_global")
-        .env("RUN_TEST_009_INNER", "1")
-        .env("HOME", dir.path())
-        .env("TEST_PROJECT_DIR", &project_dir)
-        .status()?;
-
-    assert!(status.success());
+    let config = Config::load_from_with_env(&project_dir, Some(dir.path()), |_| None).await?;
+    assert_eq!(config.agent.model, "local");
+    assert_eq!(config.budget.max_tokens, None);
     Ok(())
 }
 

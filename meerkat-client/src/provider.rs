@@ -30,16 +30,29 @@ impl ProviderResolver {
 
     /// Resolve API key for a provider using env vars with RKAT_* precedence.
     pub fn api_key_for(provider: Provider) -> Option<String> {
-        if test_client_enabled() {
+        Self::api_key_for_with_env(provider, |key| std::env::var(key).ok())
+    }
+
+    /// Resolve API key for a provider from an explicit environment provider.
+    ///
+    /// This exists primarily to make tests deterministic without mutating the process-wide
+    /// environment (which is unsafe in multi-threaded programs on Unix).
+    #[doc(hidden)]
+    pub fn api_key_for_with_env<F>(provider: Provider, mut env: F) -> Option<String>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        if env("RKAT_TEST_CLIENT").as_deref() == Some("1") {
             return Some("test-key".to_string());
         }
         match provider {
             Provider::Anthropic => {
-                env_preferring_rkat("RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")
+                env("RKAT_ANTHROPIC_API_KEY").or_else(|| env("ANTHROPIC_API_KEY"))
             }
-            Provider::OpenAI => env_preferring_rkat("RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"),
-            Provider::Gemini => env_preferring_rkat("RKAT_GEMINI_API_KEY", "GEMINI_API_KEY")
-                .or_else(|| std::env::var("GOOGLE_API_KEY").ok()),
+            Provider::OpenAI => env("RKAT_OPENAI_API_KEY").or_else(|| env("OPENAI_API_KEY")),
+            Provider::Gemini => env("RKAT_GEMINI_API_KEY")
+                .or_else(|| env("GEMINI_API_KEY"))
+                .or_else(|| env("GOOGLE_API_KEY")),
             Provider::Other => None,
         }
     }
@@ -68,12 +81,6 @@ impl ProviderResolver {
             Err(err) => Arc::new(UnsupportedClient::new(&format!("{err}"))),
         }
     }
-}
-
-fn env_preferring_rkat(rkat_key: &str, provider_key: &str) -> Option<String> {
-    std::env::var(rkat_key)
-        .ok()
-        .or_else(|| std::env::var(provider_key).ok())
 }
 
 fn test_client_enabled() -> bool {

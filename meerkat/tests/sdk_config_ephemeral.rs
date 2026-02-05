@@ -3,7 +3,7 @@ use meerkat::{ConfigDelta, SdkConfigStore};
 use serde_json::json;
 
 #[tokio::test]
-async fn e2e_sdk_config_ephemeral() {
+async fn test_sdk_config_ephemeral() {
     let store = SdkConfigStore::new();
     let baseline = store.get().await.expect("get config");
 

@@ -49,19 +49,10 @@ async fn test_store_adapter_roundtrip() {
 
 #[test]
 fn test_provider_resolver_prefers_rkat_env() {
-    if std::env::var("RUN_TEST_RESOLVER_INNER").is_ok() {
-        let key = ProviderResolver::api_key_for(Provider::OpenAI);
-        assert_eq!(key.as_deref(), Some("rkat-key"));
-        return;
-    }
-
-    let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
-        .arg("test_provider_resolver_prefers_rkat_env")
-        .env("RUN_TEST_RESOLVER_INNER", "1")
-        .env("RKAT_OPENAI_API_KEY", "rkat-key")
-        .env("OPENAI_API_KEY", "openai-key")
-        .status()
-        .expect("failed to spawn test child process");
-
-    assert!(status.success());
+    let env = std::collections::HashMap::from([
+        ("RKAT_OPENAI_API_KEY".to_string(), "rkat-key".to_string()),
+        ("OPENAI_API_KEY".to_string(), "openai-key".to_string()),
+    ]);
+    let key = ProviderResolver::api_key_for_with_env(Provider::OpenAI, |key| env.get(key).cloned());
+    assert_eq!(key.as_deref(), Some("rkat-key"));
 }

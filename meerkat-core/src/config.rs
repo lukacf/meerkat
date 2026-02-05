@@ -8,8 +8,8 @@ use crate::{
     retry::RetryPolicy,
     types::{OutputSchema, SecurityMode},
 };
-use serde::{Deserialize, Serialize};
 use serde::de::Deserializer;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -78,21 +78,49 @@ impl Config {
     /// Order: defaults → project config OR global config → env vars (secrets only)
     /// → CLI (CLI applied separately)
     pub async fn load() -> Result<Self, ConfigError> {
+        let cwd = std::env::current_dir()?;
+        let home = dirs::home_dir();
+        Self::load_from_with_env(&cwd, home.as_deref(), |key| std::env::var(key).ok()).await
+    }
+
+    /// Load config like [`Config::load`], but with explicit start directory, home directory,
+    /// and environment variable provider.
+    ///
+    /// This exists primarily to make tests deterministic without mutating the process-wide
+    /// environment (which is unsafe in multi-threaded programs on Unix).
+    #[doc(hidden)]
+    pub async fn load_from_with_env<F>(
+        start_dir: &std::path::Path,
+        home_dir: Option<&std::path::Path>,
+        env: F,
+    ) -> Result<Self, ConfigError>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
         let mut config = Self::default();
 
         // 1. Load project config (if exists). Local config replaces global.
-        if let Some(path) = Self::find_project_config().await {
+        if let Some(path) = Self::find_project_config_from(start_dir).await {
             config.merge_file(&path).await?;
-        } else if let Some(path) = Self::global_config_path() {
+        } else if let Some(path) = home_dir.map(|home| home.join(".rkat/config.toml")) {
             if tokio::fs::try_exists(&path).await.unwrap_or(false) {
                 config.merge_file(&path).await?;
             }
         }
 
         // 2. Apply environment variable overrides (secrets only)
-        config.apply_env_overrides()?;
+        config.apply_env_overrides_from(env)?;
 
         Ok(config)
+    }
+
+    /// Load config like [`Config::load`], but with explicit start directory and home directory.
+    #[doc(hidden)]
+    pub async fn load_from(
+        start_dir: &std::path::Path,
+        home_dir: Option<&std::path::Path>,
+    ) -> Result<Self, ConfigError> {
+        Self::load_from_with_env(start_dir, home_dir, |key| std::env::var(key).ok()).await
     }
 
     /// Convert config limits into runtime budget limits.
@@ -110,8 +138,8 @@ impl Config {
     /// Only returns a path if both `.rkat/` directory AND `config.toml` exist.
     /// This allows `.rkat/` to be created for session storage without requiring
     /// a config file.
-    async fn find_project_config() -> Option<PathBuf> {
-        let mut current = std::env::current_dir().ok()?;
+    async fn find_project_config_from(start_dir: &std::path::Path) -> Option<PathBuf> {
+        let mut current = start_dir.to_path_buf();
         loop {
             let marker_dir = current.join(".rkat");
             let config_path = marker_dir.join("config.toml");
@@ -204,13 +232,23 @@ impl Config {
 
     /// Apply environment variable overrides
     pub fn apply_env_overrides(&mut self) -> Result<(), ConfigError> {
+        self.apply_env_overrides_from(|key| std::env::var(key).ok())
+    }
+
+    /// Apply environment variable overrides (secrets only) using an explicit env provider.
+    ///
+    /// This exists primarily to make tests deterministic without mutating the process-wide
+    /// environment (which is unsafe in multi-threaded programs on Unix).
+    #[doc(hidden)]
+    pub fn apply_env_overrides_from<F>(&mut self, mut env: F) -> Result<(), ConfigError>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
         // Provider API keys (fallback if not set in config). Only secret env vars are honored.
         match &mut self.provider {
             ProviderConfig::Anthropic { api_key, .. } => {
                 if api_key.is_none() {
-                    let key = std::env::var("RKAT_ANTHROPIC_API_KEY")
-                        .ok()
-                        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+                    let key = env("RKAT_ANTHROPIC_API_KEY").or_else(|| env("ANTHROPIC_API_KEY"));
                     if let Some(key) = key {
                         *api_key = Some(key);
                     }
@@ -218,9 +256,7 @@ impl Config {
             }
             ProviderConfig::OpenAI { api_key, .. } => {
                 if api_key.is_none() {
-                    let key = std::env::var("RKAT_OPENAI_API_KEY")
-                        .ok()
-                        .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+                    let key = env("RKAT_OPENAI_API_KEY").or_else(|| env("OPENAI_API_KEY"));
                     if let Some(key) = key {
                         *api_key = Some(key);
                     }
@@ -229,10 +265,9 @@ impl Config {
             ProviderConfig::Gemini { api_key } => {
                 if api_key.is_none() {
                     // Try GEMINI_API_KEY first, then GOOGLE_API_KEY
-                    let key = std::env::var("RKAT_GEMINI_API_KEY")
-                        .ok()
-                        .or_else(|| std::env::var("GEMINI_API_KEY").ok())
-                        .or_else(|| std::env::var("GOOGLE_API_KEY").ok());
+                    let key = env("RKAT_GEMINI_API_KEY")
+                        .or_else(|| env("GEMINI_API_KEY"))
+                        .or_else(|| env("GOOGLE_API_KEY"));
                     if let Some(key) = key {
                         *api_key = Some(key);
                     }
@@ -423,10 +458,7 @@ impl<'de> Deserialize<'de> for ShellDefaults {
         if let Some(security_mode) = seed.security_mode {
             defaults.security_mode = security_mode;
         }
-        if let Some(security_patterns) = seed
-            .security_patterns
-            .or(seed.allowlist.clone())
-        {
+        if let Some(security_patterns) = seed.security_patterns.or(seed.allowlist.clone()) {
             defaults.security_patterns = security_patterns;
         }
 
@@ -892,32 +924,28 @@ mod tests {
 
     #[test]
     fn test_config_layering() {
-        if std::env::var("RUN_TEST_LAYERING_INNER").is_ok() {
+        // 1. Test defaults
+        let config = Config::default();
+        assert_eq!(config.agent.model, "claude-3-7-sonnet-20250219");
+        assert_eq!(config.budget.max_tokens, None);
+
+        // 2. Test env override (secrets only)
+        {
+            let env = std::collections::HashMap::from([
+                ("RKAT_MODEL".to_string(), "env-model".to_string()),
+                ("ANTHROPIC_API_KEY".to_string(), "secret-key".to_string()),
+            ]);
             let mut config = Config::default();
-            config.apply_env_overrides().expect("apply env overrides");
+            config
+                .apply_env_overrides_from(|key| env.get(key).cloned())
+                .expect("apply env overrides");
             match config.provider {
                 ProviderConfig::Anthropic { api_key, .. } => {
                     assert_eq!(api_key.as_deref(), Some("secret-key"));
                 }
                 _ => unreachable!("expected anthropic provider"),
             }
-            return;
         }
-
-        // 1. Test defaults
-        let config = Config::default();
-        assert_eq!(config.agent.model, "claude-3-7-sonnet-20250219");
-        assert_eq!(config.budget.max_tokens, None);
-
-        // 2. Test env override (secrets only) using child process
-        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
-            .arg("test_config_layering")
-            .env("RUN_TEST_LAYERING_INNER", "1")
-            .env("RKAT_MODEL", "env-model")
-            .env("ANTHROPIC_API_KEY", "secret-key")
-            .status()
-            .expect("failed to spawn test child process");
-        assert!(status.success());
 
         // 3. Test file merge
         let mut config = Config::default();
@@ -1011,14 +1039,9 @@ mod tests {
         assert!(rkat_dir.exists());
         assert!(!rkat_dir.join("config.toml").exists());
 
-        // Change to temp dir and verify load() succeeds
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp_dir.path()).unwrap();
-
-        let result = Config::load().await;
-
-        // Restore original directory before asserting
-        std::env::set_current_dir(original_dir).unwrap();
+        // Verify load succeeds without consulting process-global HOME/cwd.
+        let result =
+            Config::load_from_with_env(temp_dir.path(), Some(temp_dir.path()), |_| None).await;
 
         assert!(
             result.is_ok(),

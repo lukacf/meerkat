@@ -26,11 +26,10 @@ use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
     AgentBuilder, AgentEvent, AgentToolDispatcher, JsonlStore, OutputSchema, SessionId,
-    SessionMeta, SessionStore, ToolDef, ToolError, ToolResult,
-    build_comms_runtime_from_config, compose_tools_with_comms,
+    SessionMeta, SessionStore, ToolDef, ToolError, ToolResult, build_comms_runtime_from_config,
+    compose_tools_with_comms,
 };
-use meerkat_client::LlmClientAdapter;
-use meerkat_client::ProviderResolver;
+use meerkat_client::{LlmClient, LlmClientAdapter, ProviderResolver};
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::{
@@ -64,6 +63,8 @@ pub struct AppState {
     pub enable_shell: bool,
     /// Project root for file-based task store and shell working directory
     pub project_root: Option<PathBuf>,
+    /// Override the resolved LLM client (primarily for tests and embedding).
+    pub llm_client_override: Option<Arc<dyn LlmClient>>,
     pub config_store: Arc<dyn ConfigStore>,
     pub event_tx: broadcast::Sender<SessionEvent>,
 }
@@ -97,6 +98,7 @@ impl Default for AppState {
             enable_builtins: config.tools.builtins_enabled,
             enable_shell: config.tools.shell_enabled,
             project_root: Some(instance_root),
+            llm_client_override: None,
             config_store,
             event_tx,
         }
@@ -156,6 +158,7 @@ impl AppState {
             enable_builtins,
             enable_shell,
             project_root: Some(instance_root),
+            llm_client_override: None,
             config_store,
             event_tx,
         }
@@ -432,12 +435,6 @@ async fn create_session(
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let config = load_config_from_store(state.config_store.as_ref()).await;
     let provider = resolve_provider(req.provider, &model);
-    if ProviderResolver::api_key_for(provider).is_none() {
-        return Err(ApiError::Configuration(format!(
-            "API key not set for provider '{}'",
-            provider_key(provider)
-        )));
-    }
 
     let store = JsonlStore::new(state.store_path.clone());
     store
@@ -445,12 +442,24 @@ async fn create_session(
         .await
         .map_err(|e| ApiError::Internal(format!("Store init failed: {}", e)))?;
 
-    let base_url = config
-        .providers
-        .base_urls
-        .as_ref()
-        .and_then(|map| map.get(provider_key(provider)).cloned());
-    let llm_client = ProviderResolver::client_for(provider, base_url);
+    let llm_client = match state.llm_client_override.clone() {
+        Some(client) => client,
+        None => {
+            if ProviderResolver::api_key_for(provider).is_none() {
+                return Err(ApiError::Configuration(format!(
+                    "API key not set for provider '{}'",
+                    provider_key(provider)
+                )));
+            }
+
+            let base_url = config
+                .providers
+                .base_urls
+                .as_ref()
+                .and_then(|map| map.get(provider_key(provider)).cloned());
+            ProviderResolver::client_for(provider, base_url)
+        }
+    };
     let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
     let verbose = req.verbose;
     let llm_adapter = Arc::new(LlmClientAdapter::with_event_channel(
@@ -679,12 +688,6 @@ async fn continue_session(
             .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider)),
         &model,
     );
-    if ProviderResolver::api_key_for(provider).is_none() {
-        return Err(ApiError::Configuration(format!(
-            "API key not set for provider '{}'",
-            provider_key(provider)
-        )));
-    }
     let host_mode = req.host_mode
         || stored_metadata
             .as_ref()
@@ -702,12 +705,24 @@ async fn continue_session(
         ));
     }
 
-    let base_url = config
-        .providers
-        .base_urls
-        .as_ref()
-        .and_then(|map| map.get(provider_key(provider)).cloned());
-    let llm_client = ProviderResolver::client_for(provider, base_url);
+    let llm_client = match state.llm_client_override.clone() {
+        Some(client) => client,
+        None => {
+            if ProviderResolver::api_key_for(provider).is_none() {
+                return Err(ApiError::Configuration(format!(
+                    "API key not set for provider '{}'",
+                    provider_key(provider)
+                )));
+            }
+
+            let base_url = config
+                .providers
+                .base_urls
+                .as_ref()
+                .and_then(|map| map.get(provider_key(provider)).cloned());
+            ProviderResolver::client_for(provider, base_url)
+        }
+    };
     let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
     let verbose = req.verbose;
     let llm_adapter = Arc::new(LlmClientAdapter::with_event_channel(

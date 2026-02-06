@@ -10,6 +10,7 @@ pub mod config_store;
 pub mod error;
 pub mod event;
 pub mod gateway;
+pub mod hooks;
 pub mod mcp_config;
 pub mod ops;
 pub mod prompt;
@@ -30,8 +31,9 @@ pub use agent::{
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use config::{
     AgentConfig, BudgetConfig, CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta,
-    ConfigScope, LimitsConfig, ModelDefaults, ProviderConfig, ProviderSettings, RetryConfig,
-    ShellDefaults, StorageConfig, StoreConfig, ToolsConfig,
+    ConfigScope, HookEntryConfig, HookRunOverrides, HookRuntimeConfig, HooksConfig, LimitsConfig,
+    ModelDefaults, ProviderConfig, ProviderSettings, RetryConfig, ShellDefaults, StorageConfig,
+    StoreConfig, ToolsConfig,
 };
 pub use config_store::{ConfigStore, FileConfigStore, MemoryConfigStore};
 pub use error::{AgentError, ToolError};
@@ -40,6 +42,12 @@ pub use event::{
     format_verbose_event_with_config,
 };
 pub use gateway::{Availability, AvailabilityCheck, ToolGateway, ToolGatewayBuilder};
+pub use hooks::{
+    HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
+    HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookLlmRequest,
+    HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
+    HookRevision, HookToolCall, HookToolResult, default_failure_policy,
+};
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use ops::{
     ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent, OperationId,

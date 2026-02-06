@@ -133,8 +133,7 @@ mod tests {
     async fn test_comms_tool_surface_dispatch_unknown() {
         let (router, trusted_peers) = make_tool_context();
         let surface = CommsToolSurface::new(router, trusted_peers);
-        let args_raw =
-            serde_json::value::RawValue::from_string(Value::Null.to_string()).unwrap();
+        let args_raw = serde_json::value::RawValue::from_string(Value::Null.to_string()).unwrap();
         let call = ToolCallView {
             id: "test-1",
             name: "unknown",

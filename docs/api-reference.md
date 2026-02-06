@@ -126,6 +126,12 @@ impl AgentBuilder {
     /// Resume an existing session
     pub fn resume_session(self, session: Session) -> Self
 
+    /// Attach hook engine implementation
+    pub fn with_hook_engine(self, hook_engine: Arc<dyn HookEngine>) -> Self
+
+    /// Apply run-scoped hook overrides
+    pub fn with_hook_run_overrides(self, overrides: HookRunOverrides) -> Self
+
     /// Build the agent with dependencies
     pub fn build(
         self,
@@ -133,6 +139,39 @@ impl AgentBuilder {
         tools: Arc<dyn AgentToolDispatcher>,
         store: Arc<dyn AgentSessionStore>,
     ) -> Agent
+}
+```
+
+### Hook Contracts
+
+Core hook interfaces are exposed from `meerkat_core` and re-exported by `meerkat`:
+
+```rust
+pub enum HookPoint {
+    RunStarted,
+    RunCompleted,
+    RunFailed,
+    PreLlmRequest,
+    PostLlmResponse,
+    PreToolExecution,
+    PostToolExecution,
+    TurnBoundary,
+}
+
+pub enum HookExecutionMode {
+    Foreground,
+    Background,
+}
+
+pub enum HookCapability {
+    Observe,
+    Guardrail,
+    Rewrite,
+}
+
+pub struct HookRunOverrides {
+    pub entries: Vec<HookEntryConfig>,
+    pub disable: Vec<HookId>,
 }
 ```
 
@@ -469,6 +508,20 @@ pub enum AgentEvent {
 
     /// Session checkpoint saved
     CheckpointSaved { session_id: SessionId },
+
+    /// Hook lifecycle and audit events
+    HookStarted { hook_id: String, point: HookPoint },
+    HookCompleted { hook_id: String, point: HookPoint, duration_ms: u64 },
+    HookFailed { hook_id: String, point: HookPoint, error: String },
+    HookDenied {
+        hook_id: String,
+        point: HookPoint,
+        reason_code: HookReasonCode,
+        message: String,
+        payload: Option<serde_json::Value>,
+    },
+    HookRewriteApplied { hook_id: String, point: HookPoint, patch: HookPatch },
+    HookPatchPublished { hook_id: String, point: HookPoint, envelope: HookPatchEnvelope },
 }
 ```
 
@@ -496,6 +549,23 @@ pub enum AgentError {
 
     #[error("Configuration error: {0}")]
     Config(String),
+
+    #[error("Hook denied at {point:?}: {reason_code:?} - {message}")]
+    HookDenied {
+        point: HookPoint,
+        reason_code: HookReasonCode,
+        message: String,
+        payload: Option<serde_json::Value>,
+    },
+
+    #[error("Hook '{hook_id}' timed out after {timeout_ms}ms")]
+    HookTimeout { hook_id: String, timeout_ms: u64 },
+
+    #[error("Hook execution failed for '{hook_id}': {reason}")]
+    HookExecutionFailed { hook_id: String, reason: String },
+
+    #[error("Hook configuration invalid: {reason}")]
+    HookConfigInvalid { reason: String },
 }
 
 #[derive(Debug, Clone)]

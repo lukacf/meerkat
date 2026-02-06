@@ -4,7 +4,7 @@ mod adapters;
 mod mcp;
 
 use adapters::{CliToolDispatcher, EmptyToolDispatcher, McpRouterAdapter};
-use meerkat::AgentFactory;
+use meerkat::{AgentFactory, create_default_hook_engine, resolve_layered_hooks_config};
 use meerkat_client::{DefaultClientFactory, LlmClientFactory};
 use meerkat_comms::{CommsRuntime, CoreCommsConfig, ParentCommsContext};
 use meerkat_core::AgentToolDispatcher;
@@ -28,6 +28,7 @@ use meerkat_tools::{ensure_rkat_dir_async, find_project_root};
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use meerkat_core::HookRunOverrides;
 use meerkat_core::SessionId;
 use meerkat_core::SystemPromptConfig;
 use meerkat_core::agent::AgentBuilder;
@@ -197,6 +198,14 @@ enum Commands {
         #[arg(long, default_value = "2")]
         structured_output_retries: u32,
 
+        /// Run-scoped hook overrides as inline JSON.
+        #[arg(long = "hooks-override-json", value_name = "JSON")]
+        hooks_override_json: Option<String>,
+
+        /// Run-scoped hook overrides from a JSON file.
+        #[arg(long = "hooks-override-file", value_name = "FILE")]
+        hooks_override_file: Option<PathBuf>,
+
         // === Comms flags ===
         /// Agent name for inter-agent communication. Enables comms if set.
         #[arg(long = "comms-name")]
@@ -242,6 +251,14 @@ enum Commands {
 
         /// The prompt to continue with
         prompt: String,
+
+        /// Run-scoped hook overrides as inline JSON.
+        #[arg(long = "hooks-override-json", value_name = "JSON")]
+        hooks_override_json: Option<String>,
+
+        /// Run-scoped hook overrides from a JSON file.
+        #[arg(long = "hooks-override-file", value_name = "FILE")]
+        hooks_override_file: Option<PathBuf>,
     },
 
     /// Session management
@@ -459,6 +476,8 @@ async fn main() -> anyhow::Result<ExitCode> {
             output_schema,
             output_schema_compat,
             structured_output_retries,
+            hooks_override_json,
+            hooks_override_file,
             comms_name,
             comms_listen_tcp,
             no_comms,
@@ -483,6 +502,8 @@ async fn main() -> anyhow::Result<ExitCode> {
 
             // Parse provider params
             let provider_params = parse_provider_params(&params);
+            let hook_run_overrides =
+                parse_hook_run_overrides(hooks_override_file, hooks_override_json);
 
             // Build comms overrides from CLI flags
             let comms_overrides = CommsOverrides {
@@ -504,8 +525,8 @@ async fn main() -> anyhow::Result<ExitCode> {
                     }
                 });
 
-            match (duration, provider_params) {
-                (Ok(dur), Ok(parsed_params)) => {
+            match (duration, provider_params, hook_run_overrides) {
+                (Ok(dur), Ok(parsed_params), Ok(hooks_override)) => {
                     let mut limits = config.budget_limits();
                     if let Some(max_tokens) = max_total_tokens {
                         limits.max_tokens = Some(max_tokens);
@@ -535,14 +556,24 @@ async fn main() -> anyhow::Result<ExitCode> {
                         host,
                         &config,
                         config_base_dir,
+                        hooks_override,
                     )
                     .await
                 }
-                (Err(e), _) => Err(e),
-                (_, Err(e)) => Err(e),
+                (Err(e), _, _) => Err(e),
+                (_, Err(e), _) => Err(e),
+                (_, _, Err(e)) => Err(e),
             }
         }
-        Commands::Resume { session_id, prompt } => resume_session(&session_id, &prompt).await,
+        Commands::Resume {
+            session_id,
+            prompt,
+            hooks_override_json,
+            hooks_override_file,
+        } => {
+            let overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json)?;
+            resume_session(&session_id, &prompt, overrides).await
+        }
         Commands::Sessions { command } => match command {
             SessionCommands::List { limit } => list_sessions(limit).await,
             SessionCommands::Show { id } => show_session(&id).await,
@@ -615,6 +646,37 @@ fn parse_output_schema(schema_arg: &str) -> anyhow::Result<OutputSchema> {
 
     OutputSchema::from_json_str(&schema_str)
         .map_err(|e| anyhow::anyhow!("Invalid output schema: {}", e))
+}
+
+/// Parse run-scoped hook overrides from either --hooks-override-json or --hooks-override-file.
+fn parse_hook_run_overrides(
+    hooks_override_file: Option<PathBuf>,
+    hooks_override_json: Option<String>,
+) -> anyhow::Result<HookRunOverrides> {
+    match (hooks_override_file, hooks_override_json) {
+        (Some(_), Some(_)) => Err(anyhow::anyhow!(
+            "Provide either --hooks-override-json or --hooks-override-file, not both"
+        )),
+        (Some(path), None) => {
+            let content = std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to read hook override file '{}': {}",
+                    path.display(),
+                    e
+                )
+            })?;
+            serde_json::from_str::<HookRunOverrides>(&content).map_err(|e| {
+                anyhow::anyhow!(
+                    "Invalid hook override JSON in file '{}': {}",
+                    path.display(),
+                    e
+                )
+            })
+        }
+        (None, Some(json_payload)) => serde_json::from_str::<HookRunOverrides>(&json_payload)
+            .map_err(|e| anyhow::anyhow!("Invalid --hooks-override-json payload: {}", e)),
+        (None, None) => Ok(HookRunOverrides::default()),
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1229,6 +1291,7 @@ async fn run_agent(
     host_mode: bool,
     config: &Config,
     config_base_dir: PathBuf,
+    hooks_override: HookRunOverrides,
 ) -> anyhow::Result<()> {
     use meerkat_core::event::AgentEvent;
     use tokio::sync::mpsc;
@@ -1294,6 +1357,8 @@ async fn run_agent(
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);
     }
+    let layered_hooks = resolve_layered_hooks_config(&config_base_dir, config).await;
+    let hook_engine = create_default_hook_engine(layered_hooks);
 
     // Build the agent with budget limits (clone tools Arc so we can shutdown later)
     let tools_for_shutdown = tools.clone();
@@ -1302,7 +1367,8 @@ async fn run_agent(
         .max_tokens_per_turn(max_tokens)
         .system_prompt(system_prompt)
         .budget(limits)
-        .structured_output_retries(structured_output_retries);
+        .structured_output_retries(structured_output_retries)
+        .with_hook_run_overrides(hooks_override);
 
     // Add output schema if provided
     if let Some(schema) = output_schema {
@@ -1318,6 +1384,9 @@ async fn run_agent(
     // Add pre-created comms runtime if present
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
+    }
+    if let Some(hook_engine) = hook_engine {
+        builder = builder.with_hook_engine(hook_engine);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -1467,7 +1536,11 @@ fn resolve_api_key(provider: Provider) -> anyhow::Result<String> {
     ))
 }
 
-async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
+async fn resume_session(
+    session_id: &str,
+    prompt: &str,
+    hooks_override: HookRunOverrides,
+) -> anyhow::Result<()> {
     // Parse session ID
     let session_id = SessionId::parse(session_id)
         .map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", session_id, e))?;
@@ -1558,7 +1631,7 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
     let tooling_setup = build_tooling(
         &base_factory,
         &config,
-        config_base_dir,
+        config_base_dir.clone(),
         &comms_overrides,
         tooling.builtins,
         tooling.shell,
@@ -1582,6 +1655,8 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&tool_usage_instructions);
     }
+    let layered_hooks = resolve_layered_hooks_config(&config_base_dir, &config).await;
+    let hook_engine = create_default_hook_engine(layered_hooks);
 
     // Build the agent with the existing session and config-derived budget limits
     let tools_for_shutdown = tools.clone();
@@ -1591,10 +1666,14 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         .max_tokens_per_turn(max_tokens)
         .system_prompt(system_prompt)
         .budget(limits)
+        .with_hook_run_overrides(hooks_override)
         .resume_session(session);
 
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
+    }
+    if let Some(hook_engine) = hook_engine {
+        builder = builder.with_hook_engine(hook_engine);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -1930,6 +2009,11 @@ impl Provider {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn hooks_override_fixture_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/hooks/run_override.json")
+    }
 
     #[test]
     fn test_parse_provider_params_single() -> Result<(), Box<dyn std::error::Error>> {
@@ -1986,6 +2070,36 @@ mod tests {
         let json = result.ok_or("missing result")?;
         assert_eq!(json["key"], "");
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_hook_overrides_from_file_matches_fixture() {
+        let overrides = parse_hook_run_overrides(Some(hooks_override_fixture_path()), None)
+            .expect("fixture hook override must parse");
+        assert_eq!(
+            overrides.disable,
+            vec![meerkat_core::HookId::new("global_observer")]
+        );
+        assert_eq!(overrides.entries.len(), 2);
+        assert_eq!(
+            overrides.entries[0].point,
+            meerkat_core::HookPoint::PreToolExecution
+        );
+        assert_eq!(
+            overrides.entries[1].mode,
+            meerkat_core::HookExecutionMode::Background
+        );
+    }
+
+    #[test]
+    fn test_parse_hook_overrides_from_inline_json_matches_file() {
+        let fixture_path = hooks_override_fixture_path();
+        let fixture = std::fs::read_to_string(&fixture_path).expect("fixture must exist");
+        let from_file = parse_hook_run_overrides(Some(fixture_path), None)
+            .expect("fixture hook override must parse from file");
+        let from_json = parse_hook_run_overrides(None, Some(fixture))
+            .expect("fixture hook override must parse from inline json");
+        assert_eq!(from_json, from_file);
     }
 
     #[test]

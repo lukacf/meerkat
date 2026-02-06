@@ -3,9 +3,9 @@
 use crate::{McpConnection, McpError, McpServerConfig};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
-use meerkat_core::types::{ToolCallView, ToolResult};
 use meerkat_core::error::ToolError;
 use meerkat_core::types::ToolDef;
+use meerkat_core::types::{ToolCallView, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -84,12 +84,15 @@ impl AgentToolDispatcher for McpRouter {
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
-        let result_str = self.call_tool(call.name, &args).await.map_err(|e| match e {
-            McpError::ToolNotFound(name) => ToolError::NotFound { name },
-            other => ToolError::ExecutionFailed {
-                message: other.to_string(),
-            },
-        })?;
+        let result_str = self
+            .call_tool(call.name, &args)
+            .await
+            .map_err(|e| match e {
+                McpError::ToolNotFound(name) => ToolError::NotFound { name },
+                other => ToolError::ExecutionFailed {
+                    message: other.to_string(),
+                },
+            })?;
 
         Ok(ToolResult {
             tool_use_id: call.id.to_string(),

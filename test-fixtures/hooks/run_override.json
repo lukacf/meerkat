@@ -1,0 +1,36 @@
+{
+  "disable": ["global_observer"],
+  "entries": [
+    {
+      "id": "fixture_pre_tool_rewrite",
+      "enabled": true,
+      "point": "pre_tool_execution",
+      "mode": "foreground",
+      "capability": "rewrite",
+      "priority": 10,
+      "failure_policy": "fail_closed",
+      "timeout_ms": 800,
+      "runtime": {
+        "type": "in_process",
+        "name": "fixture.pre_tool_rewrite"
+      }
+    },
+    {
+      "id": "fixture_post_tool_background",
+      "enabled": true,
+      "point": "post_tool_execution",
+      "mode": "background",
+      "capability": "observe",
+      "priority": 50,
+      "timeout_ms": 600,
+      "runtime": {
+        "type": "http",
+        "url": "http://127.0.0.1:4010/hooks/post-tool",
+        "method": "POST",
+        "headers": {
+          "x-hook-test": "fixture"
+        }
+      }
+    }
+  ]
+}

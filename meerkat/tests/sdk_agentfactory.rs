@@ -7,11 +7,11 @@ use std::sync::{
 use async_trait::async_trait;
 use futures::stream;
 use meerkat::{
-    AgentBuilder, AgentFactory, AgentToolDispatcher, LlmDoneOutcome, LlmEvent, LlmRequest,
-    ToolDef, ToolError, ToolResult,
+    AgentBuilder, AgentFactory, AgentToolDispatcher, LlmDoneOutcome, LlmEvent, LlmRequest, ToolDef,
+    ToolError, ToolResult,
 };
-use meerkat_core::ToolCallView;
 use meerkat_client::LlmClient;
+use meerkat_core::ToolCallView;
 use meerkat_store::MemoryStore;
 use meerkat_tools::schema_for;
 use schemars::JsonSchema;

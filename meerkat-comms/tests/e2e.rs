@@ -8,9 +8,9 @@ use meerkat_comms::{
     CommsConfig, Inbox, Keypair, PubKey, Router, TrustedPeer, TrustedPeers, handle_connection,
 };
 use serde_json::json;
+use std::path::Path;
 use tempfile::TempDir;
 use tokio::net::{TcpListener, UnixListener};
-use std::path::Path;
 
 /// Helper to create a keypair
 fn make_keypair() -> Keypair {

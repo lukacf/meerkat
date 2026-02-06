@@ -279,22 +279,25 @@ mod tests {
             "Gemini schema should remove $ref"
         );
         assert!(
-            compiled.schema["properties"]["choice"].get("oneOf").is_none(),
+            compiled.schema["properties"]["choice"]
+                .get("oneOf")
+                .is_none(),
             "Gemini schema should remove oneOf"
         );
 
-        assert!(compiled
-            .warnings
-            .iter()
-            .any(|w| w.path == "/$defs"));
-        assert!(compiled
-            .warnings
-            .iter()
-            .any(|w| w.path == "/properties/id/$ref"));
-        assert!(compiled
-            .warnings
-            .iter()
-            .any(|w| w.path == "/properties/choice/oneOf"));
+        assert!(compiled.warnings.iter().any(|w| w.path == "/$defs"));
+        assert!(
+            compiled
+                .warnings
+                .iter()
+                .any(|w| w.path == "/properties/id/$ref")
+        );
+        assert!(
+            compiled
+                .warnings
+                .iter()
+                .any(|w| w.path == "/properties/choice/oneOf")
+        );
 
         Ok(())
     }

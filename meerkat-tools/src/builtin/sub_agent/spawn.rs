@@ -22,11 +22,7 @@ use std::sync::Arc;
 /// These are the only models that can be used with agent_spawn
 pub mod allowed_models {
     /// Allowed Anthropic models
-    pub const ANTHROPIC: &[&str] = &[
-        "claude-opus-4-6",
-        "claude-sonnet-4-5",
-        "claude-opus-4-5",
-    ];
+    pub const ANTHROPIC: &[&str] = &["claude-opus-4-6", "claude-sonnet-4-5", "claude-opus-4-5"];
 
     /// Allowed OpenAI models (only latest frontier models)
     pub const OPENAI: &[&str] = &["gpt-5.2", "gpt-5.2-pro"];

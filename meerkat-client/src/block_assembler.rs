@@ -234,12 +234,13 @@ impl BlockAssembler {
         } else {
             // No prior start - provider that doesn't emit start events
             // Insert at end; ordering may be off but we have the data
-            self.slots.push(BlockSlot::Finalized(AssistantBlock::ToolUse {
-                id,
-                name,
-                args,
-                meta,
-            }));
+            self.slots
+                .push(BlockSlot::Finalized(AssistantBlock::ToolUse {
+                    id,
+                    name,
+                    args,
+                    meta,
+                }));
             Ok(())
         }
     }
@@ -396,7 +397,9 @@ mod tests {
         assembler
             .on_tool_call_delta("tc_1", Some("read_file"), r#"{"pa"#)
             .unwrap();
-        assembler.on_tool_call_delta("tc_1", None, r#"th":"#).unwrap();
+        assembler
+            .on_tool_call_delta("tc_1", None, r#"th":"#)
+            .unwrap();
         assembler
             .on_tool_call_delta("tc_1", None, r#""/tmp/test"}"#)
             .unwrap();
@@ -470,7 +473,12 @@ mod tests {
         // Complete without prior start - should still work
         let args = RawValue::from_string(r#"{"key":"value"}"#.to_string()).unwrap();
         assembler
-            .on_tool_call_complete("tc_orphan".to_string(), "orphan_tool".to_string(), args, None)
+            .on_tool_call_complete(
+                "tc_orphan".to_string(),
+                "orphan_tool".to_string(),
+                args,
+                None,
+            )
             .unwrap();
 
         let blocks = assembler.finalize();
@@ -598,7 +606,9 @@ mod tests {
         assert_eq!(blocks.len(), 4);
 
         assert!(matches!(&blocks[0], AssistantBlock::Text { text, .. } if text == "Let me help. "));
-        assert!(matches!(&blocks[1], AssistantBlock::Reasoning { text, .. } if text == "thinking..."));
+        assert!(
+            matches!(&blocks[1], AssistantBlock::Reasoning { text, .. } if text == "thinking...")
+        );
         assert!(matches!(&blocks[2], AssistantBlock::ToolUse { name, .. } if name == "search"));
         assert!(matches!(&blocks[3], AssistantBlock::Text { text, .. } if text == "Done!"));
     }
@@ -608,8 +618,12 @@ mod tests {
         let mut assembler = BlockAssembler::new();
 
         // Start two tool calls
-        assembler.on_tool_call_start("tc_first".to_string()).unwrap();
-        assembler.on_tool_call_start("tc_second".to_string()).unwrap();
+        assembler
+            .on_tool_call_start("tc_first".to_string())
+            .unwrap();
+        assembler
+            .on_tool_call_start("tc_second".to_string())
+            .unwrap();
 
         // Complete in reverse order
         assembler
@@ -642,7 +656,9 @@ mod tests {
 
         assembler.on_text_delta("Complete text", None);
         assembler.on_reasoning_start(); // Started but never completed
-        assembler.on_tool_call_start("tc_incomplete".to_string()).unwrap(); // Started but never completed
+        assembler
+            .on_tool_call_start("tc_incomplete".to_string())
+            .unwrap(); // Started but never completed
 
         let blocks = assembler.finalize();
 

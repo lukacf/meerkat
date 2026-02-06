@@ -189,12 +189,11 @@ impl AgentToolDispatcher for CompositeDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get()).map_err(|e| {
-            ToolError::InvalidArguments {
+        let args: Value =
+            serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
                 name: call.name.to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         // First check if it's an allowed tool
         if !self.allowed_tools.contains(call.name) {
             // Check external dispatcher for non-allowed tools

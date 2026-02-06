@@ -3,6 +3,7 @@
 use crate::budget::Budget;
 use crate::error::AgentError;
 use crate::event::AgentEvent;
+use crate::hooks::{HookDecision, HookInvocation, HookPatch, HookPoint};
 use crate::ops::{
     ForkBranch, ForkBudgetPolicy, OperationId, OperationResult, SpawnSpec, ToolAccessPolicy,
 };
@@ -345,6 +346,138 @@ where
         self.sub_agent_manager.has_running().await
     }
 
+    async fn run_started_hooks(
+        &self,
+        prompt: &str,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) -> Result<(), AgentError> {
+        let report = self
+            .execute_hooks(
+                HookInvocation {
+                    point: HookPoint::RunStarted,
+                    session_id: self.session.id().clone(),
+                    turn_number: None,
+                    prompt: Some(prompt.to_string()),
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                event_tx,
+            )
+            .await?;
+
+        if let Some(HookDecision::Deny {
+            reason_code,
+            message,
+            payload,
+            ..
+        }) = report.decision
+        {
+            return Err(AgentError::HookDenied {
+                point: HookPoint::RunStarted,
+                reason_code,
+                message,
+                payload,
+            });
+        }
+        Ok(())
+    }
+
+    async fn run_completed_hooks(
+        &self,
+        result: &mut RunResult,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) -> Result<(), AgentError> {
+        let report = self
+            .execute_hooks(
+                HookInvocation {
+                    point: HookPoint::RunCompleted,
+                    session_id: self.session.id().clone(),
+                    turn_number: Some(result.turns),
+                    prompt: Some(result.text.clone()),
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                event_tx,
+            )
+            .await?;
+
+        if let Some(HookDecision::Deny {
+            reason_code,
+            message,
+            payload,
+            ..
+        }) = report.decision
+        {
+            return Err(AgentError::HookDenied {
+                point: HookPoint::RunCompleted,
+                reason_code,
+                message,
+                payload,
+            });
+        }
+
+        for patch in report.patches {
+            if let HookPatch::RunResult { text } = patch {
+                if let Some(tx) = event_tx {
+                    let _ = tx
+                        .send(AgentEvent::HookRewriteApplied {
+                            hook_id: "runtime".to_string(),
+                            point: HookPoint::RunCompleted,
+                            patch: HookPatch::RunResult { text: text.clone() },
+                        })
+                        .await;
+                }
+                result.text = text;
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_failed_hooks(
+        &self,
+        error: &AgentError,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) -> Result<(), AgentError> {
+        let report = self
+            .execute_hooks(
+                HookInvocation {
+                    point: HookPoint::RunFailed,
+                    session_id: self.session.id().clone(),
+                    turn_number: None,
+                    prompt: None,
+                    error: Some(error.to_string()),
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                event_tx,
+            )
+            .await?;
+
+        if let Some(HookDecision::Deny {
+            reason_code,
+            message,
+            payload,
+            ..
+        }) = report.decision
+        {
+            return Err(AgentError::HookDenied {
+                point: HookPoint::RunFailed,
+                reason_code,
+                message,
+                payload,
+            });
+        }
+        Ok(())
+    }
+
     /// Run the agent with a user message
     pub async fn run(&mut self, user_input: String) -> Result<RunResult, AgentError> {
         // Reset state for new run (allows multi-turn on same agent)
@@ -352,11 +485,21 @@ where
 
         // Add user message
         self.session.push(Message::User(crate::types::UserMessage {
-            content: user_input,
+            content: user_input.clone(),
         }));
 
-        // Run the loop without event emission (no listener)
-        self.run_loop(None).await
+        self.run_started_hooks(&user_input, None).await?;
+
+        match self.run_loop(None).await {
+            Ok(mut result) => {
+                self.run_completed_hooks(&mut result, None).await?;
+                Ok(result)
+            }
+            Err(err) => {
+                let _ = self.run_failed_hooks(&err, None).await;
+                Err(err)
+            }
+        }
     }
 
     /// Run the agent with events streamed to the provided channel
@@ -376,6 +519,8 @@ where
             content: user_input,
         }));
 
+        self.run_started_hooks(&run_prompt, Some(&event_tx)).await?;
+
         let _ = event_tx
             .send(AgentEvent::RunStarted {
                 session_id,
@@ -384,8 +529,13 @@ where
             .await;
 
         match self.run_loop(Some(event_tx.clone())).await {
-            Ok(result) => Ok(result),
+            Ok(mut result) => {
+                self.run_completed_hooks(&mut result, Some(&event_tx))
+                    .await?;
+                Ok(result)
+            }
             Err(err) => {
+                let _ = self.run_failed_hooks(&err, Some(&event_tx)).await;
                 let _ = event_tx
                     .send(AgentEvent::RunFailed {
                         session_id: self.session.id().clone(),
@@ -421,8 +571,29 @@ where
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
 
+        let pending_prompt = self
+            .session
+            .messages()
+            .last()
+            .and_then(|msg| match msg {
+                Message::User(user) => Some(user.content.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        self.run_started_hooks(&pending_prompt, None).await?;
+
         // Run the loop without adding a message
-        self.run_loop(None).await
+        match self.run_loop(None).await {
+            Ok(mut result) => {
+                self.run_completed_hooks(&mut result, None).await?;
+                Ok(result)
+            }
+            Err(err) => {
+                let _ = self.run_failed_hooks(&err, None).await;
+                Err(err)
+            }
+        }
     }
 
     /// Run the agent using the pending user message, with event streaming.
@@ -449,13 +620,20 @@ where
 
         let session_id = self.session.id().clone();
 
+        self.run_started_hooks(&prompt, Some(&event_tx)).await?;
+
         let _ = event_tx
             .send(AgentEvent::RunStarted { session_id, prompt })
             .await;
 
         match self.run_loop(Some(event_tx.clone())).await {
-            Ok(result) => Ok(result),
+            Ok(mut result) => {
+                self.run_completed_hooks(&mut result, Some(&event_tx))
+                    .await?;
+                Ok(result)
+            }
             Err(err) => {
+                let _ = self.run_failed_hooks(&err, Some(&event_tx)).await;
                 let _ = event_tx
                     .send(AgentEvent::RunFailed {
                         session_id: self.session.id().clone(),

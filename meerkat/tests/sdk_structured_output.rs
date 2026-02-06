@@ -15,8 +15,8 @@ use meerkat::{
     AgentBuilder, AgentFactory, AgentToolDispatcher, LlmDoneOutcome, LlmEvent, LlmRequest,
     OutputSchema, ToolDef, ToolError, ToolResult,
 };
-use meerkat_core::ToolCallView;
 use meerkat_client::LlmClient;
+use meerkat_core::ToolCallView;
 use meerkat_store::MemoryStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -220,8 +220,7 @@ async fn sdk_structured_output_extraction_succeeds() -> Result<(), Box<dyn std::
 }
 
 #[tokio::test]
-async fn sdk_structured_output_retry_on_invalid_json() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn sdk_structured_output_retry_on_invalid_json() -> Result<(), Box<dyn std::error::Error>> {
     let calls = Arc::new(AtomicUsize::new(0));
 
     let factory = AgentFactory::new(".rkat/sessions");

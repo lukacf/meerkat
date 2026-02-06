@@ -96,6 +96,7 @@ rkat run "List files in /tmp"
 | ⚡ **Fast** | <10ms cold start, minimal memory, predictable latency |
 | 🔌 **Multi-provider** | Anthropic, OpenAI, Gemini with unified interface |
 | 🔧 **MCP Native** | Connect to any Model Context Protocol server |
+| 🪝 **First-class Hooks** | Core hook points with deterministic rewrite/guardrail semantics |
 | 💰 **Budget Controls** | Strict token limits, time limits, tool call caps |
 | 💾 **Session Persistence** | Resume conversations from disk |
 | 📡 **Streaming** | Real-time token output with event channels |
@@ -177,6 +178,7 @@ See [docs/ARCHITECTURE.md](docs/architecture.md) for the full comms protocol des
 |-------|-------------|
 | `meerkat` | Facade crate with SDK helpers and re-exports |
 | `meerkat-core` | Agent loop, state machine, types (no I/O dependencies) |
+| `meerkat-hooks` | Hook runtime adapters + deterministic default hook engine |
 | `meerkat-client` | LLM providers: Anthropic, OpenAI, Gemini |
 | `meerkat-mcp-client` | MCP protocol client and tool router |
 | `meerkat-store` | Session persistence (JSONL, in-memory) |

@@ -60,14 +60,11 @@ impl ToolDispatcher {
         self.registry.validate(call.name, &args)?;
 
         // 2. Dispatch to router with timeout
-        let result = tokio::time::timeout(
-            self.default_timeout,
-            self.router.dispatch(call),
-        )
-        .await
-        .map_err(|_| DispatchError::Timeout {
-            timeout_ms: self.default_timeout.as_millis() as u64,
-        })??;
+        let result = tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
+            .await
+            .map_err(|_| DispatchError::Timeout {
+                timeout_ms: self.default_timeout.as_millis() as u64,
+            })??;
 
         Ok(result)
     }
@@ -80,18 +77,20 @@ impl AgentToolDispatcher for ToolDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get())
-            .map_err(|e| ToolError::InvalidArguments {
+        let args: Value =
+            serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
                 name: call.name.to_string(),
                 reason: e.to_string(),
             })?;
         // Validate arguments against schema
-        self.registry.validate(call.name, &args).map_err(|e| match e {
-            ToolValidationError::NotFound { name } => ToolError::NotFound { name },
-            ToolValidationError::InvalidArguments { name, reason } => {
-                ToolError::InvalidArguments { name, reason }
-            }
-        })?;
+        self.registry
+            .validate(call.name, &args)
+            .map_err(|e| match e {
+                ToolValidationError::NotFound { name } => ToolError::NotFound { name },
+                ToolValidationError::InvalidArguments { name, reason } => {
+                    ToolError::InvalidArguments { name, reason }
+                }
+            })?;
 
         // Dispatch with timeout to prevent hanging tool calls
         tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
@@ -274,8 +273,7 @@ mod tests {
         let filtered = FilteredDispatcher::new(inner, &policy);
 
         // Allowed tool succeeds
-        let args_raw =
-            serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
         let result = filtered.dispatch(make_call("task_list", &args_raw)).await;
         assert!(result.is_ok());
 
@@ -321,8 +319,7 @@ mod tests {
         );
 
         // Attempting to dispatch denied tools should fail
-        let args_raw =
-            serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
         let shell_result = filtered.dispatch(make_call("shell", &args_raw)).await;
         assert!(
             matches!(shell_result, Err(ToolError::NotFound { .. })),

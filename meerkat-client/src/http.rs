@@ -2,9 +2,7 @@
 
 use crate::error::LlmError;
 
-pub fn build_http_client(
-    builder: reqwest::ClientBuilder,
-) -> Result<reqwest::Client, LlmError> {
+pub fn build_http_client(builder: reqwest::ClientBuilder) -> Result<reqwest::Client, LlmError> {
     let builder = if cfg!(test) {
         builder.no_proxy()
     } else {

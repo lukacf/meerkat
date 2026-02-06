@@ -103,6 +103,22 @@ The heart of Meerkat. Contains:
 - **Retry**: Exponential backoff with jitter
 - **State Machine**: `LoopState` for agent lifecycle management
 - **Sub-agents**: Fork and spawn operations
+- **Hook contracts**: typed hook points, decisions, patches, invocation/outcome envelopes
+
+### meerkat-hooks
+
+Hook runtime adapters and the default deterministic hook engine:
+
+- **In-process runtime**: register Rust handlers by name
+- **Command runtime**: execute external processes via stdin/stdout JSON
+- **HTTP runtime**: invoke remote hook endpoints
+- **Deterministic merge**: sort outcomes by `(priority ASC, registration_index ASC)` with last-writer-wins patch application
+- **Failure policy defaults**:
+  - `observe` => fail-open
+  - `guardrail` / `rewrite` => fail-closed
+- **Background behavior**:
+  - `pre_*` background hooks are observe-only
+  - `post_*` background hooks publish `HookPatchEnvelope` events
 
 ### meerkat-client
 
@@ -242,11 +258,32 @@ Turn boundaries are critical moments where:
 4. Sub-agent results are collected and injected
 5. Budget is checked
 6. Session is checkpointed
+7. `turn_boundary` hooks run before the next state transition
 
 Events that happen at turn boundaries:
 - `TurnCompleted`
 - `ToolResultReceived`
 - `CheckpointSaved`
+- `HookStarted` / `HookCompleted` / `HookFailed`
+- `HookDenied`
+- `HookRewriteApplied`
+- `HookPatchPublished`
+
+## Hook Insertion Points
+
+The core loop executes hooks at these points:
+
+- `run_started`
+- `run_completed`
+- `run_failed`
+- `pre_llm_request`
+- `post_llm_response`
+- `pre_tool_execution`
+- `post_tool_execution`
+- `turn_boundary`
+
+Synchronous (`foreground`) patches are applied in-loop.
+Asynchronous (`background`) post-hook rewrites are event-only (`HookPatchPublished`) and do not retroactively mutate persisted session history.
 
 ### Data Flow Through Agent Loop
 

@@ -23,3 +23,7 @@ security_patterns = []
 [rest]
 host = "127.0.0.1"
 port = 8080
+
+[hooks]
+default_timeout_ms = 5000
+payload_max_bytes = 131072

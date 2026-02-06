@@ -11,6 +11,7 @@ members = [
     "meerkat-rest",
     "meerkat",
     "meerkat-comms",
+    "meerkat-hooks",
     "test-fixtures/mcp-test-server",
     "tests/integration",
 ]
@@ -86,6 +87,7 @@ meerkat-cli = { path = "meerkat-cli" }
 meerkat-rest = { path = "meerkat-rest" }
 meerkat = { path = "meerkat" }
 meerkat-comms = { path = "meerkat-comms" }
+meerkat-hooks = { path = "meerkat-hooks" }
 
 
 [workspace.lints.rust]

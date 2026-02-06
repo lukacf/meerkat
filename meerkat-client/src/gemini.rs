@@ -6,6 +6,7 @@ use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
+use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{Message, OutputSchema, Provider, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -206,8 +207,7 @@ impl GeminiClient {
                         }
                     })?;
                 let compiled =
-                    output_schema
-                        .compile_for(Provider::Gemini)
+                    Self::compile_schema_for_gemini(&output_schema)
                         .map_err(|e| LlmError::InvalidRequest {
                             message: e.to_string(),
                         })?;
@@ -289,6 +289,114 @@ impl GeminiClient {
     /// Parse streaming response line
     fn parse_stream_line(line: &str) -> Option<GenerateContentResponse> {
         serde_json::from_str(line).ok()
+    }
+
+    /// Compile an output schema with provider-specific Gemini lowering.
+    ///
+    /// In lossy mode, strips unsupported keywords and emits warnings.
+    /// In strict mode, returns an error if unsupported features are found.
+    fn compile_schema_for_gemini(output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        let (schema, warnings) = sanitize_for_gemini(output_schema.schema.as_value(), Provider::Gemini);
+
+        if output_schema.compat == SchemaCompat::Strict && !warnings.is_empty() {
+            return Err(SchemaError::UnsupportedFeatures {
+                provider: Provider::Gemini,
+                warnings,
+            });
+        }
+
+        Ok(CompiledSchema { schema, warnings })
+    }
+}
+
+// ============================================================================
+// Gemini schema sanitization (moved from meerkat-core/src/schema.rs)
+// ============================================================================
+
+fn sanitize_for_gemini(schema: &Value, provider: Provider) -> (Value, Vec<SchemaWarning>) {
+    let mut warnings = Vec::new();
+    let sanitized = sanitize_gemini_value(schema, provider, "", &mut warnings);
+    (sanitized, warnings)
+}
+
+fn sanitize_gemini_value(
+    value: &Value,
+    provider: Provider,
+    path: &str,
+    warnings: &mut Vec<SchemaWarning>,
+) -> Value {
+    match value {
+        Value::Object(obj) => {
+            let mut sanitized = serde_json::Map::new();
+            for (key, value) in obj {
+                if is_gemini_unsupported_key(key) {
+                    warnings.push(SchemaWarning {
+                        provider,
+                        path: join_path(path, key),
+                        message: format!("Removed unsupported keyword '{key}'"),
+                    });
+                    continue;
+                }
+
+                if key == "type" {
+                    if let Value::Array(types) = value {
+                        let primary = types
+                            .iter()
+                            .find(|t| t.as_str() != Some("null"))
+                            .cloned()
+                            .unwrap_or_else(|| Value::String("string".to_string()));
+                        warnings.push(SchemaWarning {
+                            provider,
+                            path: join_path(path, key),
+                            message: "Collapsed array type to a single type; nullable/union semantics may be lost for Gemini".to_string(),
+                        });
+                        sanitized.insert(key.clone(), primary);
+                        continue;
+                    }
+                }
+
+                let next = join_path(path, key);
+                sanitized.insert(
+                    key.clone(),
+                    sanitize_gemini_value(value, provider, &next, warnings),
+                );
+            }
+            Value::Object(sanitized)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(idx, item)| {
+                    let next = join_index(path, idx);
+                    sanitize_gemini_value(item, provider, &next, warnings)
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn is_gemini_unsupported_key(key: &str) -> bool {
+    matches!(
+        key,
+        "$defs" | "$ref" | "$schema" | "additionalProperties" | "oneOf" | "anyOf" | "allOf"
+    )
+}
+
+fn join_path(prefix: &str, key: &str) -> String {
+    if prefix.is_empty() {
+        format!("/{key}")
+    } else {
+        format!("{prefix}/{key}")
+    }
+}
+
+fn join_index(prefix: &str, index: usize) -> String {
+    if prefix.is_empty() {
+        format!("/{index}")
+    } else {
+        format!("{prefix}/{index}")
     }
 }
 
@@ -412,6 +520,10 @@ impl LlmClient for GeminiClient {
 
     async fn health_check(&self) -> Result<(), LlmError> {
         Ok(())
+    }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        GeminiClient::compile_schema_for_gemini(output_schema)
     }
 }
 

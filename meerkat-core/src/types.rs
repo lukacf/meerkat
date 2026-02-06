@@ -9,9 +9,8 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::schema::{
-    CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
+    MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };
-use crate::Provider;
 
 // ===========================================================================
 // New ordered transcript types (spec section 3.1)
@@ -255,11 +254,6 @@ impl OutputSchema {
             }
         }
         OutputSchema::new(value)
-    }
-
-    /// Compile this schema for a provider using the configured compatibility mode.
-    pub fn compile_for(&self, provider: Provider) -> Result<CompiledSchema, SchemaError> {
-        self.schema.compile_for(provider, self.compat)
     }
 
     /// Convert to a JSON value for provider params.

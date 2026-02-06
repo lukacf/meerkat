@@ -15,9 +15,10 @@ use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
 use crate::sub_agent::SubAgentManager;
+use crate::schema::{CompiledSchema, SchemaError};
 use crate::types::{
-    AssistantBlock, BlockAssistantMessage, Message, StopReason, ToolCallView, ToolDef, ToolResult,
-    Usage,
+    AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
+    ToolDef, ToolResult, Usage,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -52,6 +53,19 @@ pub trait AgentLlmClient: Send + Sync {
 
     /// Get the provider name
     fn provider(&self) -> &'static str;
+
+    /// Compile an output schema for this provider.
+    ///
+    /// Default implementation normalizes the schema without provider-specific lowering.
+    /// Adapters override this to apply provider-specific transformations (e.g.,
+    /// Anthropic adds `additionalProperties: false`, Gemini strips unsupported keywords).
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        // Default passthrough: normalized clone, no provider-specific lowering
+        Ok(CompiledSchema {
+            schema: output_schema.schema.as_value().clone(),
+            warnings: Vec::new(),
+        })
+    }
 }
 
 /// Result of streaming from the LLM

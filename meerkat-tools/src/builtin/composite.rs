@@ -229,7 +229,6 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     tool_use_id: call.id.to_string(),
                     content,
                     is_error: false,
-                    thought_signature: None,
                 });
             }
         }
@@ -258,7 +257,6 @@ impl AgentToolDispatcher for CompositeDispatcher {
                         tool_use_id: call.id.to_string(),
                         content,
                         is_error: false,
-                        thought_signature: None,
                     });
                 }
             }

@@ -1,5 +1,6 @@
 //! Configuration and error types for sub-agent tools
 
+use meerkat_core::config::ResolvedSubAgentConfig;
 use meerkat_core::ops::ConcurrencyLimits;
 use serde::{Deserialize, Serialize};
 
@@ -172,6 +173,11 @@ pub struct SubAgentConfig {
     /// Defaults to a temporary directory
     #[serde(default)]
     pub comms_base_dir: Option<std::path::PathBuf>,
+
+    /// Resolved sub-agent model policy from the global config.
+    /// When set, overrides the hardcoded allowlists and default provider/model.
+    #[serde(skip)]
+    pub resolved_policy: Option<ResolvedSubAgentConfig>,
 }
 
 fn default_provider() -> String {
@@ -198,6 +204,7 @@ impl Default for SubAgentConfig {
             inherit_system_prompt: default_inherit_system_prompt(),
             enable_comms: false,
             comms_base_dir: None,
+            resolved_policy: None,
         }
     }
 }
@@ -259,6 +266,12 @@ impl SubAgentConfig {
     /// Set the comms base directory
     pub fn with_comms_base_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.comms_base_dir = Some(dir);
+        self
+    }
+
+    /// Set the resolved sub-agent model policy from global config.
+    pub fn with_resolved_policy(mut self, policy: ResolvedSubAgentConfig) -> Self {
+        self.resolved_policy = Some(policy);
         self
     }
 }

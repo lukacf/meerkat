@@ -9,9 +9,8 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::schema::{
-    CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
+    MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };
-use crate::Provider;
 
 // ===========================================================================
 // New ordered transcript types (spec section 3.1)
@@ -257,11 +256,6 @@ impl OutputSchema {
         OutputSchema::new(value)
     }
 
-    /// Compile this schema for a provider using the configured compatibility mode.
-    pub fn compile_for(&self, provider: Provider) -> Result<CompiledSchema, SchemaError> {
-        self.schema.compile_for(provider, self.compat)
-    }
-
     /// Convert to a JSON value for provider params.
     pub fn to_value(&self) -> Value {
         let mut obj = Map::new();
@@ -462,34 +456,15 @@ pub struct ToolCall {
     pub name: String,
     /// Arguments as JSON
     pub args: Value,
-    /// Thought signature for Gemini 3+ models (must be passed back with tool result)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thought_signature: Option<String>,
 }
 
 impl ToolCall {
-    /// Create a new tool call (without thought signature)
+    /// Create a new tool call
     pub fn new(id: String, name: String, args: Value) -> Self {
         Self {
             id,
             name,
             args,
-            thought_signature: None,
-        }
-    }
-
-    /// Create a new tool call with thought signature (for Gemini 3+)
-    pub fn with_thought_signature(
-        id: String,
-        name: String,
-        args: Value,
-        thought_signature: String,
-    ) -> Self {
-        Self {
-            id,
-            name,
-            args,
-            thought_signature: Some(thought_signature),
         }
     }
 }
@@ -505,44 +480,24 @@ pub struct ToolResult {
     /// Whether this is an error result
     #[serde(default)]
     pub is_error: bool,
-    /// Thought signature for Gemini 3+ (must be passed back from original ToolCall)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thought_signature: Option<String>,
 }
 
 impl ToolResult {
-    /// Create a new tool result (without thought signature)
+    /// Create a new tool result
     pub fn new(tool_use_id: String, content: String, is_error: bool) -> Self {
         Self {
             tool_use_id,
             content,
             is_error,
-            thought_signature: None,
         }
     }
 
-    /// Create a new tool result with thought signature (for Gemini 3+)
-    pub fn with_thought_signature(
-        tool_use_id: String,
-        content: String,
-        is_error: bool,
-        thought_signature: String,
-    ) -> Self {
-        Self {
-            tool_use_id,
-            content,
-            is_error,
-            thought_signature: Some(thought_signature),
-        }
-    }
-
-    /// Create a tool result from a ToolCall (preserves thought_signature)
+    /// Create a tool result from a ToolCall
     pub fn from_tool_call(tool_call: &ToolCall, content: String, is_error: bool) -> Self {
         Self {
             tool_use_id: tool_call.id.clone(),
             content,
             is_error,
-            thought_signature: tool_call.thought_signature.clone(),
         }
     }
 }

@@ -5,6 +5,7 @@
 use crate::error::LlmError;
 use async_trait::async_trait;
 use futures::Stream;
+use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{Message, OutputSchema, StopReason, ToolDef, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -186,6 +187,17 @@ pub trait LlmClient: Send + Sync {
 
     /// Check if the client is healthy/connected
     async fn health_check(&self) -> Result<(), LlmError>;
+
+    /// Compile an output schema for this provider.
+    ///
+    /// Default implementation normalizes the schema without provider-specific lowering.
+    /// Provider implementations override this to apply provider-specific transformations.
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        Ok(CompiledSchema {
+            schema: output_schema.schema.as_value().clone(),
+            warnings: Vec::new(),
+        })
+    }
 }
 
 /// Request to the LLM

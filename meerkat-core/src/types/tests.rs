@@ -101,26 +101,6 @@ fn test_tool_call_serialization() {
     assert_eq!(parsed.id, "tc_abc123");
     assert_eq!(parsed.name, "read_file");
     assert_eq!(parsed.args["path"], "/tmp/test.txt");
-    assert!(parsed.thought_signature.is_none());
-}
-
-#[test]
-fn test_tool_call_with_thought_signature() {
-    let tool_call = ToolCall::with_thought_signature(
-        "tc_gemini".to_string(),
-        "search".to_string(),
-        json!({"query": "test"}),
-        "encrypted_thought_abc123".to_string(),
-    );
-
-    let json = serde_json::to_string(&tool_call).unwrap();
-    let parsed: ToolCall = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(parsed.id, "tc_gemini");
-    assert_eq!(
-        parsed.thought_signature,
-        Some("encrypted_thought_abc123".to_string())
-    );
 }
 
 #[test]
@@ -137,7 +117,6 @@ fn test_tool_result_serialization() {
     assert_eq!(parsed.tool_use_id, "tc_abc123");
     assert_eq!(parsed.content, "File contents here");
     assert!(!parsed.is_error);
-    assert!(parsed.thought_signature.is_none());
 
     // Error result
     let error_result = ToolResult::new(
@@ -152,30 +131,11 @@ fn test_tool_result_serialization() {
 }
 
 #[test]
-fn test_tool_result_with_thought_signature() {
-    let result = ToolResult::with_thought_signature(
-        "tc_gemini".to_string(),
-        "Search results here".to_string(),
-        false,
-        "encrypted_thought_xyz".to_string(),
-    );
-
-    let json = serde_json::to_string(&result).unwrap();
-    let parsed: ToolResult = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(
-        parsed.thought_signature,
-        Some("encrypted_thought_xyz".to_string())
-    );
-}
-
-#[test]
 fn test_tool_result_from_tool_call() {
-    let tool_call = ToolCall::with_thought_signature(
+    let tool_call = ToolCall::new(
         "tc_123".to_string(),
         "test_tool".to_string(),
         json!({}),
-        "thought_sig".to_string(),
     );
 
     let result = ToolResult::from_tool_call(&tool_call, "output".to_string(), false);
@@ -183,7 +143,6 @@ fn test_tool_result_from_tool_call() {
     assert_eq!(result.tool_use_id, "tc_123");
     assert_eq!(result.content, "output");
     assert!(!result.is_error);
-    assert_eq!(result.thought_signature, Some("thought_sig".to_string()));
 }
 
 #[test]

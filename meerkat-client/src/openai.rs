@@ -9,7 +9,7 @@ use crate::BlockAssembler;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use meerkat_core::{
-    AssistantBlock, Message, OutputSchema, Provider, ProviderMeta, StopReason, Usage,
+    AssistantBlock, Message, OutputSchema, ProviderMeta, StopReason, Usage,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -120,8 +120,7 @@ impl OpenAiClient {
                         }
                     })?;
                 let compiled =
-                    output_schema
-                        .compile_for(Provider::OpenAI)
+                    self.compile_schema(&output_schema)
                         .map_err(|e| LlmError::InvalidRequest {
                             message: e.to_string(),
                         })?;

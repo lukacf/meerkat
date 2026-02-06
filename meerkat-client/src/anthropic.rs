@@ -6,7 +6,8 @@ use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use meerkat_core::{Message, OutputSchema, Provider, StopReason, Usage};
+use meerkat_core::schema::{CompiledSchema, SchemaError};
+use meerkat_core::{Message, OutputSchema, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::Value;
 use std::pin::Pin;
@@ -333,8 +334,7 @@ impl AnthropicClient {
                         }
                     })?;
                 let compiled =
-                    output_schema
-                        .compile_for(Provider::Anthropic)
+                    self.compile_schema(&output_schema)
                         .map_err(|e| LlmError::InvalidRequest {
                             message: e.to_string(),
                         })?;
@@ -379,8 +379,6 @@ impl AnthropicClient {
         Ok(body)
     }
 
-    // prepare_schema_for_anthropic removed: handled by core schema compiler
-
     /// Parse an SSE event from the response
     fn parse_sse_line(line: &str) -> Option<AnthropicEvent> {
         if let Some(data) = Self::strip_data_prefix(line) {
@@ -405,6 +403,41 @@ impl AnthropicClient {
             "content_filter" => StopReason::ContentFilter,
             _ => StopReason::EndTurn,
         }
+    }
+}
+
+/// Recursively add `additionalProperties: false` to all object schemas that
+/// have `properties` but no explicit `additionalProperties`.
+///
+/// This is required by Anthropic's structured output API.
+fn ensure_additional_properties_false(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            let is_object_type = match obj.get("type") {
+                Some(Value::String(t)) => t == "object",
+                Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("object")),
+                _ => obj.contains_key("properties"),
+            };
+            if is_object_type
+                && obj.contains_key("properties")
+                && !obj.contains_key("additionalProperties")
+            {
+                obj.insert("additionalProperties".to_string(), Value::Bool(false));
+            }
+
+            let keys: Vec<String> = obj.keys().cloned().collect();
+            for key in keys {
+                if let Some(child) = obj.get_mut(&key) {
+                    ensure_additional_properties_false(child);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                ensure_additional_properties_false(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -712,6 +745,16 @@ impl LlmClient for AnthropicClient {
 
     async fn health_check(&self) -> Result<(), LlmError> {
         Ok(())
+    }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        let mut schema = output_schema.schema.as_value().clone();
+        ensure_additional_properties_false(&mut schema);
+
+        Ok(CompiledSchema {
+            schema,
+            warnings: Vec::new(),
+        })
     }
 }
 

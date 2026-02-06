@@ -5,12 +5,13 @@
 use crate::{
     budget::BudgetLimits,
     mcp_config::McpServerConfig,
+    provider::Provider,
     retry::RetryPolicy,
     types::{OutputSchema, SecurityMode},
 };
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -34,6 +35,7 @@ pub struct Config {
     pub comms: CommsRuntimeConfig,
     pub limits: LimitsConfig,
     pub rest: RestServerConfig,
+    pub sub_agents: SubAgentsConfig,
 }
 
 impl Default for Config {
@@ -59,6 +61,7 @@ impl Default for Config {
             comms: CommsRuntimeConfig::default(),
             limits: LimitsConfig::default(),
             rest: RestServerConfig::default(),
+            sub_agents: SubAgentsConfig::default(),
         }
     }
 }
@@ -228,6 +231,9 @@ impl Config {
         if other.rest != RestServerConfig::default() {
             self.rest = other.rest;
         }
+        if other.sub_agents != SubAgentsConfig::default() {
+            self.sub_agents = other.sub_agents;
+        }
     }
 
     /// Apply environment variable overrides
@@ -300,6 +306,227 @@ impl Config {
                 *self = updated;
             }
         }
+    }
+}
+
+/// Sub-agent model policy configuration.
+///
+/// Controls which providers/models sub-agents may use. The special value
+/// `"inherit"` for `default_provider` / `default_model` means "use the
+/// parent agent's provider/model".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SubAgentsConfig {
+    /// Default provider for sub-agents.
+    /// `"inherit"` = copy from parent, or an explicit provider name.
+    pub default_provider: String,
+    /// Default model for sub-agents.
+    /// `"inherit"` = copy from parent, or an explicit model name.
+    pub default_model: String,
+    /// Per-provider allowlists of model names.
+    /// Every concrete provider key (`anthropic`, `openai`, `gemini`) must be
+    /// present and non-empty. Wildcards (`"*"`) are rejected at validation time.
+    pub allowed_models: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for SubAgentsConfig {
+    fn default() -> Self {
+        Self {
+            default_provider: "inherit".to_string(),
+            default_model: "inherit".to_string(),
+            allowed_models: default_allowed_models(),
+        }
+    }
+}
+
+fn default_allowed_models() -> BTreeMap<String, Vec<String>> {
+    let mut map = BTreeMap::new();
+    map.insert(
+        "anthropic".to_string(),
+        vec![
+            "claude-opus-4-6".to_string(),
+            "claude-sonnet-4-5".to_string(),
+            "claude-opus-4-5".to_string(),
+        ],
+    );
+    map.insert(
+        "openai".to_string(),
+        vec!["gpt-5.2".to_string(), "gpt-5.2-pro".to_string()],
+    );
+    map.insert(
+        "gemini".to_string(),
+        vec![
+            "gemini-3-flash-preview".to_string(),
+            "gemini-3-pro-preview".to_string(),
+        ],
+    );
+    map
+}
+
+/// Resolved sub-agent configuration with concrete provider/model (no "inherit").
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedSubAgentConfig {
+    pub default_provider: Provider,
+    pub default_model: String,
+    pub allowed_models: BTreeMap<String, Vec<String>>,
+}
+
+impl ResolvedSubAgentConfig {
+    /// Check whether the given model is in the allowlist for its provider.
+    pub fn is_model_allowed(&self, provider: Provider, model: &str) -> bool {
+        self.allowed_models
+            .get(provider.as_str())
+            .map(|list| list.iter().any(|m| m == model))
+            .unwrap_or(false)
+    }
+
+    /// Format the allowed models as a description string suitable for tool descriptions.
+    pub fn allowed_models_description(&self) -> String {
+        let parts: Vec<String> = self
+            .allowed_models
+            .iter()
+            .map(|(provider, models)| {
+                let title = match provider.as_str() {
+                    "anthropic" => "Anthropic",
+                    "openai" => "OpenAI",
+                    "gemini" => "Gemini",
+                    other => other,
+                };
+                format!("{}: {}", title, models.join(", "))
+            })
+            .collect();
+        format!("Allowed models - {}", parts.join("; "))
+    }
+}
+
+impl Config {
+    /// Validate configuration invariants.
+    ///
+    /// Called after loading and after persisting. Checks:
+    /// - No `"*"` wildcards in allowlists
+    /// - Every concrete provider key is present and non-empty
+    /// - Resolved defaults are valid
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let sa = &self.sub_agents;
+
+        // Validate allowed_models
+        for provider in Provider::ALL_CONCRETE {
+            let key = provider.as_str();
+            let models = sa.allowed_models.get(key).ok_or_else(|| {
+                ConfigError::Validation(format!(
+                    "sub_agents.allowed_models missing provider key '{}'",
+                    key
+                ))
+            })?;
+            if models.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "sub_agents.allowed_models['{}'] must not be empty",
+                    key
+                )));
+            }
+            for model in models {
+                if model == "*" {
+                    return Err(ConfigError::Validation(format!(
+                        "sub_agents.allowed_models['{}']: wildcards ('*') are not allowed",
+                        key
+                    )));
+                }
+            }
+        }
+
+        // If default_provider is not "inherit", it must be a valid provider
+        if sa.default_provider != "inherit"
+            && Provider::parse_strict(&sa.default_provider).is_none()
+        {
+            return Err(ConfigError::Validation(format!(
+                "sub_agents.default_provider '{}' is not a valid provider name",
+                sa.default_provider
+            )));
+        }
+
+        // If default_model is not "inherit", it must be in the allowlist for some provider
+        if sa.default_model != "inherit" && sa.default_provider != "inherit" {
+            if let Some(provider) = Provider::parse_strict(&sa.default_provider) {
+                let models = sa
+                    .allowed_models
+                    .get(provider.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                if !models.iter().any(|m| m == &sa.default_model) {
+                    return Err(ConfigError::Validation(format!(
+                        "sub_agents.default_model '{}' is not in allowed_models for provider '{}'",
+                        sa.default_model,
+                        provider.as_str()
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolve sub-agent configuration, replacing "inherit" with concrete values.
+    ///
+    /// Priority: explicit config value > inherited parent context > inference > error.
+    pub fn resolve_sub_agent_config(
+        &self,
+        parent_provider: Option<Provider>,
+        parent_model: &str,
+    ) -> Result<ResolvedSubAgentConfig, ConfigError> {
+        let sa = &self.sub_agents;
+
+        // Resolve provider
+        let provider = if sa.default_provider == "inherit" {
+            // Inherit from parent
+            if let Some(p) = parent_provider {
+                if p == Provider::Other {
+                    return Err(ConfigError::Validation(
+                        "Cannot inherit sub-agent provider: parent provider is 'other'"
+                            .to_string(),
+                    ));
+                }
+                p
+            } else {
+                // Try to infer from parent model
+                Provider::infer_from_model(parent_model).ok_or_else(|| {
+                    ConfigError::Validation(format!(
+                        "Cannot resolve sub-agent provider: parent provider unknown and model '{}' is ambiguous",
+                        parent_model
+                    ))
+                })?
+            }
+        } else {
+            Provider::parse_strict(&sa.default_provider).ok_or_else(|| {
+                ConfigError::Validation(format!(
+                    "sub_agents.default_provider '{}' is not a valid provider name",
+                    sa.default_provider
+                ))
+            })?
+        };
+
+        // Resolve model
+        let model = if sa.default_model == "inherit" {
+            parent_model.to_string()
+        } else {
+            sa.default_model.clone()
+        };
+
+        let resolved = ResolvedSubAgentConfig {
+            default_provider: provider,
+            default_model: model,
+            allowed_models: sa.allowed_models.clone(),
+        };
+
+        // Validate the resolved default is actually in the allowlist
+        if !resolved.is_model_allowed(resolved.default_provider, &resolved.default_model) {
+            return Err(ConfigError::Validation(format!(
+                "Resolved sub-agent default model '{}' is not in allowed_models for provider '{}'",
+                resolved.default_model,
+                resolved.default_provider.as_str()
+            )));
+        }
+
+        Ok(resolved)
     }
 }
 
@@ -823,6 +1050,9 @@ pub enum ConfigError {
 
     #[error("Internal error: {0}")]
     InternalError(String),
+
+    #[error("Validation error: {0}")]
+    Validation(String),
 }
 
 /// Serde helpers for Option<Duration> with humantime format
@@ -1048,5 +1278,204 @@ mod tests {
             "Config::load() should succeed when .rkat/ exists without config.toml: {:?}",
             result.err()
         );
+    }
+
+    // === SubAgentsConfig tests ===
+
+    #[test]
+    fn test_sub_agents_config_default_validates() {
+        let config = Config::default();
+        config.validate().expect("Default config should validate");
+    }
+
+    #[test]
+    fn test_sub_agents_config_default_has_all_providers() {
+        let sa = SubAgentsConfig::default();
+        assert!(sa.allowed_models.contains_key("anthropic"));
+        assert!(sa.allowed_models.contains_key("openai"));
+        assert!(sa.allowed_models.contains_key("gemini"));
+    }
+
+    #[test]
+    fn test_sub_agents_config_toml_roundtrip() {
+        let toml_str = r#"
+[sub_agents]
+default_provider = "openai"
+default_model = "gpt-5.2"
+
+[sub_agents.allowed_models]
+anthropic = ["claude-opus-4-6"]
+openai = ["gpt-5.2", "gpt-5.2-pro"]
+gemini = ["gemini-3-flash-preview"]
+"#;
+
+        let config: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(config.sub_agents.default_provider, "openai");
+        assert_eq!(config.sub_agents.default_model, "gpt-5.2");
+        assert_eq!(
+            config.sub_agents.allowed_models.get("openai").unwrap(),
+            &vec!["gpt-5.2".to_string(), "gpt-5.2-pro".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_sub_agents_inherit_resolves_from_parent() {
+        let config = Config::default();
+        let resolved = config
+            .resolve_sub_agent_config(Some(Provider::OpenAI), "gpt-5.2")
+            .expect("should resolve");
+        assert_eq!(resolved.default_provider, Provider::OpenAI);
+        assert_eq!(resolved.default_model, "gpt-5.2");
+    }
+
+    #[test]
+    fn test_sub_agents_inherit_resolves_provider_from_model() {
+        let config = Config::default();
+        let resolved = config
+            .resolve_sub_agent_config(None, "claude-opus-4-6")
+            .expect("should resolve");
+        assert_eq!(resolved.default_provider, Provider::Anthropic);
+        assert_eq!(resolved.default_model, "claude-opus-4-6");
+    }
+
+    #[test]
+    fn test_sub_agents_wildcard_rejected() {
+        let mut config = Config::default();
+        config
+            .sub_agents
+            .allowed_models
+            .get_mut("openai")
+            .unwrap()
+            .push("*".to_string());
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("wildcards"));
+    }
+
+    #[test]
+    fn test_sub_agents_missing_provider_rejected() {
+        let mut config = Config::default();
+        config.sub_agents.allowed_models.remove("gemini");
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("gemini"));
+    }
+
+    #[test]
+    fn test_sub_agents_empty_list_rejected() {
+        let mut config = Config::default();
+        config
+            .sub_agents
+            .allowed_models
+            .insert("openai".to_string(), vec![]);
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_sub_agents_default_not_in_allowlist_rejected() {
+        let mut config = Config::default();
+        config.sub_agents.default_provider = "openai".to_string();
+        config.sub_agents.default_model = "nonexistent-model".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("not in allowed_models"));
+    }
+
+    #[test]
+    fn test_sub_agents_resolve_ambiguous_fails() {
+        let config = Config::default();
+        // "custom-model" doesn't match any known prefix
+        let err = config
+            .resolve_sub_agent_config(None, "custom-model")
+            .unwrap_err();
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn test_sub_agents_resolve_explicit_config() {
+        let mut config = Config::default();
+        config.sub_agents.default_provider = "gemini".to_string();
+        config.sub_agents.default_model = "gemini-3-flash-preview".to_string();
+        config.validate().expect("should validate");
+
+        let resolved = config
+            .resolve_sub_agent_config(Some(Provider::Anthropic), "claude-opus-4-6")
+            .expect("should resolve");
+        // Explicit config overrides parent
+        assert_eq!(resolved.default_provider, Provider::Gemini);
+        assert_eq!(resolved.default_model, "gemini-3-flash-preview");
+    }
+
+    #[test]
+    fn test_sub_agents_resolved_default_not_in_allowlist() {
+        // Even though inherit resolves fine, if the resolved model isn't
+        // in the allowlist, it should fail
+        let config = Config::default();
+        let err = config
+            .resolve_sub_agent_config(Some(Provider::Anthropic), "claude-old-model-42")
+            .unwrap_err();
+        assert!(err.to_string().contains("not in allowed_models"));
+    }
+
+    #[test]
+    fn test_provider_parse_strict() {
+        assert_eq!(Provider::parse_strict("anthropic"), Some(Provider::Anthropic));
+        assert_eq!(Provider::parse_strict("openai"), Some(Provider::OpenAI));
+        assert_eq!(Provider::parse_strict("gemini"), Some(Provider::Gemini));
+        assert_eq!(Provider::parse_strict("other"), None);
+        assert_eq!(Provider::parse_strict("claude"), None);
+        assert_eq!(Provider::parse_strict(""), None);
+    }
+
+    #[test]
+    fn test_provider_infer_from_model() {
+        assert_eq!(
+            Provider::infer_from_model("claude-opus-4-6"),
+            Some(Provider::Anthropic)
+        );
+        assert_eq!(
+            Provider::infer_from_model("gpt-5.2"),
+            Some(Provider::OpenAI)
+        );
+        assert_eq!(
+            Provider::infer_from_model("gemini-3-flash-preview"),
+            Some(Provider::Gemini)
+        );
+        assert_eq!(Provider::infer_from_model("llama-3"), None);
+        assert_eq!(Provider::infer_from_model(""), None);
+    }
+
+    #[test]
+    fn test_sub_agents_config_merge() {
+        let mut base = Config::default();
+        let mut other = Config::default();
+        other.sub_agents.default_provider = "openai".to_string();
+        other.sub_agents.default_model = "gpt-5.2".to_string();
+        base.merge(other);
+        assert_eq!(base.sub_agents.default_provider, "openai");
+        assert_eq!(base.sub_agents.default_model, "gpt-5.2");
+    }
+
+    #[test]
+    fn test_resolved_sub_agent_config_is_model_allowed() {
+        let config = Config::default();
+        let resolved = config
+            .resolve_sub_agent_config(Some(Provider::Anthropic), "claude-opus-4-6")
+            .unwrap();
+        assert!(resolved.is_model_allowed(Provider::Anthropic, "claude-opus-4-6"));
+        assert!(resolved.is_model_allowed(Provider::OpenAI, "gpt-5.2"));
+        assert!(!resolved.is_model_allowed(Provider::OpenAI, "gpt-4o"));
+    }
+
+    #[test]
+    fn test_resolved_sub_agent_config_description() {
+        let config = Config::default();
+        let resolved = config
+            .resolve_sub_agent_config(Some(Provider::Anthropic), "claude-opus-4-6")
+            .unwrap();
+        let desc = resolved.allowed_models_description();
+        assert!(desc.contains("Anthropic"));
+        assert!(desc.contains("OpenAI"));
+        assert!(desc.contains("Gemini"));
+        assert!(desc.contains("gpt-5.2"));
+        assert!(desc.contains("claude-opus-4-6"));
     }
 }

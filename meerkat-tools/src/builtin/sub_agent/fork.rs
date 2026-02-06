@@ -166,6 +166,18 @@ impl AgentForkTool {
             return Ok(provider.to_provider());
         }
 
+        // Use resolved policy if available
+        if let Some(ref policy) = self.state.config.resolved_policy {
+            return match policy.default_provider {
+                meerkat_core::Provider::Anthropic => Ok(LlmProvider::Anthropic),
+                meerkat_core::Provider::OpenAI => Ok(LlmProvider::OpenAi),
+                meerkat_core::Provider::Gemini => Ok(LlmProvider::Gemini),
+                meerkat_core::Provider::Other => {
+                    Err(SubAgentError::invalid_provider("other"))
+                }
+            };
+        }
+
         let provider_name = self.state.config.default_provider.as_str();
         LlmProvider::parse(provider_name)
             .ok_or_else(|| SubAgentError::invalid_provider(provider_name))
@@ -175,15 +187,26 @@ impl AgentForkTool {
         if let Some(m) = model {
             return m.to_string();
         }
+        // Use resolved policy default if available
+        if let Some(ref policy) = self.state.config.resolved_policy {
+            return policy.default_model.clone();
+        }
         if let Some(ref default) = self.state.config.default_model {
             return default.clone();
         }
-        // Provider-specific defaults
-        match provider {
-            LlmProvider::Anthropic => "claude-sonnet-4-5".to_string(),
-            LlmProvider::OpenAi => "gpt-4o".to_string(),
-            LlmProvider::Gemini => "gemini-3-flash-preview".to_string(),
-        }
+        // Fallback: first model in provider-specific default allowlist
+        let core_provider = match provider {
+            LlmProvider::Anthropic => meerkat_core::Provider::Anthropic,
+            LlmProvider::OpenAi => meerkat_core::Provider::OpenAI,
+            LlmProvider::Gemini => meerkat_core::Provider::Gemini,
+        };
+        let defaults = meerkat_core::config::SubAgentsConfig::default();
+        defaults
+            .allowed_models
+            .get(core_provider.as_str())
+            .and_then(|v| v.first())
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn resolve_budget_policy(&self, policy_str: Option<&str>) -> ForkBudgetPolicy {

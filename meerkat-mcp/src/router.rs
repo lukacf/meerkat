@@ -95,7 +95,6 @@ impl AgentToolDispatcher for McpRouter {
             tool_use_id: call.id.to_string(),
             content: result_str,
             is_error: false,
-            thought_signature: None,
         })
     }
 }

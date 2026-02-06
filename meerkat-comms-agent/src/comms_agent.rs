@@ -403,7 +403,6 @@ mod tests {
                 tool_use_id: call.id.to_string(),
                 content: "mock result".to_string(),
                 is_error: false,
-                thought_signature: None,
             })
         }
     }

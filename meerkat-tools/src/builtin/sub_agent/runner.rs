@@ -18,7 +18,8 @@ use meerkat_core::sub_agent::SubAgentManager;
 use meerkat_core::types::{Message, StopReason, SystemMessage, Usage, UserMessage};
 use meerkat_core::{
     AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, BudgetLimits,
-    LlmStreamResult, ToolDef,
+    LlmStreamResult, OutputSchema, ToolDef,
+    schema::{CompiledSchema, SchemaError},
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -192,6 +193,10 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
     fn provider(&self) -> &'static str {
         self.client.provider()
     }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        self.client.compile_schema(output_schema)
+    }
 }
 
 /// Type-erased adapter for trait object clients (from factory)
@@ -330,6 +335,10 @@ impl AgentLlmClient for DynLlmClientAdapter {
 
     fn provider(&self) -> &'static str {
         self.client.provider()
+    }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        self.client.compile_schema(output_schema)
     }
 }
 

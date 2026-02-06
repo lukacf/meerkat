@@ -30,8 +30,9 @@ pub use agent::{
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use config::{
     AgentConfig, BudgetConfig, CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta,
-    ConfigScope, LimitsConfig, ModelDefaults, ProviderConfig, ProviderSettings, RetryConfig,
-    ShellDefaults, StorageConfig, StoreConfig, ToolsConfig,
+    ConfigScope, LimitsConfig, ModelDefaults, ProviderConfig, ProviderSettings,
+    ResolvedSubAgentConfig, RetryConfig, ShellDefaults, StorageConfig, StoreConfig,
+    SubAgentsConfig, ToolsConfig,
 };
 pub use config_store::{ConfigStore, FileConfigStore, MemoryConfigStore};
 pub use error::{AgentError, ToolError};

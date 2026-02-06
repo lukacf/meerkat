@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_core::{AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, StopReason, ToolDef, Usage};
+use meerkat_core::schema::{CompiledSchema, SchemaError};
+use meerkat_core::{AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, OutputSchema, StopReason, ToolDef, Usage};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -175,5 +176,9 @@ impl AgentLlmClient for LlmClientAdapter {
 
     fn provider(&self) -> &'static str {
         self.client.provider()
+    }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        self.client.compile_schema(output_schema)
     }
 }

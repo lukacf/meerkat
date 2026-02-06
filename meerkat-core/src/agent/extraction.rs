@@ -5,7 +5,6 @@
 
 use crate::error::AgentError;
 use crate::types::{BlockAssistantMessage, Message, RunResult, UserMessage};
-use crate::Provider;
 use jsonschema::Validator;
 use serde_json::{Value, json};
 
@@ -32,9 +31,8 @@ where
             AgentError::InternalError("perform_extraction_turn called without output_schema".into())
         })?;
 
-        let provider = Provider::from_name(self.client.provider());
-        let compiled = output_schema
-            .compile_for(provider)
+        let compiled = self.client
+            .compile_schema(output_schema)
             .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
 
         // Build the JSON schema validator

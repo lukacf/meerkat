@@ -258,7 +258,6 @@ impl AgentToolDispatcher for MockToolDispatcher {
             tool_use_id: call.id.to_string(),
             content,
             is_error: false,
-            thought_signature: None,
         })
     }
 }
@@ -510,7 +509,6 @@ mod tool_invocation {
                     tool_use_id: call.id.to_string(),
                     content: result,
                     is_error: false,
-                    thought_signature: None,
                 }),
                 Err(e) => Err(ToolError::execution_failed(e.to_string())),
             }
@@ -1082,7 +1080,6 @@ mod parallel_tools {
                 tool_use_id: call.id.to_string(),
                 content,
                 is_error: false,
-                thought_signature: None,
             })
         }
     }
@@ -1295,7 +1292,6 @@ mod parallel_tools {
                     tool_use_id: call.id.to_string(),
                     content,
                     is_error: false,
-                    thought_signature: None,
                 })
             }
         }

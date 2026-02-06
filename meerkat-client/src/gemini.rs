@@ -6,6 +6,7 @@ use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
+use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{Message, OutputSchema, Provider, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -69,38 +70,10 @@ impl GeminiClient {
                         "parts": [{"text": u.content}]
                     }));
                 }
-                Message::Assistant(a) => {
-                    let mut parts = Vec::new();
-
-                    if !a.content.is_empty() {
-                        parts.push(serde_json::json!({"text": a.content}));
-                    }
-
-                    for tc in &a.tool_calls {
-                        tool_name_by_id.insert(tc.id.clone(), tc.name.clone());
-                        let part = if let Some(sig) = &tc.thought_signature {
-                            serde_json::json!({
-                                "functionCall": {
-                                    "name": tc.name,
-                                    "args": tc.args
-                                },
-                                "thoughtSignature": sig
-                            })
-                        } else {
-                            serde_json::json!({
-                                "functionCall": {
-                                    "name": tc.name,
-                                    "args": tc.args
-                                }
-                            })
-                        };
-                        parts.push(part);
-                    }
-
-                    contents.push(serde_json::json!({
-                        "role": "model",
-                        "parts": parts
-                    }));
+                Message::Assistant(_) => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "Legacy Message::Assistant is not supported by Gemini adapter; use BlockAssistant".to_string(),
+                    });
                 }
                 Message::BlockAssistant(a) => {
                     // New format: ordered blocks with ProviderMeta
@@ -234,8 +207,7 @@ impl GeminiClient {
                         }
                     })?;
                 let compiled =
-                    output_schema
-                        .compile_for(Provider::Gemini)
+                    Self::compile_schema_for_gemini(&output_schema)
                         .map_err(|e| LlmError::InvalidRequest {
                             message: e.to_string(),
                         })?;
@@ -317,6 +289,114 @@ impl GeminiClient {
     /// Parse streaming response line
     fn parse_stream_line(line: &str) -> Option<GenerateContentResponse> {
         serde_json::from_str(line).ok()
+    }
+
+    /// Compile an output schema with provider-specific Gemini lowering.
+    ///
+    /// In lossy mode, strips unsupported keywords and emits warnings.
+    /// In strict mode, returns an error if unsupported features are found.
+    fn compile_schema_for_gemini(output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        let (schema, warnings) = sanitize_for_gemini(output_schema.schema.as_value(), Provider::Gemini);
+
+        if output_schema.compat == SchemaCompat::Strict && !warnings.is_empty() {
+            return Err(SchemaError::UnsupportedFeatures {
+                provider: Provider::Gemini,
+                warnings,
+            });
+        }
+
+        Ok(CompiledSchema { schema, warnings })
+    }
+}
+
+// ============================================================================
+// Gemini schema sanitization (moved from meerkat-core/src/schema.rs)
+// ============================================================================
+
+fn sanitize_for_gemini(schema: &Value, provider: Provider) -> (Value, Vec<SchemaWarning>) {
+    let mut warnings = Vec::new();
+    let sanitized = sanitize_gemini_value(schema, provider, "", &mut warnings);
+    (sanitized, warnings)
+}
+
+fn sanitize_gemini_value(
+    value: &Value,
+    provider: Provider,
+    path: &str,
+    warnings: &mut Vec<SchemaWarning>,
+) -> Value {
+    match value {
+        Value::Object(obj) => {
+            let mut sanitized = serde_json::Map::new();
+            for (key, value) in obj {
+                if is_gemini_unsupported_key(key) {
+                    warnings.push(SchemaWarning {
+                        provider,
+                        path: join_path(path, key),
+                        message: format!("Removed unsupported keyword '{key}'"),
+                    });
+                    continue;
+                }
+
+                if key == "type" {
+                    if let Value::Array(types) = value {
+                        let primary = types
+                            .iter()
+                            .find(|t| t.as_str() != Some("null"))
+                            .cloned()
+                            .unwrap_or_else(|| Value::String("string".to_string()));
+                        warnings.push(SchemaWarning {
+                            provider,
+                            path: join_path(path, key),
+                            message: "Collapsed array type to a single type; nullable/union semantics may be lost for Gemini".to_string(),
+                        });
+                        sanitized.insert(key.clone(), primary);
+                        continue;
+                    }
+                }
+
+                let next = join_path(path, key);
+                sanitized.insert(
+                    key.clone(),
+                    sanitize_gemini_value(value, provider, &next, warnings),
+                );
+            }
+            Value::Object(sanitized)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(idx, item)| {
+                    let next = join_index(path, idx);
+                    sanitize_gemini_value(item, provider, &next, warnings)
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn is_gemini_unsupported_key(key: &str) -> bool {
+    matches!(
+        key,
+        "$defs" | "$ref" | "$schema" | "additionalProperties" | "oneOf" | "anyOf" | "allOf"
+    )
+}
+
+fn join_path(prefix: &str, key: &str) -> String {
+    if prefix.is_empty() {
+        format!("/{key}")
+    } else {
+        format!("{prefix}/{key}")
+    }
+}
+
+fn join_index(prefix: &str, index: usize) -> String {
+    if prefix.is_empty() {
+        format!("/{index}")
+    } else {
+        format!("{prefix}/{index}")
     }
 }
 
@@ -441,6 +521,10 @@ impl LlmClient for GeminiClient {
     async fn health_check(&self) -> Result<(), LlmError> {
         Ok(())
     }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        GeminiClient::compile_schema_for_gemini(output_schema)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -491,7 +575,7 @@ struct GeminiUsage {
 )]
 mod tests {
     use super::*;
-    use meerkat_core::{AssistantMessage, ToolCall, ToolResult, Usage, UserMessage};
+    use meerkat_core::{AssistantBlock, BlockAssistantMessage, ProviderMeta, UserMessage};
 
     #[test]
     fn test_build_request_body_with_thinking_budget() -> Result<(), Box<dyn std::error::Error>> {
@@ -586,34 +670,37 @@ mod tests {
 
     /// Test that functionCall has thoughtSignature but functionResponse does NOT
     /// Per spec section 2.3: Signatures on functionCall, NEVER on functionResponse
+    /// Uses BlockAssistant with ProviderMeta::Gemini for thoughtSignature.
     #[test]
     fn test_tool_response_uses_function_name_no_signature()
     -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::value::RawValue;
         let client = GeminiClient::new("test-key".to_string());
-        let tool_call = ToolCall::with_thought_signature(
-            "call_1".to_string(),
-            "get_weather".to_string(),
-            json!({"city": "Tokyo"}),
-            "sig_123".to_string(),
-        );
+        let args_raw = RawValue::from_string(json!({"city": "Tokyo"}).to_string()).unwrap();
         let request = LlmRequest::new(
             "gemini-1.5-pro",
             vec![
                 Message::User(UserMessage {
                     content: "test".to_string(),
                 }),
-                Message::Assistant(AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![tool_call],
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "get_weather".to_string(),
+                            args: args_raw,
+                            meta: Some(Box::new(ProviderMeta::Gemini {
+                                thought_signature: "sig_123".to_string(),
+                            })),
+                        },
+                    ],
                     stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
                 }),
                 Message::ToolResults {
-                    results: vec![ToolResult::with_thought_signature(
+                    results: vec![meerkat_core::ToolResult::new(
                         "call_1".to_string(),
                         "Sunny".to_string(),
                         false,
-                        "sig_123".to_string(),
                     )],
                 },
             ],
@@ -1092,42 +1179,39 @@ mod tests {
         Ok(())
     }
 
-    /// Request building: thoughtSignature on functionCall, NEVER on functionResponse
+    /// Request building: thoughtSignature on functionCall via ProviderMeta, NEVER on functionResponse
     #[test]
     fn test_request_building_no_signature_on_function_response()
     -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::value::RawValue;
         let client = GeminiClient::new("test-key".to_string());
 
-        // ToolCall with thought_signature
-        let tool_call = ToolCall::with_thought_signature(
-            "call_1".to_string(),
-            "get_weather".to_string(),
-            json!({"city": "Tokyo"}),
-            "sig_123".to_string(),
-        );
-
-        // ToolResult also has thought_signature (from legacy code path)
-        let tool_result = ToolResult::with_thought_signature(
-            "call_1".to_string(),
-            "Sunny, 25C".to_string(),
-            false,
-            "sig_123".to_string(),
-        );
-
+        let args_raw = RawValue::from_string(json!({"city": "Tokyo"}).to_string()).unwrap();
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
             vec![
                 Message::User(UserMessage {
                     content: "What's the weather?".to_string(),
                 }),
-                Message::Assistant(AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![tool_call],
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "get_weather".to_string(),
+                            args: args_raw,
+                            meta: Some(Box::new(ProviderMeta::Gemini {
+                                thought_signature: "sig_123".to_string(),
+                            })),
+                        },
+                    ],
                     stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
                 }),
                 Message::ToolResults {
-                    results: vec![tool_result],
+                    results: vec![meerkat_core::ToolResult::new(
+                        "call_1".to_string(),
+                        "Sunny, 25C".to_string(),
+                        false,
+                    )],
                 },
             ],
         );
@@ -1174,7 +1258,7 @@ mod tests {
             .ok_or("missing functionResponse part")?;
         assert!(
             fr_part.get("thoughtSignature").is_none(),
-            "functionResponse MUST NOT have thoughtSignature (verified by test_gemini_thought_signature.py)"
+            "functionResponse MUST NOT have thoughtSignature"
         );
 
         Ok(())

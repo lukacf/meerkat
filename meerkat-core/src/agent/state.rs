@@ -218,7 +218,6 @@ where
                                         tool_use_id: tc.id.clone(),
                                         content: serialized,
                                         is_error: true,
-                                        thought_signature: None,
                                     }
                                 }
                             };
@@ -273,7 +272,6 @@ where
                                     tool_use_id: r.id.to_string(),
                                     content: r.content,
                                     is_error: r.is_error,
-                                    thought_signature: None, // Sub-agents don't use thought signatures
                                 })
                                 .collect();
                             self.session.push(Message::ToolResults { results });

@@ -1,7 +1,8 @@
 //! Agent builder.
 
 use crate::budget::{Budget, BudgetLimits};
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, HookRunOverrides};
+use crate::hooks::HookEngine;
 use crate::ops::ConcurrencyLimits;
 use crate::prompt::SystemPromptConfig;
 use crate::retry::RetryPolicy;
@@ -25,6 +26,8 @@ pub struct AgentBuilder {
     pub(super) concurrency_limits: ConcurrencyLimits,
     pub(super) depth: u32,
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
+    pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
+    pub(super) hook_run_overrides: HookRunOverrides,
 }
 
 impl AgentBuilder {
@@ -39,6 +42,8 @@ impl AgentBuilder {
             concurrency_limits: ConcurrencyLimits::default(),
             depth: 0,
             comms_runtime: None,
+            hook_engine: None,
+            hook_run_overrides: HookRunOverrides::default(),
         }
     }
 
@@ -120,6 +125,18 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the hook engine.
+    pub fn with_hook_engine(mut self, hook_engine: Arc<dyn HookEngine>) -> Self {
+        self.hook_engine = Some(hook_engine);
+        self
+    }
+
+    /// Set run-scoped hook overrides.
+    pub fn with_hook_run_overrides(mut self, overrides: HookRunOverrides) -> Self {
+        self.hook_run_overrides = overrides;
+        self
+    }
+
     /// Build the agent
     pub async fn build<C, T, S>(
         self,
@@ -158,6 +175,8 @@ impl AgentBuilder {
             sub_agent_manager,
             depth: self.depth,
             comms_runtime: self.comms_runtime,
+            hook_engine: self.hook_engine,
+            hook_run_overrides: self.hook_run_overrides,
         }
     }
 }
@@ -168,7 +187,9 @@ mod tests {
     use super::*;
     use crate::LlmStreamResult;
     use crate::error::{AgentError, ToolError};
-    use crate::types::{AssistantBlock, StopReason, ToolDef, ToolResult, ToolCallView, UserMessage};
+    use crate::types::{
+        AssistantBlock, StopReason, ToolCallView, ToolDef, ToolResult, UserMessage,
+    };
     use async_trait::async_trait;
 
     struct MockClient;

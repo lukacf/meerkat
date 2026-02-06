@@ -579,8 +579,7 @@ fn test_run_result_without_structured_output_skips_field() {
             || json.get("structured_output") == Some(&Value::Null)
     );
     assert!(
-        json.get("schema_warnings").is_none()
-            || json.get("schema_warnings") == Some(&Value::Null)
+        json.get("schema_warnings").is_none() || json.get("schema_warnings") == Some(&Value::Null)
     );
 }
 
@@ -813,7 +812,9 @@ mod ordered_transcript_types {
             encoding: Option<String>,
         }
 
-        let args = RawValue::from_string(r#"{"path":"/tmp/test.txt","encoding":"utf-8"}"#.to_string()).unwrap();
+        let args =
+            RawValue::from_string(r#"{"path":"/tmp/test.txt","encoding":"utf-8"}"#.to_string())
+                .unwrap();
         let view = ToolCallView {
             id: "tc_123",
             name: "read_file",
@@ -890,12 +891,10 @@ mod ordered_transcript_types {
     #[test]
     fn test_assistant_message_tool_calls_empty() {
         let msg = BlockAssistantMessage {
-            blocks: vec![
-                AssistantBlock::Text {
-                    text: "No tools needed".to_string(),
-                    meta: None,
-                },
-            ],
+            blocks: vec![AssistantBlock::Text {
+                text: "No tools needed".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
         };
 

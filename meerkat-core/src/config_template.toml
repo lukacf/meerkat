@@ -33,3 +33,7 @@ default_model = "inherit"
 anthropic = ["claude-opus-4-6", "claude-sonnet-4-5", "claude-opus-4-5"]
 openai = ["gpt-5.2", "gpt-5.2-pro"]
 gemini = ["gemini-3-flash-preview", "gemini-3-pro-preview"]
+
+[hooks]
+default_timeout_ms = 5000
+payload_max_bytes = 131072

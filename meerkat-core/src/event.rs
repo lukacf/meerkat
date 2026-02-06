@@ -2,6 +2,7 @@
 //!
 //! These events form the streaming API for consumers.
 
+use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
 use crate::types::{SessionId, StopReason, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,6 +32,48 @@ pub enum AgentEvent {
     RunFailed {
         session_id: SessionId,
         error: String,
+    },
+
+    // === Hook Lifecycle ===
+    /// Hook invocation started.
+    HookStarted { hook_id: String, point: HookPoint },
+
+    /// Hook invocation completed.
+    HookCompleted {
+        hook_id: String,
+        point: HookPoint,
+        duration_ms: u64,
+    },
+
+    /// Hook invocation failed.
+    HookFailed {
+        hook_id: String,
+        point: HookPoint,
+        error: String,
+    },
+
+    /// Hook denied an action.
+    HookDenied {
+        hook_id: String,
+        point: HookPoint,
+        reason_code: HookReasonCode,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<Value>,
+    },
+
+    /// A rewrite patch was applied synchronously.
+    HookRewriteApplied {
+        hook_id: String,
+        point: HookPoint,
+        patch: HookPatch,
+    },
+
+    /// A background patch was published for downstream surfaces.
+    HookPatchPublished {
+        hook_id: String,
+        point: HookPoint,
+        envelope: HookPatchEnvelope,
     },
 
     // === LLM Interaction ===

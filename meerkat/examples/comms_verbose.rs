@@ -4,11 +4,11 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
-use meerkat_core::{ToolCallView, ToolResult};
 use meerkat_comms::agent::{
     CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
 };
 use meerkat_comms::{Keypair, TrustedPeer, TrustedPeers};
+use meerkat_core::{ToolCallView, ToolResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -187,7 +187,9 @@ impl AgentLlmClient for LoggingLlmAdapter {
             let args_raw = serde_json::value::RawValue::from_string(
                 serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string()),
             )
-            .unwrap_or_else(|_| serde_json::value::RawValue::from_string("{}".to_string()).unwrap());
+            .unwrap_or_else(|_| {
+                serde_json::value::RawValue::from_string("{}".to_string()).unwrap()
+            });
             blocks.push(meerkat_core::AssistantBlock::ToolUse {
                 id: tc.id,
                 name: tc.name,

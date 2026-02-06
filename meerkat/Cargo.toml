@@ -15,6 +15,7 @@ meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
 meerkat-mcp = { workspace = true }
 meerkat-comms = { workspace = true }
+meerkat-hooks = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }

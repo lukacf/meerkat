@@ -662,7 +662,8 @@ mod tests {
             shell: "definitely_not_a_real_shell_xyz123".to_string(),
             ..Default::default()
         };
-        let result = config.resolve_shell_path_auto_in(Some(std::ffi::OsStr::new("")), Some("/bin/sh"));
+        let result =
+            config.resolve_shell_path_auto_in(Some(std::ffi::OsStr::new("")), Some("/bin/sh"));
         match result {
             Err(ShellError::ShellNotInstalled(details)) => {
                 assert!(details.contains("definitely_not_a_real_shell_xyz123"));

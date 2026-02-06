@@ -5,12 +5,14 @@
 mod builder;
 pub mod comms_impl;
 mod extraction;
+mod hook_impl;
 mod runner;
 mod state;
 
 use crate::budget::Budget;
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
+use crate::hooks::HookEngine;
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
@@ -76,11 +78,7 @@ pub struct LlmStreamResult {
 }
 
 impl LlmStreamResult {
-    pub fn new(
-        blocks: Vec<AssistantBlock>,
-        stop_reason: StopReason,
-        usage: Usage,
-    ) -> Self {
+    pub fn new(blocks: Vec<AssistantBlock>, stop_reason: StopReason, usage: Usage) -> Self {
         Self {
             blocks,
             stop_reason,
@@ -116,7 +114,8 @@ pub trait AgentToolDispatcher: Send + Sync {
     /// Get available tool definitions
     fn tools(&self) -> Arc<[Arc<ToolDef>]>;
     /// Execute a tool call
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, crate::error::ToolError>;
+    async fn dispatch(&self, call: ToolCallView<'_>)
+    -> Result<ToolResult, crate::error::ToolError>;
 }
 
 /// A tool dispatcher that filters tools based on a policy
@@ -157,7 +156,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         Arc::clone(&self.filtered_tools)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, crate::error::ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<ToolResult, crate::error::ToolError> {
         if !self.allowed_tools.contains(call.name) {
             return Err(crate::error::ToolError::access_denied(call.name));
         }
@@ -199,4 +201,6 @@ where
     sub_agent_manager: Arc<SubAgentManager>,
     depth: u32,
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
+    pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
+    pub(super) hook_run_overrides: HookRunOverrides,
 }

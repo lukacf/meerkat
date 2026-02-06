@@ -6,13 +6,14 @@
 use meerkat::{
     AgentBuilder, AgentError, JsonlStore, OutputSchema, Session, SessionStore, ToolError,
     ToolResult, build_comms_runtime_from_config, compose_tools_with_comms,
+    create_default_hook_engine, resolve_layered_hooks_config,
 };
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::{invalid_session_id, invalid_session_id_message, store_error};
 use meerkat_core::{
-    AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, Provider, SessionMetadata,
-    SessionTooling, SystemPromptConfig, ToolCallView, format_verbose_event,
+    AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
+    SessionMetadata, SessionTooling, SystemPromptConfig, ToolCallView, format_verbose_event,
 };
 use meerkat_tools::find_project_root;
 use schemars::JsonSchema;
@@ -102,6 +103,9 @@ pub struct MeerkatRunInput {
     /// Agent name for inter-agent communication. Required for host_mode.
     #[serde(default)]
     pub comms_name: Option<String>,
+    /// Optional run-scoped hook overrides.
+    #[serde(default)]
+    pub hooks_override: Option<HookRunOverrides>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -229,6 +233,9 @@ pub struct MeerkatResumeInput {
     /// Optional provider override for resume.
     #[serde(default)]
     pub provider: Option<ProviderInput>,
+    /// Optional run-scoped hook overrides.
+    #[serde(default)]
+    pub hooks_override: Option<HookRunOverrides>,
 }
 
 /// Tool result provided by the MCP client
@@ -453,12 +460,17 @@ async fn handle_meerkat_run_simple(
         tool_usage_instructions = composed.1;
     }
 
+    let hooks_root = resolve_project_root();
+    let layered_hooks = resolve_layered_hooks_config(&hooks_root, &config).await;
+    let hook_engine = create_default_hook_engine(layered_hooks);
+
     // Build agent
     let mut builder = AgentBuilder::new()
         .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits())
-        .structured_output_retries(input.structured_output_retries);
+        .structured_output_retries(input.structured_output_retries)
+        .with_hook_run_overrides(input.hooks_override.clone().unwrap_or_default());
 
     if let Some(schema) = input.output_schema.clone() {
         let output_schema = OutputSchema::from_json_value(schema)
@@ -479,6 +491,9 @@ async fn handle_meerkat_run_simple(
     // Add comms runtime if enabled
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
+    }
+    if let Some(hook_engine) = hook_engine {
+        builder = builder.with_hook_engine(hook_engine);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -703,12 +718,17 @@ async fn handle_meerkat_run_with_builtins(
         tool_usage_instructions = composed.1;
     }
 
+    let hooks_root = resolve_project_root();
+    let layered_hooks = resolve_layered_hooks_config(&hooks_root, &config).await;
+    let hook_engine = create_default_hook_engine(layered_hooks);
+
     // Build agent
     let mut builder = AgentBuilder::new()
         .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits())
-        .structured_output_retries(input.structured_output_retries);
+        .structured_output_retries(input.structured_output_retries)
+        .with_hook_run_overrides(input.hooks_override.clone().unwrap_or_default());
 
     if let Some(schema) = input.output_schema.clone() {
         let output_schema = OutputSchema::from_json_value(schema)
@@ -729,6 +749,9 @@ async fn handle_meerkat_run_with_builtins(
     // Add comms runtime if enabled
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
+    }
+    if let Some(hook_engine) = hook_engine {
+        builder = builder.with_hook_engine(hook_engine);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -945,11 +968,16 @@ async fn handle_meerkat_resume_simple(
         tool_usage_instructions = composed.1;
     }
 
+    let hooks_root = resolve_project_root();
+    let layered_hooks = resolve_layered_hooks_config(&hooks_root, &config).await;
+    let hook_engine = create_default_hook_engine(layered_hooks);
+
     // Build agent with resumed session
     let mut builder = AgentBuilder::new()
         .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits())
+        .with_hook_run_overrides(input.hooks_override.clone().unwrap_or_default())
         .resume_session(session);
 
     let mut system_prompt = SystemPromptConfig::new().compose().await;
@@ -961,6 +989,9 @@ async fn handle_meerkat_resume_simple(
 
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
+    }
+    if let Some(hook_engine) = hook_engine {
+        builder = builder.with_hook_engine(hook_engine);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -1217,6 +1248,10 @@ async fn handle_meerkat_resume_with_builtins(
         tool_usage_instructions = composed.1;
     }
 
+    let hooks_root = resolve_project_root();
+    let layered_hooks = resolve_layered_hooks_config(&hooks_root, &config).await;
+    let hook_engine = create_default_hook_engine(layered_hooks);
+
     // Build agent with resumed session
     let mut system_prompt = SystemPromptConfig::new().compose().await;
     if !tool_usage_instructions.is_empty() {
@@ -1229,10 +1264,14 @@ async fn handle_meerkat_resume_with_builtins(
         .max_tokens_per_turn(max_tokens)
         .system_prompt(system_prompt)
         .budget(config.budget_limits())
+        .with_hook_run_overrides(input.hooks_override.clone().unwrap_or_default())
         .resume_session(session);
 
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
+    }
+    if let Some(hook_engine) = hook_engine {
+        builder = builder.with_hook_engine(hook_engine);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -1420,6 +1459,15 @@ impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn hooks_override_fixture() -> HookRunOverrides {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../test-fixtures/hooks/run_override.json");
+        let payload = std::fs::read_to_string(path).expect("hook override fixture must exist");
+        serde_json::from_str::<HookRunOverrides>(&payload)
+            .expect("hook override fixture must deserialize")
+    }
 
     #[test]
     fn test_tools_list_schema() {
@@ -1430,8 +1478,16 @@ mod tests {
         assert_eq!(run_tool["name"], "meerkat_run");
         assert!(run_tool["inputSchema"]["properties"]["prompt"].is_object());
         assert!(run_tool["inputSchema"]["properties"]["verbose"].is_object());
-        assert!(run_tool["inputSchema"]["properties"].get("output_schema").is_some());
-        assert!(run_tool["inputSchema"]["properties"].get("structured_output_retries").is_some());
+        assert!(
+            run_tool["inputSchema"]["properties"]
+                .get("output_schema")
+                .is_some()
+        );
+        assert!(
+            run_tool["inputSchema"]["properties"]
+                .get("structured_output_retries")
+                .is_some()
+        );
 
         let resume_tool = &tools[1];
         assert_eq!(resume_tool["name"], "meerkat_resume");
@@ -1520,6 +1576,45 @@ mod tests {
     }
 
     #[test]
+    fn test_meerkat_run_input_accepts_hooks_override_fixture() {
+        let input_json = json!({
+            "prompt": "Hello",
+            "hooks_override": hooks_override_fixture(),
+        });
+
+        let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
+        assert!(input.hooks_override.is_some());
+        let overrides = input
+            .hooks_override
+            .expect("hooks override should be present");
+        assert_eq!(overrides.entries.len(), 2);
+        assert_eq!(
+            overrides.entries[0].point,
+            meerkat_core::HookPoint::PreToolExecution
+        );
+    }
+
+    #[test]
+    fn test_meerkat_resume_input_accepts_hooks_override_fixture() {
+        let input_json = json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "prompt": "Resume",
+            "hooks_override": hooks_override_fixture(),
+        });
+
+        let input: MeerkatResumeInput = serde_json::from_value(input_json).unwrap();
+        assert!(input.hooks_override.is_some());
+        let overrides = input
+            .hooks_override
+            .expect("hooks override should be present");
+        assert_eq!(overrides.entries.len(), 2);
+        assert_eq!(
+            overrides.entries[1].mode,
+            meerkat_core::HookExecutionMode::Background
+        );
+    }
+
+    #[test]
     fn test_mpc_tool_dispatcher_creates_tool_defs() {
         let mcp_tools = vec![
             McpToolDef {
@@ -1593,7 +1688,10 @@ mod tests {
         // Verify tool_results parameter exists in the schema
         let tool_results = &resume_tool["inputSchema"]["properties"]["tool_results"];
         assert!(tool_results.is_object(), "tool_results should be an object");
-        assert_eq!(tool_results["type"], "array", "tool_results should be an array");
+        assert_eq!(
+            tool_results["type"], "array",
+            "tool_results should be an array"
+        );
         // Items may use $ref for the ToolResultInput schema
         assert!(
             tool_results["items"].is_object(),
@@ -1644,6 +1742,7 @@ mod tests {
                 builtin_config: None,
                 host_mode: true,
                 comms_name: None, // Missing!
+                hooks_override: None,
             },
             None,
         )

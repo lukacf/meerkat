@@ -137,9 +137,7 @@ mod tests {
     use meerkat_core::ops::ConcurrencyLimits;
     use meerkat_core::session::Session;
     use meerkat_core::sub_agent::SubAgentManager;
-    use meerkat_core::{
-        AgentSessionStore, AgentToolDispatcher, ToolCallView, ToolDef, ToolResult,
-    };
+    use meerkat_core::{AgentSessionStore, AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
     use tokio::sync::RwLock;
 
     struct MockClientFactory;

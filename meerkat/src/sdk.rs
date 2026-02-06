@@ -1,14 +1,16 @@
 //! SDK helper functions for tool dispatcher setup.
 
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
-    AgentFactory, AgentToolDispatcher, CommsRuntime, Config, CoreCommsConfig, ToolError,
-    ToolGatewayBuilder,
+    AgentFactory, AgentToolDispatcher, CommsRuntime, Config, CoreCommsConfig, HookEngine,
+    HooksConfig, ToolError, ToolGatewayBuilder,
 };
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::{AgentEvent, format_verbose_event};
+use meerkat_hooks::DefaultHookEngine;
 use meerkat_tools::builtin::comms::CommsToolSurface;
 use meerkat_tools::builtin::shell::ShellConfig;
 use meerkat_tools::{
@@ -17,6 +19,27 @@ use meerkat_tools::{
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+
+/// Resolve layered hooks config (global -> project) and append active config hooks.
+///
+/// The active config hooks are appended last to preserve caller-local overrides.
+pub async fn resolve_layered_hooks_config(start_dir: &Path, active_config: &Config) -> HooksConfig {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut layered = match Config::load_layered_hooks_from(start_dir, home.as_deref()).await {
+        Ok(hooks) => hooks,
+        Err(_) => HooksConfig::default(),
+    };
+    layered.append_entries_from(&active_config.hooks);
+    layered
+}
+
+/// Build a default hook engine when at least one hook is configured.
+pub fn create_default_hook_engine(hooks_config: HooksConfig) -> Option<Arc<dyn HookEngine>> {
+    if hooks_config.entries.is_empty() {
+        return None;
+    }
+    Some(Arc::new(DefaultHookEngine::new(hooks_config)))
+}
 
 /// Create a tool dispatcher with built-in tools enabled.
 ///
@@ -250,6 +273,9 @@ pub fn spawn_event_logger(
 mod tests {
     use super::*;
     use meerkat_core::ToolCallView;
+    use meerkat_core::{
+        HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig,
+    };
 
     async fn dispatch_json(
         dispatcher: &dyn AgentToolDispatcher,
@@ -387,5 +413,29 @@ mod tests {
         assert!(get_result.is_ok());
         let retrieved = get_result.unwrap();
         assert_eq!(retrieved.get("subject").unwrap(), "File store test");
+    }
+
+    #[test]
+    fn test_create_default_hook_engine_none_when_no_entries() {
+        assert!(create_default_hook_engine(HooksConfig::default()).is_none());
+    }
+
+    #[test]
+    fn test_create_default_hook_engine_some_when_entries_exist() {
+        let hooks = HooksConfig {
+            entries: vec![HookEntryConfig {
+                id: HookId::new("sdk-hook"),
+                point: HookPoint::TurnBoundary,
+                mode: HookExecutionMode::Foreground,
+                capability: HookCapability::Observe,
+                runtime: HookRuntimeConfig::InProcess {
+                    name: "sdk_hook".to_string(),
+                    config: None,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(create_default_hook_engine(hooks).is_some());
     }
 }

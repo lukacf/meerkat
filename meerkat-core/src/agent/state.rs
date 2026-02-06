@@ -2,8 +2,14 @@
 
 use crate::error::AgentError;
 use crate::event::{AgentEvent, BudgetType};
+use crate::hooks::{
+    HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
+    HookToolCall, HookToolResult,
+};
 use crate::state::LoopState;
-use crate::types::{BlockAssistantMessage, Message, RunResult, ToolCallView, ToolDef, ToolResult};
+use crate::types::{
+    AssistantBlock, BlockAssistantMessage, Message, RunResult, ToolCallView, ToolDef, ToolResult,
+};
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::sync::Arc;
@@ -23,6 +29,8 @@ where
         messages: &[Message],
         tools: &[Arc<ToolDef>],
         max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&Value>,
     ) -> Result<LlmStreamResult, AgentError> {
         let mut attempt = 0u32;
 
@@ -35,13 +43,7 @@ where
 
             match self
                 .client
-                .stream_response(
-                    messages,
-                    tools,
-                    max_tokens,
-                    self.config.temperature,
-                    self.config.provider_params.as_ref(),
-                )
+                .stream_response(messages, tools, max_tokens, temperature, provider_params)
                 .await
             {
                 Ok(result) => return Ok(result),
@@ -109,12 +111,84 @@ where
                     // Get tool definitions
                     let tool_defs = self.tools.tools();
 
+                    let mut effective_max_tokens = self.config.max_tokens_per_turn;
+                    let mut effective_temperature = self.config.temperature;
+                    let mut effective_provider_params = self.config.provider_params.clone();
+
+                    // Pre-LLM hooks may rewrite request params or deny the turn.
+                    let pre_llm_report = self
+                        .execute_hooks(
+                            HookInvocation {
+                                point: HookPoint::PreLlmRequest,
+                                session_id: self.session.id().clone(),
+                                turn_number: Some(turn_count),
+                                prompt: None,
+                                error: None,
+                                llm_request: Some(HookLlmRequest {
+                                    max_tokens: effective_max_tokens,
+                                    temperature: effective_temperature,
+                                    provider_params: effective_provider_params.clone(),
+                                    message_count: self.session.messages().len(),
+                                }),
+                                llm_response: None,
+                                tool_call: None,
+                                tool_result: None,
+                            },
+                            event_tx.as_ref(),
+                        )
+                        .await?;
+
+                    if let Some(HookDecision::Deny {
+                        reason_code,
+                        message,
+                        payload,
+                        ..
+                    }) = pre_llm_report.decision
+                    {
+                        return Err(AgentError::HookDenied {
+                            point: HookPoint::PreLlmRequest,
+                            reason_code,
+                            message,
+                            payload,
+                        });
+                    }
+
+                    for patch in pre_llm_report.patches {
+                        if let HookPatch::LlmRequest {
+                            max_tokens,
+                            temperature,
+                            provider_params,
+                        } = patch
+                        {
+                            emit_event!(AgentEvent::HookRewriteApplied {
+                                hook_id: "runtime".to_string(),
+                                point: HookPoint::PreLlmRequest,
+                                patch: HookPatch::LlmRequest {
+                                    max_tokens,
+                                    temperature,
+                                    provider_params: provider_params.clone(),
+                                },
+                            });
+                            if let Some(value) = max_tokens {
+                                effective_max_tokens = value;
+                            }
+                            if temperature.is_some() {
+                                effective_temperature = temperature;
+                            }
+                            if provider_params.is_some() {
+                                effective_provider_params = provider_params;
+                            }
+                        }
+                    }
+
                     // Call LLM with retry
                     let result = self
                         .call_llm_with_retry(
                             self.session.messages(),
                             &tool_defs,
-                            self.config.max_tokens_per_turn,
+                            effective_max_tokens,
+                            effective_temperature,
+                            effective_provider_params.as_ref(),
                         )
                         .await?;
 
@@ -123,15 +197,61 @@ where
                     self.session.record_usage(result.usage.clone());
 
                     let (blocks, stop_reason, usage) = result.into_parts();
-                    let assistant_msg = BlockAssistantMessage {
+                    let mut assistant_msg = BlockAssistantMessage {
                         blocks,
                         stop_reason,
                     };
-                    let assistant_text = assistant_msg.to_string();
+                    let mut assistant_text = assistant_msg.to_string();
                     if !assistant_text.is_empty() {
                         emit_event!(AgentEvent::TextComplete {
                             content: assistant_text.clone(),
                         });
+                    }
+
+                    let post_llm_report = self
+                        .execute_hooks(
+                            HookInvocation {
+                                point: HookPoint::PostLlmResponse,
+                                session_id: self.session.id().clone(),
+                                turn_number: Some(turn_count),
+                                prompt: None,
+                                error: None,
+                                llm_request: None,
+                                llm_response: Some(HookLlmResponse {
+                                    assistant_text: assistant_text.clone(),
+                                }),
+                                tool_call: None,
+                                tool_result: None,
+                            },
+                            event_tx.as_ref(),
+                        )
+                        .await?;
+
+                    if let Some(HookDecision::Deny {
+                        reason_code,
+                        message,
+                        payload,
+                        ..
+                    }) = post_llm_report.decision
+                    {
+                        return Err(AgentError::HookDenied {
+                            point: HookPoint::PostLlmResponse,
+                            reason_code,
+                            message,
+                            payload,
+                        });
+                    }
+
+                    for patch in post_llm_report.patches {
+                        if let HookPatch::AssistantText { text } = patch {
+                            emit_event!(AgentEvent::HookRewriteApplied {
+                                hook_id: "runtime".to_string(),
+                                point: HookPoint::PostLlmResponse,
+                                patch: HookPatch::AssistantText { text: text.clone() },
+                            });
+                            rewrite_assistant_text(&mut assistant_msg.blocks, text);
+                            assistant_text = assistant_msg.to_string();
+                        }
                     }
 
                     // Check if we have tool calls
@@ -159,19 +279,99 @@ where
                             .tool_calls()
                             .map(ToolCallOwned::from_view)
                             .collect();
-                        let num_tool_calls = tool_calls.len();
                         let tools_ref = Arc::clone(&self.tools);
+                        let mut executable_tool_calls = Vec::new();
+                        let mut tool_results = Vec::with_capacity(tool_calls.len());
 
-                        // Emit all execution start events
-                        for tc in &tool_calls {
+                        for mut tc in tool_calls {
+                            let args_value: Value = serde_json::from_str(tc.args.get())
+                                .unwrap_or_else(|_| Value::String(tc.args.get().to_string()));
+
+                            let pre_tool_report = self
+                                .execute_hooks(
+                                    HookInvocation {
+                                        point: HookPoint::PreToolExecution,
+                                        session_id: self.session.id().clone(),
+                                        turn_number: Some(turn_count),
+                                        prompt: None,
+                                        error: None,
+                                        llm_request: None,
+                                        llm_response: None,
+                                        tool_call: Some(HookToolCall {
+                                            tool_use_id: tc.id.clone(),
+                                            name: tc.name.clone(),
+                                            args: args_value,
+                                        }),
+                                        tool_result: None,
+                                    },
+                                    event_tx.as_ref(),
+                                )
+                                .await?;
+
+                            if let Some(HookDecision::Deny {
+                                reason_code,
+                                message,
+                                payload,
+                                ..
+                            }) = pre_tool_report.decision
+                            {
+                                let denied_payload = serde_json::json!({
+                                    "error": "hook_denied",
+                                    "reason_code": serde_json::to_value(reason_code).unwrap_or_else(|_| Value::String("runtime_error".to_string())),
+                                    "message": message,
+                                    "payload": payload,
+                                });
+                                let denied_content = serde_json::to_string(&denied_payload)
+                                    .unwrap_or_else(|_| {
+                                        "{\"error\":\"hook_denied\",\"message\":\"denied by hook\"}"
+                                            .to_string()
+                                    });
+                                tool_results.push(ToolResult {
+                                    tool_use_id: tc.id.clone(),
+                                    content: denied_content,
+                                    is_error: true,
+                                    thought_signature: None,
+                                });
+                                emit_event!(AgentEvent::ToolExecutionCompleted {
+                                    id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    result: tool_results
+                                        .last()
+                                        .map(|r| r.content.clone())
+                                        .unwrap_or_default(),
+                                    is_error: true,
+                                    duration_ms: 0,
+                                });
+                                emit_event!(AgentEvent::ToolResultReceived {
+                                    id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    is_error: true,
+                                });
+                                self.budget.record_tool_call();
+                                tool_call_count += 1;
+                                continue;
+                            }
+
+                            for patch in pre_tool_report.patches {
+                                if let HookPatch::ToolArgs { args } = patch {
+                                    emit_event!(AgentEvent::HookRewriteApplied {
+                                        hook_id: "runtime".to_string(),
+                                        point: HookPoint::PreToolExecution,
+                                        patch: HookPatch::ToolArgs { args: args.clone() },
+                                    });
+                                    tc.set_args(args);
+                                }
+                            }
+
                             emit_event!(AgentEvent::ToolExecutionStarted {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
                             });
+                            executable_tool_calls.push(tc);
                         }
 
-                        // Execute all tool calls in parallel using join_all
-                        let dispatch_futures: Vec<_> = tool_calls
+                        // Execute all allowed tool calls in parallel using join_all
+                        let dispatch_futures: Vec<_> = executable_tool_calls
                             .into_iter()
                             .map(|tc| {
                                 let tools_ref = Arc::clone(&tools_ref);
@@ -187,7 +387,6 @@ where
                         let dispatch_results = futures::future::join_all(dispatch_futures).await;
 
                         // Process results and emit events
-                        let mut tool_results = Vec::with_capacity(num_tool_calls);
                         for (tc, dispatch_result, duration_ms) in dispatch_results {
                             let mut tool_result = match dispatch_result {
                                 Ok(result) => result,
@@ -224,6 +423,66 @@ where
 
                             if tool_result.tool_use_id.is_empty() {
                                 tool_result.tool_use_id = tc.id.clone();
+                            }
+
+                            let post_tool_report = self
+                                .execute_hooks(
+                                    HookInvocation {
+                                        point: HookPoint::PostToolExecution,
+                                        session_id: self.session.id().clone(),
+                                        turn_number: Some(turn_count),
+                                        prompt: None,
+                                        error: None,
+                                        llm_request: None,
+                                        llm_response: None,
+                                        tool_call: None,
+                                        tool_result: Some(HookToolResult {
+                                            tool_use_id: tc.id.clone(),
+                                            name: tc.name.clone(),
+                                            content: tool_result.content.clone(),
+                                            is_error: tool_result.is_error,
+                                        }),
+                                    },
+                                    event_tx.as_ref(),
+                                )
+                                .await?;
+
+                            if let Some(HookDecision::Deny {
+                                reason_code,
+                                message,
+                                payload,
+                                ..
+                            }) = post_tool_report.decision
+                            {
+                                let denied_payload = serde_json::json!({
+                                    "error": "hook_denied",
+                                    "reason_code": serde_json::to_value(reason_code).unwrap_or_else(|_| Value::String("runtime_error".to_string())),
+                                    "message": message,
+                                    "payload": payload,
+                                });
+                                tool_result.content = serde_json::to_string(&denied_payload)
+                                    .unwrap_or_else(|_| {
+                                        "{\"error\":\"hook_denied\",\"message\":\"denied by hook\"}"
+                                            .to_string()
+                                    });
+                                tool_result.is_error = true;
+                            }
+
+                            for patch in post_tool_report.patches {
+                                if let HookPatch::ToolResult { content, is_error } = patch {
+                                    emit_event!(AgentEvent::HookRewriteApplied {
+                                        hook_id: "runtime".to_string(),
+                                        point: HookPoint::PostToolExecution,
+                                        patch: HookPatch::ToolResult {
+                                            content: content.clone(),
+                                            is_error,
+                                        },
+                                    });
+                                    tool_result.content = content;
+                                    if let Some(value) = is_error {
+                                        tool_result.is_error = value;
+                                    }
+                                }
                             }
 
                             // Emit execution complete
@@ -277,6 +536,37 @@ where
                             self.session.push(Message::ToolResults { results });
                         }
 
+                        let turn_boundary_report = self
+                            .execute_hooks(
+                                HookInvocation {
+                                    point: HookPoint::TurnBoundary,
+                                    session_id: self.session.id().clone(),
+                                    turn_number: Some(turn_count),
+                                    prompt: None,
+                                    error: None,
+                                    llm_request: None,
+                                    llm_response: None,
+                                    tool_call: None,
+                                    tool_result: None,
+                                },
+                                event_tx.as_ref(),
+                            )
+                            .await?;
+                        if let Some(HookDecision::Deny {
+                            reason_code,
+                            message,
+                            payload,
+                            ..
+                        }) = turn_boundary_report.decision
+                        {
+                            return Err(AgentError::HookDenied {
+                                point: HookPoint::TurnBoundary,
+                                reason_code,
+                                message,
+                                payload,
+                            });
+                        }
+
                         // === END TURN BOUNDARY ===
 
                         self.state.transition(LoopState::CallingLlm)?;
@@ -284,14 +574,10 @@ where
                     } else {
                         // No tool calls - we're done with the agentic loop
                         let final_text = assistant_text.clone();
-                        self.session
-                            .push(Message::BlockAssistant(assistant_msg));
+                        self.session.push(Message::BlockAssistant(assistant_msg));
 
                         // Emit turn completed
-                        emit_event!(AgentEvent::TurnCompleted {
-                            stop_reason,
-                            usage,
-                        });
+                        emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
 
                         // Check if we need to perform extraction turn for structured output
                         if self.config.output_schema.is_some() {
@@ -387,6 +673,22 @@ where
     }
 }
 
+fn rewrite_assistant_text(blocks: &mut Vec<AssistantBlock>, replacement: String) {
+    for block in blocks.iter_mut() {
+        if let AssistantBlock::Text { text, .. } = block {
+            *text = replacement;
+            return;
+        }
+    }
+    blocks.insert(
+        0,
+        AssistantBlock::Text {
+            text: replacement,
+            meta: None,
+        },
+    );
+}
+
 #[derive(Debug, Clone)]
 struct ToolCallOwned {
     id: String,
@@ -411,6 +713,11 @@ impl ToolCallOwned {
             name: &self.name,
             args: &self.args,
         }
+    }
+
+    fn set_args(&mut self, args: Value) {
+        let raw = RawValue::from_string(args.to_string()).unwrap_or_else(|_| fallback_raw_value());
+        self.args = raw;
     }
 }
 

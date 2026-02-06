@@ -4,11 +4,13 @@
 
 use crate::{
     budget::BudgetLimits,
+    hooks::{HookCapability, HookExecutionMode, HookFailurePolicy, HookId, HookPoint},
     mcp_config::McpServerConfig,
     provider::Provider,
     retry::RetryPolicy,
     types::{OutputSchema, SecurityMode},
 };
+use schemars::JsonSchema;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -36,6 +38,7 @@ pub struct Config {
     pub limits: LimitsConfig,
     pub rest: RestServerConfig,
     pub sub_agents: SubAgentsConfig,
+    pub hooks: HooksConfig,
 }
 
 impl Default for Config {
@@ -62,6 +65,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             rest: RestServerConfig::default(),
             sub_agents: SubAgentsConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -124,6 +128,42 @@ impl Config {
         home_dir: Option<&std::path::Path>,
     ) -> Result<Self, ConfigError> {
         Self::load_from_with_env(start_dir, home_dir, |key| std::env::var(key).ok()).await
+    }
+
+    /// Load only hook configuration with explicit global -> project layering.
+    ///
+    /// This preserves existing config precedence for non-hook fields while allowing
+    /// deterministic hook registration ordering across scopes.
+    pub async fn load_layered_hooks() -> Result<HooksConfig, ConfigError> {
+        let cwd = std::env::current_dir()?;
+        let home = dirs::home_dir();
+        Self::load_layered_hooks_from(&cwd, home.as_deref()).await
+    }
+
+    /// Load only hook configuration with explicit global -> project layering.
+    pub async fn load_layered_hooks_from(
+        start_dir: &std::path::Path,
+        home_dir: Option<&std::path::Path>,
+    ) -> Result<HooksConfig, ConfigError> {
+        let mut hooks = HooksConfig::default();
+
+        if let Some(global_path) = home_dir.map(|home| home.join(".rkat/config.toml")) {
+            if tokio::fs::try_exists(&global_path).await.unwrap_or(false) {
+                let content = tokio::fs::read_to_string(&global_path).await?;
+                let cfg: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
+                hooks.append_entries_from(&cfg.hooks);
+            }
+        }
+
+        if let Some(project_path) = Self::find_project_config_from(start_dir).await {
+            if tokio::fs::try_exists(&project_path).await.unwrap_or(false) {
+                let content = tokio::fs::read_to_string(&project_path).await?;
+                let cfg: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
+                hooks.append_entries_from(&cfg.hooks);
+            }
+        }
+
+        Ok(hooks)
     }
 
     /// Convert config limits into runtime budget limits.
@@ -233,6 +273,9 @@ impl Config {
         }
         if other.sub_agents != SubAgentsConfig::default() {
             self.sub_agents = other.sub_agents;
+        }
+        if other.hooks != HooksConfig::default() {
+            self.hooks = other.hooks;
         }
     }
 
@@ -1005,6 +1048,119 @@ impl Default for ToolsConfig {
             subagents_enabled: false,
         }
     }
+}
+
+/// Hook configuration root.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(default)]
+pub struct HooksConfig {
+    /// Default timeout for one hook invocation.
+    pub default_timeout_ms: u64,
+    /// Max serialized invocation payload size.
+    pub payload_max_bytes: usize,
+    /// Ordered hook registrations.
+    #[serde(default)]
+    pub entries: Vec<HookEntryConfig>,
+}
+
+impl HooksConfig {
+    pub fn append_entries_from(&mut self, other: &HooksConfig) {
+        self.entries.extend(other.entries.clone());
+    }
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_ms: 5_000,
+            payload_max_bytes: 128 * 1024,
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// Run-scoped hook overrides.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(default)]
+pub struct HookRunOverrides {
+    /// Additional hooks appended after layered config entries.
+    #[serde(default)]
+    pub entries: Vec<HookEntryConfig>,
+    /// Hook ids disabled for this run.
+    #[serde(default)]
+    pub disable: Vec<HookId>,
+}
+
+/// One hook registration entry.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(default)]
+pub struct HookEntryConfig {
+    pub id: HookId,
+    pub enabled: bool,
+    pub point: HookPoint,
+    pub mode: HookExecutionMode,
+    pub capability: HookCapability,
+    pub priority: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_policy: Option<HookFailurePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    pub runtime: HookRuntimeConfig,
+}
+
+impl HookEntryConfig {
+    pub fn effective_failure_policy(&self) -> HookFailurePolicy {
+        self.failure_policy
+            .unwrap_or_else(|| crate::hooks::default_failure_policy(self.capability))
+    }
+}
+
+impl Default for HookEntryConfig {
+    fn default() -> Self {
+        Self {
+            id: HookId::new("hook"),
+            enabled: true,
+            point: HookPoint::TurnBoundary,
+            mode: HookExecutionMode::Foreground,
+            capability: HookCapability::Observe,
+            priority: 100,
+            failure_policy: None,
+            timeout_ms: None,
+            runtime: HookRuntimeConfig::InProcess {
+                name: "noop".to_string(),
+                config: None,
+            },
+        }
+    }
+}
+
+/// Runtime-specific hook payload.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HookRuntimeConfig {
+    InProcess {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config: Option<serde_json::Value>,
+    },
+    Command {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+    },
+    Http {
+        url: String,
+        #[serde(default = "default_hook_http_method")]
+        method: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    },
+}
+
+fn default_hook_http_method() -> String {
+    "POST".to_string()
 }
 
 /// Config scope for persisted settings.

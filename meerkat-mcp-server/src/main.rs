@@ -78,7 +78,10 @@ async fn handle_request(request: &Value) -> Value {
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
 
             match meerkat_mcp_server::handle_tools_call(name, &arguments).await {
                 Ok(result) => json!({

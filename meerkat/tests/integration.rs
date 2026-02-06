@@ -133,8 +133,7 @@ mod llm_normalization {
     #[tokio::test]
     #[ignore = "e2e: live API"]
     async fn e2e_gemini_normalizes_to_llm_event() {
-        let Some(api_key) =
-            first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
+        let Some(api_key) = first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
         else {
             eprintln!("Skipping: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)");
             return;

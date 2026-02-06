@@ -368,17 +368,17 @@ impl AgentToolDispatcher for ToolGateway {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use serde_json::Value;
 
     async fn dispatch_json(
         gateway: &ToolGateway,
         name: &str,
         args: serde_json::Value,
     ) -> Result<Value, ToolError> {
-        let args_raw = serde_json::value::RawValue::from_string(args.to_string())
-            .expect("valid args json");
+        let args_raw =
+            serde_json::value::RawValue::from_string(args.to_string()).expect("valid args json");
         let call = ToolCallView {
             id: "test-1",
             name,

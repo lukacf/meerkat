@@ -27,14 +27,14 @@ use futures::stream::Stream;
 use meerkat::{
     AgentBuilder, AgentEvent, AgentToolDispatcher, JsonlStore, OutputSchema, SessionId,
     SessionMeta, SessionStore, ToolDef, ToolError, ToolResult, build_comms_runtime_from_config,
-    compose_tools_with_comms,
+    compose_tools_with_comms, create_default_hook_engine, resolve_layered_hooks_config,
 };
 use meerkat_client::{LlmClient, LlmClientAdapter, ProviderResolver};
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::{
-    Config, ConfigDelta, ConfigStore, FileConfigStore, Provider, SchemaWarning, SessionMetadata,
-    SessionTooling, SystemPromptConfig, ToolCallView, format_verbose_event,
+    Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider, SchemaWarning,
+    SessionMetadata, SessionTooling, SystemPromptConfig, ToolCallView, format_verbose_event,
 };
 use meerkat_store::StoreAdapter;
 use meerkat_tools::builtin::{
@@ -45,6 +45,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::convert::Infallible;
+use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -234,6 +235,9 @@ pub struct CreateSessionRequest {
     /// Agent name for inter-agent communication. Required for host_mode.
     #[serde(default)]
     pub comms_name: Option<String>,
+    /// Optional run-scoped hook overrides.
+    #[serde(default)]
+    pub hooks_override: Option<HookRunOverrides>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -268,6 +272,9 @@ pub struct ContinueSessionRequest {
     pub provider: Option<Provider>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Optional run-scoped hook overrides.
+    #[serde(default)]
+    pub hooks_override: Option<HookRunOverrides>,
 }
 
 /// Session response
@@ -515,11 +522,19 @@ async fn create_session(
         tool_usage_instructions = composed.1;
     }
 
+    let hooks_base_dir = state
+        .project_root
+        .as_deref()
+        .unwrap_or_else(|| FsPath::new("."));
+    let layered_hooks = resolve_layered_hooks_config(hooks_base_dir, &config).await;
+    let hook_engine = create_default_hook_engine(layered_hooks);
+
     let mut builder = AgentBuilder::new()
         .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits())
-        .structured_output_retries(req.structured_output_retries);
+        .structured_output_retries(req.structured_output_retries)
+        .with_hook_run_overrides(req.hooks_override.clone().unwrap_or_default());
 
     // Add output schema if provided
     if let Some(ref schema) = req.output_schema {
@@ -540,6 +555,9 @@ async fn create_session(
     // Add comms runtime if enabled
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
+    }
+    if let Some(hook_engine) = hook_engine {
+        builder = builder.with_hook_engine(hook_engine);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -773,11 +791,19 @@ async fn continue_session(
         tool_usage_instructions = composed.1;
     }
 
+    let hooks_base_dir = state
+        .project_root
+        .as_deref()
+        .unwrap_or_else(|| FsPath::new("."));
+    let layered_hooks = resolve_layered_hooks_config(hooks_base_dir, &config).await;
+    let hook_engine = create_default_hook_engine(layered_hooks);
+
     let mut builder = AgentBuilder::new()
         .model(model.clone())
         .max_tokens_per_turn(max_tokens)
         .budget(config.budget_limits())
         .structured_output_retries(req.structured_output_retries)
+        .with_hook_run_overrides(req.hooks_override.clone().unwrap_or_default())
         .resume_session(session);
 
     // Add output schema if provided
@@ -797,6 +823,9 @@ async fn continue_session(
 
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
+    }
+    if let Some(hook_engine) = hook_engine {
+        builder = builder.with_hook_engine(hook_engine);
     }
 
     let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -984,7 +1013,16 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::TempDir;
+
+    fn hooks_override_fixture() -> HookRunOverrides {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../test-fixtures/hooks/run_override.json");
+        let payload = std::fs::read_to_string(path).expect("hook override fixture must exist");
+        serde_json::from_str::<HookRunOverrides>(&payload)
+            .expect("hook override fixture must deserialize")
+    }
 
     #[tokio::test]
     async fn test_app_state_default() {
@@ -1112,5 +1150,46 @@ mod tests {
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
         assert!(!req.host_mode);
         assert!(req.comms_name.is_none());
+    }
+
+    #[test]
+    fn test_create_session_request_accepts_hooks_override_fixture() {
+        let hooks_override = hooks_override_fixture();
+        let req_json = serde_json::json!({
+            "prompt": "Hello",
+            "hooks_override": hooks_override,
+        });
+
+        let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
+        assert!(req.hooks_override.is_some());
+        let overrides = req
+            .hooks_override
+            .expect("hooks override should be present");
+        assert_eq!(overrides.entries.len(), 2);
+        assert_eq!(
+            overrides.entries[0].point,
+            meerkat_core::HookPoint::PreToolExecution
+        );
+    }
+
+    #[test]
+    fn test_continue_session_request_accepts_hooks_override_fixture() {
+        let hooks_override = hooks_override_fixture();
+        let req_json = serde_json::json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "prompt": "Continue",
+            "hooks_override": hooks_override,
+        });
+
+        let req: ContinueSessionRequest = serde_json::from_value(req_json).unwrap();
+        assert!(req.hooks_override.is_some());
+        let overrides = req
+            .hooks_override
+            .expect("hooks override should be present");
+        assert_eq!(overrides.entries.len(), 2);
+        assert_eq!(
+            overrides.entries[1].mode,
+            meerkat_core::HookExecutionMode::Background
+        );
     }
 }

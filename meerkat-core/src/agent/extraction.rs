@@ -3,6 +3,7 @@
 //! When `output_schema` is configured, the agent performs an extraction turn
 //! after the agentic loop completes to force validated JSON output.
 
+use crate::Provider;
 use crate::error::AgentError;
 use crate::types::{BlockAssistantMessage, Message, RunResult, UserMessage};
 use jsonschema::Validator;
@@ -90,12 +91,14 @@ where
             self.session.record_usage(result.usage.clone());
 
             let (blocks, stop_reason, _usage) = result.into_parts();
-            let assistant_msg = BlockAssistantMessage { blocks, stop_reason };
+            let assistant_msg = BlockAssistantMessage {
+                blocks,
+                stop_reason,
+            };
             let content = assistant_msg.to_string();
 
             // Add assistant response to session
-            self.session
-                .push(Message::BlockAssistant(assistant_msg));
+            self.session.push(Message::BlockAssistant(assistant_msg));
 
             // Try to parse and validate the output
             let content = content.trim();

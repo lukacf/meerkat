@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 use std::fmt;
 use uuid::Uuid;
 
+use crate::Provider;
 use crate::schema::{
     MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };
@@ -91,7 +92,6 @@ pub enum AssistantBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<Box<ProviderMeta>>,
     },
-
 }
 
 impl PartialEq for AssistantBlock {
@@ -106,8 +106,18 @@ impl PartialEq for AssistantBlock {
                 AssistantBlock::Reasoning { text: t2, meta: m2 },
             ) => t1 == t2 && m1 == m2,
             (
-                AssistantBlock::ToolUse { id: i1, name: n1, args: a1, meta: m1 },
-                AssistantBlock::ToolUse { id: i2, name: n2, args: a2, meta: m2 },
+                AssistantBlock::ToolUse {
+                    id: i1,
+                    name: n1,
+                    args: a1,
+                    meta: m1,
+                },
+                AssistantBlock::ToolUse {
+                    id: i2,
+                    name: n2,
+                    args: a2,
+                    meta: m2,
+                },
             ) => i1 == i2 && n1 == n2 && a1.get() == a2.get() && m1 == m2,
             _ => false,
         }
@@ -226,8 +236,8 @@ impl OutputSchema {
     pub fn from_json_value(value: Value) -> Result<Self, SchemaError> {
         match value {
             Value::Object(obj) if is_wrapped_schema(&obj) => {
-                let wrapped: OutputSchemaWire =
-                    serde_json::from_value(Value::Object(obj)).map_err(|_| SchemaError::InvalidRoot)?;
+                let wrapped: OutputSchemaWire = serde_json::from_value(Value::Object(obj))
+                    .map_err(|_| SchemaError::InvalidRoot)?;
                 Ok(Self {
                     schema: MeerkatSchema::new(wrapped.schema)?,
                     name: wrapped.name,
@@ -270,8 +280,7 @@ impl OutputSchema {
         );
         obj.insert(
             "format".to_string(),
-            serde_json::to_value(self.format)
-                .unwrap_or(Value::String("meerkat_v1".to_string())),
+            serde_json::to_value(self.format).unwrap_or(Value::String("meerkat_v1".to_string())),
         );
         Value::Object(obj)
     }
@@ -307,7 +316,10 @@ fn is_wrapped_schema(obj: &Map<String, Value>) -> bool {
         .and_then(Value::as_str)
         .is_some_and(|f| f == "meerkat_v1");
     let only_wrapper_keys = obj.keys().all(|key| {
-        matches!(key.as_str(), "schema" | "name" | "strict" | "compat" | "format")
+        matches!(
+            key.as_str(),
+            "schema" | "name" | "strict" | "compat" | "format"
+        )
     });
     has_schema && (has_format_marker || only_wrapper_keys)
 }
@@ -397,12 +409,16 @@ pub struct BlockAssistantMessage {
 impl BlockAssistantMessage {
     /// Iterate over tool calls without allocation.
     pub fn tool_calls(&self) -> ToolCallIter<'_> {
-        ToolCallIter { inner: self.blocks.iter() }
+        ToolCallIter {
+            inner: self.blocks.iter(),
+        }
     }
 
     /// Check if any tool calls are present.
     pub fn has_tool_calls(&self) -> bool {
-        self.blocks.iter().any(|b| matches!(b, AssistantBlock::ToolUse { .. }))
+        self.blocks
+            .iter()
+            .any(|b| matches!(b, AssistantBlock::ToolUse { .. }))
     }
 
     /// Get tool use block by ID.

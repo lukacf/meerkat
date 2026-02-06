@@ -317,6 +317,33 @@ let agent = AgentBuilder::new()
 | `resume_session(session)` | Resume from existing session | New session |
 | `provider_params(json)` | Provider-specific parameters | None |
 | `concurrency_limits(limits)` | Sub-agent limits | Default limits |
+| `with_hook_engine(engine)` | Attach a hook engine implementation | None |
+| `with_hook_run_overrides(overrides)` | Apply run-scoped hook overrides | Empty overrides |
+
+### Hook Helpers
+
+The SDK exposes helpers used by CLI/REST/MCP wiring:
+
+```rust
+use meerkat::{create_default_hook_engine, resolve_layered_hooks_config};
+
+let config = meerkat::Config::load().await?;
+let cwd = std::env::current_dir()?;
+
+let layered_hooks = resolve_layered_hooks_config(&cwd, &config).await;
+let hook_engine = create_default_hook_engine(layered_hooks);
+
+let mut builder = meerkat::AgentBuilder::new()
+    .with_hook_run_overrides(meerkat::HookRunOverrides::default());
+
+if let Some(engine) = hook_engine {
+    builder = builder.with_hook_engine(engine);
+}
+```
+
+`HookRunOverrides` schema:
+- `disable`: hook ids disabled for one run
+- `entries`: additional hook entries appended after layered config hooks
 
 ### Budget Configuration
 

@@ -137,10 +137,17 @@ impl AgentLlmClient for DynLlmClientAdapter {
                         name,
                         args_delta,
                     } => {
-                        if let Err(e) = assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta) {
-                            if matches!(e, meerkat_client::StreamAssemblyError::OrphanedToolDelta(_)) {
+                        if let Err(e) =
+                            assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
+                        {
+                            if matches!(
+                                e,
+                                meerkat_client::StreamAssemblyError::OrphanedToolDelta(_)
+                            ) {
                                 let _ = assembler.on_tool_call_start(id.clone());
-                                if let Err(e) = assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta) {
+                                if let Err(e) =
+                                    assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
+                                {
                                     tracing::warn!(?e, "orphaned tool delta");
                                 }
                             } else {
@@ -148,7 +155,12 @@ impl AgentLlmClient for DynLlmClientAdapter {
                             }
                         }
                     }
-                    LlmEvent::ToolCallComplete { id, name, args, meta } => {
+                    LlmEvent::ToolCallComplete {
+                        id,
+                        name,
+                        args,
+                        meta,
+                    } => {
                         let effective_meta = meta;
                         let args_raw = match serde_json::to_string(&args)
                             .ok()
@@ -365,8 +377,8 @@ impl AgentToolDispatcher for CliToolDispatcher {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use futures::stream;
     use futures::Stream;
+    use futures::stream;
     use meerkat_client::LlmError;
     use meerkat_core::{AssistantBlock, ProviderMeta, UserMessage};
     use std::pin::Pin;
@@ -406,8 +418,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_call_complete_preserves_thought_signature(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_tool_call_complete_preserves_thought_signature()
+    -> Result<(), Box<dyn std::error::Error>> {
         let client = Arc::new(MockClient);
         let adapter = DynLlmClientAdapter::new(client, "mock-model");
         let result = adapter

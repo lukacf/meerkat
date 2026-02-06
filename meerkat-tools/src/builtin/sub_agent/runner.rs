@@ -145,7 +145,12 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                             }
                         }
                     }
-                    LlmEvent::ToolCallComplete { id, name, args, meta } => {
+                    LlmEvent::ToolCallComplete {
+                        id,
+                        name,
+                        args,
+                        meta,
+                    } => {
                         let effective_meta = meta;
                         let args_raw = match serde_json::to_string(&args)
                             .ok()
@@ -154,8 +159,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                             Some(raw) => raw,
                             None => fallback_raw_value(),
                         };
-                        let _ =
-                            assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
+                        let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
@@ -288,7 +292,12 @@ impl AgentLlmClient for DynLlmClientAdapter {
                             }
                         }
                     }
-                    LlmEvent::ToolCallComplete { id, name, args, meta } => {
+                    LlmEvent::ToolCallComplete {
+                        id,
+                        name,
+                        args,
+                        meta,
+                    } => {
                         let effective_meta = meta;
                         let args_raw = match serde_json::to_string(&args)
                             .ok()
@@ -297,8 +306,7 @@ impl AgentLlmClient for DynLlmClientAdapter {
                             Some(raw) => raw,
                             None => fallback_raw_value(),
                         };
-                        let _ =
-                            assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
+                        let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
                     }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;

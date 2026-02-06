@@ -41,6 +41,8 @@ rkat run [OPTIONS] <PROMPT>
 | `--system-prompt`, `-s` | System prompt | None |
 | `--output`, `-o` | Output format (`text`, `json`) | `text` |
 | `--stream` | Stream output as it arrives | `false` |
+| `--hooks-override-json` | Inline JSON for run-scoped hook overrides | None |
+| `--hooks-override-file` | Path to JSON file for run-scoped hook overrides | None |
 
 ### rkat resume
 
@@ -53,6 +55,89 @@ rkat resume [OPTIONS] <SESSION_ID> <PROMPT>
 | `--model`, `-m` | Model to use | `claude-sonnet-4` |
 | `--max-tokens`, `-t` | Maximum tokens | `4096` |
 | `--output`, `-o` | Output format | `text` |
+| `--hooks-override-json` | Inline JSON for run-scoped hook overrides | None |
+| `--hooks-override-file` | Path to JSON file for run-scoped hook overrides | None |
+
+## Hook Configuration
+
+Meerkat supports first-class hooks in config and per-run overrides.
+
+### Global and Project Config
+
+Hook entries live under `[hooks]`:
+
+```toml
+[hooks]
+default_timeout_ms = 5000
+payload_max_bytes = 131072
+
+[[hooks.entries]]
+id = "pre_tool_guard"
+enabled = true
+point = "pre_tool_execution"
+mode = "foreground"
+capability = "guardrail"
+priority = 10
+failure_policy = "fail_closed"
+timeout_ms = 800
+
+[hooks.entries.runtime]
+type = "in_process"
+name = "pre_tool_guard"
+```
+
+Supported points:
+- `run_started`
+- `run_completed`
+- `run_failed`
+- `pre_llm_request`
+- `post_llm_response`
+- `pre_tool_execution`
+- `post_tool_execution`
+- `turn_boundary`
+
+Supported runtimes:
+- `in_process`
+- `command`
+- `http`
+
+### Layering and Precedence
+
+Hook entries are merged with deterministic registration order:
+1. global config (`~/.rkat/config.toml`)
+2. project config (`.rkat/config.toml`)
+3. run override entries
+
+Run overrides can also disable configured hooks by id.
+
+### Run Override JSON Schema
+
+All control surfaces accept `HookRunOverrides`:
+
+```json
+{
+  "disable": ["global_observer"],
+  "entries": [
+    {
+      "id": "run_pre_tool_rewrite",
+      "enabled": true,
+      "point": "pre_tool_execution",
+      "mode": "foreground",
+      "capability": "rewrite",
+      "priority": 10,
+      "runtime": {
+        "type": "in_process",
+        "name": "run_pre_tool_rewrite"
+      }
+    }
+  ]
+}
+```
+
+The same payload shape is used by:
+- CLI: `--hooks-override-json` / `--hooks-override-file`
+- REST: `CreateSessionRequest.hooks_override` / `ContinueSessionRequest.hooks_override`
+- MCP server: `MeerkatRunInput.hooks_override` / `MeerkatResumeInput.hooks_override`
 
 ### rkat sessions
 

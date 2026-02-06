@@ -13,6 +13,8 @@ use crate::{
 use schemars::JsonSchema;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -275,7 +277,14 @@ impl Config {
             self.sub_agents = other.sub_agents;
         }
         if other.hooks != HooksConfig::default() {
-            self.hooks = other.hooks;
+            let default_hooks = HooksConfig::default();
+            if other.hooks.default_timeout_ms != default_hooks.default_timeout_ms {
+                self.hooks.default_timeout_ms = other.hooks.default_timeout_ms;
+            }
+            if other.hooks.payload_max_bytes != default_hooks.payload_max_bytes {
+                self.hooks.payload_max_bytes = other.hooks.payload_max_bytes;
+            }
+            self.hooks.entries.extend(other.hooks.entries);
         }
     }
 
@@ -524,8 +533,7 @@ impl Config {
             if let Some(p) = parent_provider {
                 if p == Provider::Other {
                     return Err(ConfigError::Validation(
-                        "Cannot inherit sub-agent provider: parent provider is 'other'"
-                            .to_string(),
+                        "Cannot inherit sub-agent provider: parent provider is 'other'".to_string(),
                     ));
                 }
                 p
@@ -1126,41 +1134,150 @@ impl Default for HookEntryConfig {
             priority: 100,
             failure_policy: None,
             timeout_ms: None,
-            runtime: HookRuntimeConfig::InProcess {
-                name: "noop".to_string(),
-                config: None,
-            },
+            runtime: HookRuntimeConfig::new("in_process", Some(serde_json::json!({"name":"noop"})))
+                .unwrap_or_else(|_| HookRuntimeConfig {
+                    kind: "in_process".to_string(),
+                    config: None,
+                }),
         }
     }
 }
 
-/// Runtime-specific hook payload.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum HookRuntimeConfig {
-    InProcess {
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        config: Option<serde_json::Value>,
-    },
-    Command {
-        command: String,
-        #[serde(default)]
-        args: Vec<String>,
-        #[serde(default)]
-        env: HashMap<String, String>,
-    },
-    Http {
-        url: String,
-        #[serde(default = "default_hook_http_method")]
-        method: String,
-        #[serde(default)]
-        headers: HashMap<String, String>,
-    },
+/// Runtime configuration used by hook adapters.
+///
+/// Core treats this as an opaque payload to avoid adapter-specific coupling.
+#[derive(Debug, Clone)]
+pub struct HookRuntimeConfig {
+    pub kind: String,
+    #[allow(clippy::box_collection)]
+    pub config: Option<Box<RawValue>>,
 }
 
-fn default_hook_http_method() -> String {
-    "POST".to_string()
+impl PartialEq for HookRuntimeConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.config.as_ref().map(|raw| raw.get())
+                == other.config.as_ref().map(|raw| raw.get())
+    }
+}
+
+impl HookRuntimeConfig {
+    pub fn new(kind: impl Into<String>, config: Option<Value>) -> Result<Self, serde_json::Error> {
+        let config = match config {
+            Some(value) => Some(raw_json_from_value(value)?),
+            None => None,
+        };
+        Ok(Self {
+            kind: kind.into(),
+            config,
+        })
+    }
+
+    pub fn config_value(&self) -> Result<Value, serde_json::Error> {
+        match &self.config {
+            Some(raw) => serde_json::from_str(raw.get()),
+            None => Ok(Value::Null),
+        }
+    }
+}
+
+impl Default for HookRuntimeConfig {
+    fn default() -> Self {
+        Self::new("in_process", Some(serde_json::json!({"name":"noop"}))).unwrap_or_else(|_| Self {
+            kind: "in_process".to_string(),
+            config: None,
+        })
+    }
+}
+
+impl Serialize for HookRuntimeConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = Map::new();
+        map.insert("type".to_string(), Value::String(self.kind.clone()));
+
+        if let Some(raw) = &self.config {
+            let parsed: Value =
+                serde_json::from_str(raw.get()).map_err(serde::ser::Error::custom)?;
+            match parsed {
+                Value::Object(obj) => {
+                    for (key, value) in obj {
+                        map.insert(key, value);
+                    }
+                }
+                other => {
+                    map.insert("config".to_string(), other);
+                }
+            }
+        }
+
+        Value::Object(map).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for HookRuntimeConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let mut obj = value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| serde::de::Error::custom("hook runtime must be an object"))?;
+
+        let kind = obj
+            .remove("type")
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .ok_or_else(|| {
+                serde::de::Error::custom("hook runtime missing required field 'type'")
+            })?;
+
+        let config_value = if let Some(explicit) = obj.remove("config") {
+            if obj.is_empty() {
+                explicit
+            } else {
+                obj.insert("config".to_string(), explicit);
+                Value::Object(obj)
+            }
+        } else if obj.is_empty() {
+            Value::Null
+        } else {
+            Value::Object(obj)
+        };
+
+        let config = if config_value.is_null() {
+            None
+        } else {
+            Some(raw_json_from_value(config_value).map_err(serde::de::Error::custom)?)
+        };
+
+        Ok(Self { kind, config })
+    }
+}
+
+impl JsonSchema for HookRuntimeConfig {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "HookRuntimeConfig".into()
+    }
+
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+                "type": { "type": "string" },
+                "config": {}
+            },
+            "additionalProperties": true
+        })
+    }
+}
+
+fn raw_json_from_value(value: Value) -> Result<Box<RawValue>, serde_json::Error> {
+    RawValue::from_string(serde_json::to_string(&value)?)
 }
 
 /// Config scope for persisted settings.
@@ -1573,7 +1690,10 @@ gemini = ["gemini-3-flash-preview"]
 
     #[test]
     fn test_provider_parse_strict() {
-        assert_eq!(Provider::parse_strict("anthropic"), Some(Provider::Anthropic));
+        assert_eq!(
+            Provider::parse_strict("anthropic"),
+            Some(Provider::Anthropic)
+        );
         assert_eq!(Provider::parse_strict("openai"), Some(Provider::OpenAI));
         assert_eq!(Provider::parse_strict("gemini"), Some(Provider::Gemini));
         assert_eq!(Provider::parse_strict("other"), None);

@@ -21,6 +21,20 @@ where
             return Ok(HookExecutionReport::empty());
         };
 
+        if let Some(tx) = event_tx {
+            let planned = hook_engine
+                .matching_hooks(&invocation, Some(&self.hook_run_overrides))
+                .map_err(Self::map_hook_engine_error)?;
+            for hook_id in planned {
+                let _ = tx
+                    .send(AgentEvent::HookStarted {
+                        hook_id: hook_id.to_string(),
+                        point: invocation.point,
+                    })
+                    .await;
+            }
+        }
+
         let report = hook_engine
             .execute(invocation.clone(), Some(&self.hook_run_overrides))
             .await
@@ -28,13 +42,6 @@ where
 
         if let Some(tx) = event_tx {
             for outcome in &report.outcomes {
-                let _ = tx
-                    .send(AgentEvent::HookStarted {
-                        hook_id: outcome.hook_id.to_string(),
-                        point: outcome.point,
-                    })
-                    .await;
-
                 if let Some(error) = &outcome.error {
                     let _ = tx
                         .send(AgentEvent::HookFailed {

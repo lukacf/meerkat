@@ -8,10 +8,7 @@ use serde_json::{Map, Value};
 use std::fmt;
 use uuid::Uuid;
 
-use crate::Provider;
-use crate::schema::{
-    MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
-};
+use crate::schema::{MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning};
 
 // ===========================================================================
 // New ordered transcript types (spec section 3.1)
@@ -477,11 +474,7 @@ pub struct ToolCall {
 impl ToolCall {
     /// Create a new tool call
     pub fn new(id: String, name: String, args: Value) -> Self {
-        Self {
-            id,
-            name,
-            args,
-        }
+        Self { id, name, args }
     }
 }
 
@@ -551,7 +544,7 @@ pub enum SecurityMode {
 }
 
 /// Token usage statistics
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct Usage {
     pub input_tokens: u64,

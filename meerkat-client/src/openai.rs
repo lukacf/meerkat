@@ -3,17 +3,15 @@
 //! Implements the LlmClient trait for OpenAI's Responses API.
 //! This client uses the /v1/responses endpoint which supports reasoning items.
 
+use crate::BlockAssembler;
 use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
-use crate::BlockAssembler;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use meerkat_core::{
-    AssistantBlock, Message, OutputSchema, ProviderMeta, StopReason, Usage,
-};
+use meerkat_core::{AssistantBlock, Message, OutputSchema, ProviderMeta, StopReason, Usage};
 use serde::Deserialize;
-use serde_json::value::RawValue;
 use serde_json::Value;
+use serde_json::value::RawValue;
 use std::pin::Pin;
 
 /// Client for OpenAI Responses API
@@ -26,10 +24,8 @@ pub struct OpenAiClient {
 impl OpenAiClient {
     /// Create a new OpenAI client with the given API key
     pub fn new(api_key: String) -> Self {
-        let http =
-            crate::http::build_http_client(reqwest::Client::builder()).unwrap_or_else(|_| {
-                reqwest::Client::new()
-            });
+        let http = crate::http::build_http_client(reqwest::Client::builder())
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             api_key,
             base_url: "https://api.openai.com".to_string(),
@@ -113,11 +109,9 @@ impl OpenAiClient {
 
             // Handle structured output configuration
             if let Some(structured) = params.get("structured_output") {
-                let output_schema: OutputSchema =
-                    serde_json::from_value(structured.clone()).map_err(|e| {
-                        LlmError::InvalidRequest {
-                            message: format!("Invalid structured_output schema: {e}"),
-                        }
+                let output_schema: OutputSchema = serde_json::from_value(structured.clone())
+                    .map_err(|e| LlmError::InvalidRequest {
+                        message: format!("Invalid structured_output schema: {e}"),
                     })?;
                 let compiled =
                     self.compile_schema(&output_schema)
@@ -192,8 +186,15 @@ impl OpenAiClient {
                                     }));
                                 }
                             }
-                            AssistantBlock::Reasoning { text, meta: Some(meta) } => {
-                                if let ProviderMeta::OpenAi { id, encrypted_content } = meta.as_ref() {
+                            AssistantBlock::Reasoning {
+                                text,
+                                meta: Some(meta),
+                            } => {
+                                if let ProviderMeta::OpenAi {
+                                    id,
+                                    encrypted_content,
+                                } = meta.as_ref()
+                                {
                                     // OpenAI requires id and summary for reasoning items
                                     let mut item = serde_json::json!({
                                         "type": "reasoning",
@@ -651,13 +652,18 @@ mod tests {
 
         // Should have "input" not "messages"
         assert!(body.get("input").is_some(), "should have 'input' field");
-        assert!(body.get("messages").is_none(), "should NOT have 'messages' field");
+        assert!(
+            body.get("messages").is_none(),
+            "should NOT have 'messages' field"
+        );
 
         // Should include reasoning.encrypted_content
         let include = body.get("include").expect("should have include");
         let include_arr = include.as_array().expect("include should be array");
         assert!(
-            include_arr.iter().any(|v| v.as_str() == Some("reasoning.encrypted_content")),
+            include_arr
+                .iter()
+                .any(|v| v.as_str() == Some("reasoning.encrypted_content")),
             "should include reasoning.encrypted_content"
         );
     }
@@ -722,7 +728,9 @@ mod tests {
         assert_eq!(input[1]["call_id"], "call_abc123");
         assert_eq!(input[1]["name"], "get_weather");
         // arguments should be JSON string
-        let args_str = input[1]["arguments"].as_str().expect("arguments should be string");
+        let args_str = input[1]["arguments"]
+            .as_str()
+            .expect("arguments should be string");
         let parsed_args: Value = serde_json::from_str(args_str).expect("should be valid JSON");
         assert_eq!(parsed_args["location"], "Tokyo");
     }
@@ -757,8 +765,8 @@ mod tests {
 
     #[test]
     fn test_tool_definition_format() {
-        use std::sync::Arc;
         use meerkat_core::ToolDef;
+        use std::sync::Arc;
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
@@ -840,12 +848,10 @@ mod tests {
                     content: "Hello".to_string(),
                 }),
                 Message::BlockAssistant(BlockAssistantMessage {
-                    blocks: vec![
-                        AssistantBlock::Text {
-                            text: "Hi there!".to_string(),
-                            meta: None,
-                        },
-                    ],
+                    blocks: vec![AssistantBlock::Text {
+                        text: "Hi there!".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
                 }),
             ],
@@ -871,15 +877,13 @@ mod tests {
                     content: "Hello".to_string(),
                 }),
                 Message::BlockAssistant(BlockAssistantMessage {
-                    blocks: vec![
-                        AssistantBlock::Reasoning {
-                            text: "Let me think about this".to_string(),
-                            meta: Some(Box::new(ProviderMeta::OpenAi {
-                                id: "rs_abc123".to_string(),
-                                encrypted_content: Some("encrypted_data".to_string()),
-                            })),
-                        },
-                    ],
+                    blocks: vec![AssistantBlock::Reasoning {
+                        text: "Let me think about this".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAi {
+                            id: "rs_abc123".to_string(),
+                            encrypted_content: Some("encrypted_data".to_string()),
+                        })),
+                    }],
                     stop_reason: StopReason::EndTurn,
                 }),
             ],
@@ -891,7 +895,9 @@ mod tests {
         assert_eq!(input[1]["type"], "reasoning");
         assert_eq!(input[1]["id"], "rs_abc123");
         assert_eq!(input[1]["encrypted_content"], "encrypted_data");
-        let summary = input[1]["summary"].as_array().expect("summary should be array");
+        let summary = input[1]["summary"]
+            .as_array()
+            .expect("summary should be array");
         assert_eq!(summary[0]["text"], "Let me think about this");
     }
 
@@ -908,14 +914,12 @@ mod tests {
                     content: "Weather?".to_string(),
                 }),
                 Message::BlockAssistant(BlockAssistantMessage {
-                    blocks: vec![
-                        AssistantBlock::ToolUse {
-                            id: "call_xyz".to_string(),
-                            name: "get_weather".to_string(),
-                            args,
-                            meta: None,
-                        },
-                    ],
+                    blocks: vec![AssistantBlock::ToolUse {
+                        id: "call_xyz".to_string(),
+                        name: "get_weather".to_string(),
+                        args,
+                        meta: None,
+                    }],
                     stop_reason: StopReason::ToolUse,
                 }),
             ],
@@ -928,7 +932,9 @@ mod tests {
         assert_eq!(input[1]["call_id"], "call_xyz");
         assert_eq!(input[1]["name"], "get_weather");
         // arguments should be the raw JSON string
-        let args_str = input[1]["arguments"].as_str().expect("arguments should be string");
+        let args_str = input[1]["arguments"]
+            .as_str()
+            .expect("arguments should be string");
         assert_eq!(args_str, r#"{"location":"Tokyo"}"#);
     }
 
@@ -1177,7 +1183,8 @@ mod tests {
 
     #[test]
     fn test_parse_responses_sse_line_reasoning_delta() {
-        let line = r#"data: {"type":"response.reasoning_summary_text.delta","delta":"thinking..."}"#;
+        let line =
+            r#"data: {"type":"response.reasoning_summary_text.delta","delta":"thinking..."}"#;
         let event = OpenAiClient::parse_responses_sse_line(line);
         assert!(event.is_some());
         let event = event.unwrap();
@@ -1325,8 +1332,12 @@ mod tests {
             "status": "completed",
             "output": [{"type": "function_call", "call_id": "1", "name": "x", "arguments": "{}"}]
         });
-        let has_tools = response_tool["output"].as_array()
-            .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
+        let has_tools = response_tool["output"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+            })
             .unwrap_or(false);
         assert!(has_tools);
 
@@ -1335,8 +1346,12 @@ mod tests {
             "status": "completed",
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}]
         });
-        let has_tools = response_text["output"].as_array()
-            .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
+        let has_tools = response_text["output"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+            })
             .unwrap_or(false);
         assert!(!has_tools);
     }

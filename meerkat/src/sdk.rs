@@ -20,15 +20,13 @@ use meerkat_tools::{
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// Resolve layered hooks config (global -> project) and append active config hooks.
-///
-/// The active config hooks are appended last to preserve caller-local overrides.
-pub async fn resolve_layered_hooks_config(start_dir: &Path, active_config: &Config) -> HooksConfig {
+/// Resolve layered hooks config (global -> project) without duplicating project entries.
+pub async fn resolve_layered_hooks_config(
+    start_dir: &Path,
+    _active_config: &Config,
+) -> HooksConfig {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let mut layered: HooksConfig =
-        (Config::load_layered_hooks_from(start_dir, home.as_deref()).await).unwrap_or_default();
-    layered.append_entries_from(&active_config.hooks);
-    layered
+    (Config::load_layered_hooks_from(start_dir, home.as_deref()).await).unwrap_or_default()
 }
 
 /// Build a default hook engine when at least one hook is configured.
@@ -426,10 +424,11 @@ mod tests {
                 point: HookPoint::TurnBoundary,
                 mode: HookExecutionMode::Foreground,
                 capability: HookCapability::Observe,
-                runtime: HookRuntimeConfig::InProcess {
-                    name: "sdk_hook".to_string(),
-                    config: None,
-                },
+                runtime: HookRuntimeConfig::new(
+                    "in_process",
+                    Some(serde_json::json!({"name":"sdk_hook"})),
+                )
+                .unwrap_or_default(),
                 ..Default::default()
             }],
             ..Default::default()

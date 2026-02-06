@@ -153,30 +153,32 @@ where
                         });
                     }
 
-                    for patch in pre_llm_report.patches {
-                        if let HookPatch::LlmRequest {
-                            max_tokens,
-                            temperature,
-                            provider_params,
-                        } = patch
-                        {
-                            emit_event!(AgentEvent::HookRewriteApplied {
-                                hook_id: "runtime".to_string(),
-                                point: HookPoint::PreLlmRequest,
-                                patch: HookPatch::LlmRequest {
-                                    max_tokens,
-                                    temperature,
-                                    provider_params: provider_params.clone(),
-                                },
-                            });
-                            if let Some(value) = max_tokens {
-                                effective_max_tokens = value;
-                            }
-                            if temperature.is_some() {
-                                effective_temperature = temperature;
-                            }
-                            if provider_params.is_some() {
-                                effective_provider_params = provider_params;
+                    for outcome in &pre_llm_report.outcomes {
+                        for patch in &outcome.patches {
+                            if let HookPatch::LlmRequest {
+                                max_tokens,
+                                temperature,
+                                provider_params,
+                            } = patch
+                            {
+                                emit_event!(AgentEvent::HookRewriteApplied {
+                                    hook_id: outcome.hook_id.to_string(),
+                                    point: HookPoint::PreLlmRequest,
+                                    patch: HookPatch::LlmRequest {
+                                        max_tokens: *max_tokens,
+                                        temperature: *temperature,
+                                        provider_params: provider_params.clone(),
+                                    },
+                                });
+                                if let Some(value) = max_tokens {
+                                    effective_max_tokens = *value;
+                                }
+                                if temperature.is_some() {
+                                    effective_temperature = *temperature;
+                                }
+                                if provider_params.is_some() {
+                                    effective_provider_params = provider_params.clone();
+                                }
                             }
                         }
                     }
@@ -219,6 +221,12 @@ where
                                 llm_request: None,
                                 llm_response: Some(HookLlmResponse {
                                     assistant_text: assistant_text.clone(),
+                                    tool_call_names: assistant_msg
+                                        .tool_calls()
+                                        .map(|call| call.name.to_string())
+                                        .collect(),
+                                    stop_reason: Some(stop_reason),
+                                    usage: Some(usage.clone()),
                                 }),
                                 tool_call: None,
                                 tool_result: None,
@@ -242,15 +250,17 @@ where
                         });
                     }
 
-                    for patch in post_llm_report.patches {
-                        if let HookPatch::AssistantText { text } = patch {
-                            emit_event!(AgentEvent::HookRewriteApplied {
-                                hook_id: "runtime".to_string(),
-                                point: HookPoint::PostLlmResponse,
-                                patch: HookPatch::AssistantText { text: text.clone() },
-                            });
-                            rewrite_assistant_text(&mut assistant_msg.blocks, text);
-                            assistant_text = assistant_msg.to_string();
+                    for outcome in &post_llm_report.outcomes {
+                        for patch in &outcome.patches {
+                            if let HookPatch::AssistantText { text } = patch {
+                                emit_event!(AgentEvent::HookRewriteApplied {
+                                    hook_id: outcome.hook_id.to_string(),
+                                    point: HookPoint::PostLlmResponse,
+                                    patch: HookPatch::AssistantText { text: text.clone() },
+                                });
+                                rewrite_assistant_text(&mut assistant_msg.blocks, text.clone());
+                                assistant_text = assistant_msg.to_string();
+                            }
                         }
                     }
 
@@ -330,7 +340,6 @@ where
                                     tool_use_id: tc.id.clone(),
                                     content: denied_content,
                                     is_error: true,
-                                    thought_signature: None,
                                 });
                                 emit_event!(AgentEvent::ToolExecutionCompleted {
                                     id: tc.id.clone(),
@@ -352,14 +361,16 @@ where
                                 continue;
                             }
 
-                            for patch in pre_tool_report.patches {
-                                if let HookPatch::ToolArgs { args } = patch {
-                                    emit_event!(AgentEvent::HookRewriteApplied {
-                                        hook_id: "runtime".to_string(),
-                                        point: HookPoint::PreToolExecution,
-                                        patch: HookPatch::ToolArgs { args: args.clone() },
-                                    });
-                                    tc.set_args(args);
+                            for outcome in &pre_tool_report.outcomes {
+                                for patch in &outcome.patches {
+                                    if let HookPatch::ToolArgs { args } = patch {
+                                        emit_event!(AgentEvent::HookRewriteApplied {
+                                            hook_id: outcome.hook_id.to_string(),
+                                            point: HookPoint::PreToolExecution,
+                                            patch: HookPatch::ToolArgs { args: args.clone() },
+                                        });
+                                        tc.set_args(args.clone());
+                                    }
                                 }
                             }
 
@@ -468,19 +479,21 @@ where
                                 tool_result.is_error = true;
                             }
 
-                            for patch in post_tool_report.patches {
-                                if let HookPatch::ToolResult { content, is_error } = patch {
-                                    emit_event!(AgentEvent::HookRewriteApplied {
-                                        hook_id: "runtime".to_string(),
-                                        point: HookPoint::PostToolExecution,
-                                        patch: HookPatch::ToolResult {
-                                            content: content.clone(),
-                                            is_error,
-                                        },
-                                    });
-                                    tool_result.content = content;
-                                    if let Some(value) = is_error {
-                                        tool_result.is_error = value;
+                            for outcome in &post_tool_report.outcomes {
+                                for patch in &outcome.patches {
+                                    if let HookPatch::ToolResult { content, is_error } = patch {
+                                        emit_event!(AgentEvent::HookRewriteApplied {
+                                            hook_id: outcome.hook_id.to_string(),
+                                            point: HookPoint::PostToolExecution,
+                                            patch: HookPatch::ToolResult {
+                                                content: content.clone(),
+                                                is_error: *is_error,
+                                            },
+                                        });
+                                        tool_result.content = content.clone();
+                                        if let Some(value) = is_error {
+                                            tool_result.is_error = *value;
+                                        }
                                     }
                                 }
                             }

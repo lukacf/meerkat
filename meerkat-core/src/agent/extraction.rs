@@ -3,7 +3,6 @@
 //! When `output_schema` is configured, the agent performs an extraction turn
 //! after the agentic loop completes to force validated JSON output.
 
-use crate::Provider;
 use crate::error::AgentError;
 use crate::types::{BlockAssistantMessage, Message, RunResult, UserMessage};
 use jsonschema::Validator;
@@ -32,7 +31,8 @@ where
             AgentError::InternalError("perform_extraction_turn called without output_schema".into())
         })?;
 
-        let compiled = self.client
+        let compiled = self
+            .client
             .compile_schema(output_schema)
             .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
 

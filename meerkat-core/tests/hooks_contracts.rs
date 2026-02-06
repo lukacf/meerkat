@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default)]
+
 use meerkat_core::{
     AgentEvent, Config, HookCapability, HookDecision, HookEntryConfig, HookExecutionMode, HookId,
     HookInvocation, HookLlmRequest, HookOutcome, HookPatch, HookPoint, HookReasonCode,
@@ -17,10 +19,10 @@ fn hooks_config_roundtrip_contract() -> Result<(), Box<dyn std::error::Error>> {
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Guardrail,
             priority: 5,
-            runtime: HookRuntimeConfig::InProcess {
-                name: "guard_pre_tool".to_string(),
-                config: Some(json!({"mode": "strict"})),
-            },
+            runtime: HookRuntimeConfig::new(
+                "in_process",
+                Some(json!({"name": "guard_pre_tool", "config": {"mode": "strict"}})),
+            )?,
             ..Default::default()
         }],
     };
@@ -161,10 +163,7 @@ fn run_override_schema_roundtrip_contract() -> Result<(), Box<dyn std::error::Er
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Rewrite,
             priority: 1,
-            runtime: HookRuntimeConfig::InProcess {
-                name: "run_patch".to_string(),
-                config: None,
-            },
+            runtime: HookRuntimeConfig::new("in_process", Some(json!({"name": "run_patch"})))?,
             ..Default::default()
         }],
         disable: vec![HookId::new("global-hook")],

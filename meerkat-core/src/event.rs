@@ -13,6 +13,7 @@ use std::path::PathBuf;
 /// These events form the streaming API for consumers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AgentEvent {
     // === Session Lifecycle ===
     /// Agent run started

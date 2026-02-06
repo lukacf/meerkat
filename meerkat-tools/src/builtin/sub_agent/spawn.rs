@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-
 /// Tool access policy for spawned agents
 #[derive(Debug, JsonSchema)]
 #[serde(tag = "policy", rename_all = "snake_case")]
@@ -175,8 +174,7 @@ impl AgentSpawnTool {
 
     fn resolve_provider(&self, provider_str: Option<&str>) -> Result<LlmProvider, SubAgentError> {
         if let Some(name) = provider_str {
-            return LlmProvider::parse(name)
-                .ok_or_else(|| SubAgentError::invalid_provider(name));
+            return LlmProvider::parse(name).ok_or_else(|| SubAgentError::invalid_provider(name));
         }
         // Use resolved policy if available
         if let Some(ref policy) = self.state.config.resolved_policy {
@@ -184,9 +182,7 @@ impl AgentSpawnTool {
                 meerkat_core::Provider::Anthropic => Ok(LlmProvider::Anthropic),
                 meerkat_core::Provider::OpenAI => Ok(LlmProvider::OpenAi),
                 meerkat_core::Provider::Gemini => Ok(LlmProvider::Gemini),
-                meerkat_core::Provider::Other => {
-                    Err(SubAgentError::invalid_provider("other"))
-                }
+                meerkat_core::Provider::Other => Err(SubAgentError::invalid_provider("other")),
             };
         }
         let provider_name = &self.state.config.default_provider;

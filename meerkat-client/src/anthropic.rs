@@ -77,11 +77,11 @@ impl AnthropicClientBuilder {
     pub fn build(self) -> Result<AnthropicClient, LlmError> {
         let http = crate::http::build_http_client(
             reqwest::Client::builder()
-            .connect_timeout(self.connect_timeout)
-            .timeout(self.request_timeout)
-            .pool_idle_timeout(self.pool_idle_timeout)
-            .pool_max_idle_per_host(4)
-            .tcp_keepalive(Duration::from_secs(30))
+                .connect_timeout(self.connect_timeout)
+                .timeout(self.request_timeout)
+                .pool_idle_timeout(self.pool_idle_timeout)
+                .pool_max_idle_per_host(4)
+                .tcp_keepalive(Duration::from_secs(30)),
         )?;
 
         Ok(AnthropicClient {
@@ -183,14 +183,18 @@ impl AnthropicClient {
                                             "signature": signature
                                         }));
                                     }
-                                    Some(meerkat_core::ProviderMeta::AnthropicRedacted { data }) => {
+                                    Some(meerkat_core::ProviderMeta::AnthropicRedacted {
+                                        data,
+                                    }) => {
                                         // Redacted thinking — pass encrypted data verbatim
                                         content.push(serde_json::json!({
                                             "type": "redacted_thinking",
                                             "data": data
                                         }));
                                     }
-                                    Some(meerkat_core::ProviderMeta::AnthropicCompaction { content: summary }) => {
+                                    Some(meerkat_core::ProviderMeta::AnthropicCompaction {
+                                        content: summary,
+                                    }) => {
                                         // Compaction summary — replaces prior context
                                         content.push(serde_json::json!({
                                             "type": "compaction",
@@ -198,7 +202,9 @@ impl AnthropicClient {
                                         }));
                                     }
                                     _ => {
-                                        tracing::warn!("thinking block missing Anthropic signature, skipping");
+                                        tracing::warn!(
+                                            "thinking block missing Anthropic signature, skipping"
+                                        );
                                         continue;
                                     }
                                 }
@@ -327,11 +333,9 @@ impl AnthropicClient {
             // Handle structured output configuration
             // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
             if let Some(structured) = params.get("structured_output") {
-                let output_schema: OutputSchema =
-                    serde_json::from_value(structured.clone()).map_err(|e| {
-                        LlmError::InvalidRequest {
-                            message: format!("Invalid structured_output schema: {e}"),
-                        }
+                let output_schema: OutputSchema = serde_json::from_value(structured.clone())
+                    .map_err(|e| LlmError::InvalidRequest {
+                        message: format!("Invalid structured_output schema: {e}"),
                     })?;
                 let compiled =
                     self.compile_schema(&output_schema)
@@ -884,7 +888,8 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_build_request_body_renders_thinking_block_with_signature() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_request_body_renders_thinking_block_with_signature()
+    -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         // Create a session with a thinking block
@@ -926,7 +931,10 @@ mod tests {
 
         // First block should be thinking
         assert_eq!(assistant_content[0]["type"], "thinking");
-        assert_eq!(assistant_content[0]["thinking"], "Let me analyze this problem...");
+        assert_eq!(
+            assistant_content[0]["thinking"],
+            "Let me analyze this problem..."
+        );
         assert_eq!(assistant_content[0]["signature"], "sig_abc123");
 
         // Second block should be text
@@ -937,7 +945,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_body_skips_thinking_block_without_signature() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_request_body_skips_thinking_block_without_signature()
+    -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         // Thinking block without Anthropic signature should be skipped
@@ -990,8 +999,9 @@ mod tests {
                     id: "tu_123".to_string(),
                     name: "read_file".to_string(),
                     args: serde_json::value::RawValue::from_string(
-                        r#"{"path": "/tmp/test.txt"}"#.to_string()
-                    ).unwrap(),
+                        r#"{"path": "/tmp/test.txt"}"#.to_string(),
+                    )
+                    .unwrap(),
                     meta: None, // Tool use blocks don't have signatures in Anthropic
                 },
             ],
@@ -1023,7 +1033,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_body_adds_thinking_beta_header() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_request_body_adds_thinking_beta_header() -> Result<(), Box<dyn std::error::Error>>
+    {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         // When thinking is enabled via provider_params, beta header should be added
@@ -1329,7 +1340,10 @@ mod tests {
 
         let body = client.build_request_body(&request)?;
 
-        assert!(body.get("thinking").is_some(), "thinking field should be present");
+        assert!(
+            body.get("thinking").is_some(),
+            "thinking field should be present"
+        );
         assert_eq!(body["thinking"]["type"], "adaptive");
         // adaptive mode should NOT have budget_tokens
         assert!(body["thinking"].get("budget_tokens").is_none());
@@ -1350,13 +1364,17 @@ mod tests {
 
         let body = client.build_request_body(&request)?;
 
-        assert!(body.get("output_config").is_some(), "output_config should be present");
+        assert!(
+            body.get("output_config").is_some(),
+            "output_config should be present"
+        );
         assert_eq!(body["output_config"]["effort"], "medium");
         Ok(())
     }
 
     #[test]
-    fn test_build_request_body_effort_with_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_request_body_effort_with_structured_output()
+    -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         let schema = serde_json::json!({
@@ -1393,7 +1411,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_body_adaptive_thinking_does_not_set_interleaved_beta() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_request_body_adaptive_thinking_does_not_set_interleaved_beta()
+    -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         let request = LlmRequest::new(
@@ -1408,13 +1427,16 @@ mod tests {
 
         // Adaptive thinking should be in the body
         assert_eq!(body["thinking"]["type"], "adaptive");
-        assert!(body["thinking"].get("budget_tokens").is_none(),
-            "adaptive thinking should not have budget_tokens");
+        assert!(
+            body["thinking"].get("budget_tokens").is_none(),
+            "adaptive thinking should not have budget_tokens"
+        );
         Ok(())
     }
 
     #[test]
-    fn test_build_request_body_legacy_thinking_still_works() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_request_body_legacy_thinking_still_works()
+    -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         // Legacy flat format should still produce type: enabled
@@ -1496,7 +1518,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_body_redacted_thinking_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_request_body_redacted_thinking_roundtrip()
+    -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         // Redacted thinking is stored as Reasoning with AnthropicRedacted meta
@@ -1540,7 +1563,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_body_compaction_block_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_request_body_compaction_block_roundtrip() -> Result<(), Box<dyn std::error::Error>>
+    {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         // Compaction is stored as Reasoning with AnthropicCompaction meta
@@ -1576,7 +1600,10 @@ mod tests {
 
         // First block should be compaction with summary
         assert_eq!(assistant_content[0]["type"], "compaction");
-        assert_eq!(assistant_content[0]["content"], "Summary of prior conversation...");
+        assert_eq!(
+            assistant_content[0]["content"],
+            "Summary of prior conversation..."
+        );
 
         // Second block should be text
         assert_eq!(assistant_content[1]["type"], "text");

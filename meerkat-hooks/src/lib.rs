@@ -5,18 +5,18 @@ use futures::future::join_all;
 use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookOutcome, HookPatch,
-    HookPatchEnvelope, HookReasonCode, HookRevision, HookRunOverrides, HookRuntimeConfig,
-    HooksConfig,
+    HookPatchEnvelope, HookReasonCode, HookRevision, HookRunOverrides, HooksConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{Duration, timeout};
 
 /// Response returned by runtime adapters.
@@ -29,6 +29,33 @@ pub struct RuntimeHookResponse {
     pub patches: Vec<HookPatch>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct InProcessRuntimeConfig {
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CommandRuntimeConfig {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HttpRuntimeConfig {
+    url: String,
+    #[serde(default = "default_http_method")]
+    method: String,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+}
+
+fn default_http_method() -> String {
+    "POST".to_string()
+}
+
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<RuntimeHookResponse, String>> + Send>>;
 
 pub type InProcessHookHandler = Arc<dyn Fn(HookInvocation) -> HandlerFuture + Send + Sync>;
@@ -37,17 +64,31 @@ pub type InProcessHookHandler = Arc<dyn Fn(HookInvocation) -> HandlerFuture + Se
 #[derive(Clone)]
 pub struct DefaultHookEngine {
     config: HooksConfig,
-    http_client: reqwest::Client,
-    in_process_handlers: Arc<RwLock<HashMap<String, InProcessHookHandler>>>,
+    base_entries: Arc<Vec<HookEntryConfig>>,
+    base_validation_error: Option<String>,
+    http_client: Arc<OnceLock<reqwest::Client>>,
+    in_process_handlers: Arc<std::sync::RwLock<HashMap<String, InProcessHookHandler>>>,
+    published_patches: Arc<Mutex<Vec<HookPatchEnvelope>>>,
+    background_slots: Arc<Semaphore>,
     revision: Arc<AtomicU64>,
 }
 
 impl DefaultHookEngine {
     pub fn new(config: HooksConfig) -> Self {
+        let base_validation_error = config
+            .entries
+            .iter()
+            .find_map(|entry| Self::validate_entry(entry).err())
+            .map(|err| err.to_string());
+
         Self {
+            base_entries: Arc::new(config.entries.clone()),
             config,
-            http_client: reqwest::Client::new(),
-            in_process_handlers: Arc::new(RwLock::new(HashMap::new())),
+            base_validation_error,
+            http_client: Arc::new(OnceLock::new()),
+            in_process_handlers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            published_patches: Arc::new(Mutex::new(Vec::new())),
+            background_slots: Arc::new(Semaphore::new(32)),
             revision: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -59,8 +100,13 @@ impl DefaultHookEngine {
     ) -> Self {
         let next = self;
         let name = name.into();
-        if let Ok(mut map) = next.in_process_handlers.try_write() {
-            map.insert(name, handler);
+        match next.in_process_handlers.write() {
+            Ok(mut map) => {
+                map.insert(name, handler);
+            }
+            Err(err) => {
+                tracing::warn!("failed to register in-process hook handler: {}", err);
+            }
         }
         next
     }
@@ -70,34 +116,61 @@ impl DefaultHookEngine {
         name: impl Into<String>,
         handler: InProcessHookHandler,
     ) {
-        self.in_process_handlers
-            .write()
-            .await
-            .insert(name.into(), handler);
+        match self.in_process_handlers.write() {
+            Ok(mut map) => {
+                map.insert(name.into(), handler);
+            }
+            Err(err) => {
+                tracing::warn!("failed to register in-process hook handler: {}", err);
+            }
+        }
     }
 
     fn next_revision(&self) -> HookRevision {
         HookRevision(self.revision.fetch_add(1, Ordering::Relaxed))
     }
 
-    fn effective_entries(
-        &self,
-        overrides: Option<&HookRunOverrides>,
-    ) -> Result<Vec<HookEntryConfig>, HookEngineError> {
-        let mut entries = self.config.entries.clone();
+    fn effective_entries<'a>(
+        &'a self,
+        overrides: Option<&'a HookRunOverrides>,
+    ) -> Result<std::borrow::Cow<'a, [HookEntryConfig]>, HookEngineError> {
+        if let Some(reason) = &self.base_validation_error {
+            return Err(HookEngineError::InvalidConfiguration(reason.clone()));
+        }
+
         if let Some(overrides) = overrides {
+            if overrides.disable.is_empty() && overrides.entries.is_empty() {
+                return Ok(std::borrow::Cow::Borrowed(self.base_entries.as_slice()));
+            }
+
+            let mut entries = self.base_entries.as_ref().clone();
             if !overrides.disable.is_empty() {
                 let disabled: HashSet<HookId> = overrides.disable.iter().cloned().collect();
                 entries.retain(|entry| !disabled.contains(&entry.id));
             }
             entries.extend(overrides.entries.clone());
+
+            for entry in &entries {
+                Self::validate_entry(entry)?;
+            }
+
+            return Ok(std::borrow::Cow::Owned(entries));
         }
 
-        for entry in &entries {
-            Self::validate_entry(entry)?;
-        }
+        Ok(std::borrow::Cow::Borrowed(self.base_entries.as_slice()))
+    }
 
-        Ok(entries)
+    async fn drain_published_patches(&self) -> Vec<HookPatchEnvelope> {
+        let mut guard = self.published_patches.lock().await;
+        std::mem::take(&mut *guard)
+    }
+
+    async fn publish_patches(&self, patches: Vec<HookPatchEnvelope>) {
+        if patches.is_empty() {
+            return;
+        }
+        let mut guard = self.published_patches.lock().await;
+        guard.extend(patches);
     }
 
     fn validate_entry(entry: &HookEntryConfig) -> Result<(), HookEngineError> {
@@ -224,14 +297,38 @@ impl DefaultHookEngine {
         entry: &HookEntryConfig,
         invocation: HookInvocation,
     ) -> Result<RuntimeHookResponse, HookEngineError> {
-        match &entry.runtime {
-            HookRuntimeConfig::InProcess { name, .. } => {
-                let handlers = self.in_process_handlers.read().await;
-                let Some(handler) = handlers.get(name) else {
-                    return Err(HookEngineError::ExecutionFailed {
-                        hook_id: entry.id.clone(),
-                        reason: format!("in-process handler '{}' not registered", name),
-                    });
+        let runtime_kind = entry.runtime.kind.as_str();
+        let runtime_config =
+            entry
+                .runtime
+                .config_value()
+                .map_err(|err| HookEngineError::ExecutionFailed {
+                    hook_id: entry.id.clone(),
+                    reason: format!("invalid runtime config payload: {}", err),
+                })?;
+
+        match runtime_kind {
+            "in_process" => {
+                let cfg: InProcessRuntimeConfig =
+                    serde_json::from_value(runtime_config).map_err(|err| {
+                        HookEngineError::ExecutionFailed {
+                            hook_id: entry.id.clone(),
+                            reason: format!("invalid in_process runtime config: {}", err),
+                        }
+                    })?;
+                let handler = {
+                    let handlers = self.in_process_handlers.read().map_err(|err| {
+                        HookEngineError::ExecutionFailed {
+                            hook_id: entry.id.clone(),
+                            reason: format!("in-process handler lock poisoned: {}", err),
+                        }
+                    })?;
+                    handlers.get(&cfg.name).cloned().ok_or_else(|| {
+                        HookEngineError::ExecutionFailed {
+                            hook_id: entry.id.clone(),
+                            reason: format!("in-process handler '{}' not registered", cfg.name),
+                        }
+                    })?
                 };
                 (handler)(invocation)
                     .await
@@ -240,18 +337,32 @@ impl DefaultHookEngine {
                         reason,
                     })
             }
-            HookRuntimeConfig::Command { command, args, env } => {
-                self.invoke_command_runtime(entry, command, args, env, invocation)
+            "command" => {
+                let cfg: CommandRuntimeConfig =
+                    serde_json::from_value(runtime_config).map_err(|err| {
+                        HookEngineError::ExecutionFailed {
+                            hook_id: entry.id.clone(),
+                            reason: format!("invalid command runtime config: {}", err),
+                        }
+                    })?;
+                self.invoke_command_runtime(entry, &cfg.command, &cfg.args, &cfg.env, invocation)
                     .await
             }
-            HookRuntimeConfig::Http {
-                url,
-                method,
-                headers,
-            } => {
-                self.invoke_http_runtime(entry, url, method, headers, invocation)
+            "http" => {
+                let cfg: HttpRuntimeConfig =
+                    serde_json::from_value(runtime_config).map_err(|err| {
+                        HookEngineError::ExecutionFailed {
+                            hook_id: entry.id.clone(),
+                            reason: format!("invalid http runtime config: {}", err),
+                        }
+                    })?;
+                self.invoke_http_runtime(entry, &cfg.url, &cfg.method, &cfg.headers, invocation)
                     .await
             }
+            other => Err(HookEngineError::ExecutionFailed {
+                hook_id: entry.id.clone(),
+                reason: format!("unsupported hook runtime '{}'", other),
+            }),
         }
     }
 
@@ -359,8 +470,8 @@ impl DefaultHookEngine {
             }
         })?;
 
-        let mut req = self
-            .http_client
+        let http_client = self.http_client.get_or_init(reqwest::Client::new);
+        let mut req = http_client
             .request(method, url)
             .header("content-type", "application/json")
             .body(payload);
@@ -397,6 +508,19 @@ impl DefaultHookEngine {
 
 #[async_trait::async_trait]
 impl HookEngine for DefaultHookEngine {
+    fn matching_hooks(
+        &self,
+        invocation: &HookInvocation,
+        overrides: Option<&HookRunOverrides>,
+    ) -> Result<Vec<HookId>, HookEngineError> {
+        let entries = self.effective_entries(overrides)?;
+        Ok(entries
+            .iter()
+            .filter(|entry| entry.enabled && entry.point == invocation.point)
+            .map(|entry| entry.id.clone())
+            .collect())
+    }
+
     async fn execute(
         &self,
         invocation: HookInvocation,
@@ -404,17 +528,50 @@ impl HookEngine for DefaultHookEngine {
     ) -> Result<HookExecutionReport, HookEngineError> {
         let entries = self
             .effective_entries(overrides)?
-            .into_iter()
+            .iter()
             .filter(|entry| entry.enabled && entry.point == invocation.point)
+            .cloned()
             .collect::<Vec<_>>();
 
         if entries.is_empty() {
-            return Ok(HookExecutionReport::empty());
+            let mut report = HookExecutionReport::empty();
+            report.published_patches = self.drain_published_patches().await;
+            return Ok(report);
         }
 
-        let futures = entries
+        let mut foreground = Vec::new();
+        let mut background = Vec::new();
+        for (registration_index, entry) in entries.into_iter().enumerate() {
+            if entry.mode == HookExecutionMode::Background {
+                background.push((registration_index, entry));
+            } else {
+                foreground.push((registration_index, entry));
+            }
+        }
+
+        for (registration_index, entry) in background {
+            let permit = match self.background_slots.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::warn!("background hook queue full, skipping {}", entry.id);
+                    continue;
+                }
+            };
+            let engine = self.clone();
+            let invocation_cloned = invocation.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let outcome = engine
+                    .execute_one(entry, registration_index, invocation_cloned)
+                    .await;
+                if !outcome.published_patches.is_empty() {
+                    engine.publish_patches(outcome.published_patches).await;
+                }
+            });
+        }
+
+        let futures = foreground
             .into_iter()
-            .enumerate()
             .map(|(registration_index, entry)| {
                 self.execute_one(entry, registration_index, invocation.clone())
             })
@@ -434,21 +591,25 @@ impl HookEngine for DefaultHookEngine {
                 merged.decision = Some(decision);
             }
             merged.patches.extend(outcome.patches.clone());
-            merged
-                .published_patches
-                .extend(outcome.published_patches.clone());
             merged.outcomes.push(outcome);
         }
+        merged.published_patches = self.drain_published_patches().await;
 
         Ok(merged)
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::expect_used,
+    clippy::field_reassign_with_default,
+    clippy::unwrap_used
+)]
 mod tests {
     use super::*;
-    use meerkat_core::{HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode, SessionId};
+    use meerkat_core::{
+        HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode, HookRuntimeConfig, SessionId,
+    };
 
     fn static_handler(response: RuntimeHookResponse) -> InProcessHookHandler {
         Arc::new(move |_invocation| {
@@ -467,6 +628,11 @@ mod tests {
         })
     }
 
+    fn runtime_in_process(name: &str) -> HookRuntimeConfig {
+        HookRuntimeConfig::new("in_process", Some(serde_json::json!({"name": name})))
+            .unwrap_or_default()
+    }
+
     #[tokio::test]
     async fn deterministic_merge_by_priority_then_registration() {
         let mut config = HooksConfig::default();
@@ -475,10 +641,7 @@ mod tests {
                 id: HookId::new("hook-a"),
                 point: HookPoint::PreLlmRequest,
                 priority: 10,
-                runtime: HookRuntimeConfig::InProcess {
-                    name: "a".to_string(),
-                    config: None,
-                },
+                runtime: runtime_in_process("a"),
                 capability: HookCapability::Rewrite,
                 ..Default::default()
             },
@@ -486,10 +649,7 @@ mod tests {
                 id: HookId::new("hook-b"),
                 point: HookPoint::PreLlmRequest,
                 priority: 5,
-                runtime: HookRuntimeConfig::InProcess {
-                    name: "b".to_string(),
-                    config: None,
-                },
+                runtime: runtime_in_process("b"),
                 capability: HookCapability::Rewrite,
                 ..Default::default()
             },
@@ -564,10 +724,7 @@ mod tests {
             point: HookPoint::PreToolExecution,
             mode: HookExecutionMode::Background,
             capability: HookCapability::Observe,
-            runtime: HookRuntimeConfig::InProcess {
-                name: "pre-bg".to_string(),
-                config: None,
-            },
+            runtime: runtime_in_process("pre-bg"),
             ..Default::default()
         }];
 
@@ -613,10 +770,7 @@ mod tests {
             point: HookPoint::PostToolExecution,
             mode: HookExecutionMode::Background,
             capability: HookCapability::Observe,
-            runtime: HookRuntimeConfig::InProcess {
-                name: "post-bg".to_string(),
-                config: None,
-            },
+            runtime: runtime_in_process("post-bg"),
             ..Default::default()
         }];
 
@@ -634,7 +788,7 @@ mod tests {
             )
             .await;
 
-        let report = engine
+        let first = engine
             .execute(
                 HookInvocation {
                     point: HookPoint::PostToolExecution,
@@ -652,8 +806,33 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(report.patches.is_empty());
-        assert_eq!(report.published_patches.len(), 1);
+        assert!(first.patches.is_empty());
+        let mut published = first.published_patches;
+        for _ in 0..20 {
+            if !published.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let follow_up = engine
+                .execute(
+                    HookInvocation {
+                        point: HookPoint::TurnBoundary,
+                        session_id: SessionId::new(),
+                        turn_number: Some(1),
+                        prompt: None,
+                        error: None,
+                        llm_request: None,
+                        llm_response: None,
+                        tool_call: None,
+                        tool_result: None,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            published.extend(follow_up.published_patches);
+        }
+        assert_eq!(published.len(), 1);
     }
 
     #[tokio::test]
@@ -664,10 +843,7 @@ mod tests {
                 id: HookId::new("slow-low-priority"),
                 point: HookPoint::PreLlmRequest,
                 priority: 100,
-                runtime: HookRuntimeConfig::InProcess {
-                    name: "slow".to_string(),
-                    config: None,
-                },
+                runtime: runtime_in_process("slow"),
                 capability: HookCapability::Rewrite,
                 ..Default::default()
             },
@@ -675,10 +851,7 @@ mod tests {
                 id: HookId::new("fast-high-priority"),
                 point: HookPoint::PreLlmRequest,
                 priority: 1,
-                runtime: HookRuntimeConfig::InProcess {
-                    name: "fast".to_string(),
-                    config: None,
-                },
+                runtime: runtime_in_process("fast"),
                 capability: HookCapability::Rewrite,
                 ..Default::default()
             },
@@ -759,10 +932,7 @@ mod tests {
             id: HookId::new("observe-missing-handler"),
             point: HookPoint::PreToolExecution,
             capability: HookCapability::Observe,
-            runtime: HookRuntimeConfig::InProcess {
-                name: "missing".to_string(),
-                config: None,
-            },
+            runtime: runtime_in_process("missing"),
             ..Default::default()
         }];
 
@@ -797,10 +967,7 @@ mod tests {
             id: HookId::new("rewrite-missing-handler"),
             point: HookPoint::PreToolExecution,
             capability: HookCapability::Rewrite,
-            runtime: HookRuntimeConfig::InProcess {
-                name: "missing".to_string(),
-                config: None,
-            },
+            runtime: runtime_in_process("missing"),
             ..Default::default()
         }];
 
@@ -840,10 +1007,7 @@ mod tests {
             point: HookPoint::PreToolExecution,
             capability: HookCapability::Rewrite,
             failure_policy: Some(HookFailurePolicy::FailOpen),
-            runtime: HookRuntimeConfig::InProcess {
-                name: "missing".to_string(),
-                config: None,
-            },
+            runtime: runtime_in_process("missing"),
             ..Default::default()
         }];
 
@@ -880,10 +1044,7 @@ mod tests {
             mode: HookExecutionMode::Background,
             capability: HookCapability::Observe,
             failure_policy: Some(HookFailurePolicy::FailClosed),
-            runtime: HookRuntimeConfig::InProcess {
-                name: "bg".to_string(),
-                config: None,
-            },
+            runtime: runtime_in_process("bg"),
             ..Default::default()
         }];
 
@@ -907,5 +1068,113 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, HookEngineError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn command_runtime_hook_executes() {
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("command-hook"),
+            point: HookPoint::PreToolExecution,
+            runtime: HookRuntimeConfig::new(
+                "command",
+                Some(serde_json::json!({
+                    "command": "sh",
+                    "args": ["-c", "cat >/dev/null; printf '{\"patches\":[]}'"],
+                    "env": {}
+                })),
+            )
+            .unwrap_or_default(),
+            ..Default::default()
+        }];
+
+        let engine = DefaultHookEngine::new(config);
+        let report = engine
+            .execute(
+                HookInvocation {
+                    point: HookPoint::PreToolExecution,
+                    session_id: SessionId::new(),
+                    turn_number: Some(1),
+                    prompt: None,
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.outcomes.len(), 1);
+        assert!(
+            report.outcomes[0].error.is_none(),
+            "command runtime error: {:?}",
+            report.outcomes[0].error
+        );
+    }
+
+    #[tokio::test]
+    async fn http_runtime_hook_executes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0_u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let body = r#"{"patches":[]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("http-hook"),
+            point: HookPoint::PreToolExecution,
+            runtime: HookRuntimeConfig::new(
+                "http",
+                Some(serde_json::json!({
+                    "url": format!("http://{}/hook", addr),
+                    "method": "POST",
+                    "headers": {}
+                })),
+            )
+            .unwrap_or_default(),
+            ..Default::default()
+        }];
+
+        let engine = DefaultHookEngine::new(config);
+        let report = engine
+            .execute(
+                HookInvocation {
+                    point: HookPoint::PreToolExecution,
+                    session_id: SessionId::new(),
+                    turn_number: Some(1),
+                    prompt: None,
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.outcomes.len(), 1);
+        assert!(
+            report.outcomes[0].error.is_none(),
+            "http runtime error: {:?}",
+            report.outcomes[0].error
+        );
     }
 }

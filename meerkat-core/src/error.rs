@@ -172,6 +172,7 @@ impl From<&str> for ToolError {
 
 /// Errors that can occur during agent execution
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AgentError {
     #[error("LLM error ({provider}): {message}")]
     Llm {

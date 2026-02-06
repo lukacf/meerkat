@@ -1,6 +1,6 @@
 //! Hook contracts and engine interfaces.
 
-use crate::types::SessionId;
+use crate::types::{SessionId, StopReason, Usage};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -189,6 +189,12 @@ pub struct HookLlmRequest {
 #[serde(rename_all = "snake_case")]
 pub struct HookLlmResponse {
     pub assistant_text: String,
+    #[serde(default)]
+    pub tool_call_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 /// Tool call view exposed to hooks.
@@ -293,6 +299,14 @@ pub enum HookEngineError {
 /// Runtime-independent engine interface.
 #[async_trait]
 pub trait HookEngine: Send + Sync {
+    fn matching_hooks(
+        &self,
+        _invocation: &HookInvocation,
+        _overrides: Option<&crate::config::HookRunOverrides>,
+    ) -> Result<Vec<HookId>, HookEngineError> {
+        Ok(Vec::new())
+    }
+
     async fn execute(
         &self,
         invocation: HookInvocation,

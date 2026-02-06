@@ -1167,8 +1167,7 @@ async fn build_tooling(
             let resolved_policy = config
                 .resolve_sub_agent_config(parent_core_provider, model)
                 .map_err(|e| anyhow::anyhow!("Failed to resolve sub-agent config: {e}"))?;
-            let sub_agent_config =
-                SubAgentConfig::default().with_resolved_policy(resolved_policy);
+            let sub_agent_config = SubAgentConfig::default().with_resolved_policy(resolved_policy);
 
             // Build parent comms context if comms is enabled
             // This allows sub-agents to communicate back to the parent

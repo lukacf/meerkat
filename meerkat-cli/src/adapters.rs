@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_client::{BlockAssembler, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_core::{
-    AgentError, Message, OutputSchema, Session, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
+    AgentError, Message, OutputSchema, Session, SessionId, StopReason, ToolCallView, ToolDef,
+    ToolResult, Usage,
     agent::{AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult},
     error::{invalid_session_id, store_error},
     event::AgentEvent,

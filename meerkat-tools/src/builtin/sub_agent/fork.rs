@@ -172,9 +172,7 @@ impl AgentForkTool {
                 meerkat_core::Provider::Anthropic => Ok(LlmProvider::Anthropic),
                 meerkat_core::Provider::OpenAI => Ok(LlmProvider::OpenAi),
                 meerkat_core::Provider::Gemini => Ok(LlmProvider::Gemini),
-                meerkat_core::Provider::Other => {
-                    Err(SubAgentError::invalid_provider("other"))
-                }
+                meerkat_core::Provider::Other => Err(SubAgentError::invalid_provider("other")),
             };
         }
 

@@ -23,10 +23,8 @@ pub struct GeminiClient {
 impl GeminiClient {
     /// Create a new Gemini client with the given API key
     pub fn new(api_key: String) -> Self {
-        let http =
-            crate::http::build_http_client(reqwest::Client::builder()).unwrap_or_else(|_| {
-                reqwest::Client::new()
-            });
+        let http = crate::http::build_http_client(reqwest::Client::builder())
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             api_key,
             base_url: "https://generativelanguage.googleapis.com".to_string(),
@@ -85,8 +83,12 @@ impl GeminiClient {
                                 if !text.is_empty() {
                                     let mut part = serde_json::json!({"text": text});
                                     // Gemini may have thoughtSignature on text parts for continuity
-                                    if let Some(meerkat_core::ProviderMeta::Gemini { thought_signature }) = meta.as_deref() {
-                                        part["thoughtSignature"] = serde_json::json!(thought_signature);
+                                    if let Some(meerkat_core::ProviderMeta::Gemini {
+                                        thought_signature,
+                                    }) = meta.as_deref()
+                                    {
+                                        part["thoughtSignature"] =
+                                            serde_json::json!(thought_signature);
                                     }
                                     parts.push(part);
                                 }
@@ -98,14 +100,22 @@ impl GeminiClient {
                                     parts.push(serde_json::json!({"text": format!("[Reasoning: {}]", text)}));
                                 }
                             }
-                            meerkat_core::AssistantBlock::ToolUse { id, name, args, meta } => {
+                            meerkat_core::AssistantBlock::ToolUse {
+                                id,
+                                name,
+                                args,
+                                meta,
+                            } => {
                                 tool_name_by_id.insert(id.clone(), name.clone());
                                 // Parse RawValue to Value
                                 let args_value: Value = serde_json::from_str(args.get())
                                     .unwrap_or_else(|_| serde_json::json!({}));
                                 let mut part = serde_json::json!({"functionCall": {"name": name, "args": args_value}});
                                 // Only add signature if present (first parallel call has it)
-                                if let Some(meerkat_core::ProviderMeta::Gemini { thought_signature }) = meta.as_deref() {
+                                if let Some(meerkat_core::ProviderMeta::Gemini {
+                                    thought_signature,
+                                }) = meta.as_deref()
+                                {
                                     part["thoughtSignature"] = serde_json::json!(thought_signature);
                                 }
                                 parts.push(part);
@@ -200,17 +210,15 @@ impl GeminiClient {
             // Handle structured output configuration
             // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
             if let Some(structured) = params.get("structured_output") {
-                let output_schema: OutputSchema =
-                    serde_json::from_value(structured.clone()).map_err(|e| {
-                        LlmError::InvalidRequest {
-                            message: format!("Invalid structured_output schema: {e}"),
-                        }
+                let output_schema: OutputSchema = serde_json::from_value(structured.clone())
+                    .map_err(|e| LlmError::InvalidRequest {
+                        message: format!("Invalid structured_output schema: {e}"),
                     })?;
-                let compiled =
-                    Self::compile_schema_for_gemini(&output_schema)
-                        .map_err(|e| LlmError::InvalidRequest {
-                            message: e.to_string(),
-                        })?;
+                let compiled = Self::compile_schema_for_gemini(&output_schema).map_err(|e| {
+                    LlmError::InvalidRequest {
+                        message: e.to_string(),
+                    }
+                })?;
                 body["generationConfig"]["responseMimeType"] =
                     Value::String("application/json".to_string());
                 body["generationConfig"]["responseSchema"] = compiled.schema;
@@ -295,8 +303,11 @@ impl GeminiClient {
     ///
     /// In lossy mode, strips unsupported keywords and emits warnings.
     /// In strict mode, returns an error if unsupported features are found.
-    fn compile_schema_for_gemini(output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
-        let (schema, warnings) = sanitize_for_gemini(output_schema.schema.as_value(), Provider::Gemini);
+    fn compile_schema_for_gemini(
+        output_schema: &OutputSchema,
+    ) -> Result<CompiledSchema, SchemaError> {
+        let (schema, warnings) =
+            sanitize_for_gemini(output_schema.schema.as_value(), Provider::Gemini);
 
         if output_schema.compat == SchemaCompat::Strict && !warnings.is_empty() {
             return Err(SchemaError::UnsupportedFeatures {
@@ -406,8 +417,8 @@ impl LlmClient for GeminiClient {
         &'a self,
         request: &'a LlmRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-        let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> =
-            Box::pin(async_stream::try_stream! {
+        let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> = Box::pin(
+            async_stream::try_stream! {
                 let body = self.build_request_body(request)?;
                 let url = format!(
                     "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
@@ -509,7 +520,8 @@ impl LlmClient for GeminiClient {
                         }
                     }
                 }
-            });
+            },
+        );
 
         crate::streaming::ensure_terminal_done(inner)
     }
@@ -672,8 +684,8 @@ mod tests {
     /// Per spec section 2.3: Signatures on functionCall, NEVER on functionResponse
     /// Uses BlockAssistant with ProviderMeta::Gemini for thoughtSignature.
     #[test]
-    fn test_tool_response_uses_function_name_no_signature()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn test_tool_response_uses_function_name_no_signature() -> Result<(), Box<dyn std::error::Error>>
+    {
         use serde_json::value::RawValue;
         let client = GeminiClient::new("test-key".to_string());
         let args_raw = RawValue::from_string(json!({"city": "Tokyo"}).to_string()).unwrap();
@@ -684,16 +696,14 @@ mod tests {
                     content: "test".to_string(),
                 }),
                 Message::BlockAssistant(BlockAssistantMessage {
-                    blocks: vec![
-                        AssistantBlock::ToolUse {
-                            id: "call_1".to_string(),
-                            name: "get_weather".to_string(),
-                            args: args_raw,
-                            meta: Some(Box::new(ProviderMeta::Gemini {
-                                thought_signature: "sig_123".to_string(),
-                            })),
-                        },
-                    ],
+                    blocks: vec![AssistantBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        args: args_raw,
+                        meta: Some(Box::new(ProviderMeta::Gemini {
+                            thought_signature: "sig_123".to_string(),
+                        })),
+                    }],
                     stop_reason: StopReason::ToolUse,
                 }),
                 Message::ToolResults {
@@ -725,7 +735,10 @@ mod tests {
             .iter()
             .find(|p| p.get("functionCall").is_some())
             .ok_or("missing functionCall part")?;
-        assert_eq!(fc_part["thoughtSignature"], "sig_123", "functionCall SHOULD have signature");
+        assert_eq!(
+            fc_part["thoughtSignature"], "sig_123",
+            "functionCall SHOULD have signature"
+        );
 
         // Find the tool result (last message) - functionResponse MUST NOT have signature
         let tool_result_parts = contents
@@ -1110,7 +1123,10 @@ mod tests {
             .as_ref()
             .ok_or("missing parts")?;
 
-        assert!(parts[0].function_call.is_some(), "should have function_call");
+        assert!(
+            parts[0].function_call.is_some(),
+            "should have function_call"
+        );
         assert_eq!(
             parts[0].thought_signature.as_deref(),
             Some("sig_abc123"),
@@ -1194,16 +1210,14 @@ mod tests {
                     content: "What's the weather?".to_string(),
                 }),
                 Message::BlockAssistant(BlockAssistantMessage {
-                    blocks: vec![
-                        AssistantBlock::ToolUse {
-                            id: "call_1".to_string(),
-                            name: "get_weather".to_string(),
-                            args: args_raw,
-                            meta: Some(Box::new(ProviderMeta::Gemini {
-                                thought_signature: "sig_123".to_string(),
-                            })),
-                        },
-                    ],
+                    blocks: vec![AssistantBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        args: args_raw,
+                        meta: Some(Box::new(ProviderMeta::Gemini {
+                            thought_signature: "sig_123".to_string(),
+                        })),
+                    }],
                     stop_reason: StopReason::ToolUse,
                 }),
                 Message::ToolResults {
@@ -1243,9 +1257,7 @@ mod tests {
         );
 
         // Find the tool results message (role: "user" with functionResponse)
-        let tool_results_content = contents
-            .last()
-            .ok_or("missing last content")?;
+        let tool_results_content = contents.last().ok_or("missing last content")?;
         let tool_result_parts = tool_results_content
             .get("parts")
             .and_then(|p| p.as_array())

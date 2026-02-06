@@ -132,11 +132,7 @@ fn test_tool_result_serialization() {
 
 #[test]
 fn test_tool_result_from_tool_call() {
-    let tool_call = ToolCall::new(
-        "tc_123".to_string(),
-        "test_tool".to_string(),
-        json!({}),
-    );
+    let tool_call = ToolCall::new("tc_123".to_string(), "test_tool".to_string(), json!({}));
 
     let result = ToolResult::from_tool_call(&tool_call, "output".to_string(), false);
 
@@ -463,7 +459,7 @@ fn test_output_schema_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>
     let json = serde_json::to_string(&output_schema).unwrap();
     let parsed: OutputSchema = serde_json::from_str(&json).unwrap();
 
-    let mut expected = schema.clone();
+    let mut expected = schema;
     expected["required"] = json!([]);
     assert_eq!(parsed.schema.as_value(), &expected);
     assert_eq!(parsed.name, Some("test_schema".to_string()));

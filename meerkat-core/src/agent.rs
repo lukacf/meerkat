@@ -14,10 +14,10 @@ use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
 use crate::hooks::HookEngine;
 use crate::retry::RetryPolicy;
+use crate::schema::{CompiledSchema, SchemaError};
 use crate::session::Session;
 use crate::state::LoopState;
 use crate::sub_agent::SubAgentManager;
-use crate::schema::{CompiledSchema, SchemaError};
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
     ToolDef, ToolResult, Usage,

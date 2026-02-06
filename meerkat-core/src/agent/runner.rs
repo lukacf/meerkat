@@ -422,18 +422,20 @@ where
             });
         }
 
-        for patch in report.patches {
-            if let HookPatch::RunResult { text } = patch {
-                if let Some(tx) = event_tx {
-                    let _ = tx
-                        .send(AgentEvent::HookRewriteApplied {
-                            hook_id: "runtime".to_string(),
-                            point: HookPoint::RunCompleted,
-                            patch: HookPatch::RunResult { text: text.clone() },
-                        })
-                        .await;
+        for outcome in &report.outcomes {
+            for patch in &outcome.patches {
+                if let HookPatch::RunResult { text } = patch {
+                    if let Some(tx) = event_tx {
+                        let _ = tx
+                            .send(AgentEvent::HookRewriteApplied {
+                                hook_id: outcome.hook_id.to_string(),
+                                point: HookPoint::RunCompleted,
+                                patch: HookPatch::RunResult { text: text.clone() },
+                            })
+                            .await;
+                    }
+                    result.text = text.clone();
                 }
-                result.text = text;
             }
         }
         Ok(())
@@ -496,7 +498,9 @@ where
                 Ok(result)
             }
             Err(err) => {
-                let _ = self.run_failed_hooks(&err, None).await;
+                if let Err(hook_err) = self.run_failed_hooks(&err, None).await {
+                    tracing::warn!(?hook_err, "run_failed hook execution failed");
+                }
                 Err(err)
             }
         }
@@ -535,7 +539,9 @@ where
                 Ok(result)
             }
             Err(err) => {
-                let _ = self.run_failed_hooks(&err, Some(&event_tx)).await;
+                if let Err(hook_err) = self.run_failed_hooks(&err, Some(&event_tx)).await {
+                    tracing::warn!(?hook_err, "run_failed hook execution failed");
+                }
                 let _ = event_tx
                     .send(AgentEvent::RunFailed {
                         session_id: self.session.id().clone(),
@@ -590,7 +596,9 @@ where
                 Ok(result)
             }
             Err(err) => {
-                let _ = self.run_failed_hooks(&err, None).await;
+                if let Err(hook_err) = self.run_failed_hooks(&err, None).await {
+                    tracing::warn!(?hook_err, "run_failed hook execution failed");
+                }
                 Err(err)
             }
         }
@@ -633,7 +641,9 @@ where
                 Ok(result)
             }
             Err(err) => {
-                let _ = self.run_failed_hooks(&err, Some(&event_tx)).await;
+                if let Err(hook_err) = self.run_failed_hooks(&err, Some(&event_tx)).await {
+                    tracing::warn!(?hook_err, "run_failed hook execution failed");
+                }
                 let _ = event_tx
                     .send(AgentEvent::RunFailed {
                         session_id: self.session.id().clone(),

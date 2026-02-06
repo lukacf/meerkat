@@ -85,7 +85,6 @@ impl AgentToolDispatcher for CommsToolSurface {
             tool_use_id: call.id.to_string(),
             content: result.to_string(),
             is_error: false,
-            thought_signature: None,
         })
     }
 }

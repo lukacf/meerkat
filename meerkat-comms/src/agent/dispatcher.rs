@@ -105,7 +105,6 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
                 tool_use_id: call.id.to_string(),
                 content: result.to_string(),
                 is_error: false,
-                thought_signature: None,
             })
         } else if let Some(inner) = &self.inner {
             inner.dispatch(call).await
@@ -161,7 +160,6 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
                 tool_use_id: call.id.to_string(),
                 content: result.to_string(),
                 is_error: false,
-                thought_signature: None,
             })
         } else {
             self.inner.dispatch(call).await

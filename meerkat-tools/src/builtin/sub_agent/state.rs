@@ -357,7 +357,6 @@ mod tests {
                     tool_use_id: call.id.to_string(),
                     content: format!("{} executed", call.name),
                     is_error: false,
-                    thought_signature: None,
                 })
             } else {
                 Err(ToolError::not_found(call.name))

@@ -69,38 +69,10 @@ impl GeminiClient {
                         "parts": [{"text": u.content}]
                     }));
                 }
-                Message::Assistant(a) => {
-                    let mut parts = Vec::new();
-
-                    if !a.content.is_empty() {
-                        parts.push(serde_json::json!({"text": a.content}));
-                    }
-
-                    for tc in &a.tool_calls {
-                        tool_name_by_id.insert(tc.id.clone(), tc.name.clone());
-                        let part = if let Some(sig) = &tc.thought_signature {
-                            serde_json::json!({
-                                "functionCall": {
-                                    "name": tc.name,
-                                    "args": tc.args
-                                },
-                                "thoughtSignature": sig
-                            })
-                        } else {
-                            serde_json::json!({
-                                "functionCall": {
-                                    "name": tc.name,
-                                    "args": tc.args
-                                }
-                            })
-                        };
-                        parts.push(part);
-                    }
-
-                    contents.push(serde_json::json!({
-                        "role": "model",
-                        "parts": parts
-                    }));
+                Message::Assistant(_) => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "Legacy Message::Assistant is not supported by Gemini adapter; use BlockAssistant".to_string(),
+                    });
                 }
                 Message::BlockAssistant(a) => {
                     // New format: ordered blocks with ProviderMeta
@@ -491,7 +463,7 @@ struct GeminiUsage {
 )]
 mod tests {
     use super::*;
-    use meerkat_core::{AssistantMessage, ToolCall, ToolResult, Usage, UserMessage};
+    use meerkat_core::{AssistantBlock, BlockAssistantMessage, ProviderMeta, UserMessage};
 
     #[test]
     fn test_build_request_body_with_thinking_budget() -> Result<(), Box<dyn std::error::Error>> {
@@ -586,34 +558,37 @@ mod tests {
 
     /// Test that functionCall has thoughtSignature but functionResponse does NOT
     /// Per spec section 2.3: Signatures on functionCall, NEVER on functionResponse
+    /// Uses BlockAssistant with ProviderMeta::Gemini for thoughtSignature.
     #[test]
     fn test_tool_response_uses_function_name_no_signature()
     -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::value::RawValue;
         let client = GeminiClient::new("test-key".to_string());
-        let tool_call = ToolCall::with_thought_signature(
-            "call_1".to_string(),
-            "get_weather".to_string(),
-            json!({"city": "Tokyo"}),
-            "sig_123".to_string(),
-        );
+        let args_raw = RawValue::from_string(json!({"city": "Tokyo"}).to_string()).unwrap();
         let request = LlmRequest::new(
             "gemini-1.5-pro",
             vec![
                 Message::User(UserMessage {
                     content: "test".to_string(),
                 }),
-                Message::Assistant(AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![tool_call],
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "get_weather".to_string(),
+                            args: args_raw,
+                            meta: Some(Box::new(ProviderMeta::Gemini {
+                                thought_signature: "sig_123".to_string(),
+                            })),
+                        },
+                    ],
                     stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
                 }),
                 Message::ToolResults {
-                    results: vec![ToolResult::with_thought_signature(
+                    results: vec![meerkat_core::ToolResult::new(
                         "call_1".to_string(),
                         "Sunny".to_string(),
                         false,
-                        "sig_123".to_string(),
                     )],
                 },
             ],
@@ -1092,42 +1067,39 @@ mod tests {
         Ok(())
     }
 
-    /// Request building: thoughtSignature on functionCall, NEVER on functionResponse
+    /// Request building: thoughtSignature on functionCall via ProviderMeta, NEVER on functionResponse
     #[test]
     fn test_request_building_no_signature_on_function_response()
     -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::value::RawValue;
         let client = GeminiClient::new("test-key".to_string());
 
-        // ToolCall with thought_signature
-        let tool_call = ToolCall::with_thought_signature(
-            "call_1".to_string(),
-            "get_weather".to_string(),
-            json!({"city": "Tokyo"}),
-            "sig_123".to_string(),
-        );
-
-        // ToolResult also has thought_signature (from legacy code path)
-        let tool_result = ToolResult::with_thought_signature(
-            "call_1".to_string(),
-            "Sunny, 25C".to_string(),
-            false,
-            "sig_123".to_string(),
-        );
-
+        let args_raw = RawValue::from_string(json!({"city": "Tokyo"}).to_string()).unwrap();
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
             vec![
                 Message::User(UserMessage {
                     content: "What's the weather?".to_string(),
                 }),
-                Message::Assistant(AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![tool_call],
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "get_weather".to_string(),
+                            args: args_raw,
+                            meta: Some(Box::new(ProviderMeta::Gemini {
+                                thought_signature: "sig_123".to_string(),
+                            })),
+                        },
+                    ],
                     stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
                 }),
                 Message::ToolResults {
-                    results: vec![tool_result],
+                    results: vec![meerkat_core::ToolResult::new(
+                        "call_1".to_string(),
+                        "Sunny, 25C".to_string(),
+                        false,
+                    )],
                 },
             ],
         );
@@ -1174,7 +1146,7 @@ mod tests {
             .ok_or("missing functionResponse part")?;
         assert!(
             fr_part.get("thoughtSignature").is_none(),
-            "functionResponse MUST NOT have thoughtSignature (verified by test_gemini_thought_signature.py)"
+            "functionResponse MUST NOT have thoughtSignature"
         );
 
         Ok(())

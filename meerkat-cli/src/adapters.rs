@@ -303,7 +303,6 @@ impl AgentToolDispatcher for McpRouterAdapter {
                     tool_use_id: call.id.to_string(),
                     content: result,
                     is_error: false,
-                    thought_signature: None,
                 })
             }
             None => Err(ToolError::execution_failed("MCP router has been shut down")),

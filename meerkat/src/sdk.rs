@@ -25,10 +25,8 @@ use tokio::task::JoinHandle;
 /// The active config hooks are appended last to preserve caller-local overrides.
 pub async fn resolve_layered_hooks_config(start_dir: &Path, active_config: &Config) -> HooksConfig {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let mut layered = match Config::load_layered_hooks_from(start_dir, home.as_deref()).await {
-        Ok(hooks) => hooks,
-        Err(_) => HooksConfig::default(),
-    };
+    let mut layered: HooksConfig =
+        (Config::load_layered_hooks_from(start_dir, home.as_deref()).await).unwrap_or_default();
     layered.append_entries_from(&active_config.hooks);
     layered
 }

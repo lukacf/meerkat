@@ -1660,7 +1660,7 @@ mod tests {
             MeerkatRunInput {
                 prompt: "test".to_string(),
                 system_prompt: None,
-                model: Some("claude-opus-4-5".to_string()),
+                model: Some("claude-opus-4-6".to_string()),
                 max_tokens: Some(4096),
                 provider: None,
                 output_schema: None,

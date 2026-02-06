@@ -100,9 +100,9 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 |----------|------------|
 | OpenAI | `gpt-5.2` |
 | Gemini | `gemini-3-flash-preview` or `gemini-3-pro-preview` |
-| Anthropic | `claude-opus-4-5` or `claude-sonnet-4-5` |
+| Anthropic | `claude-opus-4-6` or `claude-sonnet-4-5` |
 
-Do NOT use older model names like `gpt-4o-mini` or `gemini-2.0-flash`.
+Do NOT use older model names like `gpt-4o-mini`, `gemini-2.0-flash`, or `claude-3-7-sonnet-20250219`.
 
 ## Rust Design Guidelines
 

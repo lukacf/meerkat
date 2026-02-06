@@ -308,7 +308,7 @@ let agent = AgentBuilder::new()
 
 | Method | Description | Default |
 |--------|-------------|---------|
-| `model(name)` | Set the model identifier | `"claude-sonnet-4-20250514"` |
+| `model(name)` | Set the model identifier | `"claude-opus-4-6"` |
 | `system_prompt(prompt)` | Set the system prompt | None |
 | `max_tokens_per_turn(n)` | Max tokens per LLM call | 8192 |
 | `temperature(t)` | Sampling temperature (0.0-1.0) | None (model default) |

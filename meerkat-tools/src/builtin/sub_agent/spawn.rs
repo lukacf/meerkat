@@ -23,10 +23,9 @@ use std::sync::Arc;
 pub mod allowed_models {
     /// Allowed Anthropic models
     pub const ANTHROPIC: &[&str] = &[
+        "claude-opus-4-6",
         "claude-sonnet-4-5",
         "claude-opus-4-5",
-        "claude-sonnet-4-20250514",
-        "claude-opus-4-20250514",
     ];
 
     /// Allowed OpenAI models (only latest frontier models)
@@ -824,6 +823,10 @@ mod tests {
 
             // These should all pass validation
             assert!(
+                tool.validate_model(LlmProvider::Anthropic, "claude-opus-4-6")
+                    .is_ok()
+            );
+            assert!(
                 tool.validate_model(LlmProvider::Anthropic, "claude-sonnet-4-5")
                     .is_ok()
             );
@@ -884,7 +887,7 @@ mod tests {
                 "Should list allowed OpenAI models"
             );
             assert!(
-                model_desc.contains("claude-sonnet-4-5"),
+                model_desc.contains("claude-opus-4-6"),
                 "Should list allowed Anthropic models"
             );
             assert!(

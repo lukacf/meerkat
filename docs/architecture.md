@@ -796,7 +796,7 @@ defaults < user config < project config < CLI args
 
 ```toml
 [agent]
-model = "claude-sonnet-4-20250514"
+model = "claude-opus-4-6"
 max_tokens_per_turn = 8192
 temperature = 0.7
 

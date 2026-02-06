@@ -24,7 +24,7 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 For the comms example, you can optionally specify a different model:
 
 ```bash
-export ANTHROPIC_MODEL="claude-sonnet-4-20250514"
+export ANTHROPIC_MODEL="claude-opus-4-6"
 ```
 
 ### Running Examples
@@ -573,7 +573,7 @@ The example includes detailed logging wrappers that show every API call:
 +==============================================================+
 |  ANTHROPIC API CALL #1 - Agent A
 +==============================================================+
-| Model: claude-sonnet-4-20250514
+| Model: claude-opus-4-6
 | Tools provided: ["send_message", "list_peers"]
 | Messages in context: 2
 | Last user message: Send the message 'Hello from Agent A!' to agent-b...

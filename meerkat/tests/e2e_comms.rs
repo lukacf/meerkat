@@ -229,7 +229,7 @@ fn anthropic_api_key() -> String {
 
 /// Get the Anthropic model to use in tests (configurable via ANTHROPIC_MODEL env var)
 fn anthropic_model() -> String {
-    std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string())
+    std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
 }
 
 /// Create a store adapter using JsonlStore with a temp directory

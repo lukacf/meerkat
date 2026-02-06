@@ -180,7 +180,7 @@ impl AgentForkTool {
         }
         // Provider-specific defaults
         match provider {
-            LlmProvider::Anthropic => "claude-sonnet-4-20250514".to_string(),
+            LlmProvider::Anthropic => "claude-sonnet-4-5".to_string(),
             LlmProvider::OpenAi => "gpt-4o".to_string(),
             LlmProvider::Gemini => "gemini-3-flash-preview".to_string(),
         }

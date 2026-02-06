@@ -28,6 +28,16 @@ pub enum ProviderMeta {
         /// Opaque signature for thinking continuity
         signature: String,
     },
+    /// Anthropic redacted thinking (encrypted by safety systems, must be preserved verbatim)
+    AnthropicRedacted {
+        /// Opaque encrypted data
+        data: String,
+    },
+    /// Anthropic compaction summary (server-side context compression)
+    AnthropicCompaction {
+        /// Summary text that replaces prior context
+        content: String,
+    },
     /// Gemini thought signature for tool calls
     Gemini {
         /// Opaque signature for tool call continuity
@@ -82,6 +92,7 @@ pub enum AssistantBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<Box<ProviderMeta>>,
     },
+
 }
 
 impl PartialEq for AssistantBlock {

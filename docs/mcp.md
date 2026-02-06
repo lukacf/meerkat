@@ -140,7 +140,7 @@ Minimal `meerkat_run`:
 ```json
 {
   "prompt": "Write a haiku about Rust",
-  "model": "claude-3-7-sonnet-20250219",
+  "model": "claude-opus-4-6",
   "max_tokens": 512
 }
 ```

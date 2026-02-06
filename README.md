@@ -324,7 +324,7 @@ agent.run_with_events("Write a poem".into(), tx).await?;
 
 ```
 rkat run <prompt>           Run an agent with a prompt
-  --model <model>           Model (default: claude-sonnet-4-20250514)
+  --model <model>           Model (default: claude-opus-4-6)
   --provider <p>            Provider: anthropic, openai, gemini
   --max-tokens <n>          Max tokens per turn (default: 4096)
   --max-total-tokens <n>    Total token budget

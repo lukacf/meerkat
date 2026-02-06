@@ -43,7 +43,7 @@ rkat run [OPTIONS] <PROMPT>
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model <MODEL>` | `claude-sonnet-4-20250514` | Model to use |
+| `--model <MODEL>` | `claude-opus-4-6` | Model to use |
 | `-p, --provider <PROVIDER>` | Auto-detected | LLM provider: `anthropic`, `openai`, or `gemini` |
 
 The provider is automatically inferred from the model name:
@@ -97,7 +97,7 @@ Basic usage:
 rkat run "What is the capital of France?"
 
 # Specify a model
-rkat run --model claude-opus-4-5 "Explain quantum computing"
+rkat run --model claude-opus-4-6 "Explain quantum computing"
 
 # Use OpenAI
 rkat run --model gpt-4o "Write a haiku about Rust"

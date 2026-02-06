@@ -36,7 +36,7 @@ host = "127.0.0.1"
 port = 8080
 
 [agent]
-model = "claude-3-7-sonnet-20250219"
+model = "claude-opus-4-6"
 max_tokens_per_turn = 8192
 
 [tools]
@@ -70,7 +70,7 @@ Request (full):
 {
   "prompt": "Your prompt here",
   "system_prompt": "Optional system prompt",
-  "model": "claude-3-7-sonnet-20250219",
+  "model": "claude-opus-4-6",
   "provider": "anthropic",
   "max_tokens": 4096,
   "output_schema": {

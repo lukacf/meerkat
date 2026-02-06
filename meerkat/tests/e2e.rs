@@ -292,7 +292,7 @@ fn gemini_api_key() -> Option<String> {
 
 /// Get the Anthropic model to use in tests (configurable via ANTHROPIC_MODEL env var)
 fn anthropic_model() -> String {
-    std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-opus-4-5".to_string())
+    std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-opus-4-6".to_string())
 }
 
 /// Get the OpenAI model to use in tests (configurable via OPENAI_MODEL env var)

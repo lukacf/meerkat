@@ -173,16 +173,34 @@ impl AnthropicClient {
                                 }
                             }
                             meerkat_core::AssistantBlock::Reasoning { text, meta } => {
-                                // Claude 4.5 REQUIRES signature on thinking blocks for replay
-                                let Some(meerkat_core::ProviderMeta::Anthropic { signature }) = meta.as_deref() else {
-                                    tracing::warn!("thinking block missing Anthropic signature, skipping");
-                                    continue;
-                                };
-                                content.push(serde_json::json!({
-                                    "type": "thinking",
-                                    "thinking": text,
-                                    "signature": signature
-                                }));
+                                match meta.as_deref() {
+                                    Some(meerkat_core::ProviderMeta::Anthropic { signature }) => {
+                                        // Regular thinking block with signature for replay
+                                        content.push(serde_json::json!({
+                                            "type": "thinking",
+                                            "thinking": text,
+                                            "signature": signature
+                                        }));
+                                    }
+                                    Some(meerkat_core::ProviderMeta::AnthropicRedacted { data }) => {
+                                        // Redacted thinking — pass encrypted data verbatim
+                                        content.push(serde_json::json!({
+                                            "type": "redacted_thinking",
+                                            "data": data
+                                        }));
+                                    }
+                                    Some(meerkat_core::ProviderMeta::AnthropicCompaction { content: summary }) => {
+                                        // Compaction summary — replaces prior context
+                                        content.push(serde_json::json!({
+                                            "type": "compaction",
+                                            "content": summary
+                                        }));
+                                    }
+                                    _ => {
+                                        tracing::warn!("thinking block missing Anthropic signature, skipping");
+                                        continue;
+                                    }
+                                }
                             }
                             meerkat_core::AssistantBlock::ToolUse { id, name, args, .. } => {
                                 // Parse RawValue to Value for JSON serialization
@@ -329,6 +347,33 @@ impl AnthropicClient {
                     "schema": compiled.schema
                 });
             }
+
+            // Handle inference_geo for data residency (Opus 4.6+)
+            // Format: {"inference_geo": "us"} or {"inference_geo": "global"}
+            if let Some(geo) = params.get("inference_geo").and_then(|v| v.as_str()) {
+                body["inference_geo"] = Value::String(geo.to_string());
+            }
+
+            // Handle compaction (Opus 4.6, beta)
+            // Format: {"compaction": "auto"} or {"compaction": {"trigger": 150000}}
+            if let Some(compaction) = params.get("compaction") {
+                if compaction.as_str() == Some("auto") {
+                    body["context_management"] = serde_json::json!({
+                        "edits": [{"type": "compact_20260112"}]
+                    });
+                } else if compaction.is_object() {
+                    // Allow passing full compaction config: {"trigger": 150000, "instructions": "..."}
+                    let mut edit = serde_json::json!({"type": "compact_20260112"});
+                    if let Some(obj) = compaction.as_object() {
+                        for (k, v) in obj {
+                            edit[k] = v.clone();
+                        }
+                    }
+                    body["context_management"] = serde_json::json!({
+                        "edits": [edit]
+                    });
+                }
+            }
         }
 
         Ok(body)
@@ -388,16 +433,34 @@ impl LlmClient for AnthropicClient {
             async_stream::try_stream! {
                 let body = self.build_request_body(request)?;
 
-                // Check if structured output format is present (requires beta header)
-                let has_structured_output = body.get("output_config")
-                    .and_then(|c| c.get("format"))
-                    .is_some();
-                // Check if thinking is enabled (requires interleaved-thinking beta header)
-                // Adaptive thinking (Opus 4.6) does NOT need the beta header
+                // Collect beta headers based on request features
+                let mut betas = Vec::new();
+
+                // Legacy thinking (type: "enabled") requires interleaved-thinking header
+                // Adaptive thinking (Opus 4.6) does NOT need this header
                 let thinking_type = body.get("thinking")
                     .and_then(|t| t.get("type"))
                     .and_then(|t| t.as_str());
-                let has_legacy_thinking = thinking_type == Some("enabled");
+                if thinking_type == Some("enabled") {
+                    betas.push("interleaved-thinking-2025-05-14");
+                }
+
+                // Structured output format requires beta header
+                if body.get("output_config").and_then(|c| c.get("format")).is_some() {
+                    betas.push("structured-outputs-2025-11-13");
+                }
+
+                // 1M context window (opt-in via provider_params)
+                if let Some(ref params) = request.provider_params {
+                    if params.get("context").and_then(|v| v.as_str()) == Some("1m") {
+                        betas.push("context-1m-2025-08-07");
+                    }
+                }
+
+                // Compaction API (beta)
+                if body.get("context_management").is_some() {
+                    betas.push("compact-2026-01-12");
+                }
 
                 let mut req = self.http
                     .post(format!("{}/v1/messages", self.base_url))
@@ -405,16 +468,8 @@ impl LlmClient for AnthropicClient {
                     .header("anthropic-version", "2023-06-01")
                     .header("Content-Type", "application/json");
 
-                // Add beta headers as needed:
-                // - Legacy thinking (type: "enabled") requires interleaved-thinking header
-                // - Adaptive thinking (type: "adaptive", Opus 4.6) needs NO thinking beta header
-                // - Structured output format requires structured-outputs header
-                if has_legacy_thinking && has_structured_output {
-                    req = req.header("anthropic-beta", "interleaved-thinking-2025-05-14,structured-outputs-2025-11-13");
-                } else if has_legacy_thinking {
-                    req = req.header("anthropic-beta", "interleaved-thinking-2025-05-14");
-                } else if has_structured_output {
-                    req = req.header("anthropic-beta", "structured-outputs-2025-11-13");
+                if !betas.is_empty() {
+                    req = req.header("anthropic-beta", betas.join(","));
                 }
 
                 let response = req
@@ -478,6 +533,16 @@ impl LlmClient for AnthropicClient {
                                                 };
                                             }
                                         }
+                                        "compaction_delta" => {
+                                            // Compaction summary arrives as single delta — emit as Reasoning with compaction meta
+                                            if let Some(content) = delta.content {
+                                                saw_event = true;
+                                                yield LlmEvent::ReasoningComplete {
+                                                    text: String::new(),
+                                                    meta: Some(Box::new(meerkat_core::ProviderMeta::AnthropicCompaction { content })),
+                                                };
+                                            }
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -490,6 +555,19 @@ impl LlmClient for AnthropicClient {
                                             // Start of thinking block
                                             // Signature may already be present or arrive via signature_delta
                                             current_thinking_signature = content_block.signature;
+                                        }
+                                        "redacted_thinking" => {
+                                            // Redacted by safety systems — emit as Reasoning with redacted meta
+                                            if let Some(data) = content_block.data {
+                                                saw_event = true;
+                                                yield LlmEvent::ReasoningComplete {
+                                                    text: String::new(),
+                                                    meta: Some(Box::new(meerkat_core::ProviderMeta::AnthropicRedacted { data })),
+                                                };
+                                            }
+                                        }
+                                        "compaction" => {
+                                            // Compaction block start — content arrives via compaction_delta
                                         }
                                         "tool_use" => {
                                             let id = content_block.id.unwrap_or_default();
@@ -658,6 +736,8 @@ struct AnthropicDelta {
     thinking: Option<String>,
     /// Signature for signature_delta events (arrives separately before content_block_stop)
     signature: Option<String>,
+    /// Content for compaction_delta events
+    content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -668,6 +748,8 @@ struct AnthropicContentBlock {
     name: Option<String>,
     /// Signature for thinking block continuity
     signature: Option<String>,
+    /// Encrypted data for redacted_thinking blocks
+    data: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1305,6 +1387,156 @@ mod tests {
 
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 10000);
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_inference_geo() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-opus-4-6",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("inference_geo", "us");
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(body["inference_geo"], "us");
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_compaction_auto() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-opus-4-6",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("compaction", "auto");
+
+        let body = client.build_request_body(&request)?;
+
+        let edits = body["context_management"]["edits"].as_array().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0]["type"], "compact_20260112");
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_compaction_with_trigger() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let mut request = LlmRequest::new(
+            "claude-opus-4-6",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        );
+        request.provider_params = Some(serde_json::json!({
+            "compaction": {
+                "trigger": {"type": "input_tokens", "value": 100000}
+            }
+        }));
+
+        let body = client.build_request_body(&request)?;
+
+        let edits = body["context_management"]["edits"].as_array().unwrap();
+        assert_eq!(edits[0]["type"], "compact_20260112");
+        assert_eq!(edits[0]["trigger"]["value"], 100000);
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_redacted_thinking_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        // Redacted thinking is stored as Reasoning with AnthropicRedacted meta
+        let assistant_msg = Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::Reasoning {
+                    text: String::new(),
+                    meta: Some(Box::new(ProviderMeta::AnthropicRedacted {
+                        data: "encrypted_blob_abc123".to_string(),
+                    })),
+                },
+                AssistantBlock::Text {
+                    text: "The answer.".to_string(),
+                    meta: None,
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+        });
+
+        let request = LlmRequest::new(
+            "claude-opus-4-6",
+            vec![
+                Message::User(UserMessage {
+                    content: "Question".to_string(),
+                }),
+                assistant_msg,
+            ],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let messages = body["messages"].as_array().unwrap();
+        let assistant_content = messages[1]["content"].as_array().unwrap();
+
+        // First block should be redacted_thinking with encrypted data
+        assert_eq!(assistant_content[0]["type"], "redacted_thinking");
+        assert_eq!(assistant_content[0]["data"], "encrypted_blob_abc123");
+
+        // Second block should be text
+        assert_eq!(assistant_content[1]["type"], "text");
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_compaction_block_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        // Compaction is stored as Reasoning with AnthropicCompaction meta
+        let assistant_msg = Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::Reasoning {
+                    text: String::new(),
+                    meta: Some(Box::new(ProviderMeta::AnthropicCompaction {
+                        content: "Summary of prior conversation...".to_string(),
+                    })),
+                },
+                AssistantBlock::Text {
+                    text: "Continuing from summary.".to_string(),
+                    meta: None,
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+        });
+
+        let request = LlmRequest::new(
+            "claude-opus-4-6",
+            vec![
+                Message::User(UserMessage {
+                    content: "Continue".to_string(),
+                }),
+                assistant_msg,
+            ],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let messages = body["messages"].as_array().unwrap();
+        let assistant_content = messages[1]["content"].as_array().unwrap();
+
+        // First block should be compaction with summary
+        assert_eq!(assistant_content[0]["type"], "compaction");
+        assert_eq!(assistant_content[0]["content"], "Summary of prior conversation...");
+
+        // Second block should be text
+        assert_eq!(assistant_content[1]["type"], "text");
         Ok(())
     }
 }

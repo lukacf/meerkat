@@ -18,32 +18,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// Allowed models per provider
-/// These are the only models that can be used with agent_spawn
-pub mod allowed_models {
-    /// Allowed Anthropic models
-    pub const ANTHROPIC: &[&str] = &[
-        "claude-opus-4-6",
-        "claude-sonnet-4-5",
-        "claude-opus-4-5",
-    ];
-
-    /// Allowed OpenAI models (only latest frontier models)
-    pub const OPENAI: &[&str] = &["gpt-5.2", "gpt-5.2-pro"];
-
-    /// Allowed Gemini models
-    pub const GEMINI: &[&str] = &["gemini-3-flash-preview", "gemini-3-pro-preview"];
-
-    /// Format allowed models as a description string
-    pub fn description() -> String {
-        format!(
-            "Allowed models - Anthropic: {}; OpenAI: {}; Gemini: {}",
-            ANTHROPIC.join(", "),
-            OPENAI.join(", "),
-            GEMINI.join(", ")
-        )
-    }
-}
 
 /// Tool access policy for spawned agents
 #[derive(Debug, JsonSchema)]
@@ -200,7 +174,22 @@ impl AgentSpawnTool {
     }
 
     fn resolve_provider(&self, provider_str: Option<&str>) -> Result<LlmProvider, SubAgentError> {
-        let provider_name = provider_str.unwrap_or(&self.state.config.default_provider);
+        if let Some(name) = provider_str {
+            return LlmProvider::parse(name)
+                .ok_or_else(|| SubAgentError::invalid_provider(name));
+        }
+        // Use resolved policy if available
+        if let Some(ref policy) = self.state.config.resolved_policy {
+            return match policy.default_provider {
+                meerkat_core::Provider::Anthropic => Ok(LlmProvider::Anthropic),
+                meerkat_core::Provider::OpenAI => Ok(LlmProvider::OpenAi),
+                meerkat_core::Provider::Gemini => Ok(LlmProvider::Gemini),
+                meerkat_core::Provider::Other => {
+                    Err(SubAgentError::invalid_provider("other"))
+                }
+            };
+        }
+        let provider_name = &self.state.config.default_provider;
         LlmProvider::parse(provider_name)
             .ok_or_else(|| SubAgentError::invalid_provider(provider_name))
     }
@@ -209,32 +198,59 @@ impl AgentSpawnTool {
         if let Some(m) = model {
             return m.to_string();
         }
+        // Use resolved policy default if available
+        if let Some(ref policy) = self.state.config.resolved_policy {
+            return policy.default_model.clone();
+        }
         if let Some(ref default) = self.state.config.default_model {
             return default.clone();
         }
-        // Provider-specific defaults (first model in allowlist)
-        match provider {
-            LlmProvider::Anthropic => allowed_models::ANTHROPIC[0].to_string(),
-            LlmProvider::OpenAi => allowed_models::OPENAI[0].to_string(),
-            LlmProvider::Gemini => allowed_models::GEMINI[0].to_string(),
-        }
+        // Fallback: first model in provider-specific default allowlist
+        let core_provider = match provider {
+            LlmProvider::Anthropic => meerkat_core::Provider::Anthropic,
+            LlmProvider::OpenAi => meerkat_core::Provider::OpenAI,
+            LlmProvider::Gemini => meerkat_core::Provider::Gemini,
+        };
+        let defaults = meerkat_core::config::SubAgentsConfig::default();
+        defaults
+            .allowed_models
+            .get(core_provider.as_str())
+            .and_then(|v| v.first())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Validate that a model is in the allowlist for the given provider
     pub fn validate_model(&self, provider: LlmProvider, model: &str) -> Result<(), SubAgentError> {
-        let allowed = match provider {
-            LlmProvider::Anthropic => allowed_models::ANTHROPIC,
-            LlmProvider::OpenAi => allowed_models::OPENAI,
-            LlmProvider::Gemini => allowed_models::GEMINI,
+        let core_provider = match provider {
+            LlmProvider::Anthropic => meerkat_core::Provider::Anthropic,
+            LlmProvider::OpenAi => meerkat_core::Provider::OpenAI,
+            LlmProvider::Gemini => meerkat_core::Provider::Gemini,
         };
 
-        if allowed.contains(&model) {
+        // Use resolved policy if available, otherwise fall back to defaults
+        let allowed = if let Some(ref policy) = self.state.config.resolved_policy {
+            policy
+                .allowed_models
+                .get(core_provider.as_str())
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            let defaults = meerkat_core::config::SubAgentsConfig::default();
+            defaults
+                .allowed_models
+                .get(core_provider.as_str())
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        if allowed.iter().any(|m| m == model) {
             Ok(())
         } else {
             Err(SubAgentError::InvalidModel {
                 model: model.to_string(),
                 provider: provider.to_string(),
-                allowed: allowed.iter().map(|s| s.to_string()).collect(),
+                allowed,
             })
         }
     }
@@ -420,7 +436,28 @@ impl BuiltinTool for AgentSpawnTool {
     fn def(&self) -> ToolDef {
         let mut schema = crate::schema::schema_for::<SpawnParams>();
 
-        // Enrich model description with allowed values
+        // Enrich model description with allowed values (dynamic from config)
+        let models_desc = if let Some(ref policy) = self.state.config.resolved_policy {
+            policy.allowed_models_description()
+        } else {
+            // Fallback to defaults
+            let defaults = meerkat_core::config::SubAgentsConfig::default();
+            let parts: Vec<String> = defaults
+                .allowed_models
+                .iter()
+                .map(|(provider, models)| {
+                    let title = match provider.as_str() {
+                        "anthropic" => "Anthropic",
+                        "openai" => "OpenAI",
+                        "gemini" => "Gemini",
+                        other => other,
+                    };
+                    format!("{}: {}", title, models.join(", "))
+                })
+                .collect();
+            format!("Allowed models - {}", parts.join("; "))
+        };
+
         if let Some(model_prop) = schema
             .get_mut("properties")
             .and_then(|p| p.get_mut("model"))
@@ -428,10 +465,7 @@ impl BuiltinTool for AgentSpawnTool {
             if let Some(obj) = model_prop.as_object_mut() {
                 obj.insert(
                     "description".to_string(),
-                    Value::String(format!(
-                        "Model name (provider-specific). {}",
-                        allowed_models::description()
-                    )),
+                    Value::String(format!("Model name (provider-specific). {}", models_desc)),
                 );
             }
         }

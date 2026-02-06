@@ -38,6 +38,7 @@ impl ConfigStore for MemoryConfigStore {
     }
 
     async fn set(&self, config: Config) -> Result<(), ConfigError> {
+        config.validate()?;
         *self.config.write().await = config;
         Ok(())
     }
@@ -47,6 +48,7 @@ impl ConfigStore for MemoryConfigStore {
         let mut value = serde_json::to_value(&*config).map_err(ConfigError::Json)?;
         merge_patch(&mut value, delta.0);
         let updated: Config = serde_json::from_value(value).map_err(ConfigError::Json)?;
+        updated.validate()?;
         *config = updated.clone();
         Ok(updated)
     }
@@ -120,6 +122,7 @@ impl ConfigStore for FileConfigStore {
     }
 
     async fn set(&self, config: Config) -> Result<(), ConfigError> {
+        config.validate()?;
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -132,6 +135,7 @@ impl ConfigStore for FileConfigStore {
         let mut value = serde_json::to_value(self.get().await?).map_err(ConfigError::Json)?;
         merge_patch(&mut value, delta.0);
         let updated: Config = serde_json::from_value(value).map_err(ConfigError::Json)?;
+        updated.validate()?;
         self.set(updated.clone()).await?;
         Ok(updated)
     }

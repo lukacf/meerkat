@@ -180,13 +180,20 @@ async fn load_config_from_store(store: &dyn ConfigStore) -> Config {
     config
 }
 
-fn resolve_provider(input: Option<Provider>, model: &str) -> Provider {
+fn resolve_provider(input: Option<Provider>, model: &str) -> Result<Provider, ApiError> {
     match input {
-        Some(provider) => provider,
-        None => match ProviderResolver::infer_from_model(model) {
-            Provider::Other => Provider::Anthropic,
-            provider => provider,
-        },
+        Some(provider) => Ok(provider),
+        None => {
+            let inferred = ProviderResolver::infer_from_model(model);
+            if inferred == Provider::Other {
+                Err(ApiError::BadRequest(format!(
+                    "Cannot infer provider from model '{}'. Please specify a provider explicitly.",
+                    model
+                )))
+            } else {
+                Ok(inferred)
+            }
+        }
     }
 }
 
@@ -434,7 +441,7 @@ async fn create_session(
     let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let config = load_config_from_store(state.config_store.as_ref()).await;
-    let provider = resolve_provider(req.provider, &model);
+    let provider = resolve_provider(req.provider, &model)?;
 
     let store = JsonlStore::new(state.store_path.clone());
     store
@@ -687,7 +694,7 @@ async fn continue_session(
         req.provider
             .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider)),
         &model,
-    );
+    )?;
     let host_mode = req.host_mode
         || stored_metadata
             .as_ref()

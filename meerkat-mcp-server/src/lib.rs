@@ -151,18 +151,20 @@ async fn load_config_async() -> Config {
     config
 }
 
-fn resolve_provider(input: Option<ProviderInput>, model: &str) -> Provider {
+fn resolve_provider(input: Option<ProviderInput>, model: &str) -> Result<Provider, String> {
     match input {
-        Some(provider) => match provider {
-            ProviderInput::Anthropic => Provider::Anthropic,
-            ProviderInput::Openai => Provider::OpenAI,
-            ProviderInput::Gemini => Provider::Gemini,
-            ProviderInput::Other => Provider::Other,
-        },
-        None => match ProviderResolver::infer_from_model(model) {
-            Provider::Other => Provider::Anthropic,
-            provider => provider,
-        },
+        Some(provider) => Ok(provider.to_provider()),
+        None => {
+            let inferred = ProviderResolver::infer_from_model(model);
+            if inferred == Provider::Other {
+                Err(format!(
+                    "Cannot infer provider from model '{}'. Please specify a provider explicitly.",
+                    model
+                ))
+            } else {
+                Ok(inferred)
+            }
+        }
     }
 }
 
@@ -390,7 +392,7 @@ async fn handle_meerkat_run_simple(
         .model
         .unwrap_or_else(|| config.agent.model.to_string());
     let max_tokens = input.max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
-    let provider = resolve_provider(input.provider, &model);
+    let provider = resolve_provider(input.provider, &model)?;
     if ProviderResolver::api_key_for(provider).is_none() {
         return Err(format!(
             "API key not set for provider '{}'",
@@ -577,7 +579,7 @@ async fn handle_meerkat_run_with_builtins(
         .model
         .unwrap_or_else(|| config.agent.model.to_string());
     let max_tokens = input.max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
-    let provider = resolve_provider(input.provider, &model);
+    let provider = resolve_provider(input.provider, &model)?;
     if ProviderResolver::api_key_for(provider).is_none() {
         return Err(format!(
             "API key not set for provider '{}'",
@@ -892,7 +894,7 @@ async fn handle_meerkat_resume_simple(
         .provider
         .map(ProviderInput::to_provider)
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider))
-        .unwrap_or_else(|| resolve_provider(None, &model));
+        .map_or_else(|| resolve_provider(None, &model), Ok)?;
     if ProviderResolver::api_key_for(provider).is_none() {
         return Err(format!(
             "API key not set for provider '{}'",
@@ -1098,7 +1100,7 @@ async fn handle_meerkat_resume_with_builtins(
         .provider
         .map(ProviderInput::to_provider)
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider))
-        .unwrap_or_else(|| resolve_provider(None, &model));
+        .map_or_else(|| resolve_provider(None, &model), Ok)?;
     if ProviderResolver::api_key_for(provider).is_none() {
         return Err(format!(
             "API key not set for provider '{}'",

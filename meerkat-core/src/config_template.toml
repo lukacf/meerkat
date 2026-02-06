@@ -23,3 +23,13 @@ security_patterns = []
 [rest]
 host = "127.0.0.1"
 port = 8080
+
+[sub_agents]
+# "inherit" = use parent agent's provider/model
+default_provider = "inherit"
+default_model = "inherit"
+
+[sub_agents.allowed_models]
+anthropic = ["claude-opus-4-6", "claude-sonnet-4-5", "claude-opus-4-5"]
+openai = ["gpt-5.2", "gpt-5.2-pro"]
+gemini = ["gemini-3-flash-preview", "gemini-3-pro-preview"]

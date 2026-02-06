@@ -15,17 +15,11 @@ pub struct ProviderResolver;
 
 impl ProviderResolver {
     /// Infer provider from a model string.
+    ///
+    /// Delegates to [`Provider::infer_from_model`] and falls back to
+    /// `Provider::Other` when no prefix matches.
     pub fn infer_from_model(model: &str) -> Provider {
-        let lower = model.to_lowercase();
-        if lower.contains("claude") || lower.contains("anthropic") {
-            Provider::Anthropic
-        } else if lower.contains("gpt") || lower.contains("openai") {
-            Provider::OpenAI
-        } else if lower.contains("gemini") || lower.contains("google") {
-            Provider::Gemini
-        } else {
-            Provider::Other
-        }
+        Provider::infer_from_model(model).unwrap_or(Provider::Other)
     }
 
     /// Resolve API key for a provider using env vars with RKAT_* precedence.

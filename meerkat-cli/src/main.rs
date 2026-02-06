@@ -866,6 +866,7 @@ struct ToolingSetup {
     comms_base_dir: PathBuf,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_tooling(
     base_factory: &AgentFactory,
     config: &Config,
@@ -874,6 +875,8 @@ async fn build_tooling(
     enable_builtins: bool,
     enable_shell: bool,
     enable_subagents: bool,
+    model: &str,
+    provider: Provider,
 ) -> anyhow::Result<ToolingSetup> {
     // Load comms configuration early (needed for CommsToolDispatcher)
     let comms_base_dir = config_base_dir;
@@ -1097,7 +1100,13 @@ async fn build_tooling(
             );
 
             let parent_session = Arc::new(RwLock::new(Session::new()));
-            let sub_agent_config = SubAgentConfig::default();
+            // Resolve sub-agent model policy from config
+            let parent_core_provider = Some(provider.as_core());
+            let resolved_policy = config
+                .resolve_sub_agent_config(parent_core_provider, model)
+                .map_err(|e| anyhow::anyhow!("Failed to resolve sub-agent config: {e}"))?;
+            let sub_agent_config =
+                SubAgentConfig::default().with_resolved_policy(resolved_policy);
 
             // Build parent comms context if comms is enabled
             // This allows sub-agents to communicate back to the parent
@@ -1274,6 +1283,8 @@ async fn run_agent(
         enable_builtins,
         enable_shell,
         enable_subagents,
+        model,
+        provider,
     )
     .await?;
     let ToolingSetup {
@@ -1563,6 +1574,8 @@ async fn resume_session(session_id: &str, prompt: &str) -> anyhow::Result<()> {
         tooling.builtins,
         tooling.shell,
         tooling.subagents,
+        &model,
+        provider,
     )
     .await?;
     let ToolingSetup {

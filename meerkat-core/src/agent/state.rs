@@ -204,11 +204,6 @@ where
                         stop_reason,
                     };
                     let mut assistant_text = assistant_msg.to_string();
-                    if !assistant_text.is_empty() {
-                        emit_event!(AgentEvent::TextComplete {
-                            content: assistant_text.clone(),
-                        });
-                    }
 
                     let post_llm_report = self
                         .execute_hooks(
@@ -264,6 +259,12 @@ where
                         }
                     }
 
+                    if !assistant_text.is_empty() {
+                        emit_event!(AgentEvent::TextComplete {
+                            content: assistant_text.clone(),
+                        });
+                    }
+
                     // Check if we have tool calls
                     if assistant_msg.has_tool_calls() {
                         // Add assistant message with ordered blocks
@@ -293,12 +294,11 @@ where
                         let mut executable_tool_calls = Vec::new();
                         let mut tool_results = Vec::with_capacity(tool_calls.len());
 
-                        for mut tc in tool_calls {
-                            let args_value: Value = serde_json::from_str(tc.args.get())
-                                .unwrap_or_else(|_| Value::String(tc.args.get().to_string()));
-
-                            let pre_tool_report = self
-                                .execute_hooks(
+                        let pre_tool_reports =
+                            futures::future::join_all(tool_calls.iter().map(|tc| {
+                                let args_value: Value = serde_json::from_str(tc.args.get())
+                                    .unwrap_or_else(|_| Value::String(tc.args.get().to_string()));
+                                self.execute_hooks(
                                     HookInvocation {
                                         point: HookPoint::PreToolExecution,
                                         session_id: self.session.id().clone(),
@@ -316,7 +316,13 @@ where
                                     },
                                     event_tx.as_ref(),
                                 )
-                                .await?;
+                            }))
+                            .await;
+
+                        for (mut tc, pre_tool_report) in
+                            tool_calls.into_iter().zip(pre_tool_reports.into_iter())
+                        {
+                            let pre_tool_report = pre_tool_report?;
 
                             if let Some(HookDecision::Deny {
                                 reason_code,
@@ -687,12 +693,25 @@ where
 }
 
 fn rewrite_assistant_text(blocks: &mut Vec<AssistantBlock>, replacement: String) {
-    for block in blocks.iter_mut() {
-        if let AssistantBlock::Text { text, .. } = block {
+    let first_text_idx = blocks
+        .iter()
+        .position(|block| matches!(block, AssistantBlock::Text { .. }));
+
+    if let Some(idx) = first_text_idx {
+        if let AssistantBlock::Text { text, .. } = &mut blocks[idx] {
             *text = replacement;
-            return;
         }
+        let mut i = idx + 1;
+        while i < blocks.len() {
+            if matches!(blocks[i], AssistantBlock::Text { .. }) {
+                blocks.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        return;
     }
+
     blocks.insert(
         0,
         AssistantBlock::Text {
@@ -737,4 +756,43 @@ impl ToolCallOwned {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 fn fallback_raw_value() -> Box<RawValue> {
     RawValue::from_string("{}".to_string()).expect("static JSON is valid")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::rewrite_assistant_text;
+    use crate::types::AssistantBlock;
+
+    #[test]
+    fn rewrite_assistant_text_rewrites_all_text_blocks() {
+        let mut blocks = vec![
+            AssistantBlock::Text {
+                text: "first".to_string(),
+                meta: None,
+            },
+            AssistantBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "tool".to_string(),
+                args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                meta: None,
+            },
+            AssistantBlock::Text {
+                text: "second".to_string(),
+                meta: None,
+            },
+        ];
+
+        rewrite_assistant_text(&mut blocks, "redacted".to_string());
+
+        let text_blocks: Vec<&str> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                AssistantBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(text_blocks, vec!["redacted"]);
+    }
 }

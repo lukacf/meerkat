@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::{cmp, collections::HashSet};
 
 use crate::{
     AgentFactory, AgentToolDispatcher, CommsRuntime, Config, CoreCommsConfig, HookEngine,
@@ -21,12 +22,28 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 /// Resolve layered hooks config (global -> project) without duplicating project entries.
-pub async fn resolve_layered_hooks_config(
-    start_dir: &Path,
-    _active_config: &Config,
-) -> HooksConfig {
+pub async fn resolve_layered_hooks_config(start_dir: &Path, active_config: &Config) -> HooksConfig {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    (Config::load_layered_hooks_from(start_dir, home.as_deref()).await).unwrap_or_default()
+    let mut layered =
+        (Config::load_layered_hooks_from(start_dir, home.as_deref()).await).unwrap_or_default();
+
+    let active_hooks = &active_config.hooks;
+    layered.default_timeout_ms = active_hooks.default_timeout_ms;
+    layered.payload_max_bytes = active_hooks.payload_max_bytes;
+    layered.background_max_concurrency = cmp::max(1, active_hooks.background_max_concurrency);
+
+    let mut seen_ids: HashSet<_> = layered
+        .entries
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect();
+    for entry in &active_hooks.entries {
+        if seen_ids.insert(entry.id.clone()) {
+            layered.entries.push(entry.clone());
+        }
+    }
+
+    layered
 }
 
 /// Build a default hook engine when at least one hook is configured.

@@ -13,6 +13,7 @@ fn hooks_config_roundtrip_contract() -> Result<(), Box<dyn std::error::Error>> {
     config.hooks = HooksConfig {
         default_timeout_ms: 7000,
         payload_max_bytes: 64 * 1024,
+        background_max_concurrency: 32,
         entries: vec![HookEntryConfig {
             id: HookId::new("guard-pre-tool"),
             point: HookPoint::PreToolExecution,

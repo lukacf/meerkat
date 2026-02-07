@@ -10,7 +10,7 @@ use crate::ops::{
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
-use crate::types::{Message, RunResult};
+use crate::types::{AssistantBlock, Message, RunResult};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -386,7 +386,7 @@ where
     }
 
     async fn run_completed_hooks(
-        &self,
+        &mut self,
         result: &mut RunResult,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
@@ -396,7 +396,7 @@ where
                     point: HookPoint::RunCompleted,
                     session_id: self.session.id().clone(),
                     turn_number: Some(result.turns),
-                    prompt: Some(result.text.clone()),
+                    prompt: None,
                     error: None,
                     llm_request: None,
                     llm_response: None,
@@ -435,10 +435,60 @@ where
                             .await;
                     }
                     result.text = text.clone();
+                    self.apply_run_result_text_patch(text);
                 }
             }
         }
+        if let Err(err) = self.store.save(&self.session).await {
+            tracing::warn!("Failed to save session after run_completed hooks: {}", err);
+        }
         Ok(())
+    }
+
+    fn apply_run_result_text_patch(&mut self, text: &str) {
+        let messages = self.session.messages_mut();
+        if let Some(last_assistant) = messages
+            .iter_mut()
+            .rev()
+            .find(|message| matches!(message, Message::BlockAssistant(_) | Message::Assistant(_)))
+        {
+            match last_assistant {
+                Message::BlockAssistant(block_assistant) => {
+                    let first_text_idx = block_assistant
+                        .blocks
+                        .iter()
+                        .position(|block| matches!(block, AssistantBlock::Text { .. }));
+                    if let Some(idx) = first_text_idx {
+                        if let AssistantBlock::Text { text: current, .. } =
+                            &mut block_assistant.blocks[idx]
+                        {
+                            *current = text.to_string();
+                        }
+                        let mut i = idx + 1;
+                        while i < block_assistant.blocks.len() {
+                            if matches!(block_assistant.blocks[i], AssistantBlock::Text { .. }) {
+                                block_assistant.blocks.remove(i);
+                            } else {
+                                i += 1;
+                            }
+                        }
+                    } else {
+                        block_assistant.blocks.insert(
+                            0,
+                            AssistantBlock::Text {
+                                text: text.to_string(),
+                                meta: None,
+                            },
+                        );
+                    }
+                }
+                Message::Assistant(assistant) => {
+                    assistant.content = text.to_string();
+                }
+                _ => {}
+            }
+            self.session.touch();
+        }
     }
 
     async fn run_failed_hooks(
@@ -523,14 +573,14 @@ where
             content: user_input,
         }));
 
-        self.run_started_hooks(&run_prompt, Some(&event_tx)).await?;
-
         let _ = event_tx
             .send(AgentEvent::RunStarted {
                 session_id,
-                prompt: run_prompt,
+                prompt: run_prompt.clone(),
             })
             .await;
+
+        self.run_started_hooks(&run_prompt, Some(&event_tx)).await?;
 
         match self.run_loop(Some(event_tx.clone())).await {
             Ok(mut result) => {
@@ -628,11 +678,14 @@ where
 
         let session_id = self.session.id().clone();
 
-        self.run_started_hooks(&prompt, Some(&event_tx)).await?;
-
         let _ = event_tx
-            .send(AgentEvent::RunStarted { session_id, prompt })
+            .send(AgentEvent::RunStarted {
+                session_id,
+                prompt: prompt.clone(),
+            })
             .await;
+
+        self.run_started_hooks(&prompt, Some(&event_tx)).await?;
 
         match self.run_loop(Some(event_tx.clone())).await {
             Ok(mut result) => {

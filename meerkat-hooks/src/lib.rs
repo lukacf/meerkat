@@ -1,7 +1,7 @@
 //! Hook runtimes (in-process, command, HTTP) and deterministic default engine.
 
 use chrono::Utc;
-use futures::future::join_all;
+use futures::StreamExt;
 use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookOutcome, HookPatch,
@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{Duration, timeout};
@@ -80,6 +80,7 @@ impl DefaultHookEngine {
             .iter()
             .find_map(|entry| Self::validate_entry(entry).err())
             .map(|err| err.to_string());
+        let background_max_concurrency = config.background_max_concurrency.max(1);
 
         Self {
             base_entries: Arc::new(config.entries.clone()),
@@ -88,7 +89,7 @@ impl DefaultHookEngine {
             http_client: Arc::new(OnceLock::new()),
             in_process_handlers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             published_patches: Arc::new(Mutex::new(Vec::new())),
-            background_slots: Arc::new(Semaphore::new(32)),
+            background_slots: Arc::new(Semaphore::new(background_max_concurrency)),
             revision: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -127,7 +128,40 @@ impl DefaultHookEngine {
     }
 
     fn next_revision(&self) -> HookRevision {
-        HookRevision(self.revision.fetch_add(1, Ordering::Relaxed))
+        HookRevision(self.revision.fetch_add(1, Ordering::SeqCst))
+    }
+
+    async fn read_stream_limited<R>(
+        mut stream: R,
+        byte_limit: usize,
+        stream_name: &str,
+    ) -> Result<Vec<u8>, String>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut out = Vec::new();
+        let mut chunk = vec![0u8; 8 * 1024];
+
+        loop {
+            let read = stream
+                .read(&mut chunk)
+                .await
+                .map_err(|err| format!("failed reading {}: {}", stream_name, err))?;
+            if read == 0 {
+                break;
+            }
+            out.extend_from_slice(&chunk[..read]);
+            if out.len() > byte_limit {
+                return Err(format!(
+                    "{} exceeds max size: {} > {}",
+                    stream_name,
+                    out.len(),
+                    byte_limit
+                ));
+            }
+        }
+
+        Ok(out)
     }
 
     fn effective_entries<'a>(
@@ -413,24 +447,71 @@ impl DefaultHookEngine {
                 })?;
         }
 
-        let output =
-            child
-                .wait_with_output()
-                .await
-                .map_err(|err| HookEngineError::ExecutionFailed {
-                    hook_id: entry.id.clone(),
-                    reason: format!("failed to read command hook output: {}", err),
-                })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| HookEngineError::ExecutionFailed {
+                hook_id: entry.id.clone(),
+                reason: "command hook stdout pipe unavailable".to_string(),
+            })?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| HookEngineError::ExecutionFailed {
+                hook_id: entry.id.clone(),
+                reason: "command hook stderr pipe unavailable".to_string(),
+            })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let max_output_bytes = self.config.payload_max_bytes;
+        let stdout_task = tokio::spawn(Self::read_stream_limited(
+            stdout,
+            max_output_bytes,
+            "command stdout",
+        ));
+        let stderr_task = tokio::spawn(Self::read_stream_limited(
+            stderr,
+            max_output_bytes,
+            "command stderr",
+        ));
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|err| HookEngineError::ExecutionFailed {
+                hook_id: entry.id.clone(),
+                reason: format!("failed waiting for command hook: {}", err),
+            })?;
+
+        let stdout = stdout_task
+            .await
+            .map_err(|err| HookEngineError::ExecutionFailed {
+                hook_id: entry.id.clone(),
+                reason: format!("command stdout task join failed: {}", err),
+            })?
+            .map_err(|reason| HookEngineError::ExecutionFailed {
+                hook_id: entry.id.clone(),
+                reason,
+            })?;
+        let stderr = stderr_task
+            .await
+            .map_err(|err| HookEngineError::ExecutionFailed {
+                hook_id: entry.id.clone(),
+                reason: format!("command stderr task join failed: {}", err),
+            })?
+            .map_err(|reason| HookEngineError::ExecutionFailed {
+                hook_id: entry.id.clone(),
+                reason,
+            })?;
+
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr).to_string();
             return Err(HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("command hook exited with {}: {}", output.status, stderr),
+                reason: format!("command hook exited with {}: {}", status, stderr),
             });
         }
 
-        serde_json::from_slice::<RuntimeHookResponse>(&output.stdout).map_err(|err| {
+        serde_json::from_slice::<RuntimeHookResponse>(&stdout).map_err(|err| {
             HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
                 reason: format!("invalid command hook response: {}", err),
@@ -488,16 +569,36 @@ impl DefaultHookEngine {
                 reason: format!("HTTP hook request failed: {}", err),
             })?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        let status = response.status();
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|err| HookEngineError::ExecutionFailed {
+                hook_id: entry.id.clone(),
+                reason: format!("failed reading HTTP hook response body: {}", err),
+            })?;
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() > self.config.payload_max_bytes {
+                return Err(HookEngineError::ExecutionFailed {
+                    hook_id: entry.id.clone(),
+                    reason: format!(
+                        "HTTP hook response exceeds max size: {} > {}",
+                        bytes.len(),
+                        self.config.payload_max_bytes
+                    ),
+                });
+            }
+        }
+
+        if !status.is_success() {
+            let body = String::from_utf8_lossy(&bytes);
             return Err(HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
                 reason: format!("HTTP hook returned {}: {}", status, body),
             });
         }
 
-        response.json::<RuntimeHookResponse>().await.map_err(|err| {
+        serde_json::from_slice::<RuntimeHookResponse>(&bytes).map_err(|err| {
             HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
                 reason: format!("invalid HTTP hook response: {}", err),
@@ -549,49 +650,69 @@ impl HookEngine for DefaultHookEngine {
             }
         }
 
-        for (registration_index, entry) in background {
-            let permit = match self.background_slots.clone().try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    tracing::warn!("background hook queue full, skipping {}", entry.id);
-                    continue;
-                }
-            };
-            let engine = self.clone();
-            let invocation_cloned = invocation.clone();
-            tokio::spawn(async move {
-                let _permit = permit;
-                let outcome = engine
-                    .execute_one(entry, registration_index, invocation_cloned)
-                    .await;
-                if !outcome.published_patches.is_empty() {
-                    engine.publish_patches(outcome.published_patches).await;
-                }
-            });
-        }
-
-        let futures = foreground
-            .into_iter()
-            .map(|(registration_index, entry)| {
-                self.execute_one(entry, registration_index, invocation.clone())
-            })
-            .collect::<Vec<_>>();
-
-        let mut outcomes = join_all(futures).await;
-
-        outcomes.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
-                .then_with(|| a.registration_index.cmp(&b.registration_index))
+        foreground.sort_by(|(a_idx, a_entry), (b_idx, b_entry)| {
+            a_entry
+                .priority
+                .cmp(&b_entry.priority)
+                .then_with(|| a_idx.cmp(b_idx))
         });
 
         let mut merged = HookExecutionReport::empty();
-        for outcome in outcomes {
+        for (registration_index, entry) in foreground {
+            let outcome = self
+                .execute_one(entry, registration_index, invocation.clone())
+                .await;
+
             if let Some(decision) = outcome.decision.clone() {
-                merged.decision = Some(decision);
+                match &decision {
+                    HookDecision::Deny { .. } => {
+                        merged.decision = Some(decision);
+                    }
+                    HookDecision::Allow => {
+                        if !matches!(merged.decision, Some(HookDecision::Deny { .. })) {
+                            merged.decision = Some(HookDecision::Allow);
+                        }
+                    }
+                }
             }
             merged.patches.extend(outcome.patches.clone());
+
+            let should_stop = matches!(outcome.decision, Some(HookDecision::Deny { .. }));
             merged.outcomes.push(outcome);
+            if should_stop {
+                break;
+            }
+        }
+
+        if !matches!(merged.decision, Some(HookDecision::Deny { .. })) {
+            for (registration_index, entry) in background {
+                let permit = match self.background_slots.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::warn!("background hook queue full, skipping {}", entry.id);
+                        continue;
+                    }
+                };
+                let engine = self.clone();
+                let invocation_cloned = invocation.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let outcome = engine
+                        .execute_one(entry, registration_index, invocation_cloned)
+                        .await;
+                    if let Some(error) = &outcome.error {
+                        tracing::warn!(
+                            hook_id = %outcome.hook_id,
+                            point = ?outcome.point,
+                            error = %error,
+                            "background hook execution produced an error"
+                        );
+                    }
+                    if !outcome.published_patches.is_empty() {
+                        engine.publish_patches(outcome.published_patches).await;
+                    }
+                });
+            }
         }
         merged.published_patches = self.drain_published_patches().await;
 
@@ -610,6 +731,7 @@ mod tests {
     use meerkat_core::{
         HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode, HookRuntimeConfig, SessionId,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     fn static_handler(response: RuntimeHookResponse) -> InProcessHookHandler {
         Arc::new(move |_invocation| {
@@ -997,6 +1119,119 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn deny_short_circuits_lower_priority_hooks() {
+        let mut config = HooksConfig::default();
+        config.entries = vec![
+            HookEntryConfig {
+                id: HookId::new("guardrail-deny"),
+                point: HookPoint::PreToolExecution,
+                priority: 1,
+                capability: HookCapability::Guardrail,
+                runtime: runtime_in_process("guardrail"),
+                ..Default::default()
+            },
+            HookEntryConfig {
+                id: HookId::new("observer-late"),
+                point: HookPoint::PreToolExecution,
+                priority: 100,
+                capability: HookCapability::Observe,
+                runtime: runtime_in_process("observer"),
+                ..Default::default()
+            },
+        ];
+
+        let observed_runs = Arc::new(AtomicUsize::new(0));
+        let observer_runs = observed_runs.clone();
+
+        let engine = DefaultHookEngine::new(config);
+        engine
+            .register_in_process_handler(
+                "guardrail",
+                static_handler(RuntimeHookResponse {
+                    decision: Some(HookDecision::deny(
+                        HookId::new("guardrail-deny"),
+                        HookReasonCode::PolicyViolation,
+                        "deny",
+                        None,
+                    )),
+                    patches: Vec::new(),
+                }),
+            )
+            .await;
+        engine
+            .register_in_process_handler(
+                "observer",
+                Arc::new(move |_invocation| {
+                    let observer_runs = observer_runs.clone();
+                    Box::pin(async move {
+                        observer_runs.fetch_add(1, AtomicOrdering::SeqCst);
+                        Ok(RuntimeHookResponse {
+                            decision: Some(HookDecision::Allow),
+                            patches: Vec::new(),
+                        })
+                    })
+                }),
+            )
+            .await;
+
+        let report = engine
+            .execute(
+                HookInvocation {
+                    point: HookPoint::PreToolExecution,
+                    session_id: SessionId::new(),
+                    turn_number: Some(1),
+                    prompt: None,
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(report.decision, Some(HookDecision::Deny { .. })));
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(observed_runs.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn run_started_background_guardrail_is_rejected() {
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("run-start-bg-guardrail"),
+            point: HookPoint::RunStarted,
+            mode: HookExecutionMode::Background,
+            capability: HookCapability::Guardrail,
+            runtime: runtime_in_process("guardrail"),
+            ..Default::default()
+        }];
+
+        let engine = DefaultHookEngine::new(config);
+        let err = engine
+            .execute(
+                HookInvocation {
+                    point: HookPoint::RunStarted,
+                    session_id: SessionId::new(),
+                    turn_number: Some(0),
+                    prompt: Some("hi".to_string()),
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                None,
+            )
+            .await
+            .expect_err("invalid background pre hook must be rejected");
+
+        assert!(matches!(err, HookEngineError::InvalidConfiguration(_)));
     }
 
     #[tokio::test]

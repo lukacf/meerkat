@@ -112,7 +112,9 @@ Hook runtime adapters and the default deterministic hook engine:
 - **In-process runtime**: register Rust handlers by name
 - **Command runtime**: execute external processes via stdin/stdout JSON
 - **HTTP runtime**: invoke remote hook endpoints
-- **Deterministic merge**: sort outcomes by `(priority ASC, registration_index ASC)` with last-writer-wins patch application
+- **Deterministic execution**: foreground hooks execute in `(priority ASC, registration_index ASC)` order
+- **Guardrail semantics**: first deny short-circuits remaining hooks; deny always wins over allow
+- **Patch semantics**: patches from executed hooks are applied in execution order (last patch to same field wins)
 - **Failure policy defaults**:
   - `observe` => fail-open
   - `guardrail` / `rewrite` => fail-closed

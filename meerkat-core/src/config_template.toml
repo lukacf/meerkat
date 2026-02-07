@@ -37,3 +37,4 @@ gemini = ["gemini-3-flash-preview", "gemini-3-pro-preview"]
 [hooks]
 default_timeout_ms = 5000
 payload_max_bytes = 131072
+background_max_concurrency = 32

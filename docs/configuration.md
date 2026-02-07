@@ -70,6 +70,7 @@ Hook entries live under `[hooks]`:
 [hooks]
 default_timeout_ms = 5000
 payload_max_bytes = 131072
+background_max_concurrency = 32
 
 [[hooks.entries]]
 id = "pre_tool_guard"
@@ -100,6 +101,10 @@ Supported runtimes:
 - `in_process`
 - `command`
 - `http`
+
+Security warning:
+- `command` and `http` hooks are treated as trusted code for the project where they are configured.
+- Do not run hook-enabled projects from untrusted sources without reviewing `.rkat/config.toml`.
 
 ### Layering and Precedence
 

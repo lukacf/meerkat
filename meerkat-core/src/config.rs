@@ -284,6 +284,9 @@ impl Config {
             if other.hooks.payload_max_bytes != default_hooks.payload_max_bytes {
                 self.hooks.payload_max_bytes = other.hooks.payload_max_bytes;
             }
+            if other.hooks.background_max_concurrency != default_hooks.background_max_concurrency {
+                self.hooks.background_max_concurrency = other.hooks.background_max_concurrency;
+            }
             self.hooks.entries.extend(other.hooks.entries);
         }
     }
@@ -1066,6 +1069,8 @@ pub struct HooksConfig {
     pub default_timeout_ms: u64,
     /// Max serialized invocation payload size.
     pub payload_max_bytes: usize,
+    /// Max number of background hook tasks allowed to run concurrently.
+    pub background_max_concurrency: usize,
     /// Ordered hook registrations.
     #[serde(default)]
     pub entries: Vec<HookEntryConfig>,
@@ -1082,6 +1087,7 @@ impl Default for HooksConfig {
         Self {
             default_timeout_ms: 5_000,
             payload_max_bytes: 128 * 1024,
+            background_max_concurrency: 32,
             entries: Vec::new(),
         }
     }

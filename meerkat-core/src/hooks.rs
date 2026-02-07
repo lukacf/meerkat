@@ -52,7 +52,10 @@ pub enum HookPoint {
 
 impl HookPoint {
     pub fn is_pre(self) -> bool {
-        matches!(self, Self::PreLlmRequest | Self::PreToolExecution)
+        matches!(
+            self,
+            Self::RunStarted | Self::PreLlmRequest | Self::PreToolExecution | Self::TurnBoundary
+        )
     }
 
     pub fn is_post(self) -> bool {

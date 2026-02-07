@@ -105,10 +105,14 @@ pub use meerkat_core::{
     SchemaError,
     SchemaFormat,
     SchemaWarning,
+    // Provider
+    Provider,
     // Session
     Session,
     SessionId,
     SessionMeta,
+    SessionMetadata,
+    SessionTooling,
     SpawnSpec,
     StopReason,
     StorageConfig,
@@ -136,9 +140,9 @@ pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CoreCommsConfig};
 pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};
 pub use meerkat_tools::ToolError;
 
-// AgentFactory
+// AgentFactory and build_agent types
 mod factory;
-pub use factory::AgentFactory;
+pub use factory::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent, provider_key};
 
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;

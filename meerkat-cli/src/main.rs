@@ -278,6 +278,9 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+
+    /// Start the JSON-RPC stdio server
+    Rpc,
 }
 
 #[derive(Subcommand)]
@@ -585,6 +588,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             ConfigCommands::Set { file, json, toml } => handle_config_set(file, json, toml).await,
             ConfigCommands::Patch { file, json } => handle_config_patch(file, json).await,
         },
+        Commands::Rpc => handle_rpc().await,
     };
 
     // Map result to exit code
@@ -794,6 +798,25 @@ async fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> any
         .patch(ConfigDelta(patch_value))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to patch config: {e}"))?;
+    Ok(())
+}
+
+async fn handle_rpc() -> anyhow::Result<()> {
+    let (config, _config_base_dir) = load_config().await?;
+    let store_path = get_session_store_dir().await;
+    let factory = AgentFactory::new(store_path);
+
+    let runtime = Arc::new(
+        meerkat_rpc::session_runtime::SessionRuntime::new(factory, config, 64),
+    );
+
+    let (config_store, _base_dir) = resolve_config_store().await?;
+    let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::from(config_store);
+
+    meerkat_rpc::serve_stdio(runtime, config_store)
+        .await
+        .map_err(|e| anyhow::anyhow!("RPC server error: {e}"))?;
+
     Ok(())
 }
 

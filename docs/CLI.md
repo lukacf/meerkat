@@ -20,6 +20,8 @@ rkat <COMMAND> [OPTIONS]
 | `resume` | Resume a previous session with a new prompt |
 | `sessions` | Manage stored sessions |
 | `mcp` | Configure MCP (Model Context Protocol) servers |
+| `config` | Get, set, or patch configuration |
+| `rpc` | Start the JSON-RPC stdio server |
 
 ---
 
@@ -384,6 +386,23 @@ Removed MCP server 'project-tools' from project config: .rkat/mcp.toml
 
 ---
 
+## rpc
+
+Start the JSON-RPC stdio server. This provides a stateful, bidirectional
+interface for IDE extensions, desktop apps, and automation tools.
+
+```bash
+rkat rpc
+```
+
+The server reads/writes newline-delimited JSON-RPC 2.0 on stdin/stdout. Unlike
+`run`/`resume`, it keeps agents alive between turns -- subsequent turns reuse
+the same agent without reconstruction overhead.
+
+See the [RPC reference](./rpc.md) for the full protocol specification.
+
+---
+
 ## Configuration
 
 ### Environment Variables
@@ -632,6 +651,7 @@ done
 ## See Also
 
 - [Quickstart Guide](./quickstart.md) - Get started with Meerkat
+- [RPC Reference](./rpc.md) - JSON-RPC stdio server protocol
 - [Configuration Guide](./configuration.md) - Detailed configuration options
 - [Architecture](./architecture.md) - How Meerkat works
 - [Examples](./examples.md) - More usage examples

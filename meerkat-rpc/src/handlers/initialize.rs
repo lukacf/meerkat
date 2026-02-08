@@ -29,7 +29,6 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
             "initialize".to_string(),
             "initialized".to_string(),
             "session/create".to_string(),
-            "session/resume".to_string(),
             "session/list".to_string(),
             "session/read".to_string(),
             "session/archive".to_string(),

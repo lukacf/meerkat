@@ -6,10 +6,12 @@ use tokio::sync::mpsc;
 
 use meerkat_core::event::AgentEvent;
 
+use super::{RpcResponseExt, UsageResult, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
+use crate::NOTIFICATION_CHANNEL_CAPACITY;
 
 // ---------------------------------------------------------------------------
 // Param types
@@ -39,18 +41,7 @@ pub struct TurnResult {
     pub text: String,
     pub turns: u32,
     pub tool_calls: u32,
-    pub usage: TurnUsage,
-}
-
-/// Serializable usage for turn results.
-#[derive(Debug, Serialize)]
-pub struct TurnUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_creation_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_read_tokens: Option<u64>,
+    pub usage: UsageResult,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,8 +71,9 @@ pub async fn handle_start(
         }
     };
 
-    // Set up event forwarding
-    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+    // Set up event forwarding. The spawned task exits naturally when `event_tx`
+    // is dropped at the end of the turn (the session task holds the only sender).
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(NOTIFICATION_CHANNEL_CAPACITY);
     let sink = notification_sink.clone();
     let sid_clone = session_id.clone();
     tokio::spawn(async move {
@@ -105,7 +97,7 @@ pub async fn handle_start(
         text: result.text,
         turns: result.turns,
         tool_calls: result.tool_calls,
-        usage: TurnUsage {
+        usage: UsageResult {
             input_tokens: result.usage.input_tokens,
             output_tokens: result.usage.output_tokens,
             cache_creation_tokens: result.usage.cache_creation_tokens,
@@ -141,38 +133,5 @@ pub async fn handle_interrupt(
     match runtime.interrupt(&session_id).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
         Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Parse typed params from a `RawValue`, returning an `RpcResponse` error on failure.
-#[allow(clippy::result_large_err)]
-fn parse_params<T: serde::de::DeserializeOwned>(
-    params: Option<&RawValue>,
-) -> Result<T, RpcResponse> {
-    let raw = params.ok_or_else(|| {
-        RpcResponse::error(None, error::INVALID_PARAMS, "Missing params")
-    })?;
-    serde_json::from_str(raw.get()).map_err(|e| {
-        RpcResponse::error(
-            None,
-            error::INVALID_PARAMS,
-            format!("Invalid params: {e}"),
-        )
-    })
-}
-
-/// Extension trait to set the id on an RpcResponse.
-trait RpcResponseExt {
-    fn with_id(self, id: Option<RpcId>) -> Self;
-}
-
-impl RpcResponseExt for RpcResponse {
-    fn with_id(mut self, id: Option<RpcId>) -> Self {
-        self.id = id;
-        self
     }
 }

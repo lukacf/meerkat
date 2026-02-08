@@ -692,7 +692,7 @@ where
     }
 }
 
-fn rewrite_assistant_text(blocks: &mut Vec<AssistantBlock>, replacement: String) {
+pub(crate) fn rewrite_assistant_text(blocks: &mut Vec<AssistantBlock>, replacement: String) {
     let first_text_idx = blocks
         .iter()
         .position(|block| matches!(block, AssistantBlock::Text { .. }));

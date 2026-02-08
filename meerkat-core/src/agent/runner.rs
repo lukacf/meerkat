@@ -10,7 +10,7 @@ use crate::ops::{
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
-use crate::types::{AssistantBlock, Message, RunResult};
+use crate::types::{Message, RunResult};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -446,6 +446,7 @@ where
     }
 
     fn apply_run_result_text_patch(&mut self, text: &str) {
+        use super::state::rewrite_assistant_text;
         let messages = self.session.messages_mut();
         if let Some(last_assistant) = messages
             .iter_mut()
@@ -454,33 +455,7 @@ where
         {
             match last_assistant {
                 Message::BlockAssistant(block_assistant) => {
-                    let first_text_idx = block_assistant
-                        .blocks
-                        .iter()
-                        .position(|block| matches!(block, AssistantBlock::Text { .. }));
-                    if let Some(idx) = first_text_idx {
-                        if let AssistantBlock::Text { text: current, .. } =
-                            &mut block_assistant.blocks[idx]
-                        {
-                            *current = text.to_string();
-                        }
-                        let mut i = idx + 1;
-                        while i < block_assistant.blocks.len() {
-                            if matches!(block_assistant.blocks[i], AssistantBlock::Text { .. }) {
-                                block_assistant.blocks.remove(i);
-                            } else {
-                                i += 1;
-                            }
-                        }
-                    } else {
-                        block_assistant.blocks.insert(
-                            0,
-                            AssistantBlock::Text {
-                                text: text.to_string(),
-                                meta: None,
-                            },
-                        );
-                    }
+                    rewrite_assistant_text(&mut block_assistant.blocks, text.to_string());
                 }
                 Message::Assistant(assistant) => {
                     assistant.content = text.to_string();

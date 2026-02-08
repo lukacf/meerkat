@@ -97,9 +97,7 @@ Request:
     "prompt": "What is Rust?",
     "model": "claude-sonnet-4-5",
     "max_tokens": 4096,
-    "system_prompt": "You are a helpful assistant.",
-    "enable_builtins": false,
-    "enable_shell": false
+    "system_prompt": "You are a helpful assistant."
   }
 }
 ```

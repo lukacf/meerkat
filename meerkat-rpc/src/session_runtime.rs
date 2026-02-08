@@ -14,6 +14,7 @@ use meerkat_core::types::{RunResult, SessionId};
 use meerkat_core::Config;
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
 
+use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::RpcError;
 
@@ -31,6 +32,17 @@ pub enum SessionState {
     Running,
     /// The session is shutting down.
     ShuttingDown,
+}
+
+impl SessionState {
+    /// Return a stable string representation matching the serde `rename_all` convention.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::ShuttingDown => "shutting_down",
+        }
+    }
 }
 
 /// Summary information about a session.
@@ -131,7 +143,7 @@ impl SessionRuntime {
         };
 
         // Create the permanent event channel for this session.
-        let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(100);
+        let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(NOTIFICATION_CHANNEL_CAPACITY);
 
         // Wire the event_tx into the build config so the LLM adapter streams
         // TextDelta events through it.
@@ -407,8 +419,6 @@ mod tests {
 
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
     use async_trait::async_trait;
     use futures::stream;
     use meerkat::AgentBuildConfig;
@@ -459,15 +469,11 @@ mod tests {
     /// Used to test concurrent access (SESSION_BUSY).
     struct SlowMockLlmClient {
         delay_ms: u64,
-        call_count: AtomicU32,
     }
 
     impl SlowMockLlmClient {
         fn new(delay_ms: u64) -> Self {
-            Self {
-                delay_ms,
-                call_count: AtomicU32::new(0),
-            }
+            Self { delay_ms }
         }
     }
 
@@ -483,7 +489,6 @@ mod tests {
                     + 'a,
             >,
         > {
-            self.call_count.fetch_add(1, Ordering::SeqCst);
             let delay_ms = self.delay_ms;
             Box::pin(async_stream::stream! {
                 tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;

@@ -1,8 +1,8 @@
 //! RPC server main loop.
 //!
 //! Wires together the JSON-RPC transport, method router, and notification
-//! channel. Uses `tokio::select!` to multiplex incoming requests and
-//! outgoing notifications.
+//! channel. Uses `tokio::select!` to multiplex incoming requests, outgoing
+//! responses from spawned dispatch tasks, and event notifications.
 
 use std::sync::Arc;
 
@@ -11,10 +11,11 @@ use tokio::sync::mpsc;
 
 use meerkat_core::ConfigStore;
 
-use crate::protocol::RpcNotification;
+use crate::protocol::{RpcNotification, RpcResponse};
 use crate::router::{MethodRouter, NotificationSink};
 use crate::session_runtime::SessionRuntime;
 use crate::transport::{JsonlTransport, TransportError};
+use crate::NOTIFICATION_CHANNEL_CAPACITY;
 
 /// Errors from the RPC server.
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +33,9 @@ pub struct RpcServer<R, W> {
     transport: JsonlTransport<R, W>,
     router: MethodRouter,
     notification_rx: mpsc::Receiver<RpcNotification>,
+    /// Channel for responses from concurrently dispatched requests.
+    response_rx: mpsc::Receiver<RpcResponse>,
+    response_tx: mpsc::Sender<RpcResponse>,
 }
 
 impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
@@ -45,18 +49,25 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
     ) -> Self {
-        let (notification_tx, notification_rx) = mpsc::channel(256);
+        let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
         let router = MethodRouter::new(runtime, config_store, notification_sink);
         let transport = JsonlTransport::new(reader, writer);
+        let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         Self {
             transport,
             router,
             notification_rx,
+            response_rx,
+            response_tx,
         }
     }
 
     /// Run the server until EOF or a fatal I/O error.
+    ///
+    /// Requests are dispatched concurrently in spawned tasks so that long-running
+    /// operations (e.g. `session/create`, `turn/start`) do not block the server
+    /// from processing other requests (e.g. `turn/interrupt`).
     ///
     /// Parse errors are reported to the client and do not terminate the loop.
     /// EOF (reader returns `None`) triggers graceful shutdown.
@@ -69,13 +80,17 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
                 msg = self.transport.read_message() => {
                     match msg {
                         Ok(Some(request)) => {
-                            if let Some(response) = self.router.dispatch(request).await {
-                                self.transport.write_response(&response).await?;
-                            }
+                            let router = self.router.clone();
+                            let resp_tx = self.response_tx.clone();
+                            tokio::spawn(async move {
+                                if let Some(response) = router.dispatch(request).await {
+                                    let _ = resp_tx.send(response).await;
+                                }
+                            });
                         }
                         Ok(None) => break, // EOF - clean shutdown
                         Err(TransportError::Parse(err)) => {
-                            let response = crate::protocol::RpcResponse::error(
+                            let response = RpcResponse::error(
                                 None,
                                 crate::error::PARSE_ERROR,
                                 format!("Parse error: {err}"),
@@ -86,6 +101,11 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
                             return Err(ServerError::Io(err));
                         }
                     }
+                }
+
+                // Write responses from completed dispatch tasks.
+                Some(response) = self.response_rx.recv() => {
+                    self.transport.write_response(&response).await?;
                 }
 
                 // Forward queued notifications to the transport.

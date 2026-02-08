@@ -514,7 +514,7 @@ impl AgentFactory {
     /// Build the tool dispatcher and usage instructions based on factory flags.
     fn build_tool_dispatcher_for_agent(
         &self,
-        config: &Config,
+        _config: &Config,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !self.enable_builtins {
             return Ok((Arc::new(EmptyToolDispatcher), String::new()));
@@ -561,7 +561,6 @@ impl AgentFactory {
             None,
         )?;
         let usage_instructions = dispatcher.usage_instructions();
-        let _ = config; // config reserved for future tool configuration
 
         Ok((Arc::new(dispatcher), usage_instructions))
     }

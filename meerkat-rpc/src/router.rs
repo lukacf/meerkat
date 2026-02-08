@@ -47,6 +47,7 @@ impl NotificationSink {
 // ---------------------------------------------------------------------------
 
 /// Dispatches incoming JSON-RPC requests to the appropriate handler.
+#[derive(Clone)]
 pub struct MethodRouter {
     runtime: Arc<SessionRuntime>,
     config_store: Arc<dyn ConfigStore>,
@@ -97,10 +98,6 @@ impl MethodRouter {
                     &self.notification_sink,
                 )
                 .await
-            }
-            "session/resume" => {
-                // Deferred - not yet implemented
-                RpcResponse::error(id, error::METHOD_NOT_FOUND, "session/resume is not yet implemented")
             }
             "session/list" => {
                 handlers::session::handle_list(id, &self.runtime).await

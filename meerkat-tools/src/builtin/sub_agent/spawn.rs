@@ -1,9 +1,9 @@
 //! agent_spawn tool - Spawn a new sub-agent with clean context
 
 use super::config::SubAgentError;
-use super::runner::{
-    DynSubAgentSpec, SubAgentCommsConfig, create_spawn_session, spawn_sub_agent_dyn,
-};
+use super::runner::{DynSubAgentSpec, create_spawn_session, spawn_sub_agent_dyn};
+#[cfg(feature = "comms")]
+use super::runner::SubAgentCommsConfig;
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 use crate::dispatcher::FilteredDispatcher;
@@ -119,6 +119,45 @@ struct SpawnParams {
     host_mode: bool,
 }
 
+/// Parameters for agent_spawn tool when comms is disabled.
+#[cfg(not(feature = "comms"))]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SpawnParamsNoComms {
+    /// Initial prompt/task for the sub-agent
+    prompt: String,
+    /// LLM provider to use (anthropic, openai, gemini)
+    #[serde(default)]
+    provider: Option<String>,
+    /// Model name (provider-specific)
+    #[serde(default)]
+    model: Option<String>,
+    /// Tool access policy
+    #[serde(default)]
+    tool_access: Option<ToolAccessInput>,
+    /// Budget limits
+    #[serde(default)]
+    budget: Option<BudgetInput>,
+    /// Override system prompt
+    #[serde(default)]
+    system_prompt: Option<String>,
+}
+
+#[cfg(not(feature = "comms"))]
+impl From<SpawnParamsNoComms> for SpawnParams {
+    fn from(params: SpawnParamsNoComms) -> Self {
+        Self {
+            prompt: params.prompt,
+            provider: params.provider,
+            model: params.model,
+            tool_access: params.tool_access,
+            budget: params.budget,
+            system_prompt: params.system_prompt,
+            host_mode: false,
+        }
+    }
+}
+
 /// Response from agent_spawn tool
 #[derive(Debug, Serialize)]
 struct SpawnResponse {
@@ -140,6 +179,7 @@ struct SpawnResponse {
 }
 
 /// Generate comms context to inject into child agent's prompt
+#[cfg(feature = "comms")]
 fn child_comms_context(parent_name: &str) -> String {
     format!(
         r#"
@@ -154,6 +194,7 @@ Always report important findings to your parent. Follow instructions from your p
 }
 
 /// Generate comms instructions for parent about messaging child
+#[cfg(feature = "comms")]
 fn parent_comms_instructions(child_name: &str) -> String {
     format!(
         "To message this child: send_message(\"{child_name}\", \"your message\")",
@@ -289,6 +330,7 @@ impl AgentSpawnTool {
             return Err(BuiltinToolError::invalid_args("Prompt cannot be empty"));
         }
 
+        #[cfg(feature = "comms")]
         if params.host_mode && self.state.parent_comms.is_none() {
             return Err(BuiltinToolError::invalid_args(
                 "host_mode requires comms to be enabled for sub-agents".to_string(),
@@ -340,6 +382,7 @@ impl AgentSpawnTool {
 
         // Build comms config if parent has comms enabled
         // Also prepare comms context to inject into child's prompt
+        #[cfg(feature = "comms")]
         let (comms_config, comms_instructions) =
             if let Some(parent_comms) = &self.state.parent_comms {
                 let config = SubAgentCommsConfig {
@@ -353,7 +396,11 @@ impl AgentSpawnTool {
                 (None, None)
             };
 
+        #[cfg(not(feature = "comms"))]
+        let (comms_config, comms_instructions) = (None, None);
+
         // Create prompt with comms context injected if parent has comms enabled
+        #[cfg(feature = "comms")]
         let enriched_prompt = if let Some(parent_comms) = &self.state.parent_comms {
             format!(
                 "{}\n{}",
@@ -363,6 +410,9 @@ impl AgentSpawnTool {
         } else {
             params.prompt.clone()
         };
+
+        #[cfg(not(feature = "comms"))]
+        let enriched_prompt = params.prompt.clone();
 
         // Resolve system prompt: explicit override > inherited tool usage instructions > none
         let effective_system_prompt = if params.system_prompt.is_some() {
@@ -384,6 +434,7 @@ impl AgentSpawnTool {
         let session = create_spawn_session(&enriched_prompt, effective_system_prompt.as_deref());
 
         // Create the sub-agent specification
+        #[cfg(feature = "comms")]
         let spec = DynSubAgentSpec {
             client,
             model: model.clone(),
@@ -395,6 +446,19 @@ impl AgentSpawnTool {
             system_prompt: effective_system_prompt,
             comms_config,
             parent_trusted_peers: self.state.parent_trusted_peers.clone(),
+            host_mode: params.host_mode,
+        };
+
+        #[cfg(not(feature = "comms"))]
+        let spec = DynSubAgentSpec {
+            client,
+            model: model.clone(),
+            tools: filtered_tools,
+            store: self.state.session_store.clone(),
+            session,
+            budget: Some(budget),
+            depth: self.state.depth() + 1,
+            system_prompt: effective_system_prompt,
             host_mode: params.host_mode,
         };
 
@@ -430,7 +494,16 @@ impl BuiltinTool for AgentSpawnTool {
     }
 
     fn def(&self) -> ToolDef {
-        let mut schema = crate::schema::schema_for::<SpawnParams>();
+        let mut schema = {
+            #[cfg(feature = "comms")]
+            {
+                crate::schema::schema_for::<SpawnParams>()
+            }
+            #[cfg(not(feature = "comms"))]
+            {
+                crate::schema::schema_for::<SpawnParamsNoComms>()
+            }
+        };
 
         // Enrich model description with allowed values (dynamic from config)
         let models_desc = if let Some(ref policy) = self.state.config.resolved_policy {
@@ -478,8 +551,17 @@ impl BuiltinTool for AgentSpawnTool {
     }
 
     async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+        #[cfg(feature = "comms")]
         let params: SpawnParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {}", e)))?;
+
+        #[cfg(not(feature = "comms"))]
+        let params: SpawnParams = {
+            let params: SpawnParamsNoComms = serde_json::from_value(args).map_err(|e| {
+                BuiltinToolError::invalid_args(format!("Invalid parameters: {}", e))
+            })?;
+            params.into()
+        };
 
         let response = self.spawn_agent(params).await?;
         serde_json::to_value(response).map_err(|e| {
@@ -928,6 +1010,7 @@ mod tests {
     }
 
     // Host mode tests
+    #[cfg(feature = "comms")]
     mod host_mode {
         use super::*;
         use serde_json::json;
@@ -976,6 +1059,32 @@ mod tests {
                 "Description should explain host_mode behavior"
             );
         }
+    }
+
+    #[cfg(not(feature = "comms"))]
+    #[tokio::test]
+    async fn test_spawn_schema_excludes_host_mode_without_comms() {
+        let state = create_test_state();
+        let tool = AgentSpawnTool::new(state);
+        let schema_json = serde_json::to_value(tool.def().input_schema).unwrap();
+        let props = schema_json["properties"].as_object().unwrap();
+        assert!(
+            !props.contains_key("host_mode"),
+            "host_mode should not be in schema without comms"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn test_spawn_schema_includes_host_mode_with_comms() {
+        let state = create_test_state();
+        let tool = AgentSpawnTool::new(state);
+        let schema_json = serde_json::to_value(tool.def().input_schema).unwrap();
+        let props = schema_json["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("host_mode"),
+            "host_mode should be in schema with comms"
+        );
     }
 
     #[test]

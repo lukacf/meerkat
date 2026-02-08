@@ -11,6 +11,7 @@ pub enum DispatchError {
     #[error("Tool error: {0}")]
     Tool(#[from] ToolError),
     #[error("MCP error: {0}")]
+    #[cfg(feature = "mcp")]
     Mcp(#[from] meerkat_mcp::McpError),
     #[error("Timeout: tool execution took longer than {timeout_ms}ms")]
     Timeout { timeout_ms: u64 },

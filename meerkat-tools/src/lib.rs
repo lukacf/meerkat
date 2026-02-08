@@ -28,18 +28,22 @@ pub mod error;
 pub mod registry;
 pub mod schema;
 
-pub use builder::{
-    BuiltinDispatcherConfig, CommsDispatcherConfig, McpDispatcherConfig, ToolDispatcherBuilder,
-    build_builtin_dispatcher,
-};
+pub use builder::{BuiltinDispatcherConfig, ToolDispatcherBuilder, build_builtin_dispatcher};
+#[cfg(feature = "comms")]
+pub use builder::CommsDispatcherConfig;
+#[cfg(feature = "mcp")]
+pub use builder::McpDispatcherConfig;
 pub use builtin::{
-    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CommsToolSurface,
-    CompositeDispatcher, CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore,
-    MemoryTaskStore, ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
+    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
+    CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore,
+    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
     ensure_rkat_dir_async, find_project_root,
 };
+#[cfg(feature = "comms")]
+pub use builtin::CommsToolSurface;
 pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher, ToolDispatcher};
 pub use error::{DispatchError, ToolError, ToolValidationError};
+#[cfg(feature = "comms")]
 pub use meerkat_comms::agent::{
     CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, wrap_with_comms,
 };

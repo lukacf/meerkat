@@ -3,27 +3,36 @@
 mod adapters;
 mod mcp;
 
-use adapters::{CliToolDispatcher, EmptyToolDispatcher, McpRouterAdapter};
+use adapters::{CliToolDispatcher, EmptyToolDispatcher};
+#[cfg(feature = "mcp")]
+use adapters::McpRouterAdapter;
+#[cfg(not(feature = "mcp"))]
+type McpRouterAdapter = ();
 use meerkat::{AgentFactory, create_default_hook_engine, resolve_layered_hooks_config};
 use meerkat_client::{DefaultClientFactory, LlmClientFactory};
+#[cfg(feature = "comms")]
 use meerkat_comms::{CommsRuntime, CoreCommsConfig, ParentCommsContext};
 use meerkat_core::AgentToolDispatcher;
+#[cfg(feature = "comms")]
 use meerkat_core::ToolGatewayBuilder;
+#[cfg(feature = "comms")]
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::ops::ConcurrencyLimits;
 use meerkat_core::sub_agent::SubAgentManager;
 use meerkat_core::{AgentEvent, SchemaCompat, format_verbose_event};
 use meerkat_core::{
-    CommsRuntimeMode, Config, ConfigDelta, ConfigStore, FileConfigStore, SessionMetadata,
-    SessionTooling,
+    Config, ConfigDelta, ConfigStore, FileConfigStore, SessionMetadata, SessionTooling,
 };
+#[cfg(feature = "comms")]
+use meerkat_core::CommsRuntimeMode;
 use meerkat_store::SessionStore;
 use meerkat_tools::builtin::{
-    BuiltinToolConfig, CommsToolSurface, FileTaskStore, MemoryTaskStore, TaskStore, ToolMode,
-    ToolPolicyLayer,
+    BuiltinToolConfig, FileTaskStore, MemoryTaskStore, TaskStore, ToolMode, ToolPolicyLayer,
     shell::ShellConfig,
     sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState},
 };
+#[cfg(feature = "comms")]
+use meerkat_tools::builtin::CommsToolSurface;
 use meerkat_tools::{ensure_rkat_dir_async, find_project_root};
 use tokio::sync::mpsc;
 
@@ -208,14 +217,17 @@ enum Commands {
 
         // === Comms flags ===
         /// Agent name for inter-agent communication. Enables comms if set.
+        #[cfg(feature = "comms")]
         #[arg(long = "comms-name")]
         comms_name: Option<String>,
 
         /// TCP address to listen on for inter-agent communication (e.g., "0.0.0.0:4200")
+        #[cfg(feature = "comms")]
         #[arg(long = "comms-listen-tcp")]
         comms_listen_tcp: Option<String>,
 
         /// Disable inter-agent communication entirely
+        #[cfg(feature = "comms")]
         #[arg(long = "no-comms")]
         no_comms: bool,
 
@@ -240,6 +252,7 @@ enum Commands {
         // === Host mode ===
         /// Run as a host: process initial prompt, then stay alive listening for comms messages.
         /// Requires comms to be enabled (--comms-name or auto-enabled). Exit with DISMISS message.
+        #[cfg(feature = "comms")]
         #[arg(long)]
         host: bool,
     },
@@ -465,6 +478,7 @@ async fn main() -> anyhow::Result<ExitCode> {
 
     let result = match cli.command {
         Commands::Init => init_project_config().await,
+        #[cfg(feature = "comms")]
         Commands::Run {
             prompt,
             model,
@@ -557,6 +571,97 @@ async fn main() -> anyhow::Result<ExitCode> {
                         !no_subagents, // sub-agents enabled by default
                         verbose,
                         host,
+                        &config,
+                        config_base_dir,
+                        hooks_override,
+                    )
+                    .await
+                }
+                (Err(e), _, _) => Err(e),
+                (_, Err(e), _) => Err(e),
+                (_, _, Err(e)) => Err(e),
+            }
+        }
+        #[cfg(not(feature = "comms"))]
+        Commands::Run {
+            prompt,
+            model,
+            provider,
+            max_tokens,
+            max_total_tokens,
+            max_duration,
+            max_tool_calls,
+            output,
+            stream,
+            params,
+            output_schema,
+            output_schema_compat,
+            structured_output_retries,
+            hooks_override_json,
+            hooks_override_file,
+            enable_builtins,
+            enable_shell,
+            no_subagents,
+            verbose,
+        } => {
+            let (config, config_base_dir) = load_config().await?;
+
+            let model = model.unwrap_or_else(|| config.agent.model.to_string());
+            let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
+
+            let resolved_provider = provider
+                .or_else(|| Provider::infer_from_model(&model))
+                .unwrap_or_default();
+
+            let duration = max_duration.map(|s| parse_duration(&s)).transpose();
+
+            let provider_params = parse_provider_params(&params);
+            let hook_run_overrides =
+                parse_hook_run_overrides(hooks_override_file, hooks_override_json);
+
+            let comms_overrides = CommsOverrides::default();
+
+            let parsed_output_schema = output_schema
+                .as_ref()
+                .map(|s| parse_output_schema(s))
+                .transpose()?
+                .map(|schema| {
+                    if let Some(compat) = output_schema_compat {
+                        schema.with_compat(compat.into())
+                    } else {
+                        schema
+                    }
+                });
+
+            match (duration, provider_params, hook_run_overrides) {
+                (Ok(dur), Ok(parsed_params), Ok(hooks_override)) => {
+                    let mut limits = config.budget_limits();
+                    if let Some(max_tokens) = max_total_tokens {
+                        limits.max_tokens = Some(max_tokens);
+                    }
+                    if let Some(max_duration) = dur {
+                        limits.max_duration = Some(max_duration);
+                    }
+                    if let Some(max_tool_calls) = max_tool_calls {
+                        limits.max_tool_calls = Some(max_tool_calls);
+                    }
+                    run_agent(
+                        &prompt,
+                        &model,
+                        resolved_provider,
+                        max_tokens,
+                        limits,
+                        &output,
+                        stream,
+                        parsed_params,
+                        parsed_output_schema,
+                        structured_output_retries,
+                        comms_overrides,
+                        enable_builtins,
+                        enable_shell,
+                        !no_subagents,
+                        verbose,
+                        false,
                         &config,
                         config_base_dir,
                         hooks_override,
@@ -820,6 +925,7 @@ async fn handle_rpc() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "comms")]
 fn build_comms_config(config: &Config, overrides: &CommsOverrides) -> Option<CoreCommsConfig> {
     if overrides.disabled {
         return None;
@@ -882,6 +988,7 @@ async fn create_session_store() -> Arc<JsonlStore> {
 }
 
 /// Create MCP tool dispatcher from config files
+#[cfg(feature = "mcp")]
 async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
     use meerkat_core::mcp_config::{McpConfig, McpScope};
     use meerkat_mcp::McpRouter;
@@ -943,15 +1050,24 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
     Ok(Some(adapter))
 }
 
+#[cfg(not(feature = "mcp"))]
+async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
+    Ok(None)
+}
+
 struct ToolingSetup {
     tools: Arc<CliToolDispatcher>,
     tool_usage_instructions: String,
+    #[cfg(feature = "comms")]
     comms_runtime: Option<CommsRuntime>,
+    #[cfg(feature = "comms")]
     comms_config: Option<CoreCommsConfig>,
+    #[cfg(feature = "comms")]
     comms_base_dir: PathBuf,
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "comms")]
 async fn build_tooling(
     base_factory: &AgentFactory,
     config: &Config,
@@ -1021,6 +1137,8 @@ async fn build_tooling(
     }
 
     // Load MCP tools (available for all modes)
+    #[cfg(feature = "mcp")]
+    #[cfg(feature = "mcp")]
     let mcp_router_adapter = match create_mcp_tools().await {
         Ok(adapter) => adapter,
         Err(e) => {
@@ -1029,14 +1147,26 @@ async fn build_tooling(
         }
     };
 
+    #[cfg(not(feature = "mcp"))]
+    let mcp_router_adapter: Option<()> = None;
+
+    #[cfg(not(feature = "mcp"))]
+    let mcp_router_adapter: Option<()> = None;
+
     // Determine if we need CompositeDispatcher (builtins OR subagents)
     let need_composite = enable_builtins || enable_subagents;
 
     // Load MCP config and create tool dispatcher
     let (tools, tool_usage_instructions): (Arc<CliToolDispatcher>, String) = if need_composite {
         // Convert MCP adapter to trait object for CompositeDispatcher
+        #[cfg(feature = "mcp")]
+        #[cfg(feature = "mcp")]
         let mcp_adapter = mcp_router_adapter
             .map(|a| Arc::new(a) as Arc<dyn meerkat_core::agent::AgentToolDispatcher>);
+        #[cfg(not(feature = "mcp"))]
+        let mcp_adapter: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>> = None;
+        #[cfg(not(feature = "mcp"))]
+        let mcp_adapter: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>> = None;
         use std::collections::HashSet;
 
         // Build enabled tools based on flags
@@ -1303,6 +1433,128 @@ async fn build_tooling(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(feature = "comms"))]
+async fn build_tooling(
+    base_factory: &AgentFactory,
+    config: &Config,
+    _config_base_dir: PathBuf,
+    _comms_overrides: &CommsOverrides,
+    enable_builtins: bool,
+    enable_shell: bool,
+    enable_subagents: bool,
+    _model: &str,
+    _provider: Provider,
+) -> anyhow::Result<ToolingSetup> {
+    let mcp_router_adapter = match create_mcp_tools().await {
+        Ok(adapter) => adapter,
+        Err(e) => {
+            tracing::warn!("Failed to load MCP tools: {}", e);
+            None
+        }
+    };
+
+    let need_composite = enable_builtins || enable_subagents;
+
+    let (tools, tool_usage_instructions): (Arc<CliToolDispatcher>, String) = if need_composite {
+        let mcp_adapter = mcp_router_adapter
+            .map(|a| Arc::new(a) as Arc<dyn meerkat_core::agent::AgentToolDispatcher>);
+        use std::collections::HashSet;
+
+        let mut enabled_tools: HashSet<String> = HashSet::new();
+        if enable_builtins {
+            enabled_tools.extend(
+                [
+                    "task_list",
+                    "task_get",
+                    "task_create",
+                    "task_update",
+                    "wait",
+                    "datetime",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+        }
+        if enable_shell {
+            enabled_tools.extend([
+                "shell".to_string(),
+                "shell_job_status".to_string(),
+                "shell_jobs".to_string(),
+                "shell_job_cancel".to_string(),
+            ]);
+        }
+        if enable_subagents {
+            enabled_tools.extend([
+                "agent_spawn".to_string(),
+                "agent_fork".to_string(),
+                "agent_status".to_string(),
+                "agent_cancel".to_string(),
+                "agent_list".to_string(),
+            ]);
+        }
+
+        let builtin_config = BuiltinToolConfig {
+            policy: ToolPolicyLayer {
+                mode: Some(ToolMode::AllowList),
+                enable: enabled_tools,
+                disable: HashSet::new(),
+            },
+            enforced: Default::default(),
+        };
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let project_root = find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
+
+        let shell_config = if enable_shell {
+            Some(ShellConfig {
+                enabled: true,
+                default_timeout_secs: config.shell.timeout_secs,
+                restrict_to_project: true,
+                shell: config.shell.program.to_string(),
+                shell_path: None,
+                project_root: project_root.clone(),
+                max_completed_jobs: 100,
+                completed_job_ttl_secs: 300,
+                max_concurrent_processes: 10,
+                security_mode: config.shell.security_mode,
+                security_patterns: config.shell.security_patterns.clone(),
+            })
+        } else {
+            None
+        };
+
+        let dispatcher = base_factory
+            .build_composite_dispatcher(
+                Arc::new(FileTaskStore::in_project(&project_root)),
+                &builtin_config,
+                shell_config,
+                mcp_adapter,
+                None,
+            )
+            .await?;
+
+        let usage = dispatcher.usage_instructions();
+        (Arc::new(CliToolDispatcher::Composite(dispatcher)), usage)
+    } else {
+        #[cfg(feature = "mcp")]
+        if let Some(adapter) = mcp_router_adapter {
+            (Arc::new(CliToolDispatcher::Mcp(adapter)), String::new())
+        } else {
+            (Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher::default())), String::new())
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            (Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher::default())), String::new())
+        }
+    };
+
+    Ok(ToolingSetup {
+        tools,
+        tool_usage_instructions,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_agent(
     prompt: &str,
     model: &str,
@@ -1326,6 +1578,8 @@ async fn run_agent(
 ) -> anyhow::Result<()> {
     use meerkat_core::event::AgentEvent;
     use tokio::sync::mpsc;
+
+    let host_mode = cfg!(feature = "comms") && host_mode;
 
     let api_key = resolve_api_key(provider)?;
 
@@ -1372,12 +1626,19 @@ async fn run_agent(
         provider,
     )
     .await?;
+    #[cfg(feature = "comms")]
     let ToolingSetup {
         tools,
         tool_usage_instructions,
         comms_runtime,
         comms_config,
         comms_base_dir,
+    } = tooling;
+
+    #[cfg(not(feature = "comms"))]
+    let ToolingSetup {
+        tools,
+        tool_usage_instructions,
     } = tooling;
 
     // Create persistent session store
@@ -1408,13 +1669,22 @@ async fn run_agent(
         builder = builder.output_schema(schema);
     }
 
+    #[cfg(feature = "comms")]
     let comms_enabled = comms_runtime.is_some();
+    #[cfg(not(feature = "comms"))]
+    let comms_enabled = false;
+
+    #[cfg(feature = "comms")]
     let comms_name = comms_config.as_ref().map(|config| config.name.clone());
+    #[cfg(not(feature = "comms"))]
+    let comms_name: Option<String> = None;
 
-    // Extract peer_id before moving runtime to builder
+    #[cfg(feature = "comms")]
     let comms_peer_id = comms_runtime.as_ref().map(|r| r.public_key().to_peer_id());
+    #[cfg(not(feature = "comms"))]
+    let comms_peer_id: Option<String> = None;
 
-    // Add pre-created comms runtime if present
+    #[cfg(feature = "comms")]
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
@@ -1444,6 +1714,7 @@ async fn run_agent(
         .map_err(|e| anyhow::anyhow!("Failed to store session metadata: {e}"))?;
 
     // Display comms status if enabled
+    #[cfg(feature = "comms")]
     if let Some(peer_id) = comms_peer_id {
         eprintln!("Peer ID: {}", peer_id);
 
@@ -1462,6 +1733,7 @@ async fn run_agent(
     }
 
     // Validate host mode requirements
+    #[cfg(feature = "comms")]
     if host_mode && agent.comms().is_none() {
         return Err(anyhow::anyhow!(
             "--host mode requires comms to be enabled. Use --comms-name to enable."
@@ -1597,10 +1869,11 @@ async fn resume_session(
             comms: config.tools.comms_enabled,
             subagents: config.tools.subagents_enabled,
         });
-    let host_mode = stored_metadata
-        .as_ref()
-        .map(|meta| meta.host_mode)
-        .unwrap_or(false);
+    let host_mode = cfg!(feature = "comms")
+        && stored_metadata
+            .as_ref()
+            .map(|meta| meta.host_mode)
+            .unwrap_or(false);
     let comms_name = stored_metadata
         .as_ref()
         .and_then(|meta| meta.comms_name.clone());
@@ -1654,12 +1927,18 @@ async fn resume_session(
             .await,
     );
 
-    let comms_requested = tooling.comms || host_mode;
-    let comms_overrides = CommsOverrides {
-        name: comms_name.clone(),
-        listen_tcp: None,
-        disabled: !comms_requested,
+    #[cfg(feature = "comms")]
+    let comms_overrides = {
+        let comms_requested = tooling.comms || host_mode;
+        CommsOverrides {
+            name: comms_name.clone(),
+            listen_tcp: None,
+            disabled: !comms_requested,
+        }
     };
+
+    #[cfg(not(feature = "comms"))]
+    let comms_overrides = CommsOverrides::default();
 
     let tooling_setup = build_tooling(
         &base_factory,
@@ -1673,12 +1952,19 @@ async fn resume_session(
         provider,
     )
     .await?;
+    #[cfg(feature = "comms")]
     let ToolingSetup {
         tools,
         tool_usage_instructions,
         comms_runtime,
         comms_config: _,
         comms_base_dir: _,
+    } = tooling_setup;
+
+    #[cfg(not(feature = "comms"))]
+    let ToolingSetup {
+        tools,
+        tool_usage_instructions,
     } = tooling_setup;
 
     // Create session store adapter
@@ -1704,6 +1990,7 @@ async fn resume_session(
         .with_hook_run_overrides(hooks_override)
         .resume_session(session);
 
+    #[cfg(feature = "comms")]
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
@@ -2224,6 +2511,7 @@ mod tests {
         assert_eq!(Provider::infer_from_model(""), None);
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     fn test_comms_tool_dispatcher_provides_comms_tools() {
         use meerkat_comms::Inbox;

@@ -835,6 +835,7 @@ mod state_machine {
 }
 
 /// CP-MCP-WIRE: MCP protocol compliance
+#[cfg(feature = "mcp")]
 mod mcp_protocol {
     use super::*;
 

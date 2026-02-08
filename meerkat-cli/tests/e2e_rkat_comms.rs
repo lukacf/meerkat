@@ -1,3 +1,4 @@
+#![cfg(feature = "comms")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! End-to-end tests for rkat CLI inter-agent communication (Phase 12)
 //!
@@ -879,3 +880,4 @@ async fn test_e2e_rkat_sender_nonblocking() {
     instance_a.kill();
     instance_b.kill();
 }
+#![cfg(feature = "comms")]

@@ -31,12 +31,16 @@ mod status;
 mod tool_set;
 
 pub use config::{SubAgentConfig, SubAgentError};
+#[cfg(feature = "comms")]
 pub use meerkat_comms::runtime::ParentCommsContext;
 pub use runner::{
-    DynLlmClientAdapter, DynSubAgentSpec, LlmClientAdapter, SubAgentCommsConfig, SubAgentHandle,
-    SubAgentRunnerError, SubAgentSpec, create_child_comms_config, create_child_peer_entry,
-    create_child_trusted_peers, create_fork_session, create_spawn_session, setup_child_comms,
-    spawn_sub_agent, spawn_sub_agent_dyn,
+    DynSubAgentSpec, SubAgentHandle, SubAgentRunnerError, SubAgentSpec,
+    create_fork_session, create_spawn_session, spawn_sub_agent, spawn_sub_agent_dyn,
+};
+#[cfg(feature = "comms")]
+pub use runner::{
+    SubAgentCommsConfig, create_child_comms_config, create_child_peer_entry,
+    create_child_trusted_peers, setup_child_comms,
 };
 pub use state::SubAgentToolState;
 pub use tool_set::SubAgentToolSet;

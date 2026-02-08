@@ -2,7 +2,9 @@
 
 use super::config::SubAgentConfig;
 use meerkat_client::LlmClientFactory;
+#[cfg(feature = "comms")]
 use meerkat_comms::TrustedPeers;
+#[cfg(feature = "comms")]
 use meerkat_comms::runtime::ParentCommsContext;
 use meerkat_core::session::Session;
 use meerkat_core::sub_agent::SubAgentManager;
@@ -37,10 +39,12 @@ pub struct SubAgentToolState {
     pub current_depth: u32,
 
     /// Parent comms context for sub-agent communication (if comms enabled)
+    #[cfg(feature = "comms")]
     pub parent_comms: Option<ParentCommsContext>,
 
     /// Parent's trusted peers (for adding sub-agents as trusted)
     /// This is shared with the parent's CommsRuntime so updates are visible to listeners.
+    #[cfg(feature = "comms")]
     pub parent_trusted_peers: Option<Arc<RwLock<TrustedPeers>>>,
 
     /// Tool usage instructions from parent (for inheriting system prompt)
@@ -67,7 +71,9 @@ impl SubAgentToolState {
             parent_session,
             config,
             current_depth,
+            #[cfg(feature = "comms")]
             parent_comms: None,
+            #[cfg(feature = "comms")]
             parent_trusted_peers: None,
             tool_usage_instructions: RwLock::new(None),
         }
@@ -101,6 +107,7 @@ impl SubAgentToolState {
     /// When sub-agents are spawned, they are added to this list so the parent
     /// can accept their connections.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "comms")]
     pub fn with_comms(
         manager: Arc<SubAgentManager>,
         client_factory: Arc<dyn LlmClientFactory>,
@@ -509,6 +516,7 @@ mod tests {
     // === Comms context regression tests ===
     // These tests verify that sub-agents receive comms context when parent has comms enabled
 
+    #[cfg(feature = "comms")]
     #[test]
     fn test_state_new_has_no_parent_comms() {
         // When created with `new()`, parent_comms should be None
@@ -519,6 +527,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     fn test_state_with_comms_has_parent_comms() {
         use meerkat_comms::runtime::comms_bootstrap::ParentCommsContext;
@@ -570,6 +579,7 @@ mod tests {
         assert_eq!(comms.parent_addr, "tcp://127.0.0.1:4200");
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     fn test_spawn_tool_uses_parent_comms_for_subagent() {
         // Verify the spawn tool accesses parent_comms from state
@@ -619,6 +629,7 @@ mod tests {
         assert_eq!(base_dir, PathBuf::from("/tmp/agents"));
     }
 
+    #[cfg(feature = "comms")]
     #[tokio::test]
     async fn test_parent_trusted_peers_can_be_updated() {
         // Regression test: When a sub-agent is spawned, its pubkey should be

@@ -16,6 +16,7 @@ use meerkat_store::MemoryStore;
 use meerkat_store::{JsonlStore, SessionStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 use meerkat_tools::builtin::shell::ShellConfig;
+#[cfg(feature = "sub-agents")]
 use meerkat_tools::builtin::sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState};
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, FileTaskStore, MemoryTaskStore, TaskStore,
@@ -24,10 +25,9 @@ use meerkat_tools::builtin::{
 use meerkat_tools::{BuiltinDispatcherConfig, CompositeDispatcherError, build_builtin_dispatcher};
 use tokio::sync::{RwLock, mpsc};
 
-use crate::{
-    build_comms_runtime_from_config, compose_tools_with_comms, create_default_hook_engine,
-    resolve_layered_hooks_config,
-};
+use crate::{create_default_hook_engine, resolve_layered_hooks_config};
+#[cfg(feature = "comms")]
+use crate::{build_comms_runtime_from_config, compose_tools_with_comms};
 
 /// Type-erased agent using trait objects.
 pub type DynAgent = Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>;
@@ -125,6 +125,7 @@ pub enum BuildAgentError {
 
     /// Comms runtime failed to initialize.
     #[error("Comms runtime failed: {0}")]
+    #[cfg(feature = "comms")]
     Comms(String),
 
     /// Configuration error.
@@ -133,6 +134,7 @@ pub enum BuildAgentError {
 
     /// `host_mode` was set but `comms_name` is missing.
     #[error("host_mode requires comms_name to be set")]
+    #[cfg(feature = "comms")]
     HostModeRequiresCommsName,
 }
 
@@ -149,6 +151,7 @@ pub struct AgentFactory {
     pub enable_builtins: bool,
     pub enable_shell: bool,
     pub enable_subagents: bool,
+    #[cfg(feature = "comms")]
     pub enable_comms: bool,
 }
 
@@ -161,6 +164,7 @@ impl AgentFactory {
             enable_builtins: false,
             enable_shell: false,
             enable_subagents: false,
+            #[cfg(feature = "comms")]
             enable_comms: false,
         }
     }
@@ -190,6 +194,7 @@ impl AgentFactory {
     }
 
     /// Enable or disable comms tools.
+    #[cfg(feature = "comms")]
     pub fn comms(mut self, enabled: bool) -> Self {
         self.enable_comms = enabled;
         self
@@ -280,62 +285,82 @@ impl AgentFactory {
             external,
             session_id,
         };
+        #[cfg(not(feature = "sub-agents"))]
+        {
+            return build_builtin_dispatcher(builder);
+        }
+
+        #[cfg(feature = "sub-agents")]
         if !self.enable_subagents {
             return build_builtin_dispatcher(builder);
         }
 
-        let BuiltinDispatcherConfig {
-            store,
-            config,
-            shell_config,
-            external,
-            session_id,
-        } = builder;
-
-        let shell_config_for_subagents = shell_config.clone();
-        let mut composite = self
-            .build_composite_dispatcher(store, &config, shell_config, external.clone(), session_id)
-            .await?;
-
-        let limits = ConcurrencyLimits::default();
-        let manager = Arc::new(SubAgentManager::new(limits, 0));
-        let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
-
-        let sub_agent_task_store = MemoryTaskStore::new();
-        let sub_agent_factory = self.clone().subagents(false).comms(false);
-        let sub_agent_dispatcher = sub_agent_factory
-            .build_composite_dispatcher(
-                Arc::new(sub_agent_task_store),
-                &config,
-                shell_config_for_subagents,
+        #[cfg(feature = "sub-agents")]
+        {
+            let BuiltinDispatcherConfig {
+                store,
+                config,
+                shell_config,
                 external,
-                None,
-            )
-            .await?;
-        let sub_agent_tools: Arc<dyn AgentToolDispatcher> = Arc::new(sub_agent_dispatcher);
+                session_id,
+            } = builder;
 
-        let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-            sub_agent_factory
-                .build_store_adapter(Arc::new(MemoryStore::new()))
-                .await,
-        );
+            let shell_config_for_subagents = shell_config.clone();
+            let mut composite = self
+                .build_composite_dispatcher(
+                    store,
+                    &config,
+                    shell_config,
+                    external.clone(),
+                    session_id,
+                )
+                .await?;
 
-        let parent_session = Arc::new(RwLock::new(Session::new()));
-        let sub_agent_config = SubAgentConfig::default();
-        let state = Arc::new(SubAgentToolState::new(
-            manager,
-            client_factory,
-            sub_agent_tools,
-            sub_agent_store,
-            parent_session,
-            sub_agent_config,
-            0,
-        ));
+            let limits = ConcurrencyLimits::default();
+            let manager = Arc::new(SubAgentManager::new(limits, 0));
+            let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
 
-        let tool_set = SubAgentToolSet::new(state);
-        composite.register_sub_agent_tools(tool_set, &config)?;
+            let sub_agent_task_store = MemoryTaskStore::new();
+            let sub_agent_factory = {
+                let factory = self.clone().subagents(false);
+                #[cfg(feature = "comms")]
+                let factory = factory.comms(false);
+                factory
+            };
+            let sub_agent_dispatcher = sub_agent_factory
+                .build_composite_dispatcher(
+                    Arc::new(sub_agent_task_store),
+                    &config,
+                    shell_config_for_subagents,
+                    external,
+                    None,
+                )
+                .await?;
+            let sub_agent_tools: Arc<dyn AgentToolDispatcher> = Arc::new(sub_agent_dispatcher);
 
-        Ok(Arc::new(composite))
+            let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+                sub_agent_factory
+                    .build_store_adapter(Arc::new(MemoryStore::new()))
+                    .await,
+            );
+
+            let parent_session = Arc::new(RwLock::new(Session::new()));
+            let sub_agent_config = SubAgentConfig::default();
+            let state = Arc::new(SubAgentToolState::new(
+                manager,
+                client_factory,
+                sub_agent_tools,
+                sub_agent_store,
+                parent_session,
+                sub_agent_config,
+                0,
+            ));
+
+            let tool_set = SubAgentToolSet::new(state);
+            composite.register_sub_agent_tools(tool_set, &config)?;
+
+            Ok(Arc::new(composite))
+        }
     }
 
     /// Build a fully-configured, type-erased agent ready to run.
@@ -352,6 +377,7 @@ impl AgentFactory {
         config: &Config,
     ) -> Result<DynAgent, BuildAgentError> {
         // 1. Validate host_mode
+        #[cfg(feature = "comms")]
         if build_config.host_mode && build_config.comms_name.is_none() {
             return Err(BuildAgentError::HostModeRequiresCommsName);
         }
@@ -416,6 +442,7 @@ impl AgentFactory {
             Arc::new(StoreAdapter::new(Arc::new(store)));
 
         // 8. Create comms runtime
+        #[cfg(feature = "comms")]
         let comms_runtime = if build_config.host_mode {
             let comms_name = build_config
                 .comms_name
@@ -433,7 +460,11 @@ impl AgentFactory {
             None
         };
 
+        #[cfg(not(feature = "comms"))]
+        let comms_runtime = None;
+
         // 9. Compose tools with comms
+        #[cfg(feature = "comms")]
         if let Some(ref runtime) = comms_runtime {
             let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
                 .map_err(|e| BuildAgentError::Config(format!("Failed to compose comms tools: {e}")))?;
@@ -478,6 +509,7 @@ impl AgentFactory {
         if let Some(session) = build_config.resume_session {
             builder = builder.resume_session(session);
         }
+        #[cfg(feature = "comms")]
         if let Some(runtime) = comms_runtime {
             builder = builder.with_comms_runtime(
                 Arc::new(runtime) as Arc<dyn meerkat_core::agent::CommsRuntime>,

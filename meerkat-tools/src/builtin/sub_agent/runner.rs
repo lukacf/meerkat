@@ -6,28 +6,29 @@
 //! - Running the agent loop in a background task
 //! - Reporting results back to the parent
 
-use async_trait::async_trait;
-use futures::StreamExt;
-use meerkat_client::{BlockAssembler, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+use meerkat_client::{LlmClient, LlmClientAdapter};
+#[cfg(feature = "comms")]
 use meerkat_comms::agent::wrap_with_comms;
+#[cfg(feature = "comms")]
 use meerkat_comms::runtime::{CommsBootstrap, CommsRuntime, CoreCommsConfig, ParentCommsContext};
+#[cfg(feature = "comms")]
 use meerkat_comms::{PubKey, TrustedPeer, TrustedPeers};
 use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::session::Session;
 use meerkat_core::sub_agent::SubAgentManager;
-use meerkat_core::types::{Message, StopReason, SystemMessage, Usage, UserMessage};
+use meerkat_core::types::{Message, SystemMessage, UserMessage};
 use meerkat_core::{
-    AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, BudgetLimits,
-    LlmStreamResult, OutputSchema, ToolDef,
-    schema::{CompiledSchema, SchemaError},
+    AgentBuilder, AgentError, AgentSessionStore, AgentToolDispatcher, BudgetLimits,
 };
-use serde_json::Value;
+#[cfg(feature = "comms")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+#[cfg(feature = "comms")]
 use tokio::sync::RwLock;
 
 /// Configuration for spawning a sub-agent with comms
+#[cfg(feature = "comms")]
 #[derive(Debug, Clone)]
 pub struct SubAgentCommsConfig {
     /// Name for this sub-agent
@@ -51,308 +52,10 @@ pub struct SubAgentHandle {
     pub child_addr: String,
 }
 
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-fn fallback_raw_value() -> Box<serde_json::value::RawValue> {
-    serde_json::value::RawValue::from_string("{}".to_string()).expect("static JSON is valid")
-}
-
-/// Adapter that converts meerkat_client::LlmClient to meerkat_core::AgentLlmClient
-///
-/// This bridges the streaming interface used by providers with the
-/// result-based interface used by the Agent.
-pub struct LlmClientAdapter<C: LlmClient> {
-    client: Arc<C>,
-    model: String,
-}
-
-impl<C: LlmClient> LlmClientAdapter<C> {
-    /// Create a new adapter wrapping the given client
-    pub fn new(client: Arc<C>, model: String) -> Self {
-        Self { client, model }
-    }
-}
-
-#[async_trait]
-impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
-    async fn stream_response(
-        &self,
-        messages: &[Message],
-        tools: &[Arc<ToolDef>],
-        max_tokens: u32,
-        temperature: Option<f32>,
-        provider_params: Option<&Value>,
-    ) -> Result<LlmStreamResult, AgentError> {
-        let request = LlmRequest {
-            model: self.model.clone(),
-            messages: messages.to_vec(),
-            tools: tools.to_vec(),
-            max_tokens,
-            temperature,
-            stop_sequences: None,
-            provider_params: provider_params.cloned(),
-        };
-
-        let mut stream = self.client.stream(&request);
-
-        let mut assembler = BlockAssembler::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = Usage::default();
-        let mut reasoning_started = false;
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(event) => match event {
-                    LlmEvent::TextDelta { delta, meta } => {
-                        assembler.on_text_delta(&delta, meta);
-                    }
-                    LlmEvent::ReasoningDelta { delta } => {
-                        if !reasoning_started {
-                            reasoning_started = true;
-                            assembler.on_reasoning_start();
-                        }
-                        if let Err(e) = assembler.on_reasoning_delta(&delta) {
-                            tracing::warn!(?e, "orphaned reasoning delta");
-                        }
-                    }
-                    LlmEvent::ReasoningComplete { text, meta } => {
-                        if !reasoning_started {
-                            assembler.on_reasoning_start();
-                            let _ = assembler.on_reasoning_delta(&text);
-                        }
-                        assembler.on_reasoning_complete(meta);
-                        reasoning_started = false;
-                    }
-                    LlmEvent::ToolCallDelta {
-                        id,
-                        name,
-                        args_delta,
-                    } => {
-                        if let Err(e) =
-                            assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
-                        {
-                            if matches!(
-                                e,
-                                meerkat_client::block_assembler::StreamAssemblyError::OrphanedToolDelta(_)
-                            ) {
-                                let _ = assembler.on_tool_call_start(id.clone());
-                                if let Err(e) =
-                                    assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
-                                {
-                                    tracing::warn!(?e, "orphaned tool delta");
-                                }
-                            } else {
-                                tracing::warn!(?e, "tool delta error");
-                            }
-                        }
-                    }
-                    LlmEvent::ToolCallComplete {
-                        id,
-                        name,
-                        args,
-                        meta,
-                    } => {
-                        let effective_meta = meta;
-                        let args_raw = match serde_json::to_string(&args)
-                            .ok()
-                            .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
-                        {
-                            Some(raw) => raw,
-                            None => fallback_raw_value(),
-                        };
-                        let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
-                    }
-                    LlmEvent::UsageUpdate { usage: u } => {
-                        usage = u;
-                    }
-                    LlmEvent::Done { outcome } => match outcome {
-                        LlmDoneOutcome::Success { stop_reason: sr } => {
-                            stop_reason = sr;
-                        }
-                        LlmDoneOutcome::Error { error } => {
-                            return Err(AgentError::llm(
-                                self.client.provider(),
-                                error.failure_reason(),
-                                error.to_string(),
-                            ));
-                        }
-                    },
-                },
-                Err(e) => {
-                    return Err(AgentError::llm(
-                        self.client.provider(),
-                        e.failure_reason(),
-                        e.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(LlmStreamResult::new(
-            assembler.finalize(),
-            stop_reason,
-            usage,
-        ))
-    }
-
-    fn provider(&self) -> &'static str {
-        self.client.provider()
-    }
-
-    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
-        self.client.compile_schema(output_schema)
-    }
-}
-
-/// Type-erased adapter for trait object clients (from factory)
-///
-/// This allows using `Arc<dyn LlmClient>` (as returned by LlmClientFactory)
-/// with the Agent system which requires sized types.
-pub struct DynLlmClientAdapter {
-    client: Arc<dyn LlmClient>,
-    model: String,
-}
-
-impl DynLlmClientAdapter {
-    /// Create a new adapter wrapping a trait object client
-    pub fn new(client: Arc<dyn LlmClient>, model: String) -> Self {
-        Self { client, model }
-    }
-}
-
-#[async_trait]
-impl AgentLlmClient for DynLlmClientAdapter {
-    async fn stream_response(
-        &self,
-        messages: &[Message],
-        tools: &[Arc<ToolDef>],
-        max_tokens: u32,
-        temperature: Option<f32>,
-        provider_params: Option<&Value>,
-    ) -> Result<LlmStreamResult, AgentError> {
-        let request = LlmRequest {
-            model: self.model.clone(),
-            messages: messages.to_vec(),
-            tools: tools.to_vec(),
-            max_tokens,
-            temperature,
-            stop_sequences: None,
-            provider_params: provider_params.cloned(),
-        };
-
-        let mut stream = self.client.stream(&request);
-
-        let mut assembler = BlockAssembler::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = Usage::default();
-        let mut reasoning_started = false;
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(event) => match event {
-                    LlmEvent::TextDelta { delta, meta } => {
-                        assembler.on_text_delta(&delta, meta);
-                    }
-                    LlmEvent::ReasoningDelta { delta } => {
-                        if !reasoning_started {
-                            reasoning_started = true;
-                            assembler.on_reasoning_start();
-                        }
-                        if let Err(e) = assembler.on_reasoning_delta(&delta) {
-                            tracing::warn!(?e, "orphaned reasoning delta");
-                        }
-                    }
-                    LlmEvent::ReasoningComplete { text, meta } => {
-                        if !reasoning_started {
-                            assembler.on_reasoning_start();
-                            let _ = assembler.on_reasoning_delta(&text);
-                        }
-                        assembler.on_reasoning_complete(meta);
-                        reasoning_started = false;
-                    }
-                    LlmEvent::ToolCallDelta {
-                        id,
-                        name,
-                        args_delta,
-                    } => {
-                        if let Err(e) =
-                            assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
-                        {
-                            if matches!(
-                                e,
-                                meerkat_client::block_assembler::StreamAssemblyError::OrphanedToolDelta(_)
-                            ) {
-                                let _ = assembler.on_tool_call_start(id.clone());
-                                if let Err(e) =
-                                    assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
-                                {
-                                    tracing::warn!(?e, "orphaned tool delta");
-                                }
-                            } else {
-                                tracing::warn!(?e, "tool delta error");
-                            }
-                        }
-                    }
-                    LlmEvent::ToolCallComplete {
-                        id,
-                        name,
-                        args,
-                        meta,
-                    } => {
-                        let effective_meta = meta;
-                        let args_raw = match serde_json::to_string(&args)
-                            .ok()
-                            .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
-                        {
-                            Some(raw) => raw,
-                            None => fallback_raw_value(),
-                        };
-                        let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
-                    }
-                    LlmEvent::UsageUpdate { usage: u } => {
-                        usage = u;
-                    }
-                    LlmEvent::Done { outcome } => match outcome {
-                        LlmDoneOutcome::Success { stop_reason: sr } => {
-                            stop_reason = sr;
-                        }
-                        LlmDoneOutcome::Error { error } => {
-                            return Err(AgentError::llm(
-                                self.client.provider(),
-                                error.failure_reason(),
-                                error.to_string(),
-                            ));
-                        }
-                    },
-                },
-                Err(e) => {
-                    return Err(AgentError::llm(
-                        self.client.provider(),
-                        e.failure_reason(),
-                        e.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(LlmStreamResult::new(
-            assembler.finalize(),
-            stop_reason,
-            usage,
-        ))
-    }
-
-    fn provider(&self) -> &'static str {
-        self.client.provider()
-    }
-
-    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
-        self.client.compile_schema(output_schema)
-    }
-}
-
 /// Set up mutual trust between parent and child
 ///
 /// Creates a TrustedPeers list that trusts the parent, for use by the child.
+#[cfg(feature = "comms")]
 pub fn create_child_trusted_peers(parent_context: &ParentCommsContext) -> TrustedPeers {
     TrustedPeers {
         peers: vec![TrustedPeer {
@@ -364,6 +67,7 @@ pub fn create_child_trusted_peers(parent_context: &ParentCommsContext) -> Truste
 }
 
 /// Create comms configuration for a child agent
+#[cfg(feature = "comms")]
 pub fn create_child_comms_config(child_name: &str, base_dir: &std::path::Path) -> CoreCommsConfig {
     CoreCommsConfig {
         enabled: true,
@@ -413,6 +117,7 @@ pub fn create_fork_session(parent_session: &Session, fork_prompt: &str) -> Sessi
 ///
 /// This creates the identity, trust files, and comms runtime for a child agent.
 /// Returns the child's public key and address for the parent to use.
+#[cfg(feature = "comms")]
 pub async fn setup_child_comms(
     config: &SubAgentCommsConfig,
 ) -> Result<(CommsRuntime, [u8; 32], String), SubAgentRunnerError> {
@@ -468,6 +173,7 @@ pub async fn setup_child_comms(
 /// Create a TrustedPeer entry for the parent to trust the child
 ///
 /// After setting up child comms, the parent needs to add this peer to its trust list.
+#[cfg(feature = "comms")]
 pub fn create_child_peer_entry(
     child_name: &str,
     child_pubkey: [u8; 32],
@@ -527,10 +233,12 @@ pub struct DynSubAgentSpec {
     /// System prompt override
     pub system_prompt: Option<String>,
     /// Comms configuration (if comms should be enabled for this sub-agent)
+    #[cfg(feature = "comms")]
     pub comms_config: Option<SubAgentCommsConfig>,
     /// Parent's trusted peers (for adding this sub-agent as trusted)
     /// When set, the sub-agent will be added to this list after comms setup
     /// so the parent can accept connections from the sub-agent.
+    #[cfg(feature = "comms")]
     pub parent_trusted_peers: Option<Arc<RwLock<TrustedPeers>>>,
     /// Host mode - agent stays alive processing comms messages after initial prompt
     pub host_mode: bool,
@@ -539,7 +247,7 @@ pub struct DynSubAgentSpec {
 /// Spawn and run a sub-agent in a background task (trait object version)
 ///
 /// This version works with trait objects as returned by LlmClientFactory.
-/// It internally uses DynLlmClientAdapter to bridge to AgentLlmClient.
+/// It internally uses LlmClientAdapter to bridge to AgentLlmClient.
 ///
 /// ## Comms Setup
 ///
@@ -558,8 +266,8 @@ pub async fn spawn_sub_agent_dyn(
     let started_at = Instant::now();
 
     // Create the LLM client adapter (bridges LlmClient -> AgentLlmClient)
-    let llm_adapter: Arc<DynLlmClientAdapter> =
-        Arc::new(DynLlmClientAdapter::new(spec.client, spec.model.clone()));
+    let client: Arc<dyn LlmClient> = spec.client;
+    let llm_adapter = Arc::new(LlmClientAdapter::new(client, spec.model.clone()));
 
     // Build the agent - now supports trait objects directly via ?Sized bounds
     let mut builder = AgentBuilder::new()
@@ -578,6 +286,7 @@ pub async fn spawn_sub_agent_dyn(
     // Set up comms for the sub-agent if configured
     // Uses CommsBootstrap::for_child_inproc for lightweight in-process communication
     // No network listeners or filesystem resources needed
+    #[cfg(feature = "comms")]
     let (tools, comms_info) = if let Some(comms_config) = spec.comms_config {
         let bootstrap = CommsBootstrap::for_child_inproc(
             comms_config.name.clone(),
@@ -626,6 +335,9 @@ pub async fn spawn_sub_agent_dyn(
     } else {
         (spec.tools, None)
     };
+
+    #[cfg(not(feature = "comms"))]
+    let (tools, comms_info) = (spec.tools, None);
 
     // Pass trait objects directly - no wrappers needed thanks to ?Sized bounds
     let mut agent = builder.build(llm_adapter, tools, spec.store).await;
@@ -825,6 +537,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     fn test_create_child_trusted_peers() {
         let parent_context = ParentCommsContext {
@@ -840,6 +553,7 @@ mod tests {
         assert_eq!(*trusted.peers[0].pubkey.as_bytes(), [42u8; 32]);
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     fn test_create_child_comms_config() {
         let base_dir = PathBuf::from("/tmp/agents");
@@ -851,6 +565,7 @@ mod tests {
         assert!(config.listen_tcp.is_none());
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     fn test_create_child_peer_entry() {
         let peer = create_child_peer_entry("child-1", [1u8; 32], "uds:///tmp/child.sock");

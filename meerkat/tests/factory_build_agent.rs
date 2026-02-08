@@ -310,6 +310,7 @@ async fn build_agent_applies_system_prompt_override() {
 }
 
 /// 9. `build_agent` with host_mode but no comms_name fails.
+#[cfg(feature = "comms")]
 #[tokio::test]
 async fn build_agent_host_mode_without_comms_name_fails() {
     let temp = tempfile::tempdir().unwrap();

@@ -1307,8 +1307,10 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "toml",
+ "tracing",
  "which",
 ]
 
@@ -1328,6 +1330,7 @@ dependencies = [
  "meerkat-comms",
  "meerkat-core",
  "meerkat-mcp",
+ "meerkat-rpc",
  "meerkat-store",
  "meerkat-tools",
  "serde",
@@ -1501,6 +1504,25 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "meerkat-rpc"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures",
+ "indexmap",
+ "meerkat",
+ "meerkat-client",
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

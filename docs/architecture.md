@@ -44,10 +44,10 @@ Meerkat is designed as a **minimal, composable agent harness**. It provides the 
 ```
 +-----------------------------------------------------------------------------+
 |                              Access Patterns                                 |
-+---------------+---------------+---------------------+-----------------------+
-|  meerkat-cli  |  meerkat-mcp  |   meerkat (SDK)     |  meerkat-rest (opt)   |
-|  (headless)   |  (server)     |                     |  (HTTP API)           |
-+-------+-------+-------+-------+----------+----------+-----------+-----------+
++---------------+---------------+---------------------+-----------+-----------+
+|  meerkat-cli  |  meerkat-mcp  |   meerkat (SDK)     | meerkat-  | meerkat-  |
+|  (headless)   |  (server)     |                     | rest(HTTP)| rpc(stdio)|
++-------+-------+-------+-------+----------+----------+-----+-----+-----+-----+
         |               |                  |                      |
         +---------------+---------+--------+----------------------+
                                   |
@@ -170,6 +170,19 @@ MCP protocol implementation:
 - **McpConnection**: Manages stdio connection to MCP server
 - **McpRouter**: Routes tool calls to appropriate MCP servers
 - **Protocol handling**: Initialize, tools/list, tools/call
+
+### meerkat-rpc
+
+JSON-RPC 2.0 stdio server for IDE and desktop app integration:
+
+- **SessionRuntime**: Stateful agent manager -- keeps agents alive between turns
+- **RpcServer**: JSONL transport multiplexing requests and notifications via `tokio::select!`
+- **MethodRouter**: Maps JSON-RPC methods to SessionRuntime/ConfigStore operations
+- **Handlers**: Typed param parsing and response construction for each method group
+
+Each session gets a dedicated tokio task with exclusive `Agent` ownership,
+enabling `cancel(&mut self)` without mutex. Commands flow through channels;
+events stream back as JSON-RPC notifications.
 
 ### meerkat (facade)
 

@@ -28,6 +28,10 @@
         "pages": ["rest"]
       },
       {
+        "tab": "RPC",
+        "pages": ["rpc"]
+      },
+      {
         "tab": "Architecture",
         "pages": ["architecture"]
       }

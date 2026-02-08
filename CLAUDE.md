@@ -55,9 +55,10 @@ meerkat-store     → Session persistence (JsonlStore, MemoryStore) implementing
 meerkat-tools     → Tool registry and validation implementing AgentToolDispatcher
 meerkat-mcp-client → MCP protocol client, McpRouter for tool routing
 meerkat-mcp-server → Expose Meerkat as MCP tools (meerkat_run, meerkat_resume)
+meerkat-rpc       → JSON-RPC stdio server (stateful SessionRuntime, IDE/desktop integration)
 meerkat-rest      → Optional REST API server
 meerkat-cli       → CLI binary (produces `rkat`)
-meerkat           → Facade crate, re-exports and SDK helpers
+meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 ```
 
 **Key traits** (all in meerkat-core):
@@ -83,6 +84,34 @@ rkat mcp remove <name>
 
 Config stored in `.rkat/mcp.toml` (project) or `~/.config/rkat/mcp.toml` (user).
 
+## JSON-RPC Stdio Server
+
+```bash
+# Start the JSON-RPC stdio server (for IDE/desktop integration)
+rkat rpc
+```
+
+The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/stdout. Unlike REST/MCP, it keeps agents alive between turns via `SessionRuntime` -- enabling fast multi-turn conversations, mid-turn cancellation, and event streaming without agent reconstruction overhead.
+
+**Methods:**
+
+| Method | Purpose |
+|--------|---------|
+| `initialize` | Handshake, returns server capabilities |
+| `session/create` | Create session + run first turn |
+| `session/list` | List active sessions |
+| `session/read` | Get session state |
+| `session/archive` | Remove session |
+| `turn/start` | Start a new turn on existing session |
+| `turn/interrupt` | Cancel in-flight turn |
+| `config/get` | Read config |
+| `config/set` | Replace config |
+| `config/patch` | Merge-patch config |
+
+**Notifications** (server -> client): `session/event` with `AgentEvent` payload, emitted during turns.
+
+**Architecture:** Each session gets a dedicated tokio task that exclusively owns the `Agent` (no mutex needed for `cancel(&mut self)`). The `SessionRuntime` dispatches commands via channels. `AgentFactory.build_agent()` consolidates the agent construction pipeline shared across all surfaces.
+
 ## Key Files
 
 - `meerkat-core/src/agent.rs` - Main agent execution loop
@@ -91,6 +120,10 @@ Config stored in `.rkat/mcp.toml` (project) or `~/.config/rkat/mcp.toml` (user).
 - `meerkat-client/src/anthropic.rs` - Anthropic streaming implementation
 - `meerkat-mcp-client/src/router.rs` - MCP tool routing
 - `meerkat-cli/src/main.rs` - CLI entry point
+- `meerkat/src/factory.rs` - AgentFactory, DynAgent, AgentBuildConfig (consolidated agent construction)
+- `meerkat-rpc/src/session_runtime.rs` - SessionRuntime (stateful agent manager)
+- `meerkat-rpc/src/router.rs` - JSON-RPC method dispatch
+- `meerkat-rpc/src/server.rs` - RPC server main loop
 
 ## Testing with Multiple Providers
 

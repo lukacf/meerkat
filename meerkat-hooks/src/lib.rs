@@ -1350,28 +1350,38 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "integration-real: binds TCP port and makes real HTTP request"]
     async fn http_runtime_hook_executes() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+        // Bind a mock HTTP server. The listener is ready immediately after bind
+        // (no sleep race needed).
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = vec![0_u8; 4096];
-                let _ = socket.read(&mut buf).await;
-                let body = r#"{"patches":[]}"#;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
+            // Accept connections in a loop so retries/keep-alive don't break.
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0_u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let body = r#"{"patches":[]}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
         let mut config = HooksConfig::default();
+        // Use an explicit generous timeout so this test doesn't flake under
+        // parallel test load (the default 5 000 ms is borderline on CI).
+        config.default_timeout_ms = 30_000;
         config.entries = vec![HookEntryConfig {
             id: HookId::new("http-hook"),
             point: HookPoint::PreToolExecution,

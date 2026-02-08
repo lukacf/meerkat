@@ -34,8 +34,8 @@ pub use config::{SubAgentConfig, SubAgentError};
 #[cfg(feature = "comms")]
 pub use meerkat_comms::runtime::ParentCommsContext;
 pub use runner::{
-    DynSubAgentSpec, SubAgentHandle, SubAgentRunnerError, SubAgentSpec,
-    create_fork_session, create_spawn_session, spawn_sub_agent, spawn_sub_agent_dyn,
+    DynSubAgentSpec, SubAgentHandle, SubAgentRunnerError, SubAgentSpec, create_fork_session,
+    create_spawn_session, spawn_sub_agent, spawn_sub_agent_dyn,
 };
 #[cfg(feature = "comms")]
 pub use runner::{

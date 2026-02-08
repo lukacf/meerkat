@@ -1,9 +1,9 @@
 //! agent_spawn tool - Spawn a new sub-agent with clean context
 
 use super::config::SubAgentError;
-use super::runner::{DynSubAgentSpec, create_spawn_session, spawn_sub_agent_dyn};
 #[cfg(feature = "comms")]
 use super::runner::SubAgentCommsConfig;
+use super::runner::{DynSubAgentSpec, create_spawn_session, spawn_sub_agent_dyn};
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 use crate::dispatcher::FilteredDispatcher;
@@ -397,7 +397,7 @@ impl AgentSpawnTool {
             };
 
         #[cfg(not(feature = "comms"))]
-        let (comms_config, comms_instructions) = (None, None);
+        let comms_instructions: Option<String> = None;
 
         // Create prompt with comms context injected if parent has comms enabled
         #[cfg(feature = "comms")]

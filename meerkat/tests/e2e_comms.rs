@@ -847,4 +847,3 @@ mod sanity {
         assert!(tool_names.contains(&"list_peers"));
     }
 }
-#![cfg(feature = "comms")]

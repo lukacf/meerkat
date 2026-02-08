@@ -3,16 +3,18 @@
 mod adapters;
 mod mcp;
 
-use adapters::{CliToolDispatcher, EmptyToolDispatcher};
 #[cfg(feature = "mcp")]
 use adapters::McpRouterAdapter;
+use adapters::{CliToolDispatcher, EmptyToolDispatcher};
 #[cfg(not(feature = "mcp"))]
-type McpRouterAdapter = ();
+struct McpRouterAdapter;
 use meerkat::{AgentFactory, create_default_hook_engine, resolve_layered_hooks_config};
 use meerkat_client::{DefaultClientFactory, LlmClientFactory};
 #[cfg(feature = "comms")]
 use meerkat_comms::{CommsRuntime, CoreCommsConfig, ParentCommsContext};
 use meerkat_core::AgentToolDispatcher;
+#[cfg(feature = "comms")]
+use meerkat_core::CommsRuntimeMode;
 #[cfg(feature = "comms")]
 use meerkat_core::ToolGatewayBuilder;
 #[cfg(feature = "comms")]
@@ -23,16 +25,14 @@ use meerkat_core::{AgentEvent, SchemaCompat, format_verbose_event};
 use meerkat_core::{
     Config, ConfigDelta, ConfigStore, FileConfigStore, SessionMetadata, SessionTooling,
 };
-#[cfg(feature = "comms")]
-use meerkat_core::CommsRuntimeMode;
 use meerkat_store::SessionStore;
+#[cfg(feature = "comms")]
+use meerkat_tools::builtin::CommsToolSurface;
 use meerkat_tools::builtin::{
     BuiltinToolConfig, FileTaskStore, MemoryTaskStore, TaskStore, ToolMode, ToolPolicyLayer,
     shell::ShellConfig,
     sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState},
 };
-#[cfg(feature = "comms")]
-use meerkat_tools::builtin::CommsToolSurface;
 use meerkat_tools::{ensure_rkat_dir_async, find_project_root};
 use tokio::sync::mpsc;
 
@@ -911,9 +911,9 @@ async fn handle_rpc() -> anyhow::Result<()> {
     let store_path = get_session_store_dir().await;
     let factory = AgentFactory::new(store_path);
 
-    let runtime = Arc::new(
-        meerkat_rpc::session_runtime::SessionRuntime::new(factory, config, 64),
-    );
+    let runtime = Arc::new(meerkat_rpc::session_runtime::SessionRuntime::new(
+        factory, config, 64,
+    ));
 
     let (config_store, _base_dir) = resolve_config_store().await?;
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::from(config_store);
@@ -1066,6 +1066,15 @@ struct ToolingSetup {
     comms_base_dir: PathBuf,
 }
 
+fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
+    if requested && !cfg!(feature = "comms") {
+        return Err(anyhow::anyhow!(
+            "--host-mode requires comms support (build with --features comms)"
+        ));
+    }
+    Ok(requested && cfg!(feature = "comms"))
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "comms")]
 async fn build_tooling(
@@ -1138,7 +1147,6 @@ async fn build_tooling(
 
     // Load MCP tools (available for all modes)
     #[cfg(feature = "mcp")]
-    #[cfg(feature = "mcp")]
     let mcp_router_adapter = match create_mcp_tools().await {
         Ok(adapter) => adapter,
         Err(e) => {
@@ -1150,9 +1158,6 @@ async fn build_tooling(
     #[cfg(not(feature = "mcp"))]
     let mcp_router_adapter: Option<()> = None;
 
-    #[cfg(not(feature = "mcp"))]
-    let mcp_router_adapter: Option<()> = None;
-
     // Determine if we need CompositeDispatcher (builtins OR subagents)
     let need_composite = enable_builtins || enable_subagents;
 
@@ -1160,11 +1165,8 @@ async fn build_tooling(
     let (tools, tool_usage_instructions): (Arc<CliToolDispatcher>, String) = if need_composite {
         // Convert MCP adapter to trait object for CompositeDispatcher
         #[cfg(feature = "mcp")]
-        #[cfg(feature = "mcp")]
         let mcp_adapter = mcp_router_adapter
             .map(|a| Arc::new(a) as Arc<dyn meerkat_core::agent::AgentToolDispatcher>);
-        #[cfg(not(feature = "mcp"))]
-        let mcp_adapter: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>> = None;
         #[cfg(not(feature = "mcp"))]
         let mcp_adapter: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>> = None;
         use std::collections::HashSet;
@@ -1307,10 +1309,16 @@ async fn build_tooling(
             let sub_agent_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
                 Arc::new(sub_agent_dispatcher);
 
-            // Use a memory store for sub-agent sessions (wrapped in adapter)
+            // Use a dedicated JSONL store namespace for sub-agent sessions.
+            let sub_agent_store_dir = get_session_store_dir().await.join("subagents");
+            let sub_agent_session_store = JsonlStore::new(sub_agent_store_dir);
+            sub_agent_session_store
+                .init()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to init sub-agent store: {e}"))?;
             let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
                 sub_agent_factory
-                    .build_store_adapter(Arc::new(meerkat_store::MemoryStore::new()))
+                    .build_store_adapter(Arc::new(sub_agent_session_store))
                     .await,
             );
 
@@ -1456,8 +1464,11 @@ async fn build_tooling(
     let need_composite = enable_builtins || enable_subagents;
 
     let (tools, tool_usage_instructions): (Arc<CliToolDispatcher>, String) = if need_composite {
+        #[cfg(feature = "mcp")]
         let mcp_adapter = mcp_router_adapter
             .map(|a| Arc::new(a) as Arc<dyn meerkat_core::agent::AgentToolDispatcher>);
+        #[cfg(not(feature = "mcp"))]
+        let mcp_adapter: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>> = None;
         use std::collections::HashSet;
 
         let mut enabled_tools: HashSet<String> = HashSet::new();
@@ -1534,17 +1545,26 @@ async fn build_tooling(
             .await?;
 
         let usage = dispatcher.usage_instructions();
-        (Arc::new(CliToolDispatcher::Composite(dispatcher)), usage)
+        (
+            Arc::new(CliToolDispatcher::Composite(Arc::new(dispatcher))),
+            usage,
+        )
     } else {
         #[cfg(feature = "mcp")]
         if let Some(adapter) = mcp_router_adapter {
             (Arc::new(CliToolDispatcher::Mcp(adapter)), String::new())
         } else {
-            (Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher::default())), String::new())
+            (
+                Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher)),
+                String::new(),
+            )
         }
         #[cfg(not(feature = "mcp"))]
         {
-            (Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher::default())), String::new())
+            (
+                Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher)),
+                String::new(),
+            )
         }
     };
 
@@ -1579,7 +1599,7 @@ async fn run_agent(
     use meerkat_core::event::AgentEvent;
     use tokio::sync::mpsc;
 
-    let host_mode = cfg!(feature = "comms") && host_mode;
+    let host_mode = resolve_host_mode(host_mode)?;
 
     let api_key = resolve_api_key(provider)?;
 
@@ -1869,11 +1889,11 @@ async fn resume_session(
             comms: config.tools.comms_enabled,
             subagents: config.tools.subagents_enabled,
         });
-    let host_mode = cfg!(feature = "comms")
-        && stored_metadata
-            .as_ref()
-            .map(|meta| meta.host_mode)
-            .unwrap_or(false);
+    let host_mode_requested = stored_metadata
+        .as_ref()
+        .map(|meta| meta.host_mode)
+        .unwrap_or(false);
+    let host_mode = resolve_host_mode(host_mode_requested)?;
     let comms_name = stored_metadata
         .as_ref()
         .and_then(|meta| meta.comms_name.clone());
@@ -2335,6 +2355,23 @@ mod tests {
 
     fn hooks_override_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/hooks/run_override.json")
+    }
+
+    #[cfg(not(feature = "comms"))]
+    #[test]
+    fn test_resolve_host_mode_rejects_when_comms_disabled() {
+        let err = resolve_host_mode(true).expect_err("host mode should be rejected");
+        assert!(
+            err.to_string()
+                .contains("--host-mode requires comms support")
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_resolve_host_mode_allows_when_comms_enabled() {
+        assert!(resolve_host_mode(true).expect("host mode should be enabled"));
+        assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
     }
 
     #[test]

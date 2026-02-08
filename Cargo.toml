@@ -79,14 +79,14 @@ tempfile = "3.14"
 
 # Internal crates
 meerkat-core = { path = "meerkat-core" }
-meerkat-client = { path = "meerkat-client" }
-meerkat-store = { path = "meerkat-store" }
-meerkat-tools = { path = "meerkat-tools" }
+meerkat-client = { path = "meerkat-client", default-features = false }
+meerkat-store = { path = "meerkat-store", default-features = false }
+meerkat-tools = { path = "meerkat-tools", default-features = false }
 meerkat-mcp = { path = "meerkat-mcp" }
 meerkat-mcp-server = { path = "meerkat-mcp-server" }
 meerkat-cli = { path = "meerkat-cli" }
 meerkat-rest = { path = "meerkat-rest" }
-meerkat = { path = "meerkat" }
+meerkat = { path = "meerkat", default-features = false }
 meerkat-comms = { path = "meerkat-comms" }
 meerkat-hooks = { path = "meerkat-hooks" }
 meerkat-rpc = { path = "meerkat-rpc" }

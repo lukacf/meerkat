@@ -210,6 +210,15 @@ fn provider_key(provider: Provider) -> &'static str {
     }
 }
 
+fn resolve_host_mode(requested: bool) -> Result<bool, ApiError> {
+    if requested && !cfg!(feature = "comms") {
+        return Err(ApiError::BadRequest(
+            "host_mode requires comms support (build with --features comms)".to_string(),
+        ));
+    }
+    Ok(requested && cfg!(feature = "comms"))
+}
+
 /// Create session request
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
@@ -441,7 +450,7 @@ async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    let host_mode = cfg!(feature = "comms") && req.host_mode;
+    let host_mode = resolve_host_mode(req.host_mode)?;
 
     // Validate host mode requirements
     #[cfg(feature = "comms")]
@@ -521,9 +530,6 @@ async fn create_session(
     } else {
         None
     };
-
-    #[cfg(not(feature = "comms"))]
-    let comms_runtime = None;
 
     #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
@@ -725,12 +731,12 @@ async fn continue_session(
             .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider)),
         &model,
     )?;
-    let host_mode = cfg!(feature = "comms")
-        && (req.host_mode
-            || stored_metadata
-                .as_ref()
-                .map(|meta| meta.host_mode)
-                .unwrap_or(false));
+    let host_mode_requested = req.host_mode
+        || stored_metadata
+            .as_ref()
+            .map(|meta| meta.host_mode)
+            .unwrap_or(false);
+    let host_mode = resolve_host_mode(host_mode_requested)?;
     let comms_name = req.comms_name.clone().or_else(|| {
         stored_metadata
             .as_ref()
@@ -798,9 +804,6 @@ async fn continue_session(
     } else {
         None
     };
-
-    #[cfg(not(feature = "comms"))]
-    let comms_runtime = None;
 
     #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
@@ -1170,6 +1173,20 @@ mod tests {
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
         assert!(!req.host_mode);
         assert!(req.comms_name.is_none());
+    }
+
+    #[cfg(not(feature = "comms"))]
+    #[test]
+    fn test_resolve_host_mode_rejects_when_comms_disabled() {
+        let err = resolve_host_mode(true).expect_err("host mode should be rejected");
+        assert!(matches!(err, ApiError::BadRequest(_)));
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_resolve_host_mode_allows_when_comms_enabled() {
+        assert!(resolve_host_mode(true).expect("host mode should be enabled"));
+        assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
     }
 
     #[test]

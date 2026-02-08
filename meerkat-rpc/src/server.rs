@@ -11,11 +11,11 @@ use tokio::sync::mpsc;
 
 use meerkat_core::ConfigStore;
 
+use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::protocol::{RpcNotification, RpcResponse};
 use crate::router::{MethodRouter, NotificationSink};
 use crate::session_runtime::SessionRuntime;
 use crate::transport::{JsonlTransport, TransportError};
-use crate::NOTIFICATION_CHANNEL_CAPACITY;
 
 /// Errors from the RPC server.
 #[derive(Debug, thiserror::Error)]

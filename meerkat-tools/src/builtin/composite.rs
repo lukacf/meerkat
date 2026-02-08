@@ -239,6 +239,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
 
         // Check sub-agent tools
+        #[cfg(feature = "sub-agents")]
         if let Some(ref sub) = self.sub_agent_tools {
             for tool in sub.tools() {
                 if tool.name() == call.name {

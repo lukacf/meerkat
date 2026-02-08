@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-meerkat = { workspace = true, default-features = false, features = ["anthropic", "jsonl-store"] }
+meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
 meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
 indexmap = "2"

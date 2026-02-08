@@ -880,4 +880,3 @@ async fn test_e2e_rkat_sender_nonblocking() {
     instance_a.kill();
     instance_b.kill();
 }
-#![cfg(feature = "comms")]

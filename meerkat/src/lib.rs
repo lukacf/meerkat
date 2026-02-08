@@ -94,6 +94,8 @@ pub use meerkat_core::{
     OperationResult,
     OperationSpec,
     OutputSchema,
+    // Provider
+    Provider,
     ProviderConfig,
     ResultShape,
     RetryConfig,
@@ -105,8 +107,6 @@ pub use meerkat_core::{
     SchemaError,
     SchemaFormat,
     SchemaWarning,
-    // Provider
-    Provider,
     // Session
     Session,
     SessionId,
@@ -168,14 +168,13 @@ pub use meerkat_store::MemoryStore;
 pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidationError};
 
 // Re-export builtin tools infrastructure
+#[cfg(feature = "comms")]
+pub use meerkat_tools::CommsToolSurface;
 pub use meerkat_tools::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
     CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore,
-    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
-    find_project_root,
+    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir, find_project_root,
 };
-#[cfg(feature = "comms")]
-pub use meerkat_tools::CommsToolSurface;
 
 // Re-export MCP client
 #[cfg(feature = "mcp")]

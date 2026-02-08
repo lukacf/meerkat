@@ -65,18 +65,15 @@ impl RpcResponse {
     pub fn success(id: Option<RpcId>, result: impl Serialize) -> Self {
         // Serialize the result to a RawValue. If serialization fails,
         // fall back to a JSON null.
-        let raw = serde_json::value::to_raw_value(&result)
-            .unwrap_or_else(|_| {
-                // This is extremely unlikely to fail since we're serializing
-                // a type that impl Serialize, but we avoid unwrap in library code.
-                serde_json::value::to_raw_value(&serde_json::Value::Null)
-                    .unwrap_or_else(|_| {
-                        // Serializing null to RawValue cannot realistically fail.
-                        // We use a const approach as last resort.
-                        RawValue::from_string("null".to_string())
-                            .unwrap_or_default()
-                    })
-            });
+        let raw = serde_json::value::to_raw_value(&result).unwrap_or_else(|_| {
+            // This is extremely unlikely to fail since we're serializing
+            // a type that impl Serialize, but we avoid unwrap in library code.
+            serde_json::value::to_raw_value(&serde_json::Value::Null).unwrap_or_else(|_| {
+                // Serializing null to RawValue cannot realistically fail.
+                // We use a const approach as last resort.
+                RawValue::from_string("null".to_string()).unwrap_or_default()
+            })
+        });
         Self {
             jsonrpc: "2.0".to_string(),
             id,

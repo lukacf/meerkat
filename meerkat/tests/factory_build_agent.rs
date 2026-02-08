@@ -28,9 +28,8 @@ impl LlmClient for MockLlmClient {
     fn stream<'a>(
         &'a self,
         _request: &'a LlmRequest,
-    ) -> Pin<
-        Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>,
-    > {
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>>
+    {
         Box::pin(stream::iter(vec![
             Ok(LlmEvent::TextDelta {
                 delta: "Hello from mock".to_string(),
@@ -233,7 +232,10 @@ async fn build_agent_with_resume_preserves_messages() {
             false
         }
     });
-    assert!(has_previous, "Resumed session should preserve prior messages");
+    assert!(
+        has_previous,
+        "Resumed session should preserve prior messages"
+    );
 }
 
 /// 7. `build_agent` with `resume_session` uses stored metadata as defaults.

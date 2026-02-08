@@ -183,6 +183,13 @@ fn provider_key(provider: Provider) -> &'static str {
     }
 }
 
+fn resolve_host_mode(requested: bool) -> Result<bool, String> {
+    if requested && !cfg!(feature = "comms") {
+        return Err("host_mode requires comms support (build with --features comms)".to_string());
+    }
+    Ok(requested && cfg!(feature = "comms"))
+}
+
 fn resolve_store_path(config: &Config) -> PathBuf {
     config
         .store
@@ -379,7 +386,7 @@ async fn handle_meerkat_run(
     input: MeerkatRunInput,
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
-    let host_mode = cfg!(feature = "comms") && input.host_mode;
+    let host_mode = resolve_host_mode(input.host_mode)?;
 
     // Validate host mode requirements
     #[cfg(feature = "comms")]
@@ -400,7 +407,7 @@ async fn handle_meerkat_run_simple(
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
     let config = load_config_async().await;
-    let host_mode = cfg!(feature = "comms") && input.host_mode;
+    let host_mode = resolve_host_mode(input.host_mode)?;
     let model = input
         .model
         .unwrap_or_else(|| config.agent.model.to_string());
@@ -459,9 +466,6 @@ async fn handle_meerkat_run_simple(
     } else {
         None
     };
-
-    #[cfg(not(feature = "comms"))]
-    let comms_runtime = None;
 
     #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
@@ -602,7 +606,7 @@ async fn handle_meerkat_run_with_builtins(
     };
 
     let config = load_config_async().await;
-    let host_mode = cfg!(feature = "comms") && input.host_mode;
+    let host_mode = resolve_host_mode(input.host_mode)?;
     let model = input
         .model
         .unwrap_or_else(|| config.agent.model.to_string());
@@ -724,9 +728,6 @@ async fn handle_meerkat_run_with_builtins(
     } else {
         None
     };
-
-    #[cfg(not(feature = "comms"))]
-    let comms_runtime = None;
 
     #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
@@ -916,12 +917,12 @@ async fn handle_meerkat_resume_simple(
         .max_tokens
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
         .unwrap_or(config.agent.max_tokens_per_turn);
-    let host_mode = cfg!(feature = "comms")
-        && (input.host_mode
-            || stored_metadata
-                .as_ref()
-                .map(|meta| meta.host_mode)
-                .unwrap_or(false));
+    let host_mode_requested = input.host_mode
+        || stored_metadata
+            .as_ref()
+            .map(|meta| meta.host_mode)
+            .unwrap_or(false);
+    let host_mode = resolve_host_mode(host_mode_requested)?;
     let comms_name = input.comms_name.clone().or_else(|| {
         stored_metadata
             .as_ref()
@@ -979,9 +980,6 @@ async fn handle_meerkat_resume_simple(
     } else {
         None
     };
-
-    #[cfg(not(feature = "comms"))]
-    let comms_runtime = None;
 
     #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
@@ -1140,12 +1138,12 @@ async fn handle_meerkat_resume_with_builtins(
         .max_tokens
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
         .unwrap_or(config.agent.max_tokens_per_turn);
-    let host_mode = cfg!(feature = "comms")
-        && (input.host_mode
-            || stored_metadata
-                .as_ref()
-                .map(|meta| meta.host_mode)
-                .unwrap_or(false));
+    let host_mode_requested = input.host_mode
+        || stored_metadata
+            .as_ref()
+            .map(|meta| meta.host_mode)
+            .unwrap_or(false);
+    let host_mode = resolve_host_mode(host_mode_requested)?;
     let comms_name = input.comms_name.clone().or_else(|| {
         stored_metadata
             .as_ref()
@@ -1271,9 +1269,6 @@ async fn handle_meerkat_resume_with_builtins(
     } else {
         None
     };
-
-    #[cfg(not(feature = "comms"))]
-    let comms_runtime = None;
 
     #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
@@ -1733,6 +1728,20 @@ mod tests {
             tool_results["items"].is_object(),
             "tool_results items should be defined"
         );
+    }
+
+    #[cfg(not(feature = "comms"))]
+    #[test]
+    fn test_resolve_host_mode_rejects_when_comms_disabled() {
+        let err = resolve_host_mode(true).expect_err("host mode should be rejected");
+        assert!(err.contains("host_mode requires comms support"));
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_resolve_host_mode_allows_when_comms_enabled() {
+        assert!(resolve_host_mode(true).expect("host mode should be enabled"));
+        assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
     }
 
     #[cfg(feature = "comms")]

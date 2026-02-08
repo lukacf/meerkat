@@ -90,7 +90,8 @@ mod tests {
 
     #[tokio::test]
     async fn read_single_request() {
-        let input = r#"{"jsonrpc":"2.0","id":1,"method":"session/create","params":{"model":"test"}}"#;
+        let input =
+            r#"{"jsonrpc":"2.0","id":1,"method":"session/create","params":{"model":"test"}}"#;
         let input_line = format!("{input}\n");
         let mut transport = make_transport(&input_line);
 

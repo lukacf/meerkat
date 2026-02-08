@@ -9,9 +9,9 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use meerkat::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent};
 use meerkat_client::LlmClient;
+use meerkat_core::Config;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::types::{RunResult, SessionId};
-use meerkat_core::Config;
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
 
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
@@ -143,7 +143,8 @@ impl SessionRuntime {
         };
 
         // Create the permanent event channel for this session.
-        let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(NOTIFICATION_CHANNEL_CAPACITY);
+        let (agent_event_tx, agent_event_rx) =
+            mpsc::channel::<AgentEvent>(NOTIFICATION_CHANNEL_CAPACITY);
 
         // Wire the event_tx into the build config so the LLM adapter streams
         // TextDelta events through it.
@@ -280,9 +281,7 @@ impl SessionRuntime {
     /// Get the current state of a session, or `None` if the session does not exist.
     pub async fn session_state(&self, session_id: &SessionId) -> Option<SessionState> {
         let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)
-            .map(|h| *h.state_rx.borrow())
+        sessions.get(session_id).map(|h| *h.state_rx.borrow())
     }
 
     /// Archive (remove) a session.
@@ -417,13 +416,13 @@ fn build_error_to_rpc(err: BuildAgentError) -> RpcError {
 mod tests {
     use super::*;
 
-    use std::pin::Pin;
-    use std::sync::Arc;
     use async_trait::async_trait;
     use futures::stream;
     use meerkat::AgentBuildConfig;
     use meerkat_client::{LlmClient, LlmError};
     use meerkat_core::StopReason;
+    use std::pin::Pin;
+    use std::sync::Arc;
 
     // -----------------------------------------------------------------------
     // Mock LLM client
@@ -437,11 +436,7 @@ mod tests {
             &'a self,
             _request: &'a meerkat_client::LlmRequest,
         ) -> Pin<
-            Box<
-                dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
-                    + Send
-                    + 'a,
-            >,
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
         > {
             Box::pin(stream::iter(vec![
                 Ok(meerkat_client::LlmEvent::TextDelta {
@@ -483,11 +478,7 @@ mod tests {
             &'a self,
             _request: &'a meerkat_client::LlmRequest,
         ) -> Pin<
-            Box<
-                dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
-                    + Send
-                    + 'a,
-            >,
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
         > {
             let delay_ms = self.delay_ms;
             Box::pin(async_stream::stream! {
@@ -695,9 +686,9 @@ mod tests {
         );
 
         // Check that we got a RunStarted event
-        let has_run_started = events.iter().any(|e| {
-            matches!(e, AgentEvent::RunStarted { .. })
-        });
+        let has_run_started = events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RunStarted { .. }));
         assert!(has_run_started, "Should have received a RunStarted event");
     }
 

@@ -1,9 +1,9 @@
 //! agent_fork tool - Fork current agent with continued context
 
 use super::config::SubAgentError;
-use super::runner::{
-    DynSubAgentSpec, SubAgentCommsConfig, create_fork_session, spawn_sub_agent_dyn,
-};
+#[cfg(feature = "comms")]
+use super::runner::SubAgentCommsConfig;
+use super::runner::{DynSubAgentSpec, create_fork_session, spawn_sub_agent_dyn};
 use super::state::SubAgentToolState;
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 use crate::dispatcher::FilteredDispatcher;
@@ -140,6 +140,7 @@ struct ForkResponse {
 }
 
 /// Generate comms instructions for parent about messaging forked child
+#[cfg(feature = "comms")]
 fn parent_comms_instructions(child_name: &str) -> String {
     format!(
         "To message this fork: send_message(\"{child_name}\", \"your message\")",
@@ -320,6 +321,7 @@ impl AgentForkTool {
         let name = format!("fork-{}{}", &op_id_str[..8], &op_id_str[9..13]);
 
         // Build comms config if parent has comms enabled
+        #[cfg(feature = "comms")]
         let (comms_config, comms_instructions) =
             if let Some(parent_comms) = &self.state.parent_comms {
                 let config = SubAgentCommsConfig {
@@ -332,8 +334,11 @@ impl AgentForkTool {
             } else {
                 (None, None)
             };
+        #[cfg(not(feature = "comms"))]
+        let comms_instructions: Option<String> = None;
 
         // Create the sub-agent specification for the fork
+        #[cfg(feature = "comms")]
         let spec = DynSubAgentSpec {
             client,
             model: model.clone(),
@@ -346,6 +351,18 @@ impl AgentForkTool {
             comms_config,
             parent_trusted_peers: self.state.parent_trusted_peers.clone(),
             host_mode: false, // Forked agents don't run in host mode
+        };
+        #[cfg(not(feature = "comms"))]
+        let spec = DynSubAgentSpec {
+            client,
+            model: model.clone(),
+            tools: filtered_tools,
+            store: self.state.session_store.clone(),
+            session,
+            budget: Some(budget),
+            depth: self.state.depth() + 1,
+            system_prompt: None, // Fork inherits system prompt from session
+            host_mode: false,    // Forked agents don't run in host mode
         };
 
         // Spawn the forked agent

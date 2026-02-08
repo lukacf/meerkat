@@ -29,13 +29,8 @@ impl LlmClient for MockLlmClient {
     fn stream<'a>(
         &'a self,
         _request: &'a meerkat_client::LlmRequest,
-    ) -> Pin<
-        Box<
-            dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
-                + Send
-                + 'a,
-        >,
-    > {
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>>
+    {
         Box::pin(stream::iter(vec![
             Ok(meerkat_client::LlmEvent::TextDelta {
                 delta: "Hello from mock".to_string(),
@@ -105,22 +100,15 @@ async fn send_request(writer: &mut tokio::io::DuplexStream, request: &serde_json
 }
 
 /// Read a single JSONL line and parse it as a JSON value.
-async fn read_line_json(
-    reader: &mut BufReader<tokio::io::DuplexStream>,
-) -> serde_json::Value {
+async fn read_line_json(reader: &mut BufReader<tokio::io::DuplexStream>) -> serde_json::Value {
     let mut line = String::new();
     reader.read_line(&mut line).await.unwrap();
-    assert!(
-        !line.is_empty(),
-        "Expected a JSONL line but got EOF"
-    );
+    assert!(!line.is_empty(), "Expected a JSONL line but got EOF");
     serde_json::from_str(&line).unwrap()
 }
 
 /// Read a response (a line that has an "id" field), skipping notifications.
-async fn read_response(
-    reader: &mut BufReader<tokio::io::DuplexStream>,
-) -> serde_json::Value {
+async fn read_response(reader: &mut BufReader<tokio::io::DuplexStream>) -> serde_json::Value {
     loop {
         let value = read_line_json(reader).await;
         // Responses have an "id" field; notifications do not
@@ -150,7 +138,11 @@ async fn initialize_roundtrip() {
 
     let response = read_response(&mut reader).await;
     assert_eq!(response["id"], 1);
-    assert!(response["error"].is_null(), "Expected success, got error: {}", response);
+    assert!(
+        response["error"].is_null(),
+        "Expected success, got error: {}",
+        response
+    );
     assert_eq!(response["result"]["server_info"]["name"], "meerkat-rpc");
     assert!(response["result"]["server_info"]["version"].is_string());
 
@@ -181,10 +173,22 @@ async fn session_create_and_turn_start() {
 
     let create_resp = read_response(&mut reader).await;
     assert_eq!(create_resp["id"], 1);
-    assert!(create_resp["error"].is_null(), "session/create failed: {}", create_resp);
-    let session_id = create_resp["result"]["session_id"].as_str().unwrap().to_string();
+    assert!(
+        create_resp["error"].is_null(),
+        "session/create failed: {}",
+        create_resp
+    );
+    let session_id = create_resp["result"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(!session_id.is_empty());
-    assert!(create_resp["result"]["text"].as_str().unwrap().contains("Hello from mock"));
+    assert!(
+        create_resp["result"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Hello from mock")
+    );
 
     // Start another turn
     let turn_req = serde_json::json!({
@@ -197,9 +201,21 @@ async fn session_create_and_turn_start() {
 
     let turn_resp = read_response(&mut reader).await;
     assert_eq!(turn_resp["id"], 2);
-    assert!(turn_resp["error"].is_null(), "turn/start failed: {}", turn_resp);
-    assert_eq!(turn_resp["result"]["session_id"].as_str().unwrap(), session_id);
-    assert!(turn_resp["result"]["text"].as_str().unwrap().contains("Hello from mock"));
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start failed: {}",
+        turn_resp
+    );
+    assert_eq!(
+        turn_resp["result"]["session_id"].as_str().unwrap(),
+        session_id
+    );
+    assert!(
+        turn_resp["result"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Hello from mock")
+    );
 
     drop(writer);
     server_handle.await.unwrap().unwrap();
@@ -215,7 +231,11 @@ async fn server_shuts_down_on_eof() {
 
     // Server should exit cleanly
     let result = server_handle.await.unwrap();
-    assert!(result.is_ok(), "Server should shut down cleanly on EOF, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Server should shut down cleanly on EOF, got: {:?}",
+        result.err()
+    );
 }
 
 /// 4. Malformed JSON returns parse error, then server continues processing.
@@ -229,7 +249,11 @@ async fn malformed_json_returns_error_and_continues() {
 
     // Should get a parse error response
     let error_resp = read_line_json(&mut reader).await;
-    assert!(error_resp["error"].is_object(), "Expected error response, got: {}", error_resp);
+    assert!(
+        error_resp["error"].is_object(),
+        "Expected error response, got: {}",
+        error_resp
+    );
     assert_eq!(error_resp["error"]["code"], -32700); // PARSE_ERROR
 
     // Now send a valid request - server should still work
@@ -243,7 +267,11 @@ async fn malformed_json_returns_error_and_continues() {
 
     let response = read_response(&mut reader).await;
     assert_eq!(response["id"], 42);
-    assert!(response["error"].is_null(), "Expected success after recovery, got: {}", response);
+    assert!(
+        response["error"].is_null(),
+        "Expected success after recovery, got: {}",
+        response
+    );
     assert_eq!(response["result"]["server_info"]["name"], "meerkat-rpc");
 
     drop(writer);
@@ -265,7 +293,11 @@ async fn config_get_patch_roundtrip() {
 
     let get_resp = read_response(&mut reader).await;
     assert_eq!(get_resp["id"], 1);
-    assert!(get_resp["error"].is_null(), "config/get failed: {}", get_resp);
+    assert!(
+        get_resp["error"].is_null(),
+        "config/get failed: {}",
+        get_resp
+    );
     let initial_max_tokens = get_resp["result"]["max_tokens"].as_u64().unwrap();
 
     // Patch max_tokens
@@ -280,7 +312,11 @@ async fn config_get_patch_roundtrip() {
 
     let patch_resp = read_response(&mut reader).await;
     assert_eq!(patch_resp["id"], 2);
-    assert!(patch_resp["error"].is_null(), "config/patch failed: {}", patch_resp);
+    assert!(
+        patch_resp["error"].is_null(),
+        "config/patch failed: {}",
+        patch_resp
+    );
     assert_eq!(patch_resp["result"]["max_tokens"], new_max_tokens);
 
     // Get again and verify
@@ -336,7 +372,11 @@ async fn session_list_after_create() {
     send_request(&mut writer, &list_req).await;
     let list_resp = read_response(&mut reader).await;
     assert_eq!(list_resp["id"], 3);
-    assert!(list_resp["error"].is_null(), "session/list failed: {}", list_resp);
+    assert!(
+        list_resp["error"].is_null(),
+        "session/list failed: {}",
+        list_resp
+    );
 
     let sessions = list_resp["result"]["sessions"].as_array().unwrap();
     assert!(

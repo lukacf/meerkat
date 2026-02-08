@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::{cmp, collections::HashSet};
 
-use crate::{AgentFactory, AgentToolDispatcher, Config, HookEngine, HooksConfig, ToolError, ToolGatewayBuilder};
+use crate::{
+    AgentFactory, AgentToolDispatcher, Config, HookEngine, HooksConfig, ToolError,
+    ToolGatewayBuilder,
+};
 #[cfg(feature = "comms")]
 use crate::{CommsRuntime, CoreCommsConfig};
 #[cfg(feature = "comms")]

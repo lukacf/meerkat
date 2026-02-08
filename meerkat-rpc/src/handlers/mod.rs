@@ -22,15 +22,10 @@ use crate::protocol::{RpcId, RpcResponse};
 pub(crate) fn parse_params<T: serde::de::DeserializeOwned>(
     params: Option<&RawValue>,
 ) -> Result<T, RpcResponse> {
-    let raw = params.ok_or_else(|| {
-        RpcResponse::error(None, error::INVALID_PARAMS, "Missing params")
-    })?;
+    let raw =
+        params.ok_or_else(|| RpcResponse::error(None, error::INVALID_PARAMS, "Missing params"))?;
     serde_json::from_str(raw.get()).map_err(|e| {
-        RpcResponse::error(
-            None,
-            error::INVALID_PARAMS,
-            format!("Invalid params: {e}"),
-        )
+        RpcResponse::error(None, error::INVALID_PARAMS, format!("Invalid params: {e}"))
     })
 }
 

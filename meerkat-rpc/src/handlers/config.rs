@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use serde_json::value::RawValue;
 
-use meerkat_core::config::{Config, ConfigDelta};
 use meerkat_core::ConfigStore;
+use meerkat_core::config::{Config, ConfigDelta};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
@@ -16,10 +16,7 @@ use crate::protocol::{RpcId, RpcResponse};
 // ---------------------------------------------------------------------------
 
 /// Handle `config/get`.
-pub async fn handle_get(
-    id: Option<RpcId>,
-    config_store: &Arc<dyn ConfigStore>,
-) -> RpcResponse {
+pub async fn handle_get(id: Option<RpcId>, config_store: &Arc<dyn ConfigStore>) -> RpcResponse {
     match config_store.get().await {
         Ok(config) => RpcResponse::success(id, config),
         Err(e) => RpcResponse::error(

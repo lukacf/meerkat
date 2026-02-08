@@ -1,6 +1,8 @@
 //! AgentFactory - shared wiring for Meerkat interfaces.
 
+#[cfg(not(feature = "memory-store"))]
 use async_trait::async_trait;
+#[cfg(not(feature = "memory-store"))]
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,16 +13,20 @@ use meerkat_client::{
 };
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionId,
-    SessionMeta, SessionMetadata, SessionTooling, SystemPromptConfig,
+    BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
+    SessionTooling, SystemPromptConfig,
 };
 #[cfg(feature = "sub-agents")]
 use meerkat_core::{ConcurrencyLimits, SubAgentManager};
+#[cfg(not(feature = "memory-store"))]
+use meerkat_core::{SessionId, SessionMeta};
 #[cfg(feature = "jsonl-store")]
 use meerkat_store::JsonlStore;
 #[cfg(feature = "memory-store")]
 use meerkat_store::MemoryStore;
-use meerkat_store::{SessionFilter, SessionStore, StoreAdapter};
+#[cfg(not(feature = "memory-store"))]
+use meerkat_store::SessionFilter;
+use meerkat_store::{SessionStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 use meerkat_tools::builtin::shell::ShellConfig;
 #[cfg(feature = "sub-agents")]
@@ -37,11 +43,13 @@ use crate::{build_comms_runtime_from_config, compose_tools_with_comms};
 use crate::{create_default_hook_engine, resolve_layered_hooks_config};
 
 /// Ephemeral in-process store used when no storage backend feature is enabled.
+#[cfg(not(feature = "memory-store"))]
 #[derive(Default)]
 struct EphemeralSessionStore {
     sessions: RwLock<HashMap<SessionId, Session>>,
 }
 
+#[cfg(not(feature = "memory-store"))]
 impl EphemeralSessionStore {
     fn new() -> Self {
         Self {
@@ -50,6 +58,7 @@ impl EphemeralSessionStore {
     }
 }
 
+#[cfg(not(feature = "memory-store"))]
 #[async_trait]
 impl SessionStore for EphemeralSessionStore {
     async fn save(&self, session: &Session) -> Result<(), meerkat_store::StoreError> {

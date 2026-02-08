@@ -17,9 +17,7 @@ use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::session::Session;
 use meerkat_core::sub_agent::SubAgentManager;
 use meerkat_core::types::{Message, SystemMessage, UserMessage};
-use meerkat_core::{
-    AgentBuilder, AgentError, AgentSessionStore, AgentToolDispatcher, BudgetLimits,
-};
+use meerkat_core::{AgentBuilder, AgentSessionStore, AgentToolDispatcher, BudgetLimits};
 #[cfg(feature = "comms")]
 use std::path::PathBuf;
 use std::sync::Arc;

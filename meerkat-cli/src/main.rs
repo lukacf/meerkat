@@ -504,83 +504,36 @@ async fn main() -> anyhow::Result<ExitCode> {
             verbose,
             host,
         } => {
-            let (config, config_base_dir) = load_config().await?;
-
-            let model = model.unwrap_or_else(|| config.agent.model.to_string());
-            let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
-
-            // Resolve provider: explicit flag > infer from model > default
-            let resolved_provider = provider
-                .or_else(|| Provider::infer_from_model(&model))
-                .unwrap_or_default();
-
-            // Parse duration string if provided
-            let duration = max_duration.map(|s| parse_duration(&s)).transpose();
-
-            // Parse provider params
-            let provider_params = parse_provider_params(&params);
-            let hook_run_overrides =
-                parse_hook_run_overrides(hooks_override_file, hooks_override_json);
-
-            // Build comms overrides from CLI flags
             let comms_overrides = CommsOverrides {
                 name: comms_name,
                 listen_tcp: comms_listen_tcp.and_then(|s| s.parse().ok()),
                 disabled: no_comms,
             };
 
-            // Parse output schema if provided
-            let parsed_output_schema = output_schema
-                .as_ref()
-                .map(|s| parse_output_schema(s))
-                .transpose()?
-                .map(|schema| {
-                    if let Some(compat) = output_schema_compat {
-                        schema.with_compat(compat.into())
-                    } else {
-                        schema
-                    }
-                });
-
-            match (duration, provider_params, hook_run_overrides) {
-                (Ok(dur), Ok(parsed_params), Ok(hooks_override)) => {
-                    let mut limits = config.budget_limits();
-                    if let Some(max_tokens) = max_total_tokens {
-                        limits.max_tokens = Some(max_tokens);
-                    }
-                    if let Some(max_duration) = dur {
-                        limits.max_duration = Some(max_duration);
-                    }
-                    if let Some(max_tool_calls) = max_tool_calls {
-                        limits.max_tool_calls = Some(max_tool_calls);
-                    }
-                    run_agent(
-                        &prompt,
-                        &model,
-                        resolved_provider,
-                        max_tokens,
-                        limits,
-                        &output,
-                        stream,
-                        parsed_params,
-                        parsed_output_schema,
-                        structured_output_retries,
-                        comms_overrides,
-                        enable_builtins,
-                        enable_shell,
-                        !no_subagents, // sub-agents enabled by default
-                        verbose,
-                        host,
-                        &config,
-                        config_base_dir,
-                        hooks_override,
-                    )
-                    .await
-                }
-                (Err(e), _, _) => Err(e),
-                (_, Err(e), _) => Err(e),
-                (_, _, Err(e)) => Err(e),
-            }
+            handle_run_command(
+                prompt,
+                model,
+                provider,
+                max_tokens,
+                max_total_tokens,
+                max_duration,
+                max_tool_calls,
+                output,
+                stream,
+                params,
+                output_schema,
+                output_schema_compat,
+                structured_output_retries,
+                hooks_override_json,
+                hooks_override_file,
+                comms_overrides,
+                enable_builtins,
+                enable_shell,
+                no_subagents,
+                verbose,
+                host,
+            )
+            .await
         }
         #[cfg(not(feature = "comms"))]
         Commands::Run {
@@ -604,74 +557,30 @@ async fn main() -> anyhow::Result<ExitCode> {
             no_subagents,
             verbose,
         } => {
-            let (config, config_base_dir) = load_config().await?;
-
-            let model = model.unwrap_or_else(|| config.agent.model.to_string());
-            let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
-
-            let resolved_provider = provider
-                .or_else(|| Provider::infer_from_model(&model))
-                .unwrap_or_default();
-
-            let duration = max_duration.map(|s| parse_duration(&s)).transpose();
-
-            let provider_params = parse_provider_params(&params);
-            let hook_run_overrides =
-                parse_hook_run_overrides(hooks_override_file, hooks_override_json);
-
-            let comms_overrides = CommsOverrides::default();
-
-            let parsed_output_schema = output_schema
-                .as_ref()
-                .map(|s| parse_output_schema(s))
-                .transpose()?
-                .map(|schema| {
-                    if let Some(compat) = output_schema_compat {
-                        schema.with_compat(compat.into())
-                    } else {
-                        schema
-                    }
-                });
-
-            match (duration, provider_params, hook_run_overrides) {
-                (Ok(dur), Ok(parsed_params), Ok(hooks_override)) => {
-                    let mut limits = config.budget_limits();
-                    if let Some(max_tokens) = max_total_tokens {
-                        limits.max_tokens = Some(max_tokens);
-                    }
-                    if let Some(max_duration) = dur {
-                        limits.max_duration = Some(max_duration);
-                    }
-                    if let Some(max_tool_calls) = max_tool_calls {
-                        limits.max_tool_calls = Some(max_tool_calls);
-                    }
-                    run_agent(
-                        &prompt,
-                        &model,
-                        resolved_provider,
-                        max_tokens,
-                        limits,
-                        &output,
-                        stream,
-                        parsed_params,
-                        parsed_output_schema,
-                        structured_output_retries,
-                        comms_overrides,
-                        enable_builtins,
-                        enable_shell,
-                        !no_subagents,
-                        verbose,
-                        false,
-                        &config,
-                        config_base_dir,
-                        hooks_override,
-                    )
-                    .await
-                }
-                (Err(e), _, _) => Err(e),
-                (_, Err(e), _) => Err(e),
-                (_, _, Err(e)) => Err(e),
-            }
+            handle_run_command(
+                prompt,
+                model,
+                provider,
+                max_tokens,
+                max_total_tokens,
+                max_duration,
+                max_tool_calls,
+                output,
+                stream,
+                params,
+                output_schema,
+                output_schema_compat,
+                structured_output_retries,
+                hooks_override_json,
+                hooks_override_file,
+                CommsOverrides::default(),
+                enable_builtins,
+                enable_shell,
+                no_subagents,
+                verbose,
+                false,
+            )
+            .await
         }
         Commands::Resume {
             session_id,
@@ -712,6 +621,95 @@ async fn main() -> anyhow::Result<ExitCode> {
             ExitCode::from(EXIT_ERROR)
         }
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_run_command(
+    prompt: String,
+    model: Option<String>,
+    provider: Option<Provider>,
+    max_tokens: Option<u32>,
+    max_total_tokens: Option<u64>,
+    max_duration: Option<String>,
+    max_tool_calls: Option<usize>,
+    output: String,
+    stream: bool,
+    params: Vec<String>,
+    output_schema: Option<String>,
+    output_schema_compat: Option<SchemaCompatArg>,
+    structured_output_retries: u32,
+    hooks_override_json: Option<String>,
+    hooks_override_file: Option<PathBuf>,
+    comms_overrides: CommsOverrides,
+    enable_builtins: bool,
+    enable_shell: bool,
+    no_subagents: bool,
+    verbose: bool,
+    host: bool,
+) -> anyhow::Result<()> {
+    let (config, config_base_dir) = load_config().await?;
+
+    let model = model.unwrap_or_else(|| config.agent.model.to_string());
+    let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
+    let resolved_provider = provider
+        .or_else(|| Provider::infer_from_model(&model))
+        .unwrap_or_default();
+
+    let duration = max_duration.map(|s| parse_duration(&s)).transpose();
+    let provider_params = parse_provider_params(&params);
+    let hook_run_overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json);
+
+    let parsed_output_schema = output_schema
+        .as_ref()
+        .map(|s| parse_output_schema(s))
+        .transpose()?
+        .map(|schema| {
+            if let Some(compat) = output_schema_compat {
+                schema.with_compat(compat.into())
+            } else {
+                schema
+            }
+        });
+
+    match (duration, provider_params, hook_run_overrides) {
+        (Ok(dur), Ok(parsed_params), Ok(hooks_override)) => {
+            let mut limits = config.budget_limits();
+            if let Some(max_tokens) = max_total_tokens {
+                limits.max_tokens = Some(max_tokens);
+            }
+            if let Some(max_duration) = dur {
+                limits.max_duration = Some(max_duration);
+            }
+            if let Some(max_tool_calls) = max_tool_calls {
+                limits.max_tool_calls = Some(max_tool_calls);
+            }
+            run_agent(
+                &prompt,
+                &model,
+                resolved_provider,
+                max_tokens,
+                limits,
+                &output,
+                stream,
+                parsed_params,
+                parsed_output_schema,
+                structured_output_retries,
+                comms_overrides,
+                enable_builtins,
+                enable_shell,
+                !no_subagents,
+                verbose,
+                host,
+                &config,
+                config_base_dir,
+                hooks_override,
+            )
+            .await
+        }
+        (Err(e), _, _) => Err(e),
+        (_, Err(e), _) => Err(e),
+        (_, _, Err(e)) => Err(e),
+    }
 }
 
 /// Parse a duration string like "5m", "1h30m", "30s"

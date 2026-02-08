@@ -1120,7 +1120,7 @@ fn build_enabled_tools(
 fn build_shell_config(
     config: &Config,
     enable_shell: bool,
-    project_root: &PathBuf,
+    project_root: &std::path::Path,
 ) -> Option<ShellConfig> {
     if !enable_shell {
         return None;
@@ -1132,7 +1132,7 @@ fn build_shell_config(
         restrict_to_project: true,
         shell: config.shell.program.to_string(),
         shell_path: None,
-        project_root: project_root.clone(),
+        project_root: project_root.to_path_buf(),
         max_completed_jobs: 100,
         completed_job_ttl_secs: 300,
         max_concurrent_processes: 10,
@@ -1143,7 +1143,7 @@ fn build_shell_config(
 
 async fn build_task_store(
     enable_builtins: bool,
-    project_root: &PathBuf,
+    project_root: &std::path::Path,
 ) -> anyhow::Result<Arc<dyn TaskStore>> {
     if enable_builtins {
         ensure_rkat_dir_async(project_root)
@@ -1167,7 +1167,7 @@ async fn register_sub_agent_tools(
     provider: Provider,
     #[cfg(feature = "comms")] comms_runtime: Option<&CommsRuntime>,
     #[cfg(feature = "comms")] comms_config: Option<&CoreCommsConfig>,
-    #[cfg(feature = "comms")] comms_base_dir: &PathBuf,
+    #[cfg(feature = "comms")] comms_base_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
     use meerkat_core::Session;
     use tokio::sync::RwLock;
@@ -1223,7 +1223,7 @@ async fn register_sub_agent_tools(
             parent_name: config.name.clone(),
             parent_pubkey: *runtime.public_key().as_bytes(),
             parent_addr,
-            comms_base_dir: comms_base_dir.clone(),
+            comms_base_dir: comms_base_dir.to_path_buf(),
         };
 
         Arc::new(SubAgentToolState::with_comms(

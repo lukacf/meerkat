@@ -9,7 +9,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int test-int-real test-e2e test-all lint fmt fmt-check audit ci clean doc release install-hooks coverage check help
+.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix lint lint-feature-matrix fmt fmt-check audit ci clean doc release install-hooks coverage check help
 
 # Default target
 all: ci
@@ -56,10 +56,60 @@ test-all:
 	@echo "$(GREEN)Running full test suite...$(NC)"
 	cargo test --workspace --all-features --all-targets
 
+# Minimal builds without optional features
+test-minimal:
+	@echo "$(GREEN)Running minimal build checks...$(NC)"
+	cargo check -p meerkat-core
+	cargo check -p meerkat-client --no-default-features
+	cargo check -p meerkat-store --no-default-features
+	cargo check -p meerkat-tools --no-default-features
+	cargo check -p meerkat --no-default-features
+	cargo test -p meerkat-core --lib --bins --tests
+
+# Library crate feature combinations
+test-feature-matrix-lib:
+	@echo "$(GREEN)Running library feature matrix checks...$(NC)"
+	cargo check -p meerkat-tools --no-default-features --features sub-agents
+	cargo check -p meerkat-tools --no-default-features --features comms
+	cargo check -p meerkat-tools --no-default-features --features mcp
+	cargo check -p meerkat-tools --no-default-features --features sub-agents,comms
+	cargo check -p meerkat-tools --no-default-features --features comms,mcp
+	cargo check -p meerkat --no-default-features --features openai,memory-store
+	cargo check -p meerkat --no-default-features --features gemini,jsonl-store
+	cargo check -p meerkat --features all-providers,comms,mcp,sub-agents
+	cargo test -p meerkat --features all-providers,comms,mcp --lib --bins --tests
+
+# Surface crate feature combinations
+test-feature-matrix-surface:
+	@echo "$(GREEN)Running surface feature matrix checks...$(NC)"
+	cargo check -p meerkat-rpc --no-default-features
+	cargo check -p meerkat-rpc --no-default-features --features comms,mcp
+	cargo check -p meerkat-rest --no-default-features
+	cargo check -p meerkat-rest --no-default-features --features comms
+	cargo check -p meerkat-mcp-server --no-default-features
+	cargo check -p meerkat-mcp-server --no-default-features --features comms
+	cargo check -p meerkat-cli --no-default-features
+	cargo check -p meerkat-cli --no-default-features --features mcp
+	cargo test -p meerkat-cli --no-default-features --features mcp -- --nocapture
+	cargo check -p meerkat-cli --no-default-features --features comms,mcp
+
+# Full feature matrix
+test-feature-matrix: test-feature-matrix-lib test-feature-matrix-surface
+
 # Run clippy linter
 lint:
 	@echo "$(GREEN)Running clippy...$(NC)"
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# Run clippy across key feature combinations (not just --all-features)
+lint-feature-matrix:
+	@echo "$(GREEN)Running clippy feature matrix...$(NC)"
+	cargo clippy -p meerkat-tools --no-default-features --features sub-agents
+	cargo clippy -p meerkat-tools --no-default-features --features comms,mcp
+	cargo clippy -p meerkat --no-default-features --features openai,memory-store
+	cargo clippy -p meerkat --features all-providers,comms,mcp,sub-agents
+	cargo clippy -p meerkat-cli --no-default-features --features mcp
+	cargo clippy -p meerkat-rpc --no-default-features
 
 # Check formatting
 fmt-check:
@@ -82,7 +132,7 @@ audit-alt:
 	cargo audit
 
 # Full CI pipeline - runs everything
-ci: fmt-check lint test-all audit
+ci: fmt-check lint lint-feature-matrix test-all test-minimal test-feature-matrix audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Quick check - compile without producing output
@@ -169,6 +219,7 @@ help:
 	@echo "  $(GREEN)test-e2e$(NC)      - Run e2e tests (ignored)"
 	@echo "  $(GREEN)test-all$(NC)      - Run full test suite (CI)"
 	@echo "  $(GREEN)lint$(NC)          - Run clippy linter"
+	@echo "  $(GREEN)lint-feature-matrix$(NC)- Run clippy across key feature combinations"
 	@echo "  $(GREEN)fmt$(NC)           - Fix code formatting"
 	@echo "  $(GREEN)fmt-check$(NC)     - Check code formatting"
 	@echo "  $(GREEN)audit$(NC)         - Run security audit (cargo-deny)"

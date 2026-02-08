@@ -3,10 +3,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "comms")]
 use meerkat_comms::agent::DynCommsToolDispatcher;
+#[cfg(feature = "comms")]
 use meerkat_comms::{Router, TrustedPeers};
 use meerkat_core::AgentToolDispatcher;
+#[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouter;
+#[cfg(feature = "comms")]
 use tokio::sync::RwLock;
 
 use crate::builtin::shell::ShellConfig;
@@ -18,12 +22,14 @@ pub enum ToolDispatcherSource {
     /// Empty dispatcher (default)
     Empty,
     /// MCP-based tools
+    #[cfg(feature = "mcp")]
     Mcp(McpDispatcherConfig),
     /// Built-in and sub-agent tools (boxed to reduce enum size)
     Composite(Box<BuiltinDispatcherConfig>),
 }
 
 /// Configuration for an MCP-based dispatcher
+#[cfg(feature = "mcp")]
 pub struct McpDispatcherConfig {
     pub router: Arc<McpRouter>,
 }
@@ -38,6 +44,7 @@ pub struct BuiltinDispatcherConfig {
 }
 
 /// Configuration for a comms-enabled dispatcher
+#[cfg(feature = "comms")]
 pub struct CommsDispatcherConfig {
     pub router: Arc<Router>,
     pub trusted_peers: Arc<RwLock<TrustedPeers>>,
@@ -46,6 +53,7 @@ pub struct CommsDispatcherConfig {
 /// Top-level configuration for building a ToolDispatcher
 pub struct ToolDispatcherConfig {
     pub source: ToolDispatcherSource,
+    #[cfg(feature = "comms")]
     pub comms: Option<CommsDispatcherConfig>,
     pub default_timeout: Duration,
 }
@@ -54,6 +62,7 @@ impl Default for ToolDispatcherConfig {
     fn default() -> Self {
         Self {
             source: ToolDispatcherSource::Empty,
+            #[cfg(feature = "comms")]
             comms: None,
             default_timeout: Duration::from_secs(30),
         }
@@ -78,6 +87,7 @@ impl ToolDispatcherBuilder {
     }
 
     /// Add comms tools to the dispatcher
+    #[cfg(feature = "comms")]
     pub fn comms(mut self, comms: CommsDispatcherConfig) -> Self {
         self.config.comms = Some(comms);
         self
@@ -93,6 +103,7 @@ impl ToolDispatcherBuilder {
     pub async fn build(self) -> Result<ToolDispatcher, CompositeDispatcherError> {
         let router: Arc<dyn AgentToolDispatcher> = match self.config.source {
             ToolDispatcherSource::Empty => Arc::new(EmptyToolDispatcher),
+            #[cfg(feature = "mcp")]
             ToolDispatcherSource::Mcp(mcp) => mcp.router,
             ToolDispatcherSource::Composite(comp) => Arc::new(CompositeDispatcher::new(
                 comp.store,
@@ -104,6 +115,7 @@ impl ToolDispatcherBuilder {
         };
 
         // Wrap with comms if enabled
+        #[cfg(feature = "comms")]
         let router = if let Some(comms) = self.config.comms {
             Arc::new(DynCommsToolDispatcher::new(
                 comms.router,
@@ -113,6 +125,9 @@ impl ToolDispatcherBuilder {
         } else {
             router
         };
+
+        #[cfg(not(feature = "comms"))]
+        let router = router;
 
         // Populate registry from router's tools
         let mut registry = crate::registry::ToolRegistry::new();

@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-meerkat = { workspace = true }
+meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
 meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
 indexmap = "2"
@@ -18,6 +18,12 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[features]
+default = []
+comms = ["meerkat/comms"]
+mcp = ["meerkat/mcp"]
+sub-agents = ["meerkat/sub-agents"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

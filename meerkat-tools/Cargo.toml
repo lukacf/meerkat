@@ -8,11 +8,17 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = ["sub-agents", "comms", "mcp"]
+sub-agents = ["dep:meerkat-client"]
+comms = ["dep:meerkat-comms"]
+mcp = ["dep:meerkat-mcp"]
+
 [dependencies]
 meerkat-core = { workspace = true }
-meerkat-client = { workspace = true }
-meerkat-comms = { workspace = true }
-meerkat-mcp = { workspace = true }
+meerkat-client = { workspace = true, optional = true }
+meerkat-comms = { workspace = true, optional = true }
+meerkat-mcp = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

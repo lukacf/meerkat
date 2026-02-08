@@ -15,6 +15,7 @@
 //! The [`memory_store`] module provides [`MemoryTaskStore`] for testing.
 //! The [`file_store`] module provides [`FileTaskStore`] for persistent storage.
 
+#[cfg(feature = "comms")]
 pub mod comms;
 pub mod composite;
 pub mod config;
@@ -23,12 +24,14 @@ pub mod memory_store;
 pub mod project;
 pub mod shell;
 pub mod store;
+#[cfg(feature = "sub-agents")]
 pub mod sub_agent;
 pub mod tasks;
 pub mod types;
 pub mod utility;
 
 // Re-export core types for convenience
+#[cfg(feature = "comms")]
 pub use comms::CommsToolSurface;
 pub use composite::{CompositeDispatcher, CompositeDispatcherError};
 pub use config::{

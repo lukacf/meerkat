@@ -26,10 +26,13 @@ use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
     AgentBuilder, AgentEvent, AgentToolDispatcher, JsonlStore, OutputSchema, SessionId,
-    SessionMeta, SessionStore, ToolDef, ToolError, ToolResult, build_comms_runtime_from_config,
-    compose_tools_with_comms, create_default_hook_engine, resolve_layered_hooks_config,
+    SessionMeta, SessionStore, ToolDef, ToolError, ToolResult, create_default_hook_engine,
+    resolve_layered_hooks_config,
 };
+#[cfg(feature = "comms")]
+use meerkat::{build_comms_runtime_from_config, compose_tools_with_comms};
 use meerkat_client::{LlmClient, LlmClientAdapter, ProviderResolver};
+#[cfg(feature = "comms")]
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::{
@@ -205,6 +208,15 @@ fn provider_key(provider: Provider) -> &'static str {
         Provider::Gemini => "gemini",
         Provider::Other => "other",
     }
+}
+
+fn resolve_host_mode(requested: bool) -> Result<bool, ApiError> {
+    if requested && !cfg!(feature = "comms") {
+        return Err(ApiError::BadRequest(
+            "host_mode requires comms support (build with --features comms)".to_string(),
+        ));
+    }
+    Ok(requested && cfg!(feature = "comms"))
 }
 
 /// Create session request
@@ -438,8 +450,11 @@ async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
+    let host_mode = resolve_host_mode(req.host_mode)?;
+
     // Validate host mode requirements
-    if req.host_mode && req.comms_name.is_none() {
+    #[cfg(feature = "comms")]
+    if host_mode && req.comms_name.is_none() {
         return Err(ApiError::BadRequest(
             "host_mode requires comms_name to be set".to_string(),
         ));
@@ -498,7 +513,8 @@ async fn create_session(
 
     // Create comms runtime if host_mode is enabled
     // Note: inproc_only() already registers in InprocRegistry, no need to start listeners
-    let comms_runtime = if req.host_mode {
+    #[cfg(feature = "comms")]
+    let comms_runtime = if host_mode {
         let comms_name = req.comms_name.as_ref().ok_or_else(|| {
             ApiError::Configuration("comms_name required when host_mode is enabled".to_string())
         })?;
@@ -515,6 +531,7 @@ async fn create_session(
         None
     };
 
+    #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
         let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
             .map_err(|e| ApiError::Internal(format!("Failed to compose comms tools: {}", e)))?;
@@ -553,6 +570,7 @@ async fn create_session(
     builder = builder.system_prompt(system_prompt);
 
     // Add comms runtime if enabled
+    #[cfg(feature = "comms")]
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
@@ -583,10 +601,10 @@ async fn create_session(
         tooling: SessionTooling {
             builtins: state.enable_builtins,
             shell: state.enable_shell,
-            comms: req.host_mode,
+            comms: host_mode,
             subagents: false,
         },
-        host_mode: req.host_mode,
+        host_mode,
         comms_name: req.comms_name.clone(),
     };
     if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
@@ -594,7 +612,7 @@ async fn create_session(
     }
 
     // Run agent based on mode
-    let result = if req.host_mode {
+    let result = if host_mode {
         agent
             .run_host_mode_with_events(req.prompt, agent_event_tx.clone())
             .await
@@ -713,17 +731,19 @@ async fn continue_session(
             .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider)),
         &model,
     )?;
-    let host_mode = req.host_mode
+    let host_mode_requested = req.host_mode
         || stored_metadata
             .as_ref()
             .map(|meta| meta.host_mode)
             .unwrap_or(false);
+    let host_mode = resolve_host_mode(host_mode_requested)?;
     let comms_name = req.comms_name.clone().or_else(|| {
         stored_metadata
             .as_ref()
             .and_then(|meta| meta.comms_name.clone())
     });
 
+    #[cfg(feature = "comms")]
     if host_mode && comms_name.is_none() {
         return Err(ApiError::BadRequest(
             "host_mode requires comms_name to be set".to_string(),
@@ -767,6 +787,7 @@ async fn continue_session(
         create_tool_dispatcher(state.project_root.as_ref(), tooling.builtins, tooling.shell)?;
     let store_adapter = Arc::new(StoreAdapter::new(Arc::new(store)));
 
+    #[cfg(feature = "comms")]
     let comms_runtime = if host_mode {
         let comms_name = comms_name.as_ref().ok_or_else(|| {
             ApiError::Configuration("comms_name required when host_mode is enabled".to_string())
@@ -784,6 +805,7 @@ async fn continue_session(
         None
     };
 
+    #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
         let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
             .map_err(|e| ApiError::Internal(format!("Failed to compose comms tools: {}", e)))?;
@@ -821,6 +843,7 @@ async fn continue_session(
     }
     builder = builder.system_prompt(system_prompt);
 
+    #[cfg(feature = "comms")]
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
@@ -1150,6 +1173,20 @@ mod tests {
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
         assert!(!req.host_mode);
         assert!(req.comms_name.is_none());
+    }
+
+    #[cfg(not(feature = "comms"))]
+    #[test]
+    fn test_resolve_host_mode_rejects_when_comms_disabled() {
+        let err = resolve_host_mode(true).expect_err("host mode should be rejected");
+        assert!(matches!(err, ApiError::BadRequest(_)));
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_resolve_host_mode_allows_when_comms_enabled() {
+        assert!(resolve_host_mode(true).expect("host mode should be enabled"));
+        assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
     }
 
     #[test]

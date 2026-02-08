@@ -5,15 +5,15 @@ use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 
 use meerkat::AgentBuildConfig;
-use meerkat_core::event::AgentEvent;
 use meerkat_core::Provider;
+use meerkat_core::event::AgentEvent;
 
 use super::{RpcResponseExt, UsageResult, parse_params};
+use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
-use crate::NOTIFICATION_CHANNEL_CAPACITY;
 
 // ---------------------------------------------------------------------------
 // Param types

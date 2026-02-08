@@ -2,6 +2,7 @@
 
 use crate::builtin::shell::{JobManager, ShellConfig};
 use crate::builtin::store::TaskStore;
+#[cfg(feature = "sub-agents")]
 use crate::builtin::sub_agent::SubAgentToolSet;
 use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError};
 use async_trait::async_trait;
@@ -28,6 +29,7 @@ pub enum CompositeDispatcherError {
 /// A composite dispatcher that combines multiple sources of tools.
 pub struct CompositeDispatcher {
     builtin_tools: Vec<Arc<dyn BuiltinTool>>,
+    #[cfg(feature = "sub-agents")]
     sub_agent_tools: Option<SubAgentToolSet>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
     #[allow(dead_code)]
@@ -99,6 +101,7 @@ impl CompositeDispatcher {
 
         Ok(Self {
             builtin_tools,
+            #[cfg(feature = "sub-agents")]
             sub_agent_tools: None,
             external,
             task_store,
@@ -108,6 +111,7 @@ impl CompositeDispatcher {
     }
 
     /// Register sub-agent tools.
+    #[cfg(feature = "sub-agents")]
     pub fn register_sub_agent_tools(
         &mut self,
         tool_set: SubAgentToolSet,
@@ -143,6 +147,7 @@ impl CompositeDispatcher {
                 ));
             }
         }
+        #[cfg(feature = "sub-agents")]
         if self.sub_agent_tools.is_some() {
             out.push_str("## Sub-agent tools\nManage hierarchical agents.\n\n");
         }
@@ -165,6 +170,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
 
         // Add allowed sub-agent tools
+        #[cfg(feature = "sub-agents")]
         if let Some(ref sub) = self.sub_agent_tools {
             for tool in sub.tools() {
                 if self.allowed_tools.contains(tool.name()) {
@@ -233,6 +239,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
 
         // Check sub-agent tools
+        #[cfg(feature = "sub-agents")]
         if let Some(ref sub) = self.sub_agent_tools {
             for tool in sub.tools() {
                 if tool.name() == call.name {

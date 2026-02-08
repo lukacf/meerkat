@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use meerkat_core::ConfigStore;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::types::SessionId;
-use meerkat_core::ConfigStore;
 
 use crate::error;
 use crate::handlers;
@@ -91,51 +91,25 @@ impl MethodRouter {
         let response = match request.method.as_str() {
             "initialize" => handlers::initialize::handle_initialize(id),
             "session/create" => {
-                handlers::session::handle_create(
-                    id,
-                    params,
-                    &self.runtime,
-                    &self.notification_sink,
-                )
-                .await
+                handlers::session::handle_create(id, params, &self.runtime, &self.notification_sink)
+                    .await
             }
-            "session/list" => {
-                handlers::session::handle_list(id, &self.runtime).await
-            }
-            "session/read" => {
-                handlers::session::handle_read(id, params, &self.runtime).await
-            }
-            "session/archive" => {
-                handlers::session::handle_archive(id, params, &self.runtime).await
-            }
+            "session/list" => handlers::session::handle_list(id, &self.runtime).await,
+            "session/read" => handlers::session::handle_read(id, params, &self.runtime).await,
+            "session/archive" => handlers::session::handle_archive(id, params, &self.runtime).await,
             "turn/start" => {
-                handlers::turn::handle_start(
-                    id,
-                    params,
-                    &self.runtime,
-                    &self.notification_sink,
-                )
-                .await
+                handlers::turn::handle_start(id, params, &self.runtime, &self.notification_sink)
+                    .await
             }
-            "turn/interrupt" => {
-                handlers::turn::handle_interrupt(id, params, &self.runtime).await
-            }
-            "config/get" => {
-                handlers::config::handle_get(id, &self.config_store).await
-            }
-            "config/set" => {
-                handlers::config::handle_set(id, params, &self.config_store).await
-            }
-            "config/patch" => {
-                handlers::config::handle_patch(id, params, &self.config_store).await
-            }
-            _ => {
-                RpcResponse::error(
-                    id,
-                    error::METHOD_NOT_FOUND,
-                    format!("Method not found: {}", request.method),
-                )
-            }
+            "turn/interrupt" => handlers::turn::handle_interrupt(id, params, &self.runtime).await,
+            "config/get" => handlers::config::handle_get(id, &self.config_store).await,
+            "config/set" => handlers::config::handle_set(id, params, &self.config_store).await,
+            "config/patch" => handlers::config::handle_patch(id, params, &self.config_store).await,
+            _ => RpcResponse::error(
+                id,
+                error::METHOD_NOT_FOUND,
+                format!("Method not found: {}", request.method),
+            ),
         };
 
         Some(response)
@@ -180,11 +154,7 @@ mod tests {
             &'a self,
             _request: &'a meerkat_client::LlmRequest,
         ) -> Pin<
-            Box<
-                dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
-                    + Send
-                    + 'a,
-            >,
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
         > {
             Box::pin(stream::iter(vec![
                 Ok(meerkat_client::LlmEvent::TextDelta {
@@ -228,10 +198,9 @@ mod tests {
     }
 
     fn make_request(method: &str, params: impl Serialize) -> RpcRequest {
-        let params_raw = serde_json::value::RawValue::from_string(
-            serde_json::to_string(&params).unwrap(),
-        )
-        .unwrap();
+        let params_raw =
+            serde_json::value::RawValue::from_string(serde_json::to_string(&params).unwrap())
+                .unwrap();
         RpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(RpcId::Num(1)),
@@ -265,7 +234,10 @@ mod tests {
             "Expected success response, got error: {:?}",
             resp.error
         );
-        let raw = resp.result.as_ref().expect("Missing result in success response");
+        let raw = resp
+            .result
+            .as_ref()
+            .expect("Missing result in success response");
         serde_json::from_str(raw.get()).unwrap()
     }
 
@@ -293,10 +265,7 @@ mod tests {
 
         // Verify methods list includes expected methods
         let methods = result["methods"].as_array().unwrap();
-        let method_names: Vec<&str> = methods
-            .iter()
-            .map(|m| m.as_str().unwrap())
-            .collect();
+        let method_names: Vec<&str> = methods.iter().map(|m| m.as_str().unwrap()).collect();
         assert!(method_names.contains(&"initialize"));
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"turn/start"));
@@ -368,10 +337,7 @@ mod tests {
         let (router, _notif_rx) = test_router().await;
 
         // Create a session first
-        let create_req = make_request(
-            "session/create",
-            serde_json::json!({"prompt": "Hello"}),
-        );
+        let create_req = make_request("session/create", serde_json::json!({"prompt": "Hello"}));
         let create_resp = router.dispatch(create_req).await.unwrap();
         let created = result_value(&create_resp);
         let created_id = created["session_id"].as_str().unwrap();
@@ -385,9 +351,9 @@ mod tests {
         assert!(!sessions.is_empty(), "Should have at least one session");
 
         // Find our session in the list
-        let found = sessions.iter().any(|s| {
-            s["session_id"].as_str() == Some(created_id)
-        });
+        let found = sessions
+            .iter()
+            .any(|s| s["session_id"].as_str() == Some(created_id));
         assert!(found, "Created session should appear in list");
     }
 
@@ -397,10 +363,7 @@ mod tests {
         let (router, _notif_rx) = test_router().await;
 
         // Create a session
-        let create_req = make_request(
-            "session/create",
-            serde_json::json!({"prompt": "Hello"}),
-        );
+        let create_req = make_request("session/create", serde_json::json!({"prompt": "Hello"}));
         let create_resp = router.dispatch(create_req).await.unwrap();
         let created = result_value(&create_resp);
         let session_id = created["session_id"].as_str().unwrap().to_string();
@@ -419,9 +382,9 @@ mod tests {
         let list_resp = router.dispatch(list_req).await.unwrap();
         let list_result = result_value(&list_resp);
         let sessions = list_result["sessions"].as_array().unwrap();
-        let found = sessions.iter().any(|s| {
-            s["session_id"].as_str() == Some(&session_id)
-        });
+        let found = sessions
+            .iter()
+            .any(|s| s["session_id"].as_str() == Some(&session_id));
         assert!(!found, "Archived session should not appear in list");
     }
 
@@ -431,10 +394,7 @@ mod tests {
         let (router, _notif_rx) = test_router().await;
 
         // Create a session first
-        let create_req = make_request(
-            "session/create",
-            serde_json::json!({"prompt": "Hello"}),
-        );
+        let create_req = make_request("session/create", serde_json::json!({"prompt": "Hello"}));
         let create_resp = router.dispatch(create_req).await.unwrap();
         let created = result_value(&create_resp);
         let session_id = created["session_id"].as_str().unwrap().to_string();
@@ -464,10 +424,7 @@ mod tests {
         let (router, mut notif_rx) = test_router().await;
 
         // Create a session
-        let create_req = make_request(
-            "session/create",
-            serde_json::json!({"prompt": "Hello"}),
-        );
+        let create_req = make_request("session/create", serde_json::json!({"prompt": "Hello"}));
         let _create_resp = router.dispatch(create_req).await.unwrap();
 
         // Give the event forwarder task a moment to send notifications
@@ -498,10 +455,7 @@ mod tests {
         let (router, _notif_rx) = test_router().await;
 
         // Create a session
-        let create_req = make_request(
-            "session/create",
-            serde_json::json!({"prompt": "Hello"}),
-        );
+        let create_req = make_request("session/create", serde_json::json!({"prompt": "Hello"}));
         let create_resp = router.dispatch(create_req).await.unwrap();
         let created = result_value(&create_resp);
         let session_id = created["session_id"].as_str().unwrap().to_string();
@@ -527,7 +481,10 @@ mod tests {
 
         // Config should be an object with known fields
         assert!(result.is_object(), "Config should be a JSON object");
-        assert!(result.get("agent").is_some(), "Config should have 'agent' field");
+        assert!(
+            result.get("agent").is_some(),
+            "Config should have 'agent' field"
+        );
     }
 
     /// 11. `config/set` then `config/get` roundtrip.

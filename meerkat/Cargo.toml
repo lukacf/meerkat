@@ -13,8 +13,8 @@ meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
-meerkat-mcp = { workspace = true }
-meerkat-comms = { workspace = true }
+meerkat-mcp = { workspace = true, optional = true }
+meerkat-comms = { workspace = true, optional = true }
 meerkat-hooks = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -39,7 +39,7 @@ meerkat-mcp-server = { workspace = true }
 nix = { workspace = true }
 
 [features]
-default = ["anthropic", "jsonl-store"]
+default = ["anthropic", "jsonl-store", "comms", "mcp", "sub-agents"]
 
 # LLM providers
 anthropic = ["meerkat-client/anthropic"]
@@ -51,5 +51,15 @@ all-providers = ["anthropic", "openai", "gemini"]
 jsonl-store = ["meerkat-store/jsonl"]
 memory-store = ["meerkat-store/memory"]
 
+# Optional subsystems
+comms = ["dep:meerkat-comms", "meerkat-tools/comms"]
+mcp = ["dep:meerkat-mcp", "meerkat-tools/mcp"]
+sub-agents = ["meerkat-tools/sub-agents"]
+
 [lints]
 workspace = true
+
+[[example]]
+name = "comms_verbose"
+path = "examples/comms_verbose.rs"
+required-features = ["comms"]

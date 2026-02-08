@@ -94,6 +94,8 @@ pub use meerkat_core::{
     OperationResult,
     OperationSpec,
     OutputSchema,
+    // Provider
+    Provider,
     ProviderConfig,
     ResultShape,
     RetryConfig,
@@ -105,8 +107,6 @@ pub use meerkat_core::{
     SchemaError,
     SchemaFormat,
     SchemaWarning,
-    // Provider
-    Provider,
     // Session
     Session,
     SessionId,
@@ -133,7 +133,9 @@ pub use meerkat_core::{
 };
 
 // Re-export comms types from meerkat_comms
+#[cfg(feature = "comms")]
 pub use meerkat_comms::agent::{CommsContent, CommsMessage, CommsStatus};
+#[cfg(feature = "comms")]
 pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CoreCommsConfig};
 
 // Re-export client types
@@ -166,14 +168,16 @@ pub use meerkat_store::MemoryStore;
 pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidationError};
 
 // Re-export builtin tools infrastructure
+#[cfg(feature = "comms")]
+pub use meerkat_tools::CommsToolSurface;
 pub use meerkat_tools::{
-    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CommsToolSurface,
-    CompositeDispatcher, CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore,
-    MemoryTaskStore, ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
-    find_project_root,
+    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
+    CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore,
+    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir, find_project_root,
 };
 
 // Re-export MCP client
+#[cfg(feature = "mcp")]
 pub use meerkat_mcp::{McpConnection, McpError, McpRouter, McpServerConfig};
 
 // SDK module

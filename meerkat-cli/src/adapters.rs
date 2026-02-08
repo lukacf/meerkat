@@ -252,16 +252,20 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
     }
 }
 
+#[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouter;
 use meerkat_tools::builtin::CompositeDispatcher;
+#[cfg(feature = "mcp")]
 use tokio::sync::RwLock;
 
 /// Adapter that wraps an McpRouter to implement AgentToolDispatcher
+#[cfg(feature = "mcp")]
 pub struct McpRouterAdapter {
     router: RwLock<Option<McpRouter>>,
     cached_tools: RwLock<Arc<[Arc<ToolDef>]>>,
 }
 
+#[cfg(feature = "mcp")]
 impl McpRouterAdapter {
     pub fn new(router: McpRouter) -> Self {
         Self {
@@ -296,6 +300,7 @@ impl McpRouterAdapter {
 }
 
 #[async_trait]
+#[cfg(feature = "mcp")]
 impl AgentToolDispatcher for McpRouterAdapter {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         // Return the cached tools (blocking read in sync context)
@@ -331,9 +336,11 @@ impl AgentToolDispatcher for McpRouterAdapter {
 /// Combined tool dispatcher that can be empty, MCP-backed, or composite (with builtins)
 pub enum CliToolDispatcher {
     Empty(EmptyToolDispatcher),
+    #[cfg(feature = "mcp")]
     Mcp(Box<McpRouterAdapter>),
     Composite(std::sync::Arc<CompositeDispatcher>),
     /// Dispatcher wrapped with comms tools (uses Arc to match wrap_with_comms output)
+    #[cfg(feature = "comms")]
     WithComms(Arc<dyn AgentToolDispatcher>),
 }
 
@@ -342,10 +349,12 @@ impl CliToolDispatcher {
     pub async fn shutdown(&self) {
         match self {
             CliToolDispatcher::Empty(_) => {}
+            #[cfg(feature = "mcp")]
             CliToolDispatcher::Mcp(adapter) => adapter.shutdown().await,
             CliToolDispatcher::Composite(_) => {
                 // CompositeDispatcher doesn't have external connections to shut down
             }
+            #[cfg(feature = "comms")]
             CliToolDispatcher::WithComms(_) => {
                 // Comms connections are managed by CommsRuntime
             }
@@ -358,8 +367,10 @@ impl AgentToolDispatcher for CliToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         match self {
             CliToolDispatcher::Empty(d) => d.tools(),
+            #[cfg(feature = "mcp")]
             CliToolDispatcher::Mcp(d) => d.tools(),
             CliToolDispatcher::Composite(d) => d.tools(),
+            #[cfg(feature = "comms")]
             CliToolDispatcher::WithComms(d) => d.tools(),
         }
     }
@@ -367,8 +378,10 @@ impl AgentToolDispatcher for CliToolDispatcher {
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         match self {
             CliToolDispatcher::Empty(d) => d.dispatch(call).await,
+            #[cfg(feature = "mcp")]
             CliToolDispatcher::Mcp(d) => d.dispatch(call).await,
             CliToolDispatcher::Composite(d) => d.dispatch(call).await,
+            #[cfg(feature = "comms")]
             CliToolDispatcher::WithComms(d) => d.dispatch(call).await,
         }
     }

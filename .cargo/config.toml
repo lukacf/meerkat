@@ -16,3 +16,9 @@ int-real = "test --workspace integration_real -- --ignored --test-threads=1"
 
 # End-to-end tests (live APIs / full-system resources, ignored by default)
 e2e = "test --workspace e2e_ -- --ignored --test-threads=1"
+
+# Feature matrix helpers (shell aliases to make targets)
+test-minimal = "!make test-minimal"
+test-feature-matrix-lib = "!make test-feature-matrix-lib"
+test-feature-matrix-surface = "!make test-feature-matrix-surface"
+test-feature-matrix = "!make test-feature-matrix"

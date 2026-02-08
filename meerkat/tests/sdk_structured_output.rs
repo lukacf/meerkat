@@ -17,9 +17,11 @@ use meerkat::{
 };
 use meerkat_client::LlmClient;
 use meerkat_core::ToolCallView;
-use meerkat_store::MemoryStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[path = "support/test_session_store.rs"]
+mod test_session_store;
+use test_session_store::TestSessionStore;
 
 /// Mock LLM client that returns valid JSON on extraction turn
 struct MockLlmClientWithStructuredOutput {
@@ -184,7 +186,7 @@ async fn sdk_structured_output_extraction_succeeds() -> Result<(), Box<dyn std::
     });
     let llm_adapter = Arc::new(factory.build_llm_adapter(llm_client, "mock-model").await);
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(TestSessionStore::new());
     let store_adapter = Arc::new(factory.build_store_adapter(store).await);
 
     let tools: Arc<dyn AgentToolDispatcher> = Arc::new(EmptyDispatcher);
@@ -229,7 +231,7 @@ async fn sdk_structured_output_retry_on_invalid_json() -> Result<(), Box<dyn std
     });
     let llm_adapter = Arc::new(factory.build_llm_adapter(llm_client, "mock-model").await);
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(TestSessionStore::new());
     let store_adapter = Arc::new(factory.build_store_adapter(store).await);
 
     let tools: Arc<dyn AgentToolDispatcher> = Arc::new(EmptyDispatcher);
@@ -267,7 +269,7 @@ async fn sdk_no_structured_output_without_schema() {
     let llm_client = Arc::new(MockLlmClientWithStructuredOutput { calls });
     let llm_adapter = Arc::new(factory.build_llm_adapter(llm_client, "mock-model").await);
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(TestSessionStore::new());
     let store_adapter = Arc::new(factory.build_store_adapter(store).await);
 
     let tools: Arc<dyn AgentToolDispatcher> = Arc::new(EmptyDispatcher);

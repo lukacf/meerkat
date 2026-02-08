@@ -1,3 +1,4 @@
+#![cfg(feature = "comms")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! End-to-end tests for Meerkat inter-agent communication (Gate 1: E2E Scenarios)
 //!

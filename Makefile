@@ -90,6 +90,7 @@ test-feature-matrix-surface:
 	cargo check -p meerkat-mcp-server --no-default-features --features comms
 	cargo check -p meerkat-cli --no-default-features
 	cargo check -p meerkat-cli --no-default-features --features mcp
+	cargo test -p meerkat-cli --no-default-features --features mcp -- --nocapture
 	cargo check -p meerkat-cli --no-default-features --features comms,mcp
 
 # Full feature matrix

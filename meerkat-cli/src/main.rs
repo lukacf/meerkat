@@ -1073,6 +1073,199 @@ fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
     Ok(requested && cfg!(feature = "comms"))
 }
 
+fn build_enabled_tools(
+    enable_builtins: bool,
+    enable_shell: bool,
+    enable_subagents: bool,
+) -> std::collections::HashSet<String> {
+    let mut enabled_tools = std::collections::HashSet::new();
+
+    if enable_builtins {
+        enabled_tools.extend(
+            [
+                "task_list",
+                "task_get",
+                "task_create",
+                "task_update",
+                "wait",
+                "datetime",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+    }
+
+    if enable_shell {
+        enabled_tools.extend([
+            "shell".to_string(),
+            "shell_job_status".to_string(),
+            "shell_jobs".to_string(),
+            "shell_job_cancel".to_string(),
+        ]);
+    }
+
+    if enable_subagents {
+        enabled_tools.extend([
+            "agent_spawn".to_string(),
+            "agent_fork".to_string(),
+            "agent_status".to_string(),
+            "agent_cancel".to_string(),
+            "agent_list".to_string(),
+        ]);
+    }
+
+    enabled_tools
+}
+
+fn build_shell_config(
+    config: &Config,
+    enable_shell: bool,
+    project_root: &PathBuf,
+) -> Option<ShellConfig> {
+    if !enable_shell {
+        return None;
+    }
+
+    Some(ShellConfig {
+        enabled: true,
+        default_timeout_secs: config.shell.timeout_secs,
+        restrict_to_project: true,
+        shell: config.shell.program.to_string(),
+        shell_path: None,
+        project_root: project_root.clone(),
+        max_completed_jobs: 100,
+        completed_job_ttl_secs: 300,
+        max_concurrent_processes: 10,
+        security_mode: config.shell.security_mode,
+        security_patterns: config.shell.security_patterns.clone(),
+    })
+}
+
+async fn build_task_store(
+    enable_builtins: bool,
+    project_root: &PathBuf,
+) -> anyhow::Result<Arc<dyn TaskStore>> {
+    if enable_builtins {
+        ensure_rkat_dir_async(project_root)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create .rkat directory: {}", e))?;
+        Ok(Arc::new(FileTaskStore::in_project(project_root)))
+    } else {
+        Ok(Arc::new(MemoryTaskStore::new()))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn register_sub_agent_tools(
+    composite: &mut meerkat_tools::builtin::CompositeDispatcher,
+    factory: &AgentFactory,
+    builtin_config: &BuiltinToolConfig,
+    shell_config_for_subagents: Option<ShellConfig>,
+    mcp_adapter: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
+    config: &Config,
+    model: &str,
+    provider: Provider,
+    #[cfg(feature = "comms")] comms_runtime: Option<&CommsRuntime>,
+    #[cfg(feature = "comms")] comms_config: Option<&CoreCommsConfig>,
+    #[cfg(feature = "comms")] comms_base_dir: &PathBuf,
+) -> anyhow::Result<()> {
+    use meerkat_core::Session;
+    use tokio::sync::RwLock;
+
+    let limits = ConcurrencyLimits::default();
+    let manager = Arc::new(SubAgentManager::new(limits, 0));
+    let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
+
+    let sub_agent_task_store = MemoryTaskStore::new();
+    let sub_agent_factory = {
+        let factory = factory.clone().subagents(false);
+        #[cfg(feature = "comms")]
+        let factory = factory.comms(false);
+        factory
+    };
+    let sub_agent_dispatcher = sub_agent_factory
+        .build_composite_dispatcher(
+            Arc::new(sub_agent_task_store),
+            builtin_config,
+            shell_config_for_subagents,
+            mcp_adapter,
+            None,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create sub-agent dispatcher: {}", e))?;
+
+    let sub_agent_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
+        Arc::new(sub_agent_dispatcher);
+
+    let sub_agent_store_dir = get_session_store_dir().await.join("subagents");
+    let sub_agent_session_store = JsonlStore::new(sub_agent_store_dir);
+    sub_agent_session_store
+        .init()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to init sub-agent store: {e}"))?;
+    let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+        sub_agent_factory
+            .build_store_adapter(Arc::new(sub_agent_session_store))
+            .await,
+    );
+
+    let parent_session = Arc::new(RwLock::new(Session::new()));
+    let parent_core_provider = Some(provider.as_core());
+    let resolved_policy = config
+        .resolve_sub_agent_config(parent_core_provider, model)
+        .map_err(|e| anyhow::anyhow!("Failed to resolve sub-agent config: {e}"))?;
+    let sub_agent_config = SubAgentConfig::default().with_resolved_policy(resolved_policy);
+
+    #[cfg(feature = "comms")]
+    let state = if let (Some(runtime), Some(config)) = (comms_runtime, comms_config) {
+        let parent_addr = format!("inproc://{}", config.name);
+        let parent_comms = ParentCommsContext {
+            parent_name: config.name.clone(),
+            parent_pubkey: *runtime.public_key().as_bytes(),
+            parent_addr,
+            comms_base_dir: comms_base_dir.clone(),
+        };
+
+        Arc::new(SubAgentToolState::with_comms(
+            manager,
+            client_factory,
+            sub_agent_tools,
+            sub_agent_store,
+            parent_session,
+            sub_agent_config,
+            0,
+            parent_comms,
+            runtime.trusted_peers_shared(),
+        ))
+    } else {
+        Arc::new(SubAgentToolState::new(
+            manager,
+            client_factory,
+            sub_agent_tools,
+            sub_agent_store,
+            parent_session,
+            sub_agent_config,
+            0,
+        ))
+    };
+    #[cfg(not(feature = "comms"))]
+    let state = Arc::new(SubAgentToolState::new(
+        manager,
+        client_factory,
+        sub_agent_tools,
+        sub_agent_store,
+        parent_session,
+        sub_agent_config,
+        0,
+    ));
+
+    let tool_set = SubAgentToolSet::new(state);
+    composite
+        .register_sub_agent_tools(tool_set, builtin_config)
+        .map_err(|e| anyhow::anyhow!("Failed to register sub-agent tools: {}", e))?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "comms")]
 async fn build_tooling(
@@ -1167,53 +1360,13 @@ async fn build_tooling(
             .map(|a| Arc::new(a) as Arc<dyn meerkat_core::agent::AgentToolDispatcher>);
         #[cfg(not(feature = "mcp"))]
         let mcp_adapter: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>> = None;
-        use std::collections::HashSet;
-
-        // Build enabled tools based on flags
-        let mut enabled_tools: HashSet<String> = HashSet::new();
-
-        // Add builtin tools (task + utility) if enabled
-        if enable_builtins {
-            enabled_tools.extend(
-                [
-                    "task_list",
-                    "task_get",
-                    "task_create",
-                    "task_update",
-                    "wait",
-                    "datetime",
-                ]
-                .iter()
-                .map(|s| s.to_string()),
-            );
-        }
-
-        // Add shell tools if enabled (requires --enable-builtins)
-        if enable_shell {
-            enabled_tools.extend([
-                "shell".to_string(),
-                "shell_job_status".to_string(),
-                "shell_jobs".to_string(),
-                "shell_job_cancel".to_string(),
-            ]);
-        }
-
-        // Add sub-agent tools if enabled (default: true, regardless of builtins)
-        if enable_subagents {
-            enabled_tools.extend([
-                "agent_spawn".to_string(),
-                "agent_fork".to_string(),
-                "agent_status".to_string(),
-                "agent_cancel".to_string(),
-                "agent_list".to_string(),
-            ]);
-        }
+        let enabled_tools = build_enabled_tools(enable_builtins, enable_shell, enable_subagents);
 
         let builtin_config = BuiltinToolConfig {
             policy: ToolPolicyLayer {
                 mode: Some(ToolMode::AllowList),
                 enable: enabled_tools,
-                disable: HashSet::new(),
+                disable: std::collections::HashSet::new(),
             },
             enforced: Default::default(),
         };
@@ -1221,34 +1374,8 @@ async fn build_tooling(
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let project_root = find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
 
-        // Create shell config if shell is enabled
-        let shell_config = if enable_shell {
-            Some(ShellConfig {
-                enabled: true,
-                default_timeout_secs: config.shell.timeout_secs,
-                restrict_to_project: true,
-                shell: config.shell.program.to_string(),
-                shell_path: None,
-                project_root: project_root.clone(),
-                max_completed_jobs: 100,
-                completed_job_ttl_secs: 300,
-                max_concurrent_processes: 10,
-                security_mode: config.shell.security_mode,
-                security_patterns: config.shell.security_patterns.clone(),
-            })
-        } else {
-            None
-        };
-
-        // Use file-backed task store when builtins are enabled; otherwise fall back to memory.
-        let task_store: Arc<dyn TaskStore> = if enable_builtins {
-            ensure_rkat_dir_async(&project_root)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create .rkat directory: {}", e))?;
-            Arc::new(FileTaskStore::in_project(&project_root))
-        } else {
-            Arc::new(MemoryTaskStore::new())
-        };
+        let shell_config = build_shell_config(config, enable_shell, &project_root);
+        let task_store = build_task_store(enable_builtins, &project_root).await?;
 
         // Clone shell_config for sub-agents before it's moved
         let shell_config_for_subagents = shell_config.clone();
@@ -1272,107 +1399,21 @@ async fn build_tooling(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create composite dispatcher: {}", e))?;
 
-        // Register sub-agent tools if enabled
         if enable_subagents {
-            use meerkat_core::Session;
-            use tokio::sync::RwLock;
-
-            // Create the dependencies for SubAgentToolState
-            let limits = ConcurrencyLimits::default();
-            let manager = Arc::new(SubAgentManager::new(limits, 0));
-            let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
-
-            // Create a tool dispatcher for sub-agents that inherits all parent tools
-            // EXCEPT sub-agent tools (to prevent infinite nesting).
-            //
-            // Sub-agents use the same builtin_config as the parent. Sub-agent tools
-            // won't be available because they're not registered in sub_agent_dispatcher
-            // (they're only registered in the parent's composite dispatcher).
-            //
-            // Comms tools are added later in spawn_sub_agent_dyn via CommsBootstrap,
-            // ensuring uniform comms setup for all agents.
-            let sub_agent_task_store = MemoryTaskStore::new();
-            let sub_agent_factory = factory.subagents(false).comms(false);
-            let sub_agent_dispatcher = sub_agent_factory
-                .build_composite_dispatcher(
-                    Arc::new(sub_agent_task_store),
-                    &builtin_config, // Same config as parent - inherits all builtin tools
-                    shell_config_for_subagents,
-                    mcp_adapter.clone(),
-                    None,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create sub-agent dispatcher: {}", e))?;
-
-            let sub_agent_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
-                Arc::new(sub_agent_dispatcher);
-
-            // Use a dedicated JSONL store namespace for sub-agent sessions.
-            let sub_agent_store_dir = get_session_store_dir().await.join("subagents");
-            let sub_agent_session_store = JsonlStore::new(sub_agent_store_dir);
-            sub_agent_session_store
-                .init()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to init sub-agent store: {e}"))?;
-            let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-                sub_agent_factory
-                    .build_store_adapter(Arc::new(sub_agent_session_store))
-                    .await,
-            );
-
-            let parent_session = Arc::new(RwLock::new(Session::new()));
-            // Resolve sub-agent model policy from config
-            let parent_core_provider = Some(provider.as_core());
-            let resolved_policy = config
-                .resolve_sub_agent_config(parent_core_provider, model)
-                .map_err(|e| anyhow::anyhow!("Failed to resolve sub-agent config: {e}"))?;
-            let sub_agent_config = SubAgentConfig::default().with_resolved_policy(resolved_policy);
-
-            // Build parent comms context if comms is enabled
-            // This allows sub-agents to communicate back to the parent
-            let state = if let (Some(runtime), Some(config)) = (&comms_runtime, &comms_config) {
-                // Use inproc address for sub-agents (they run in-process)
-                // The parent registers in InprocRegistry when start_listeners() is called,
-                // so in-process sub-agents can reach us via inproc:// without network I/O.
-                let parent_addr = format!("inproc://{}", config.name);
-
-                let parent_comms = ParentCommsContext {
-                    parent_name: config.name.clone(),
-                    parent_pubkey: *runtime.public_key().as_bytes(),
-                    parent_addr,
-                    comms_base_dir: comms_base_dir.clone(),
-                };
-
-                Arc::new(SubAgentToolState::with_comms(
-                    manager,
-                    client_factory,
-                    sub_agent_tools,
-                    sub_agent_store,
-                    parent_session,
-                    sub_agent_config,
-                    0, // depth
-                    parent_comms,
-                    runtime.trusted_peers_shared(),
-                ))
-            } else {
-                Arc::new(SubAgentToolState::new(
-                    manager,
-                    client_factory,
-                    sub_agent_tools,
-                    sub_agent_store,
-                    parent_session,
-                    sub_agent_config,
-                    0, // depth
-                ))
-            };
-
-            // Register sub-agent tools with composite dispatcher
-            // This also automatically sets tool_usage_instructions on the state
-            // so spawned sub-agents know how to use shell, task, and other tools
-            let tool_set = SubAgentToolSet::new(state);
-            composite
-                .register_sub_agent_tools(tool_set, &builtin_config)
-                .map_err(|e| anyhow::anyhow!("Failed to register sub-agent tools: {}", e))?;
+            register_sub_agent_tools(
+                &mut composite,
+                &factory,
+                &builtin_config,
+                shell_config_for_subagents,
+                mcp_adapter.clone(),
+                config,
+                model,
+                provider,
+                comms_runtime.as_ref(),
+                comms_config.as_ref(),
+                &comms_base_dir,
+            )
+            .await?;
         }
 
         // Get tool usage instructions before wrapping
@@ -1467,46 +1508,13 @@ async fn build_tooling(
             .map(|a| Arc::new(a) as Arc<dyn meerkat_core::agent::AgentToolDispatcher>);
         #[cfg(not(feature = "mcp"))]
         let mcp_adapter: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>> = None;
-        use std::collections::HashSet;
-
-        let mut enabled_tools: HashSet<String> = HashSet::new();
-        if enable_builtins {
-            enabled_tools.extend(
-                [
-                    "task_list",
-                    "task_get",
-                    "task_create",
-                    "task_update",
-                    "wait",
-                    "datetime",
-                ]
-                .iter()
-                .map(|s| s.to_string()),
-            );
-        }
-        if enable_shell {
-            enabled_tools.extend([
-                "shell".to_string(),
-                "shell_job_status".to_string(),
-                "shell_jobs".to_string(),
-                "shell_job_cancel".to_string(),
-            ]);
-        }
-        if enable_subagents {
-            enabled_tools.extend([
-                "agent_spawn".to_string(),
-                "agent_fork".to_string(),
-                "agent_status".to_string(),
-                "agent_cancel".to_string(),
-                "agent_list".to_string(),
-            ]);
-        }
+        let enabled_tools = build_enabled_tools(enable_builtins, enable_shell, enable_subagents);
 
         let builtin_config = BuiltinToolConfig {
             policy: ToolPolicyLayer {
                 mode: Some(ToolMode::AllowList),
                 enable: enabled_tools,
-                disable: HashSet::new(),
+                disable: std::collections::HashSet::new(),
             },
             enforced: Default::default(),
         };
@@ -1514,32 +1522,8 @@ async fn build_tooling(
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let project_root = find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
 
-        let shell_config = if enable_shell {
-            Some(ShellConfig {
-                enabled: true,
-                default_timeout_secs: config.shell.timeout_secs,
-                restrict_to_project: true,
-                shell: config.shell.program.to_string(),
-                shell_path: None,
-                project_root: project_root.clone(),
-                max_completed_jobs: 100,
-                completed_job_ttl_secs: 300,
-                max_concurrent_processes: 10,
-                security_mode: config.shell.security_mode,
-                security_patterns: config.shell.security_patterns.clone(),
-            })
-        } else {
-            None
-        };
-
-        let task_store: Arc<dyn TaskStore> = if enable_builtins {
-            ensure_rkat_dir_async(&project_root)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create .rkat directory: {}", e))?;
-            Arc::new(FileTaskStore::in_project(&project_root))
-        } else {
-            Arc::new(MemoryTaskStore::new())
-        };
+        let shell_config = build_shell_config(config, enable_shell, &project_root);
+        let task_store = build_task_store(enable_builtins, &project_root).await?;
 
         let shell_config_for_subagents = shell_config.clone();
 
@@ -1562,62 +1546,17 @@ async fn build_tooling(
             .map_err(|e| anyhow::anyhow!("Failed to create composite dispatcher: {}", e))?;
 
         if enable_subagents {
-            use meerkat_core::Session;
-            use tokio::sync::RwLock;
-
-            let limits = ConcurrencyLimits::default();
-            let manager = Arc::new(SubAgentManager::new(limits, 0));
-            let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
-
-            let sub_agent_task_store = MemoryTaskStore::new();
-            let sub_agent_factory = factory.subagents(false);
-            let sub_agent_dispatcher = sub_agent_factory
-                .build_composite_dispatcher(
-                    Arc::new(sub_agent_task_store),
-                    &builtin_config,
-                    shell_config_for_subagents,
-                    mcp_adapter.clone(),
-                    None,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create sub-agent dispatcher: {}", e))?;
-
-            let sub_agent_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
-                Arc::new(sub_agent_dispatcher);
-
-            let sub_agent_store_dir = get_session_store_dir().await.join("subagents");
-            let sub_agent_session_store = JsonlStore::new(sub_agent_store_dir);
-            sub_agent_session_store
-                .init()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to init sub-agent store: {e}"))?;
-            let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-                sub_agent_factory
-                    .build_store_adapter(Arc::new(sub_agent_session_store))
-                    .await,
-            );
-
-            let parent_session = Arc::new(RwLock::new(Session::new()));
-            let parent_core_provider = Some(provider.as_core());
-            let resolved_policy = config
-                .resolve_sub_agent_config(parent_core_provider, model)
-                .map_err(|e| anyhow::anyhow!("Failed to resolve sub-agent config: {e}"))?;
-            let sub_agent_config = SubAgentConfig::default().with_resolved_policy(resolved_policy);
-
-            let state = Arc::new(SubAgentToolState::new(
-                manager,
-                client_factory,
-                sub_agent_tools,
-                sub_agent_store,
-                parent_session,
-                sub_agent_config,
-                0,
-            ));
-
-            let tool_set = SubAgentToolSet::new(state);
-            dispatcher
-                .register_sub_agent_tools(tool_set, &builtin_config)
-                .map_err(|e| anyhow::anyhow!("Failed to register sub-agent tools: {}", e))?;
+            register_sub_agent_tools(
+                &mut dispatcher,
+                &factory,
+                &builtin_config,
+                shell_config_for_subagents,
+                mcp_adapter.clone(),
+                config,
+                model,
+                provider,
+            )
+            .await?;
         }
 
         let usage = dispatcher.usage_instructions();

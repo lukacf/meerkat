@@ -1450,8 +1450,8 @@ async fn build_tooling(
     enable_builtins: bool,
     enable_shell: bool,
     enable_subagents: bool,
-    _model: &str,
-    _provider: Provider,
+    model: &str,
+    provider: Provider,
 ) -> anyhow::Result<ToolingSetup> {
     let mcp_router_adapter = match create_mcp_tools().await {
         Ok(adapter) => adapter,
@@ -1534,15 +1534,93 @@ async fn build_tooling(
             None
         };
 
-        let dispatcher = base_factory
+        let task_store: Arc<dyn TaskStore> = if enable_builtins {
+            ensure_rkat_dir_async(&project_root)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create .rkat directory: {}", e))?;
+            Arc::new(FileTaskStore::in_project(&project_root))
+        } else {
+            Arc::new(MemoryTaskStore::new())
+        };
+
+        let shell_config_for_subagents = shell_config.clone();
+
+        let factory = base_factory
+            .clone()
+            .project_root(project_root)
+            .builtins(enable_builtins)
+            .shell(enable_shell)
+            .subagents(enable_subagents);
+
+        let mut dispatcher = factory
             .build_composite_dispatcher(
-                Arc::new(FileTaskStore::in_project(&project_root)),
+                task_store,
                 &builtin_config,
                 shell_config,
-                mcp_adapter,
+                mcp_adapter.clone(),
                 None,
             )
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create composite dispatcher: {}", e))?;
+
+        if enable_subagents {
+            use meerkat_core::Session;
+            use tokio::sync::RwLock;
+
+            let limits = ConcurrencyLimits::default();
+            let manager = Arc::new(SubAgentManager::new(limits, 0));
+            let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
+
+            let sub_agent_task_store = MemoryTaskStore::new();
+            let sub_agent_factory = factory.subagents(false);
+            let sub_agent_dispatcher = sub_agent_factory
+                .build_composite_dispatcher(
+                    Arc::new(sub_agent_task_store),
+                    &builtin_config,
+                    shell_config_for_subagents,
+                    mcp_adapter.clone(),
+                    None,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create sub-agent dispatcher: {}", e))?;
+
+            let sub_agent_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                Arc::new(sub_agent_dispatcher);
+
+            let sub_agent_store_dir = get_session_store_dir().await.join("subagents");
+            let sub_agent_session_store = JsonlStore::new(sub_agent_store_dir);
+            sub_agent_session_store
+                .init()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to init sub-agent store: {e}"))?;
+            let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+                sub_agent_factory
+                    .build_store_adapter(Arc::new(sub_agent_session_store))
+                    .await,
+            );
+
+            let parent_session = Arc::new(RwLock::new(Session::new()));
+            let parent_core_provider = Some(provider.as_core());
+            let resolved_policy = config
+                .resolve_sub_agent_config(parent_core_provider, model)
+                .map_err(|e| anyhow::anyhow!("Failed to resolve sub-agent config: {e}"))?;
+            let sub_agent_config = SubAgentConfig::default().with_resolved_policy(resolved_policy);
+
+            let state = Arc::new(SubAgentToolState::new(
+                manager,
+                client_factory,
+                sub_agent_tools,
+                sub_agent_store,
+                parent_session,
+                sub_agent_config,
+                0,
+            ));
+
+            let tool_set = SubAgentToolSet::new(state);
+            dispatcher
+                .register_sub_agent_tools(tool_set, &builtin_config)
+                .map_err(|e| anyhow::anyhow!("Failed to register sub-agent tools: {}", e))?;
+        }
 
         let usage = dispatcher.usage_instructions();
         (
@@ -1552,7 +1630,10 @@ async fn build_tooling(
     } else {
         #[cfg(feature = "mcp")]
         if let Some(adapter) = mcp_router_adapter {
-            (Arc::new(CliToolDispatcher::Mcp(adapter)), String::new())
+            (
+                Arc::new(CliToolDispatcher::Mcp(Box::new(adapter))),
+                String::new(),
+            )
         } else {
             (
                 Arc::new(CliToolDispatcher::Empty(EmptyToolDispatcher)),

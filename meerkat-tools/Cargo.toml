@@ -10,9 +10,9 @@ repository.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
-meerkat-client = { workspace = true }
-meerkat-comms = { workspace = true }
-meerkat-mcp = { workspace = true }
+meerkat-client = { workspace = true, optional = true }
+meerkat-comms = { workspace = true, optional = true }
+meerkat-mcp = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -29,6 +29,12 @@ ciborium = "0.2"
 toml = { workspace = true }
 shlex = "1.3"
 globset = "0.4"
+
+[features]
+default = ["sub-agents", "comms", "mcp"]
+sub-agents = ["dep:meerkat-client"]
+comms = ["dep:meerkat-comms"]
+mcp = ["dep:meerkat-mcp"]
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }

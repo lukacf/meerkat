@@ -133,7 +133,9 @@ pub use meerkat_core::{
 };
 
 // Re-export comms types from meerkat_comms
+#[cfg(feature = "comms")]
 pub use meerkat_comms::agent::{CommsContent, CommsMessage, CommsStatus};
+#[cfg(feature = "comms")]
 pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CoreCommsConfig};
 
 // Re-export client types
@@ -167,13 +169,15 @@ pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidat
 
 // Re-export builtin tools infrastructure
 pub use meerkat_tools::{
-    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CommsToolSurface,
-    CompositeDispatcher, CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore,
-    MemoryTaskStore, ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
-    find_project_root,
+    BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
+    CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore, ResolvedToolPolicy,
+    TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir, find_project_root,
 };
+#[cfg(feature = "comms")]
+pub use meerkat_tools::CommsToolSurface;
 
 // Re-export MCP client
+#[cfg(feature = "mcp")]
 pub use meerkat_mcp::{McpConnection, McpError, McpRouter, McpServerConfig};
 
 // SDK module

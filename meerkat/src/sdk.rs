@@ -6,12 +6,16 @@ use std::sync::Arc;
 use std::{cmp, collections::HashSet};
 
 use crate::{
-    AgentFactory, AgentToolDispatcher, CommsRuntime, Config, CoreCommsConfig, HookEngine,
-    HooksConfig, ToolError, ToolGatewayBuilder,
+    AgentFactory, AgentToolDispatcher, Config, HookEngine, HooksConfig, ToolError,
+    ToolGatewayBuilder,
 };
+#[cfg(feature = "comms")]
+use crate::{CommsRuntime, CoreCommsConfig};
+#[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::{AgentEvent, format_verbose_event};
 use meerkat_hooks::DefaultHookEngine;
+#[cfg(feature = "comms")]
 use meerkat_tools::builtin::comms::CommsToolSurface;
 use meerkat_tools::builtin::shell::ShellConfig;
 use meerkat_tools::{
@@ -165,6 +169,7 @@ pub async fn create_shell_dispatcher(
 ///
 /// - Inproc mode uses an in-memory runtime (no listeners).
 /// - TCP/UDS modes require `config.comms.address` to be set.
+#[cfg(feature = "comms")]
 pub async fn build_comms_runtime_from_config(
     config: &Config,
     base_dir: impl AsRef<Path>,
@@ -224,6 +229,7 @@ pub async fn build_comms_runtime_from_config(
 }
 
 /// Compose a tool dispatcher with comms tools and append usage instructions.
+#[cfg(feature = "comms")]
 pub fn compose_tools_with_comms(
     base_tools: Arc<dyn AgentToolDispatcher>,
     tool_usage_instructions: String,

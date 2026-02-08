@@ -5,10 +5,12 @@
 
 use meerkat::{
     AgentBuilder, AgentError, JsonlStore, OutputSchema, Session, SessionStore, ToolError,
-    ToolResult, build_comms_runtime_from_config, compose_tools_with_comms,
-    create_default_hook_engine, resolve_layered_hooks_config,
+    ToolResult, create_default_hook_engine, resolve_layered_hooks_config,
 };
+#[cfg(feature = "comms")]
+use meerkat::{build_comms_runtime_from_config, compose_tools_with_comms};
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
+#[cfg(feature = "comms")]
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::{invalid_session_id, invalid_session_id_message, store_error};
 use meerkat_core::{
@@ -98,9 +100,11 @@ pub struct MeerkatRunInput {
     pub builtin_config: Option<BuiltinConfigInput>,
     /// Run in host mode: process prompt then stay alive listening for comms messages.
     /// Requires comms_name to be set.
+    #[cfg(feature = "comms")]
     #[serde(default)]
     pub host_mode: bool,
     /// Agent name for inter-agent communication. Required for host_mode.
+    #[cfg(feature = "comms")]
     #[serde(default)]
     pub comms_name: Option<String>,
     /// Optional run-scoped hook overrides.
@@ -219,9 +223,11 @@ pub struct MeerkatResumeInput {
     #[serde(default)]
     pub builtin_config: Option<BuiltinConfigInput>,
     /// Run in host mode: process prompt then stay alive listening for comms messages.
+    #[cfg(feature = "comms")]
     #[serde(default)]
     pub host_mode: bool,
     /// Agent name for inter-agent communication. Required for host_mode.
+    #[cfg(feature = "comms")]
     #[serde(default)]
     pub comms_name: Option<String>,
     /// Optional model override for resume.
@@ -377,8 +383,14 @@ async fn handle_meerkat_run(
     input: MeerkatRunInput,
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
+    #[cfg(feature = "comms")]
+    let host_mode = input.host_mode;
+    #[cfg(feature = "comms")]
+    let comms_name = input.comms_name.clone();
+
     // Validate host mode requirements
-    if input.host_mode && input.comms_name.is_none() {
+    #[cfg(feature = "comms")]
+    if host_mode && comms_name.is_none() {
         return Err("host_mode requires comms_name to be set".to_string());
     }
 
@@ -394,6 +406,15 @@ async fn handle_meerkat_run_simple(
     input: MeerkatRunInput,
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
+    #[cfg(feature = "comms")]
+    let host_mode = input.host_mode;
+    #[cfg(not(feature = "comms"))]
+    let host_mode = false;
+    #[cfg(feature = "comms")]
+    let comms_name = input.comms_name.clone();
+    #[cfg(not(feature = "comms"))]
+    let comms_name: Option<String> = None;
+
     let config = load_config_async().await;
     let model = input
         .model
@@ -439,9 +460,9 @@ async fn handle_meerkat_run_simple(
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(store)));
 
     // Create comms runtime if host_mode is enabled
-    let comms_runtime = if input.host_mode {
-        let comms_name = input
-            .comms_name
+    #[cfg(feature = "comms")]
+    let comms_runtime = if host_mode {
+        let comms_name = comms_name
             .as_ref()
             .ok_or_else(|| "comms_name required when host_mode is enabled".to_string())?;
         let base_dir = resolve_project_root();
@@ -452,7 +473,10 @@ async fn handle_meerkat_run_simple(
     } else {
         None
     };
+    #[cfg(not(feature = "comms"))]
+    let comms_runtime: Option<()> = None;
 
+    #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
         let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
             .map_err(|e| format!("Failed to compose comms tools: {}", e))?;
@@ -489,6 +513,7 @@ async fn handle_meerkat_run_simple(
     builder = builder.system_prompt(system_prompt);
 
     // Add comms runtime if enabled
+    #[cfg(feature = "comms")]
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
@@ -504,11 +529,11 @@ async fn handle_meerkat_run_simple(
         tooling: SessionTooling {
             builtins: false,
             shell: false,
-            comms: input.host_mode,
+            comms: host_mode,
             subagents: false,
         },
-        host_mode: input.host_mode,
-        comms_name: input.comms_name.clone(),
+        host_mode,
+        comms_name,
     };
     if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
         tracing::warn!("Failed to store session metadata: {}", err);
@@ -525,7 +550,7 @@ async fn handle_meerkat_run_simple(
     });
 
     // Run agent based on mode
-    let result = if input.host_mode {
+    let result = if host_mode {
         if let Some(ref tx) = event_tx {
             agent
                 .run_host_mode_with_events(input.prompt, tx.clone())
@@ -588,6 +613,15 @@ async fn handle_meerkat_run_with_builtins(
         BuiltinToolConfig, CompositeDispatcher, EnforcedToolPolicy, FileTaskStore, ToolMode,
         ToolPolicyLayer, builtin::shell::ShellConfig, ensure_rkat_dir_async, find_project_root,
     };
+
+    #[cfg(feature = "comms")]
+    let host_mode = input.host_mode;
+    #[cfg(not(feature = "comms"))]
+    let host_mode = false;
+    #[cfg(feature = "comms")]
+    let comms_name = input.comms_name.clone();
+    #[cfg(not(feature = "comms"))]
+    let comms_name: Option<String> = None;
 
     let config = load_config_async().await;
     let model = input
@@ -697,9 +731,9 @@ async fn handle_meerkat_run_with_builtins(
     let store_adapter = Arc::new(SessionStoreAdapter::new(Arc::new(session_store)));
 
     // Create comms runtime if host_mode is enabled
-    let comms_runtime = if input.host_mode {
-        let comms_name = input
-            .comms_name
+    #[cfg(feature = "comms")]
+    let comms_runtime = if host_mode {
+        let comms_name = comms_name
             .as_ref()
             .ok_or_else(|| "comms_name required when host_mode is enabled".to_string())?;
         let base_dir = resolve_project_root();
@@ -710,7 +744,10 @@ async fn handle_meerkat_run_with_builtins(
     } else {
         None
     };
+    #[cfg(not(feature = "comms"))]
+    let comms_runtime: Option<()> = None;
 
+    #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
         let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
             .map_err(|e| format!("Failed to compose comms tools: {}", e))?;
@@ -767,7 +804,7 @@ async fn handle_meerkat_run_with_builtins(
     });
 
     // Run agent based on mode
-    let result = if input.host_mode {
+    let result = if host_mode {
         if let Some(ref tx) = event_tx {
             agent
                 .run_host_mode_with_events(input.prompt, tx.clone())
@@ -889,6 +926,23 @@ async fn handle_meerkat_resume_simple(
     config: Config,
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
+    #[cfg(feature = "comms")]
+    let host_mode = input.host_mode
+        || stored_metadata
+            .as_ref()
+            .map(|meta| meta.host_mode)
+            .unwrap_or(false);
+    #[cfg(not(feature = "comms"))]
+    let host_mode = false;
+    #[cfg(feature = "comms")]
+    let comms_name = input.comms_name.clone().or_else(|| {
+        stored_metadata
+            .as_ref()
+            .and_then(|meta| meta.comms_name.clone())
+    });
+    #[cfg(not(feature = "comms"))]
+    let comms_name: Option<String> = None;
+
     let model = input
         .model
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
@@ -897,19 +951,12 @@ async fn handle_meerkat_resume_simple(
         .max_tokens
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
         .unwrap_or(config.agent.max_tokens_per_turn);
-    let host_mode = input.host_mode
-        || stored_metadata
-            .as_ref()
-            .map(|meta| meta.host_mode)
-            .unwrap_or(false);
-    let comms_name = input.comms_name.clone().or_else(|| {
-        stored_metadata
-            .as_ref()
-            .and_then(|meta| meta.comms_name.clone())
-    });
+
+    #[cfg(feature = "comms")]
     if host_mode && comms_name.is_none() {
         return Err("host_mode requires comms_name to be set".to_string());
     }
+    #[cfg(feature = "comms")]
     if host_mode && comms_name.is_none() {
         return Err("host_mode requires comms_name to be set".to_string());
     }
@@ -948,6 +995,7 @@ async fn handle_meerkat_resume_simple(
     let mut tool_usage_instructions = String::new();
     let store_adapter = Arc::new(SessionStoreAdapter::new(session_store));
 
+    #[cfg(feature = "comms")]
     let comms_runtime = if host_mode {
         let comms_name = comms_name
             .as_ref()
@@ -960,7 +1008,10 @@ async fn handle_meerkat_resume_simple(
     } else {
         None
     };
+    #[cfg(not(feature = "comms"))]
+    let comms_runtime: Option<()> = None;
 
+    #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
         let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
             .map_err(|e| format!("Failed to compose comms tools: {}", e))?;
@@ -987,6 +1038,7 @@ async fn handle_meerkat_resume_simple(
     }
     builder = builder.system_prompt(system_prompt);
 
+    #[cfg(feature = "comms")]
     if let Some(runtime) = comms_runtime {
         builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
     }
@@ -1108,6 +1160,23 @@ async fn handle_meerkat_resume_with_builtins(
         session.push(Message::ToolResults { results });
     }
 
+    #[cfg(feature = "comms")]
+    let host_mode = input.host_mode
+        || stored_metadata
+            .as_ref()
+            .map(|meta| meta.host_mode)
+            .unwrap_or(false);
+    #[cfg(not(feature = "comms"))]
+    let host_mode = false;
+    #[cfg(feature = "comms")]
+    let comms_name = input.comms_name.clone().or_else(|| {
+        stored_metadata
+            .as_ref()
+            .and_then(|meta| meta.comms_name.clone())
+    });
+    #[cfg(not(feature = "comms"))]
+    let comms_name: Option<String> = None;
+
     let model = input
         .model
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
@@ -1116,16 +1185,6 @@ async fn handle_meerkat_resume_with_builtins(
         .max_tokens
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
         .unwrap_or(config.agent.max_tokens_per_turn);
-    let host_mode = input.host_mode
-        || stored_metadata
-            .as_ref()
-            .map(|meta| meta.host_mode)
-            .unwrap_or(false);
-    let comms_name = input.comms_name.clone().or_else(|| {
-        stored_metadata
-            .as_ref()
-            .and_then(|meta| meta.comms_name.clone())
-    });
 
     let provider = input
         .provider
@@ -1228,6 +1287,7 @@ async fn handle_meerkat_resume_with_builtins(
 
     let store_adapter = Arc::new(SessionStoreAdapter::new(session_store));
 
+    #[cfg(feature = "comms")]
     let comms_runtime = if host_mode {
         let comms_name = comms_name
             .as_ref()
@@ -1240,7 +1300,10 @@ async fn handle_meerkat_resume_with_builtins(
     } else {
         None
     };
+    #[cfg(not(feature = "comms"))]
+    let comms_runtime: Option<()> = None;
 
+    #[cfg(feature = "comms")]
     if let Some(ref runtime) = comms_runtime {
         let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
             .map_err(|e| format!("Failed to compose comms tools: {}", e))?;
@@ -1699,6 +1762,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     fn test_meerkat_run_input_with_host_mode() {
         let input_json = json!({
@@ -1713,6 +1777,7 @@ mod tests {
         assert_eq!(input.comms_name, Some("test-agent".to_string()));
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     fn test_meerkat_run_input_host_mode_defaults_to_false() {
         let input_json = json!({
@@ -1724,6 +1789,7 @@ mod tests {
         assert!(input.comms_name.is_none());
     }
 
+    #[cfg(feature = "comms")]
     #[tokio::test]
     async fn test_handle_meerkat_run_host_mode_requires_comms_name() {
         let result = handle_meerkat_run(
@@ -1753,6 +1819,7 @@ mod tests {
         assert!(err.contains("comms_name"));
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     fn test_tools_list_has_host_mode_parameter() {
         let tools = tools_list();

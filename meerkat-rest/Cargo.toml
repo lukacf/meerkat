@@ -13,7 +13,7 @@ name = "meerkat-rest"
 path = "src/main.rs"
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
+meerkat = { workspace = true, default-features = false, features = ["anthropic", "jsonl-store"] }
 meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
@@ -33,6 +33,10 @@ async-stream = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
+
+[features]
+default = ["comms"]
+comms = ["meerkat/comms"]
 
 [dev-dependencies]
 hyper = { workspace = true }

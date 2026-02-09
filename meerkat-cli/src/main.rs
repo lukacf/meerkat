@@ -5,10 +5,11 @@ mod mcp;
 
 #[cfg(feature = "mcp")]
 use adapters::McpRouterAdapter;
-use meerkat::{AgentBuildConfig, AgentFactory};
+use meerkat::{AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::service::{CreateSessionRequest, SessionService};
 use meerkat_core::{AgentEvent, SchemaCompat, format_verbose_event};
-use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, SessionTooling};
+use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
 use meerkat_store::SessionStore;
 use meerkat_tools::find_project_root;
 use tokio::sync::mpsc;
@@ -1021,6 +1022,20 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
     }
 }
 
+/// Build a `FactoryAgentBuilder` + `EphemeralSessionService` from factory flags and config.
+fn build_cli_service(
+    factory: AgentFactory,
+    config: Config,
+) -> (
+    EphemeralSessionService<FactoryAgentBuilder>,
+    Arc<tokio::sync::Mutex<Option<AgentBuildConfig>>>,
+) {
+    let builder = FactoryAgentBuilder::new(factory, config);
+    let config_slot = builder.build_config_slot.clone();
+    let service = EphemeralSessionService::new(builder, 1);
+    (service, config_slot)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_agent(
     prompt: &str,
@@ -1077,6 +1092,9 @@ async fn run_agent(
     #[cfg(feature = "comms")]
     let factory = factory.comms(!comms_overrides.disabled);
 
+    // Pre-create session to claim the session_id
+    let session = Session::new();
+
     let build_config = AgentBuildConfig {
         model: model.to_string(),
         provider: Some(provider.as_core()),
@@ -1086,50 +1104,50 @@ async fn run_agent(
         structured_output_retries,
         hooks_override,
         host_mode,
-        comms_name,
-        resume_session: None,
+        comms_name: comms_name.clone(),
+        resume_session: Some(session),
         budget_limits: Some(limits),
-        event_tx: event_tx.clone(),
+        event_tx: None, // wired by the service via build_agent()
         llm_client_override: None,
         provider_params,
         external_tools,
+        override_builtins: None,
+        override_shell: None,
     };
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
 
-    let mut agent = factory
-        .build_agent(build_config, config)
-        .await
-        .map_err(|e| anyhow::anyhow!("Agent build failed: {e}"))?;
-
-    // Validate host mode requirements
-    #[cfg(feature = "comms")]
-    if host_mode && agent.comms().is_none() {
-        return Err(anyhow::anyhow!(
-            "--host mode requires comms to be enabled. Use --comms-name to enable."
-        ));
+    // Build the session service and stage the build config
+    let (service, config_slot) = build_cli_service(factory, config.clone());
+    {
+        let mut slot = config_slot.lock().await;
+        *slot = Some(build_config);
     }
 
-    // Run the agent
-    tracing::info!("Running agent with model: {}", model);
-
-    let result = if host_mode {
+    if host_mode {
         eprintln!(
             "Running in host mode{} (Ctrl+C to exit)...",
             if verbose { " with verbose output" } else { "" }
         );
-        if let Some(tx) = event_tx.clone() {
-            agent
-                .run_host_mode_with_events(prompt.to_string(), tx)
-                .await?
-        } else {
-            agent.run_host_mode(prompt.to_string()).await?
-        }
-    } else if let Some(tx) = event_tx.clone() {
-        agent.run_with_events(prompt.to_string(), tx).await?
-    } else {
-        agent.run(prompt.to_string()).await?
-    };
+    }
+
+    // Route through SessionService::create_session()
+    let result = service
+        .create_session(CreateSessionRequest {
+            model: model.to_string(),
+            prompt: prompt.to_string(),
+            system_prompt: None,
+            max_tokens: Some(max_tokens),
+            event_tx: event_tx.clone(),
+            host_mode,
+        })
+        .await
+        .map_err(|e| match e {
+            meerkat_core::service::SessionError::Agent(agent_err) => {
+                anyhow::Error::from(agent_err)
+            }
+            other => anyhow::anyhow!("Session service error: {other}"),
+        })?;
 
     // Wait for streaming task to complete (it will end when sender is dropped)
     if let Some(task) = event_task {
@@ -1140,7 +1158,8 @@ async fn run_agent(
         }
     }
 
-    // Shutdown MCP connections gracefully
+    // Shutdown the session service and MCP connections gracefully
+    service.shutdown().await;
     shutdown_mcp(&mcp_adapter).await;
 
     // Output the result
@@ -1269,7 +1288,7 @@ async fn resume_session(
     let factory = factory.comms(tooling.comms || host_mode);
 
     let build_config = AgentBuildConfig {
-        model,
+        model: model.clone(),
         provider: Some(provider_core),
         max_tokens: Some(max_tokens),
         system_prompt: None,
@@ -1277,28 +1296,46 @@ async fn resume_session(
         structured_output_retries: 2,
         hooks_override,
         host_mode,
-        comms_name,
+        comms_name: comms_name.clone(),
         resume_session: Some(session),
         budget_limits: None,
-        event_tx: None,
+        event_tx: None, // wired by the service via build_agent()
         llm_client_override: None,
         provider_params: None,
         external_tools,
+        override_builtins: None,
+        override_shell: None,
     };
 
-    let mut agent = factory
-        .build_agent(build_config, &config)
+    // Build the session service and stage the build config
+    let (service, config_slot) = build_cli_service(factory, config);
+    {
+        let mut slot = config_slot.lock().await;
+        *slot = Some(build_config);
+    }
+
+    // Route through SessionService::create_session() with the resumed session
+    // staged in the build config. The service builds the agent (which picks up
+    // the resume_session), runs the first turn, and returns RunResult.
+    let result = service
+        .create_session(CreateSessionRequest {
+            model,
+            prompt: prompt.to_string(),
+            system_prompt: None,
+            max_tokens: Some(max_tokens),
+            event_tx: None,
+            host_mode,
+        })
         .await
-        .map_err(|e| anyhow::anyhow!("Agent build failed: {e}"))?;
+        .map_err(|e| match e {
+            meerkat_core::service::SessionError::Agent(agent_err) => {
+                anyhow::Error::from(agent_err)
+            }
+            other => anyhow::anyhow!("Session service error: {other}"),
+        })?;
 
-    // Run the agent with the new prompt
-    let result = if host_mode {
-        agent.run_host_mode(prompt.to_string()).await?
-    } else {
-        agent.run(prompt.to_string()).await?
-    };
-
-    // Shutdown MCP connections gracefully
+    // Shutdown the session service and MCP connections gracefully
+    service.shutdown().await;
     shutdown_mcp(&mcp_adapter).await;
 
     // Output the result
@@ -1311,7 +1348,11 @@ async fn resume_session(
     Ok(())
 }
 
-/// List sessions
+/// List sessions.
+///
+/// TODO: Migrate to `PersistentSessionService::list()` when the `session-store`
+/// feature is wired into the CLI. Currently uses direct `JsonlStore` access
+/// because `EphemeralSessionService` only tracks live (in-memory) sessions.
 async fn list_sessions(limit: usize) -> anyhow::Result<()> {
     let store = create_session_store().await;
     let filter = SessionFilter {
@@ -1352,7 +1393,10 @@ async fn list_sessions(limit: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Show session details
+/// Show session details.
+///
+/// TODO: Migrate to `PersistentSessionService::read()` when the `session-store`
+/// feature is wired into the CLI. Currently uses direct `JsonlStore` access.
 async fn show_session(id: &str) -> anyhow::Result<()> {
     // Parse session ID
     let session_id =
@@ -1447,7 +1491,10 @@ async fn show_session(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Delete a session
+/// Delete a session.
+///
+/// TODO: Migrate to `PersistentSessionService::archive()` when the `session-store`
+/// feature is wired into the CLI. Currently uses direct `JsonlStore` access.
 async fn delete_session(id: &str) -> anyhow::Result<()> {
     // Parse session ID
     let session_id =

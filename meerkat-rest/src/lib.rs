@@ -24,10 +24,15 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
-    AgentBuildConfig, AgentEvent, AgentFactory, JsonlStore, LlmClient, OutputSchema, SessionId,
-    SessionMeta, SessionStore,
+    AgentBuildConfig, AgentEvent, AgentFactory, EphemeralSessionService, FactoryAgentBuilder,
+    JsonlStore, LlmClient, OutputSchema, Session, SessionId, SessionMeta, SessionService,
+    SessionStore,
 };
 use meerkat_core::error::invalid_session_id_message;
+use meerkat_core::service::{
+    CreateSessionRequest as SvcCreateSessionRequest, SessionError,
+    StartTurnRequest as SvcStartTurnRequest,
+};
 use meerkat_core::{
     Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider, SchemaWarning,
     SessionTooling, format_verbose_event,
@@ -38,7 +43,7 @@ use std::borrow::Cow;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 /// Application state shared across handlers
 #[derive(Clone)]
@@ -58,6 +63,10 @@ pub struct AppState {
     pub llm_client_override: Option<Arc<dyn LlmClient>>,
     pub config_store: Arc<dyn ConfigStore>,
     pub event_tx: broadcast::Sender<SessionEvent>,
+    /// Session service for managing agent lifecycle.
+    pub session_service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
+    /// Slot for staging `AgentBuildConfig` before `session_service` calls.
+    pub builder_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
 }
 
 impl Default for AppState {
@@ -80,18 +89,32 @@ impl Default for AppState {
                     .join("sessions")
             });
 
+        let enable_builtins = config.tools.builtins_enabled;
+        let enable_shell = config.tools.shell_enabled;
+
+        let mut factory = AgentFactory::new(store_path.clone())
+            .builtins(enable_builtins)
+            .shell(enable_shell);
+        factory = factory.project_root(instance_root.clone());
+
+        let builder = FactoryAgentBuilder::new(factory, config.clone());
+        let builder_slot = builder.build_config_slot.clone();
+        let session_service = Arc::new(EphemeralSessionService::new(builder, 100));
+
         Self {
             store_path,
             default_model: Cow::Owned(config.agent.model.to_string()),
             max_tokens: config.agent.max_tokens_per_turn,
             rest_host: Cow::Owned(config.rest.host.clone()),
             rest_port: config.rest.port,
-            enable_builtins: config.tools.builtins_enabled,
-            enable_shell: config.tools.shell_enabled,
+            enable_builtins,
+            enable_shell,
             project_root: Some(instance_root),
             llm_client_override: None,
             config_store,
             event_tx,
+            session_service,
+            builder_slot,
         }
     }
 }
@@ -140,6 +163,15 @@ impl AppState {
         let rest_host = Cow::Owned(config.rest.host.clone());
         let rest_port = config.rest.port;
 
+        let mut factory = AgentFactory::new(store_path.clone())
+            .builtins(enable_builtins)
+            .shell(enable_shell);
+        factory = factory.project_root(instance_root.clone());
+
+        let builder = FactoryAgentBuilder::new(factory, config);
+        let builder_slot = builder.build_config_slot.clone();
+        let session_service = Arc::new(EphemeralSessionService::new(builder, 100));
+
         Self {
             store_path,
             default_model,
@@ -152,6 +184,8 @@ impl AppState {
             llm_client_override: None,
             config_store,
             event_tx,
+            session_service,
+            builder_slot,
         }
     }
 }
@@ -161,14 +195,6 @@ fn rest_instance_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("meerkat")
         .join("rest")
-}
-
-async fn load_config_from_store(store: &dyn ConfigStore) -> Config {
-    let mut config = store.get().await.unwrap_or_else(|_| Config::default());
-    if let Err(err) = config.apply_env_overrides() {
-        tracing::warn!("Failed to apply env overrides: {}", err);
-    }
-    config
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, ApiError> {
@@ -347,53 +373,16 @@ async fn patch_config(
     Ok(Json(updated))
 }
 
-/// Create and run a new session
-async fn create_session(
-    State(state): State<AppState>,
-    Json(req): Json<CreateSessionRequest>,
-) -> Result<Json<SessionResponse>, ApiError> {
-    let host_mode = resolve_host_mode(req.host_mode)?;
-    let model = req.model.unwrap_or_else(|| state.default_model.clone());
-    let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
-    let config = load_config_from_store(state.config_store.as_ref()).await;
-
-    let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
-    let verbose = req.verbose;
-
-    let mut factory = AgentFactory::new(state.store_path.clone())
-        .builtins(state.enable_builtins)
-        .shell(state.enable_shell);
-    if let Some(ref project_root) = state.project_root {
-        factory = factory.project_root(project_root.clone());
-    }
-
-    let build_config = AgentBuildConfig {
-        model: model.to_string(),
-        provider: req.provider,
-        max_tokens: Some(max_tokens),
-        system_prompt: req.system_prompt,
-        output_schema: req.output_schema,
-        structured_output_retries: req.structured_output_retries,
-        hooks_override: req.hooks_override.unwrap_or_default(),
-        host_mode,
-        comms_name: req.comms_name.clone(),
-        resume_session: None,
-        budget_limits: None,
-        event_tx: Some(agent_event_tx.clone()),
-        llm_client_override: state.llm_client_override.clone(),
-        provider_params: None,
-        external_tools: None,
-    };
-
-    let mut agent = factory
-        .build_agent(build_config, &config)
-        .await
-        .map_err(|e| ApiError::Agent(format!("{e}")))?;
-
-    let session_id = agent.session().id().clone();
-    let broadcast_tx = state.event_tx.clone();
-    let forward_task = tokio::spawn(async move {
-        while let Some(event) = agent_event_rx.recv().await {
+/// Spawn a task that forwards events from an mpsc receiver to the broadcast channel,
+/// optionally logging verbose events. Returns the join handle.
+fn spawn_event_forwarder(
+    mut event_rx: mpsc::Receiver<AgentEvent>,
+    broadcast_tx: broadcast::Sender<SessionEvent>,
+    session_id: SessionId,
+    verbose: bool,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
             if verbose {
                 if let Some(line) = format_verbose_event(&event) {
                     tracing::info!("{}", line);
@@ -404,25 +393,12 @@ async fn create_session(
                 event,
             });
         }
-    });
+    })
+}
 
-    // Run agent based on mode
-    let result = if host_mode {
-        agent
-            .run_host_mode_with_events(req.prompt, agent_event_tx.clone())
-            .await
-            .map_err(|e| ApiError::Agent(format!("{}", e)))?
-    } else {
-        agent
-            .run_with_events(req.prompt, agent_event_tx.clone())
-            .await
-            .map_err(|e| ApiError::Agent(format!("{}", e)))?
-    };
-    drop(agent);
-    drop(agent_event_tx);
-    let _ = forward_task.await;
-
-    Ok(Json(SessionResponse {
+/// Convert a `RunResult` into a `SessionResponse`.
+fn run_result_to_response(result: meerkat_core::types::RunResult) -> SessionResponse {
+    SessionResponse {
         session_id: result.session_id.to_string(),
         text: result.text,
         turns: result.turns,
@@ -434,7 +410,115 @@ async fn create_session(
         },
         structured_output: result.structured_output,
         schema_warnings: result.schema_warnings,
-    }))
+    }
+}
+
+/// Map a `SessionError` to an `ApiError`, handling `CallbackPending` specially
+/// by returning a successful response with the pre-created session_id.
+fn session_error_to_api_result(
+    err: SessionError,
+    fallback_session_id: &SessionId,
+) -> Result<Json<SessionResponse>, ApiError> {
+    match err {
+        SessionError::Agent(ref agent_err) => {
+            if let meerkat_core::error::AgentError::CallbackPending {
+                tool_name: _,
+                args: _,
+            } = agent_err
+            {
+                // CallbackPending: the agent is waiting for external tool results.
+                // Return a success response with the pre-created session_id so the
+                // caller can resume via continue_session.
+                return Ok(Json(SessionResponse {
+                    session_id: fallback_session_id.to_string(),
+                    text: "Agent is waiting for tool results".to_string(),
+                    turns: 0,
+                    tool_calls: 0,
+                    usage: UsageResponse {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        total_tokens: 0,
+                    },
+                    structured_output: None,
+                    schema_warnings: None,
+                }));
+            }
+            Err(ApiError::Agent(format!("{err}")))
+        }
+        SessionError::NotFound { .. } => Err(ApiError::NotFound(format!("{err}"))),
+        SessionError::Busy { .. } => Err(ApiError::BadRequest(format!("{err}"))),
+        _ => Err(ApiError::Agent(format!("{err}"))),
+    }
+}
+
+/// Create and run a new session
+async fn create_session(
+    State(state): State<AppState>,
+    Json(req): Json<CreateSessionRequest>,
+) -> Result<Json<SessionResponse>, ApiError> {
+    let host_mode = resolve_host_mode(req.host_mode)?;
+    let model = req.model.unwrap_or_else(|| state.default_model.clone());
+    let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
+
+    // Pre-create a session to claim the session_id (needed for CallbackPending handling
+    // and event forwarding before the service call returns).
+    let pre_session = Session::new();
+    let session_id = pre_session.id().clone();
+
+    // Set up event forwarding: caller channel -> broadcast
+    let (caller_event_tx, caller_event_rx) = mpsc::channel::<AgentEvent>(100);
+    let forward_task = spawn_event_forwarder(
+        caller_event_rx,
+        state.event_tx.clone(),
+        session_id.clone(),
+        req.verbose,
+    );
+
+    // Build the full AgentBuildConfig and stage it via the builder slot.
+    let build_config = AgentBuildConfig {
+        model: model.to_string(),
+        provider: req.provider,
+        max_tokens: Some(max_tokens),
+        system_prompt: req.system_prompt,
+        output_schema: req.output_schema,
+        structured_output_retries: req.structured_output_retries,
+        hooks_override: req.hooks_override.unwrap_or_default(),
+        host_mode,
+        comms_name: req.comms_name.clone(),
+        resume_session: Some(pre_session),
+        budget_limits: None,
+        event_tx: None, // Wired by the session service's builder
+        llm_client_override: state.llm_client_override.clone(),
+        provider_params: None,
+        external_tools: None,
+        override_builtins: None,
+        override_shell: None,
+    };
+
+    {
+        let mut slot = state.builder_slot.lock().await;
+        *slot = Some(build_config);
+    }
+
+    // Call the session service
+    let svc_req = SvcCreateSessionRequest {
+        model: model.to_string(),
+        prompt: req.prompt,
+        system_prompt: None, // Already in build_config
+        max_tokens: Some(max_tokens),
+        event_tx: Some(caller_event_tx),
+        host_mode,
+    };
+
+    let result = state.session_service.create_session(svc_req).await;
+
+    // Wait for the event forwarder to drain
+    let _ = forward_task.await;
+
+    match result {
+        Ok(run_result) => Ok(Json(run_result_to_response(run_result))),
+        Err(err) => session_error_to_api_result(err, &session_id),
+    }
 }
 
 /// Get session details
@@ -486,136 +570,138 @@ async fn continue_session(
     let session_id = SessionId::parse(&req.session_id)
         .map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
 
-    let store = JsonlStore::new(state.store_path.clone());
-    store
-        .init()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Store init failed: {}", e)))?;
+    // Set up event forwarding: caller channel -> broadcast
+    let (caller_event_tx, caller_event_rx) = mpsc::channel::<AgentEvent>(100);
+    let forward_task = spawn_event_forwarder(
+        caller_event_rx,
+        state.event_tx.clone(),
+        session_id.clone(),
+        req.verbose,
+    );
 
-    let session = store
-        .load(&session_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to load session: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("Session not found: {}", id)))?;
-
-    let config = load_config_from_store(state.config_store.as_ref()).await;
-    let stored_metadata = session.session_metadata();
-
-    // Resolve tooling flags from stored metadata, falling back to server defaults
-    let tooling = stored_metadata
-        .as_ref()
-        .map(|meta| meta.tooling.clone())
-        .unwrap_or(SessionTooling {
-            builtins: state.enable_builtins,
-            shell: state.enable_shell,
-            comms: false,
-            subagents: false,
-        });
-
-    let model = req
-        .model
-        .or_else(|| {
-            stored_metadata
-                .as_ref()
-                .map(|meta| meta.model.clone().into())
-        })
-        .unwrap_or_else(|| state.default_model.clone());
-    let max_tokens = req
-        .max_tokens
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
-        .unwrap_or(state.max_tokens);
-    let provider = req
-        .provider
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider));
-    let host_mode_requested = req.host_mode
-        || stored_metadata
-            .as_ref()
-            .map(|meta| meta.host_mode)
-            .unwrap_or(false);
+    let host_mode_requested = req.host_mode;
     let host_mode = resolve_host_mode(host_mode_requested)?;
-    let comms_name = req.comms_name.clone().or_else(|| {
-        stored_metadata
-            .as_ref()
-            .and_then(|meta| meta.comms_name.clone())
-    });
 
-    let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
-    let verbose = req.verbose;
-
-    let mut factory = AgentFactory::new(state.store_path.clone())
-        .builtins(tooling.builtins)
-        .shell(tooling.shell);
-    if let Some(ref project_root) = state.project_root {
-        factory = factory.project_root(project_root.clone());
-    }
-
-    let build_config = AgentBuildConfig {
-        model: model.to_string(),
-        provider,
-        max_tokens: Some(max_tokens),
-        system_prompt: req.system_prompt,
-        output_schema: req.output_schema,
-        structured_output_retries: req.structured_output_retries,
-        hooks_override: req.hooks_override.unwrap_or_default(),
+    // First, try to start a turn on a live session in the service.
+    let svc_req = SvcStartTurnRequest {
+        prompt: req.prompt.clone(),
+        event_tx: Some(caller_event_tx.clone()),
         host_mode,
-        comms_name,
-        resume_session: Some(session),
-        budget_limits: None,
-        event_tx: Some(agent_event_tx.clone()),
-        llm_client_override: state.llm_client_override.clone(),
-        provider_params: None,
-        external_tools: None,
     };
 
-    let mut agent = factory
-        .build_agent(build_config, &config)
-        .await
-        .map_err(|e| ApiError::Agent(format!("{e}")))?;
+    let result = state
+        .session_service
+        .start_turn(&session_id, svc_req)
+        .await;
 
-    let session_id = agent.session().id().clone();
-    let broadcast_tx = state.event_tx.clone();
-    let forward_task = tokio::spawn(async move {
-        while let Some(event) = agent_event_rx.recv().await {
-            if verbose {
-                if let Some(line) = format_verbose_event(&event) {
-                    tracing::info!("{}", line);
-                }
-            }
-            let _ = broadcast_tx.send(SessionEvent {
-                session_id: session_id.clone(),
-                event,
+    let final_result = match result {
+        Ok(run_result) => Ok(run_result),
+        Err(SessionError::NotFound { .. }) => {
+            // The session isn't live in the service. Load it from the store,
+            // stage a build config with resume_session, and create a new
+            // service session.
+            let store = JsonlStore::new(state.store_path.clone());
+            store
+                .init()
+                .await
+                .map_err(|e| ApiError::Internal(format!("Store init failed: {}", e)))?;
+
+            let session = store
+                .load(&session_id)
+                .await
+                .map_err(|e| ApiError::Internal(format!("Failed to load session: {}", e)))?
+                .ok_or_else(|| ApiError::NotFound(format!("Session not found: {}", id)))?;
+
+            let stored_metadata = session.session_metadata();
+
+            // Resolve tooling flags from stored metadata, falling back to server defaults
+            let tooling = stored_metadata
+                .as_ref()
+                .map(|meta| meta.tooling.clone())
+                .unwrap_or(SessionTooling {
+                    builtins: state.enable_builtins,
+                    shell: state.enable_shell,
+                    comms: false,
+                    subagents: false,
+                });
+
+            let model = req
+                .model
+                .or_else(|| {
+                    stored_metadata
+                        .as_ref()
+                        .map(|meta| meta.model.clone().into())
+                })
+                .unwrap_or_else(|| state.default_model.clone());
+            let max_tokens = req
+                .max_tokens
+                .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
+                .unwrap_or(state.max_tokens);
+            let provider = req
+                .provider
+                .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider));
+            let continue_host_mode_requested = host_mode_requested
+                || stored_metadata
+                    .as_ref()
+                    .map(|meta| meta.host_mode)
+                    .unwrap_or(false);
+            let continue_host_mode = resolve_host_mode(continue_host_mode_requested)?;
+            let comms_name = req.comms_name.clone().or_else(|| {
+                stored_metadata
+                    .as_ref()
+                    .and_then(|meta| meta.comms_name.clone())
             });
-        }
-    });
 
-    let result = if host_mode {
-        agent
-            .run_host_mode_with_events(req.prompt, agent_event_tx.clone())
-            .await
-            .map_err(|e| ApiError::Agent(format!("{}", e)))?
-    } else {
-        agent
-            .run_with_events(req.prompt, agent_event_tx.clone())
-            .await
-            .map_err(|e| ApiError::Agent(format!("{}", e)))?
+            let build_config = AgentBuildConfig {
+                model: model.to_string(),
+                provider,
+                max_tokens: Some(max_tokens),
+                system_prompt: req.system_prompt,
+                output_schema: req.output_schema,
+                structured_output_retries: req.structured_output_retries,
+                hooks_override: req.hooks_override.unwrap_or_default(),
+                host_mode: continue_host_mode,
+                comms_name,
+                resume_session: Some(session),
+                budget_limits: None,
+                event_tx: None, // Wired by the session service's builder
+                llm_client_override: state.llm_client_override.clone(),
+                provider_params: None,
+                external_tools: None,
+                override_builtins: Some(tooling.builtins),
+                override_shell: Some(tooling.shell),
+            };
+
+            {
+                let mut slot = state.builder_slot.lock().await;
+                *slot = Some(build_config);
+            }
+
+            let svc_req = SvcCreateSessionRequest {
+                model: model.to_string(),
+                prompt: req.prompt,
+                system_prompt: None,
+                max_tokens: Some(max_tokens),
+                event_tx: Some(caller_event_tx),
+                host_mode: continue_host_mode,
+            };
+
+            state
+                .session_service
+                .create_session(svc_req)
+                .await
+                .map_err(|e| ApiError::Agent(format!("{e}")))
+        }
+        Err(err) => return session_error_to_api_result(err, &session_id),
     };
-    drop(agent);
-    drop(agent_event_tx);
+
+    // Wait for the event forwarder to drain
     let _ = forward_task.await;
 
-    Ok(Json(SessionResponse {
-        session_id: result.session_id.to_string(),
-        text: result.text,
-        turns: result.turns,
-        tool_calls: result.tool_calls,
-        usage: UsageResponse {
-            input_tokens: result.usage.input_tokens,
-            output_tokens: result.usage.output_tokens,
-            total_tokens: result.usage.total_tokens(),
-        },
-        structured_output: result.structured_output,
-        schema_warnings: result.schema_warnings,
-    }))
+    match final_result {
+        Ok(run_result) => Ok(Json(run_result_to_response(run_result))),
+        Err(err) => Err(err),
+    }
 }
 
 /// SSE endpoint for streaming session events

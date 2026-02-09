@@ -3,11 +3,15 @@
 //! This crate provides an MCP server that exposes Meerkat agent capabilities
 //! as MCP tools: meerkat_run and meerkat_resume.
 
-use meerkat::{JsonlStore, OutputSchema, SessionStore, ToolError, ToolResult};
+use meerkat::{
+    AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder, JsonlStore,
+    OutputSchema, SessionStore, ToolError, ToolResult,
+};
 use meerkat_core::error::invalid_session_id_message;
+use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService};
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
-    ToolCallView, format_verbose_event,
+    Session, ToolCallView, format_verbose_event,
 };
 use meerkat_tools::find_project_root;
 use schemars::JsonSchema;
@@ -170,6 +174,41 @@ fn resolve_store_path(config: &Config) -> PathBuf {
         })
 }
 
+/// Shared state for the MCP server, holding the session service.
+///
+/// The service is configured once with max-permissive factory flags
+/// (`builtins: true`, `shell: true`). Per-request tool configuration is
+/// controlled via `override_builtins` / `override_shell` in `AgentBuildConfig`.
+pub struct MeerkatMcpState {
+    service: EphemeralSessionService<FactoryAgentBuilder>,
+    build_config_slot: Arc<tokio::sync::Mutex<Option<AgentBuildConfig>>>,
+}
+
+impl MeerkatMcpState {
+    /// Create a new MCP state with a session service backed by `AgentFactory`.
+    pub async fn new() -> Self {
+        let config = load_config_async().await;
+        let store_path = resolve_store_path(&config);
+        let project_root = resolve_project_root();
+
+        // Create factory with max-permissive flags; per-request overrides
+        // in AgentBuildConfig control what tools are actually enabled.
+        let factory = AgentFactory::new(store_path)
+            .project_root(project_root)
+            .builtins(true)
+            .shell(true);
+
+        let builder = FactoryAgentBuilder::new(factory, config);
+        let build_config_slot = builder.build_config_slot.clone();
+        let service = EphemeralSessionService::new(builder, 100);
+
+        Self {
+            service,
+            build_config_slot,
+        }
+    }
+}
+
 /// Input schema for meerkat_resume tool
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatResumeInput {
@@ -265,9 +304,12 @@ fn maybe_event_channel(
 }
 
 /// Format an agent run result (success, callback pending, or error) into an MCP response.
+///
+/// The `session_id` parameter is the pre-claimed ID, used as fallback when the
+/// result is a `CallbackPending` error (which doesn't carry a session ID).
 fn format_agent_result(
-    result: Result<meerkat_core::types::RunResult, meerkat::AgentError>,
-    agent: &meerkat::DynAgent,
+    result: Result<meerkat_core::types::RunResult, SessionError>,
+    session_id: &meerkat::SessionId,
 ) -> Result<Value, String> {
     match result {
         Ok(result) => {
@@ -284,8 +326,10 @@ fn format_agent_result(
             });
             Ok(wrap_tool_payload(payload))
         }
-        Err(meerkat::AgentError::CallbackPending { tool_name, args }) => {
-            let session_id = agent.session().id();
+        Err(SessionError::Agent(meerkat::AgentError::CallbackPending {
+            tool_name,
+            args,
+        })) => {
             let payload = json!({
                 "content": [{
                     "type": "text",
@@ -326,12 +370,17 @@ pub fn tools_list() -> Vec<Value> {
 }
 
 /// Handle a tools/call request
-pub async fn handle_tools_call(tool_name: &str, arguments: &Value) -> Result<Value, String> {
-    handle_tools_call_with_notifier(tool_name, arguments, None).await
+pub async fn handle_tools_call(
+    state: &MeerkatMcpState,
+    tool_name: &str,
+    arguments: &Value,
+) -> Result<Value, String> {
+    handle_tools_call_with_notifier(state, tool_name, arguments, None).await
 }
 
 /// Handle a tools/call request with optional event notifications.
 pub async fn handle_tools_call_with_notifier(
+    state: &MeerkatMcpState,
     tool_name: &str,
     arguments: &Value,
     notifier: Option<EventNotifier>,
@@ -340,12 +389,12 @@ pub async fn handle_tools_call_with_notifier(
         "meerkat_run" => {
             let input: MeerkatRunInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| format!("Invalid arguments: {}", e))?;
-            handle_meerkat_run(input, notifier).await
+            handle_meerkat_run(state, input, notifier).await
         }
         "meerkat_resume" => {
             let input: MeerkatResumeInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| format!("Invalid arguments: {}", e))?;
-            handle_meerkat_resume(input, notifier).await
+            handle_meerkat_resume(state, input, notifier).await
         }
         "meerkat_config" => {
             let input: MeerkatConfigInput = serde_json::from_value(arguments.clone())
@@ -389,20 +438,15 @@ async fn handle_meerkat_config(input: MeerkatConfigInput) -> Result<Value, Strin
 }
 
 async fn handle_meerkat_run(
+    state: &MeerkatMcpState,
     input: MeerkatRunInput,
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
-    use meerkat::{AgentBuildConfig, AgentFactory};
-
     let host_mode = resolve_host_mode(input.host_mode)?;
     let config = load_config_async().await;
     let model = input
         .model
         .unwrap_or_else(|| config.agent.model.to_string());
-    let store_path = resolve_store_path(&config);
-    let project_root = resolve_project_root();
-
-    let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
 
     // Build external tool dispatcher from MCP callback tools (if any)
     let external_tools: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
@@ -416,12 +460,6 @@ async fn handle_meerkat_run(
         .as_ref()
         .is_some_and(|c| c.enable_shell);
 
-    // Configure the factory with the right tool flags
-    let factory = AgentFactory::new(store_path)
-        .project_root(project_root)
-        .builtins(input.enable_builtins)
-        .shell(input.enable_builtins && enable_shell);
-
     // Parse output schema if provided
     let output_schema = match input.output_schema.clone() {
         Some(schema) => Some(
@@ -431,6 +469,23 @@ async fn handle_meerkat_run(
         None => None,
     };
 
+    // Pre-create a session to claim a stable session_id
+    let session = Session::new();
+    let session_id = session.id().clone();
+
+    // Set up event forwarding
+    let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
+    let event_task = event_rx.map(|rx| {
+        let stream_notifier = if input.stream { notifier.clone() } else { None };
+        spawn_event_forwarder(
+            rx,
+            session_id.to_string(),
+            input.verbose,
+            stream_notifier,
+        )
+    });
+
+    // Build config with per-request tool overrides
     let build_config = AgentBuildConfig {
         model: model.clone(),
         provider: input.provider.map(|p| p.to_provider()),
@@ -441,62 +496,51 @@ async fn handle_meerkat_run(
         hooks_override: input.hooks_override.clone().unwrap_or_default(),
         host_mode,
         comms_name: input.comms_name.clone(),
-        resume_session: None,
+        resume_session: Some(session),
         budget_limits: None,
-        event_tx: event_tx.clone(),
+        event_tx: None, // wired by the service
         llm_client_override: None,
         provider_params: None,
         external_tools,
+        override_builtins: Some(input.enable_builtins),
+        override_shell: Some(input.enable_builtins && enable_shell),
     };
 
-    let mut agent = factory
-        .build_agent(build_config, &config)
-        .await
-        .map_err(|e| format!("Agent build failed: {e}"))?;
+    // Stage the build config for the builder to pick up
+    {
+        let mut slot = state.build_config_slot.lock().await;
+        *slot = Some(build_config);
+    }
 
-    let event_task = event_rx.map(|rx| {
-        let stream_notifier = if input.stream { notifier.clone() } else { None };
-        spawn_event_forwarder(
-            rx,
-            agent.session().id().to_string(),
-            input.verbose,
-            stream_notifier,
-        )
-    });
-
-    // Run agent based on mode
-    let result = if host_mode {
-        if let Some(ref tx) = event_tx {
-            agent
-                .run_host_mode_with_events(input.prompt, tx.clone())
-                .await
-        } else {
-            agent.run_host_mode(input.prompt).await
-        }
-    } else if let Some(ref tx) = event_tx {
-        agent.run_with_events(input.prompt, tx.clone()).await
-    } else {
-        agent.run(input.prompt).await
+    // Route through the session service
+    let req = CreateSessionRequest {
+        model,
+        prompt: input.prompt,
+        system_prompt: None, // already in the staged build config
+        max_tokens: None,    // already in the staged build config
+        event_tx: event_tx.clone(),
+        host_mode,
     };
+
+    let result = state.service.create_session(req).await;
     drop(event_tx);
     if let Some(task) = event_task {
         let _ = task.await;
     }
 
-    format_agent_result(result, &agent)
+    format_agent_result(result, &session_id)
 }
 
 async fn handle_meerkat_resume(
+    state: &MeerkatMcpState,
     input: MeerkatResumeInput,
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
-    use meerkat::{AgentBuildConfig, AgentFactory};
-
     let config = load_config_async().await;
     let store_path = resolve_store_path(&config);
 
-    // Load existing session
-    let session_store = JsonlStore::new(store_path.clone());
+    // Load existing session from persistent store
+    let session_store = JsonlStore::new(store_path);
     session_store
         .init()
         .await
@@ -555,9 +599,6 @@ async fn handle_meerkat_resume(
         .map(ProviderInput::to_provider)
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider));
 
-    let project_root = resolve_project_root();
-    let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
-
     // Build external tool dispatcher from MCP callback tools (if any)
     let external_tools: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
         None
@@ -565,13 +606,28 @@ async fn handle_meerkat_resume(
         Some(Arc::new(MpcToolDispatcher::new(&input.tools)))
     };
 
-    let factory = AgentFactory::new(store_path)
-        .project_root(project_root)
-        .builtins(enable_builtins)
-        .shell(enable_builtins && enable_shell);
+    // Use empty prompt when only providing tool results
+    let prompt = if input.prompt.is_empty() && !input.tool_results.is_empty() {
+        String::new()
+    } else {
+        input.prompt
+    };
 
+    // Set up event forwarding
+    let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
+    let event_task = event_rx.map(|rx| {
+        let stream_notifier = if input.stream { notifier.clone() } else { None };
+        spawn_event_forwarder(
+            rx,
+            session_id.to_string(),
+            input.verbose,
+            stream_notifier,
+        )
+    });
+
+    // Build config with resume_session and per-request tool overrides
     let build_config = AgentBuildConfig {
-        model,
+        model: model.clone(),
         provider,
         max_tokens,
         system_prompt: None,
@@ -582,52 +638,38 @@ async fn handle_meerkat_resume(
         comms_name,
         resume_session: Some(session),
         budget_limits: None,
-        event_tx: event_tx.clone(),
+        event_tx: None, // wired by the service
         llm_client_override: None,
         provider_params: None,
         external_tools,
+        override_builtins: Some(enable_builtins),
+        override_shell: Some(enable_builtins && enable_shell),
     };
 
-    let mut agent = factory
-        .build_agent(build_config, &config)
-        .await
-        .map_err(|e| format!("Agent build failed: {e}"))?;
+    // Stage the build config for the builder to pick up
+    {
+        let mut slot = state.build_config_slot.lock().await;
+        *slot = Some(build_config);
+    }
 
-    let event_task = event_rx.map(|rx| {
-        let stream_notifier = if input.stream { notifier.clone() } else { None };
-        spawn_event_forwarder(
-            rx,
-            agent.session().id().to_string(),
-            input.verbose,
-            stream_notifier,
-        )
-    });
-
-    // Use empty prompt when only providing tool results
-    let prompt = if input.prompt.is_empty() && !input.tool_results.is_empty() {
-        String::new()
-    } else {
-        input.prompt
+    // Route through the session service. Because we set resume_session, the
+    // builder will reuse the existing session ID and messages.
+    let req = CreateSessionRequest {
+        model,
+        prompt,
+        system_prompt: None,
+        max_tokens: None,
+        event_tx: event_tx.clone(),
+        host_mode,
     };
 
-    // Run agent based on mode
-    let result = if host_mode {
-        if let Some(ref tx) = event_tx {
-            agent.run_host_mode_with_events(prompt, tx.clone()).await
-        } else {
-            agent.run_host_mode(prompt).await
-        }
-    } else if let Some(ref tx) = event_tx {
-        agent.run_with_events(prompt, tx.clone()).await
-    } else {
-        agent.run(prompt).await
-    };
+    let result = state.service.create_session(req).await;
     drop(event_tx);
     if let Some(task) = event_task {
         let _ = task.await;
     }
 
-    format_agent_result(result, &agent)
+    format_agent_result(result, &session_id)
 }
 
 fn wrap_tool_payload(payload: Value) -> Value {
@@ -987,7 +1029,9 @@ mod tests {
     #[cfg(feature = "comms")]
     #[tokio::test]
     async fn test_handle_meerkat_run_host_mode_requires_comms_name() {
+        let state = MeerkatMcpState::new().await;
         let result = handle_meerkat_run(
+            &state,
             MeerkatRunInput {
                 prompt: "test".to_string(),
                 system_prompt: None,

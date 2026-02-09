@@ -2,7 +2,10 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use meerkat::{Config, JsonlStore, SessionId, SessionStore};
+use meerkat::{
+    AgentFactory, Config, EphemeralSessionService, FactoryAgentBuilder, JsonlStore, SessionId,
+    SessionStore,
+};
 use meerkat_client::TestClient;
 use meerkat_core::MemoryConfigStore;
 use meerkat_rest::{AppState, router};
@@ -36,6 +39,15 @@ async fn inner_test_rest_resume_metadata() {
     let store_path = temp_dir.path().join("sessions");
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
 
+    let factory = AgentFactory::new(store_path.clone())
+        .builtins(true)
+        .shell(true)
+        .project_root(project_root.clone());
+    let mut builder = FactoryAgentBuilder::new(factory, config.clone());
+    builder.default_llm_client = Some(Arc::new(TestClient::default()));
+    let builder_slot = builder.build_config_slot.clone();
+    let session_service = Arc::new(EphemeralSessionService::new(builder, 100));
+
     let state_run = AppState {
         store_path: store_path.clone(),
         default_model: config.agent.model.clone().into(),
@@ -48,6 +60,8 @@ async fn inner_test_rest_resume_metadata() {
         llm_client_override: Some(Arc::new(TestClient::default())),
         config_store: std::sync::Arc::new(config_store),
         event_tx,
+        session_service,
+        builder_slot,
     };
 
     let app = router(state_run);
@@ -96,6 +110,15 @@ async fn inner_test_rest_resume_metadata() {
     let original_tooling = metadata.tooling.clone();
     let original_provider = metadata.provider;
 
+    let factory2 = AgentFactory::new(store_path.clone())
+        .builtins(true)
+        .shell(true)
+        .project_root(project_root.clone());
+    let mut builder2 = FactoryAgentBuilder::new(factory2, config.clone());
+    builder2.default_llm_client = Some(Arc::new(TestClient::default()));
+    let builder_slot2 = builder2.build_config_slot.clone();
+    let session_service2 = Arc::new(EphemeralSessionService::new(builder2, 100));
+
     let state_resume = AppState {
         store_path: store_path.clone(),
         default_model: "gpt-4o-mini".into(),
@@ -108,6 +131,8 @@ async fn inner_test_rest_resume_metadata() {
         llm_client_override: Some(Arc::new(TestClient::default())),
         config_store: std::sync::Arc::new(MemoryConfigStore::new(config.clone())),
         event_tx: tokio::sync::broadcast::channel(16).0,
+        session_service: session_service2,
+        builder_slot: builder_slot2,
     };
 
     let app = router(state_resume);

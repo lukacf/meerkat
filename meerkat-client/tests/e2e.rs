@@ -1,3 +1,5 @@
+#![cfg(feature = "integration-real-tests")]
+
 //! E2E tests for LLM clients.
 //!
 //! Verifies stream normalization and error handling for all providers.

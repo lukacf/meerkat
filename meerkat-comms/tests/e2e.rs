@@ -2,6 +2,7 @@
 //!
 //! These tests verify the full system working together with realistic scenarios.
 
+#![cfg(feature = "integration-real-tests")]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use meerkat_comms::{

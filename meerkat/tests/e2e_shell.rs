@@ -1,3 +1,4 @@
+#![cfg(feature = "integration-real-tests")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
 //! These tests verify the full shell tool functionality from tool call to

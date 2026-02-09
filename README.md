@@ -483,13 +483,13 @@ Those tools are **excellent for interactive development**—coding alongside an 
 cargo build --workspace
 
 # Fast tests (unit + integration-fast; skips doctests; default for hooks)
-cargo test --workspace --lib --bins --tests
+cargo test --target-dir target/fast --workspace --lib --bins --tests
 
 # Unit tests only
-cargo test --workspace --lib --bins
+cargo test --target-dir target/fast --workspace --lib --bins
 
 # Integration-fast tests only
-cargo test --workspace --tests
+cargo test --target-dir target/fast --workspace --tests
 
 # Integration-real tests (spawns processes / requires binaries)
 cargo test --workspace integration_real -- --ignored --test-threads=1

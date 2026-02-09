@@ -3,6 +3,8 @@
 # Falls back to full workspace test for root-level changes.
 set -euo pipefail
 
+FAST_TARGET_DIR="${FAST_TARGET_DIR:-target/fast}"
+
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '\.(rs|toml)$' || true)
 
@@ -16,7 +18,7 @@ fi
 # is sufficient — the pre-push hook runs the full workspace test.
 if echo "$STAGED_FILES" | grep -qE '^Cargo\.(toml|lock)$'; then
   echo "Workspace manifest changed — running cargo check."
-  cargo check --workspace
+  CARGO_TARGET_DIR="$FAST_TARGET_DIR" cargo check --workspace
   exit $?
 fi
 
@@ -53,4 +55,4 @@ fi
 
 echo "Testing changed crates:$PKG_FLAGS"
 # shellcheck disable=SC2086
-cargo test $PKG_FLAGS --lib --bins --tests
+CARGO_TARGET_DIR="$FAST_TARGET_DIR" cargo test $PKG_FLAGS --lib --bins --tests

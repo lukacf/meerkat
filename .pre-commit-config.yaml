@@ -5,13 +5,13 @@
 default_stages: [pre-commit]
 
 repos:
-  # Fast tests on commit (unit + integration-fast)
+  # Fast tests on commit — only changed crates
   - repo: local
     hooks:
       - id: cargo-test
-        name: cargo test (fast)
-        entry: make test
-        language: system
+        name: cargo test (changed crates)
+        entry: scripts/test-changed-crates.sh
+        language: script
         types: [rust]
         pass_filenames: false
 

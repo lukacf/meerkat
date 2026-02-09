@@ -1,6 +1,6 @@
 # Roadmap Progress
 
-**Current Phase:** 4
+**Current Phase:** 5
 
 **Current Status:** gating
 
@@ -73,11 +73,11 @@
 
 ## Phase 5 — SDK Builder
 
-- [ ] Builder tool (`tools/sdk-builder/`)
-- [ ] Builder pipeline
-- [ ] Profile presets (minimal, standard, full)
-- [ ] Testing: manifest resolution, preset builds, SDK surface verification
-- [ ] Reproducible, version-locked bundles
+- [x] Builder tool (`tools/sdk-builder/build.py`) — resolves features, builds runtime, emits schemas, runs codegen, emits bundle manifest
+- [x] Builder pipeline (6 steps: resolve features, build runtime, emit schemas, run codegen, package SDKs, emit bundle manifest)
+- [x] Profile presets (minimal, standard, full) in `profiles/` directory
+- [x] Bundle manifest with source commit, features, contract version, hashes, timestamp
+- [ ] Testing: manifest resolution, preset builds, SDK surface verification (requires full release build pipeline)
 
 ---
 
@@ -140,3 +140,11 @@
 - performance-gate: PASS
 - spec-accuracy-gate: PASS (codegen pipeline, Python/TS SDKs, generated types, conformance tests)
 - rust-quality-gate: PASS (no Rust changes in this phase beyond docs)
+
+### Phase 5 — Attempt 1
+
+- build-gate: PASS
+- test-gate: PASS
+- performance-gate: PASS
+- spec-accuracy-gate: PASS (builder pipeline, preset profiles, bundle manifests)
+- rust-quality-gate: PASS

@@ -1,0 +1,17 @@
+# Full profile — everything enabled.
+# Comms, sub-agents, memory, skills, compaction.
+[profile]
+name = "meerkat-full"
+
+[features]
+include = ["comms", "sub-agents", "session-store", "session-compaction", "memory-store", "skills", "mcp"]
+exclude = []
+
+[sdk]
+languages = ["python", "typescript"]
+
+[sdk.python]
+package_name = "meerkat-full"
+
+[sdk.typescript]
+package_name = "@meerkat/full"

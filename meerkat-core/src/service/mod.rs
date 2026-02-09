@@ -36,6 +36,10 @@ pub enum SessionError {
     #[error("no turn running on session: {id}")]
     NotRunning { id: SessionId },
 
+    /// A session store operation failed.
+    #[error("store error: {0}")]
+    Store(#[source] Box<dyn std::error::Error + Send + Sync>),
+
     /// An agent-level error occurred during execution.
     #[error("agent error: {0}")]
     Agent(#[from] crate::error::AgentError),
@@ -50,6 +54,7 @@ impl SessionError {
             Self::PersistenceDisabled => "SESSION_PERSISTENCE_DISABLED",
             Self::CompactionDisabled => "SESSION_COMPACTION_DISABLED",
             Self::NotRunning { .. } => "SESSION_NOT_RUNNING",
+            Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Agent(_) => "AGENT_ERROR",
         }
     }
@@ -141,10 +146,7 @@ impl SessionView {
 #[async_trait]
 pub trait SessionService: Send + Sync {
     /// Create a new session and run the first turn.
-    async fn create_session(
-        &self,
-        req: CreateSessionRequest,
-    ) -> Result<RunResult, SessionError>;
+    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError>;
 
     /// Start a new turn on an existing session.
     async fn start_turn(

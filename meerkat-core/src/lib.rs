@@ -11,9 +11,9 @@ pub mod config_store;
 pub mod error;
 pub mod event;
 pub mod gateway;
-pub mod memory;
 pub mod hooks;
 pub mod mcp_config;
+pub mod memory;
 pub mod ops;
 pub mod prompt;
 pub mod provider;
@@ -63,12 +63,12 @@ pub use ops::{
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
 pub use retry::RetryPolicy;
+pub use schema::{
+    CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
+};
 pub use service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
     SessionUsage, SessionView, StartTurnRequest,
-};
-pub use schema::{
-    CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };
 pub use session::{SESSION_VERSION, Session, SessionMeta, SessionMetadata, SessionTooling};
 pub use state::LoopState;

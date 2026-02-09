@@ -65,6 +65,7 @@ where
     }
 
     /// The main agent loop
+    #[allow(unused_assignments)]
     pub(super) async fn run_loop(
         &mut self,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
@@ -72,12 +73,20 @@ where
         let mut turn_count = 0u32;
         let max_turns = self.config.max_turns.unwrap_or(100);
         let mut tool_call_count = 0u32;
+        let mut event_stream_open = true;
 
         // Helper to conditionally emit events (only when listener exists)
         macro_rules! emit_event {
             ($event:expr) => {
-                if let Some(ref tx) = event_tx {
-                    let _ = tx.send($event).await;
+                if event_stream_open {
+                    if let Some(ref tx) = event_tx {
+                        if tx.send($event).await.is_err() {
+                            event_stream_open = false;
+                            tracing::warn!(
+                                "agent event stream receiver dropped; continuing without streaming events"
+                            );
+                        }
+                    }
                 }
             };
         }

@@ -12,10 +12,11 @@ if [ -z "$STAGED_FILES" ]; then
 fi
 
 # Check for root-level manifest changes (workspace Cargo.toml, Cargo.lock).
-# These can affect all crates, so run the full workspace test.
+# These affect dependency resolution but rarely break tests. A fast check
+# is sufficient — the pre-push hook runs the full workspace test.
 if echo "$STAGED_FILES" | grep -qE '^Cargo\.(toml|lock)$'; then
-  echo "Workspace manifest changed — running full workspace test."
-  cargo test --workspace --lib --bins --tests
+  echo "Workspace manifest changed — running cargo check."
+  cargo check --workspace
   exit $?
 fi
 

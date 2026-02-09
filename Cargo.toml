@@ -122,3 +122,6 @@ similar_names = "allow"
 doc_markdown = "allow"
 match_bool = "allow"
 items_after_statements = "allow"
+
+[patch.crates-io]
+hnsw_rs = { path = "vendor/hnsw_rs" }

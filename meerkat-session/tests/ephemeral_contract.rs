@@ -72,7 +72,6 @@ impl SessionAgent for MockAgent {
 
     fn snapshot(&self) -> SessionSnapshot {
         SessionSnapshot {
-            session_id: self.session_id.clone(),
             created_at: SystemTime::now(),
             updated_at: SystemTime::now(),
             message_count: self.message_count,
@@ -94,16 +93,28 @@ impl SessionAgent for MockAgent {
 
 struct MockAgentBuilder {
     delay_ms: Option<u64>,
+    build_delay_ms: Option<u64>,
 }
 
 impl MockAgentBuilder {
     fn new() -> Self {
-        Self { delay_ms: None }
+        Self {
+            delay_ms: None,
+            build_delay_ms: None,
+        }
     }
 
     fn with_delay(delay_ms: u64) -> Self {
         Self {
             delay_ms: Some(delay_ms),
+            build_delay_ms: None,
+        }
+    }
+
+    fn with_build_delay(build_delay_ms: u64) -> Self {
+        Self {
+            delay_ms: None,
+            build_delay_ms: Some(build_delay_ms),
         }
     }
 }
@@ -117,6 +128,9 @@ impl SessionAgentBuilder for MockAgentBuilder {
         _req: &CreateSessionRequest,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<MockAgent, SessionError> {
+        if let Some(delay) = self.build_delay_ms {
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+        }
         Ok(MockAgent {
             session_id: SessionId::new(),
             message_count: 0,
@@ -196,6 +210,40 @@ async fn test_list_sessions() {
 
     let sessions = service.list(SessionQuery::default()).await.unwrap();
     assert_eq!(sessions.len(), 2);
+}
+
+#[tokio::test]
+async fn test_create_session_capacity_is_atomic() {
+    let service = Arc::new(EphemeralSessionService::new(
+        MockAgentBuilder::with_build_delay(100),
+        1,
+    ));
+
+    let s1 = service.clone();
+    let t1 = tokio::spawn(async move { s1.create_session(create_req("A")).await });
+    let s2 = service.clone();
+    let t2 = tokio::spawn(async move { s2.create_session(create_req("B")).await });
+
+    let r1 = t1.await.unwrap();
+    let r2 = t2.await.unwrap();
+
+    let mut ok_count = 0;
+    let mut err_count = 0;
+    for result in [r1, r2] {
+        match result {
+            Ok(_) => ok_count += 1,
+            Err(err) => {
+                assert_eq!(err.code(), "AGENT_ERROR");
+                err_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(ok_count, 1);
+    assert_eq!(err_count, 1);
+
+    let sessions = service.list(SessionQuery::default()).await.unwrap();
+    assert_eq!(sessions.len(), 1);
 }
 
 #[tokio::test]

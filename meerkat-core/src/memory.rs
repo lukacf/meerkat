@@ -31,11 +31,7 @@ pub struct MemoryResult {
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Index text content with associated metadata.
-    async fn index(
-        &self,
-        content: &str,
-        metadata: MemoryMetadata,
-    ) -> Result<(), MemoryStoreError>;
+    async fn index(&self, content: &str, metadata: MemoryMetadata) -> Result<(), MemoryStoreError>;
 
     /// Search for memories matching the query.
     async fn search(

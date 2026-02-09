@@ -77,9 +77,5 @@ pub trait Compactor: Send + Sync {
     /// 2. Inject a summary message.
     /// 3. Retain recent complete turns per `recent_turn_budget`.
     /// 4. Return everything else as `discarded`.
-    fn rebuild_history(
-        &self,
-        messages: &[Message],
-        summary: &str,
-    ) -> CompactionResult;
+    fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult;
 }

@@ -3,8 +3,8 @@
 //! The Agent struct ties together all components and runs the agent loop.
 
 mod builder;
-pub mod compact;
 pub mod comms_impl;
+pub mod compact;
 mod extraction;
 mod hook_impl;
 mod runner;

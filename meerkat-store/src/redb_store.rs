@@ -13,8 +13,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const SESSIONS_BY_ID: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("redb_sessions_by_id");
+const SESSIONS_BY_ID: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redb_sessions_by_id");
 const SESSIONS_BY_UPDATED: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("redb_sessions_by_updated");
 const EMPTY_VALUE: &[u8] = &[];
@@ -80,8 +79,7 @@ impl SessionStore for RedbSessionStore {
         let id_key = session_id_key(session.id());
         let upd_key = updated_key(session.id(), session.updated_at());
         let session_id = session.id().clone();
-        let json = serde_json::to_vec(session)
-            .map_err(StoreError::Serialization)?;
+        let json = serde_json::to_vec(session).map_err(StoreError::Serialization)?;
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -142,8 +140,8 @@ impl SessionStore for RedbSessionStore {
                 .map_err(|e| StoreError::Database(Box::new(e.into())))?
             {
                 Some(data) => {
-                    let session: Session = serde_json::from_slice(data.value())
-                        .map_err(StoreError::Serialization)?;
+                    let session: Session =
+                        serde_json::from_slice(data.value()).map_err(StoreError::Serialization)?;
                     Ok(Some(session))
                 }
                 None => Ok(None),
@@ -157,87 +155,87 @@ impl SessionStore for RedbSessionStore {
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || {
-        let read_txn = db
-            .begin_read()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let by_id = read_txn
-            .open_table(SESSIONS_BY_ID)
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let by_updated = read_txn
-            .open_table(SESSIONS_BY_UPDATED)
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+            let read_txn = db
+                .begin_read()
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+            let by_id = read_txn
+                .open_table(SESSIONS_BY_ID)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+            let by_updated = read_txn
+                .open_table(SESSIONS_BY_UPDATED)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
-        let count = by_updated
-            .len()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let mut results = Vec::with_capacity(count as usize);
+            let count = by_updated
+                .len()
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+            let mut results = Vec::with_capacity(count as usize);
 
-        let iter = by_updated
-            .iter()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+            let iter = by_updated
+                .iter()
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
-        for entry in iter {
-            let (key_guard, _) = entry.map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            let key_bytes = key_guard.value();
-            if key_bytes.len() < 24 {
-                continue;
-            }
+            for entry in iter {
+                let (key_guard, _) = entry.map_err(|e| StoreError::Database(Box::new(e.into())))?;
+                let key_bytes = key_guard.value();
+                if key_bytes.len() < 24 {
+                    continue;
+                }
 
-            // Extract session ID from key (bytes 8..24)
-            let mut uuid_bytes = [0u8; 16];
-            uuid_bytes.copy_from_slice(&key_bytes[8..24]);
-            let session_id = SessionId(Uuid::from_bytes(uuid_bytes));
+                // Extract session ID from key (bytes 8..24)
+                let mut uuid_bytes = [0u8; 16];
+                uuid_bytes.copy_from_slice(&key_bytes[8..24]);
+                let session_id = SessionId(Uuid::from_bytes(uuid_bytes));
 
-            // Load the full session to build meta
-            let id_key = session_id_key(&session_id);
-            if let Some(data) = by_id
-                .get(id_key.as_slice())
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?
-            {
-                if let Ok(session) = serde_json::from_slice::<Session>(data.value()) {
-                    let meta = SessionMeta::from(&session);
+                // Load the full session to build meta
+                let id_key = session_id_key(&session_id);
+                if let Some(data) = by_id
+                    .get(id_key.as_slice())
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?
+                {
+                    if let Ok(session) = serde_json::from_slice::<Session>(data.value()) {
+                        let meta = SessionMeta::from(&session);
 
-                    // Apply filters
-                    if let Some(after) = filter.created_after {
-                        if meta.created_at < after {
-                            continue;
+                        // Apply filters
+                        if let Some(after) = filter.created_after {
+                            if meta.created_at < after {
+                                continue;
+                            }
                         }
-                    }
-                    if let Some(after) = filter.updated_after {
-                        if meta.updated_at < after {
-                            continue;
+                        if let Some(after) = filter.updated_after {
+                            if meta.updated_at < after {
+                                continue;
+                            }
                         }
-                    }
 
-                    results.push(meta);
+                        results.push(meta);
 
-                    // Early exit: collect enough to satisfy offset + limit without overflow.
-                    let effective_limit = filter
-                        .offset
-                        .unwrap_or(0)
-                        .saturating_add(filter.limit.unwrap_or(usize::MAX));
-                    if results.len() >= effective_limit {
-                        break;
+                        // Early exit: collect enough to satisfy offset + limit without overflow.
+                        let effective_limit = filter
+                            .offset
+                            .unwrap_or(0)
+                            .saturating_add(filter.limit.unwrap_or(usize::MAX));
+                        if results.len() >= effective_limit {
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        // Apply offset
-        if let Some(offset) = filter.offset {
-            if offset < results.len() {
-                results = results.split_off(offset);
-            } else {
-                results.clear();
+            // Apply offset
+            if let Some(offset) = filter.offset {
+                if offset < results.len() {
+                    results = results.split_off(offset);
+                } else {
+                    results.clear();
+                }
             }
-        }
 
-        // Apply limit
-        if let Some(limit) = filter.limit {
-            results.truncate(limit);
-        }
+            // Apply limit
+            if let Some(limit) = filter.limit {
+                results.truncate(limit);
+            }
 
-        Ok(results)
+            Ok(results)
         })
         .await
         .map_err(StoreError::Join)?

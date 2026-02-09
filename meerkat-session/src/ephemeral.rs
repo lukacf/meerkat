@@ -8,14 +8,14 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
+    SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, Usage};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
-use tokio::sync::{RwLock, mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
 
 /// Capacity for the internal agent event channel.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -38,7 +38,6 @@ enum SessionState {
 /// Snapshot of session metadata for read/list operations.
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
-    pub session_id: SessionId,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
     pub message_count: usize,
@@ -87,7 +86,7 @@ struct SessionHandle {
     /// `StartTurn`, guaranteeing that only one turn is admitted at a time.
     /// Reset to `false` by the session task after the turn completes.
     turn_lock: Arc<AtomicBool>,
-    session_id: SessionId,
+    _capacity_permit: OwnedSemaphorePermit,
     created_at: SystemTime,
 }
 
@@ -147,6 +146,7 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
     builder: B,
     max_sessions: usize,
+    session_capacity: Arc<Semaphore>,
 }
 
 impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
@@ -156,6 +156,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             sessions: RwLock::new(IndexMap::new()),
             builder,
             max_sessions,
+            session_capacity: Arc::new(Semaphore::new(max_sessions)),
         }
     }
 
@@ -168,9 +169,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
     ) -> Result<meerkat_core::Session, SessionError> {
         let sessions = self.sessions.read().await;
-        let handle = sessions.get(id).ok_or_else(|| SessionError::NotFound {
-            id: id.clone(),
-        })?;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
@@ -199,47 +200,40 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     }
 
     /// Acquire the turn lock atomically. Returns Err(Busy) if already locked.
-    fn try_acquire_turn(handle: &SessionHandle) -> Result<(), SessionError> {
-        match handle.turn_lock.compare_exchange(
-            false,
-            true,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+    fn try_acquire_turn(id: &SessionId, handle: &SessionHandle) -> Result<(), SessionError> {
+        match handle
+            .turn_lock
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => Ok(()),
-            Err(_) => Err(SessionError::Busy {
-                id: handle.session_id.clone(),
-            }),
+            Err(_) => Err(SessionError::Busy { id: id.clone() }),
         }
     }
 }
 
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionService<B> {
-    async fn create_session(
-        &self,
-        req: CreateSessionRequest,
-    ) -> Result<RunResult, SessionError> {
-        // Check capacity
-        {
-            let sessions = self.sessions.read().await;
-            if sessions.len() >= self.max_sessions {
+    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+        // Reserve capacity up front so two concurrent create_session calls cannot race
+        // past max_sessions between check and insert.
+        let capacity_permit = match self.session_capacity.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let active = self.sessions.read().await.len();
                 return Err(SessionError::Agent(
                     meerkat_core::error::AgentError::InternalError(format!(
                         "Max sessions reached ({}/{})",
-                        sessions.len(),
-                        self.max_sessions
+                        active, self.max_sessions
                     )),
                 ));
             }
-        }
+        };
 
         let prompt = req.prompt.clone();
         let caller_event_tx = req.event_tx.clone();
 
         // Create the permanent event channel for this session.
-        let (agent_event_tx, agent_event_rx) =
-            mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
+        let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
 
         // Build the agent
         let agent = self
@@ -278,39 +272,66 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             state_rx,
             summary_rx,
             turn_lock: turn_lock.clone(),
-            session_id: session_id.clone(),
+            _capacity_permit: capacity_permit,
             created_at,
         };
 
         // Acquire turn lock for the first turn (cannot fail — fresh session)
         turn_lock.store(true, Ordering::Release);
 
-        {
+        let inserted = {
             let mut sessions = self.sessions.write().await;
-            sessions.insert(session_id.clone(), handle);
+            if sessions.contains_key(&session_id) {
+                false
+            } else {
+                sessions.insert(session_id.clone(), handle);
+                true
+            }
+        };
+        if !inserted {
+            // Duplicate IDs are unexpected but can happen if the builder returns a reused ID.
+            // Stop the task so it does not leak in the background.
+            let _ = command_tx.send(SessionCommand::Shutdown).await;
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "Duplicate session ID generated: {session_id}"
+                )),
+            ));
         }
 
         // Run the first turn
         let (result_tx, result_rx) = oneshot::channel();
-        command_tx
+        if command_tx
             .send(SessionCommand::StartTurn {
                 prompt,
                 event_tx: caller_event_tx,
                 result_tx,
             })
             .await
-            .map_err(|_| {
-                turn_lock.store(false, Ordering::Release);
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+            .is_err()
+        {
+            turn_lock.store(false, Ordering::Release);
+            let mut sessions = self.sessions.write().await;
+            sessions.swap_remove(&session_id);
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(
                     "Session task exited before first turn".to_string(),
-                ))
-            })?;
+                ),
+            ));
+        }
 
-        let result = result_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped the result channel".to_string(),
-            ))
-        })?;
+        let result = match result_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                let mut sessions = self.sessions.write().await;
+                sessions.swap_remove(&session_id);
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(
+                        "Session task dropped the result channel".to_string(),
+                    ),
+                ));
+            }
+        };
 
         result.map_err(SessionError::Agent)
     }
@@ -324,13 +345,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
         {
             let sessions = self.sessions.read().await;
-            let handle = sessions.get(id).ok_or_else(|| SessionError::NotFound {
-                id: id.clone(),
-            })?;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
             // Atomic busy check via compare-and-swap. This is the single
             // point of admission — if two callers race, exactly one wins.
-            Self::try_acquire_turn(handle)?;
+            Self::try_acquire_turn(id, handle)?;
 
             handle
                 .command_tx
@@ -359,9 +380,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
         let sessions = self.sessions.read().await;
-        let handle = sessions.get(id).ok_or_else(|| SessionError::NotFound {
-            id: id.clone(),
-        })?;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
         // Check turn_lock atomically — if false, no turn is running.
         // This avoids the TOCTOU race of checking state_rx then sending.
@@ -386,9 +407,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         let sessions = self.sessions.read().await;
-        let handle = sessions.get(id).ok_or_else(|| SessionError::NotFound {
-            id: id.clone(),
-        })?;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
@@ -410,7 +431,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let is_active = *handle.state_rx.borrow() == SessionState::Running;
         Ok(SessionView {
             state: SessionInfo {
-                session_id: snapshot.session_id,
+                session_id: id.clone(),
                 created_at: snapshot.created_at,
                 updated_at: snapshot.updated_at,
                 message_count: snapshot.message_count,
@@ -427,12 +448,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     async fn list(&self, query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
         let sessions = self.sessions.read().await;
         let mut summaries: Vec<SessionSummary> = sessions
-            .values()
-            .map(|h| {
+            .iter()
+            .map(|(session_id, h)| {
                 let state = *h.state_rx.borrow();
                 let cache = h.summary_rx.borrow();
                 SessionSummary {
-                    session_id: h.session_id.clone(),
+                    session_id: session_id.clone(),
                     created_at: h.created_at,
                     updated_at: cache.updated_at,
                     message_count: cache.message_count,
@@ -458,9 +479,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
         let mut sessions = self.sessions.write().await;
-        let handle = sessions.swap_remove(id).ok_or_else(|| SessionError::NotFound {
-            id: id.clone(),
-        })?;
+        let handle = sessions
+            .swap_remove(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())
@@ -492,6 +513,7 @@ async fn session_task<A: SessionAgent>(
                 result_tx,
             } => {
                 state_tx.send_replace(SessionState::Running);
+                let mut event_stream_open = true;
 
                 // Scope the pinned future so its mutable borrow of `agent` is
                 // released before we call `agent.snapshot()`.
@@ -503,8 +525,13 @@ async fn session_task<A: SessionAgent>(
                         tokio::select! {
                             result = &mut run_fut => break result,
                             Some(event) = agent_event_rx.recv() => {
-                                if let Some(ref tx) = event_tx {
-                                    let _ = tx.send(event).await;
+                                if event_stream_open {
+                                    if let Some(ref tx) = event_tx {
+                                        if tx.send(event).await.is_err() {
+                                            event_stream_open = false;
+                                            tracing::warn!("session event stream receiver dropped; continuing without streaming events");
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -512,8 +539,15 @@ async fn session_task<A: SessionAgent>(
 
                     // Drain any remaining events
                     while let Ok(event) = agent_event_rx.try_recv() {
-                        if let Some(ref tx) = event_tx {
-                            let _ = tx.send(event).await;
+                        if event_stream_open {
+                            if let Some(ref tx) = event_tx {
+                                if tx.send(event).await.is_err() {
+                                    event_stream_open = false;
+                                    tracing::warn!(
+                                        "session event stream receiver dropped while draining events"
+                                    );
+                                }
+                            }
                         }
                     }
 

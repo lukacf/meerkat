@@ -1,10 +1,7 @@
 //! Adapters to bridge existing crate types to agent traits
 
 use async_trait::async_trait;
-use meerkat_core::{
-    ToolCallView, ToolDef, ToolResult,
-    agent::AgentToolDispatcher,
-};
+use meerkat_core::{ToolCallView, ToolDef, ToolResult, agent::AgentToolDispatcher};
 use meerkat_tools::ToolError;
 use serde_json::Value;
 use std::sync::Arc;

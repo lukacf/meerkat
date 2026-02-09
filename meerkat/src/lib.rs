@@ -151,11 +151,11 @@ pub use meerkat_core::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
     SessionUsage, SessionView, StartTurnRequest,
 };
-pub use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
 #[cfg(feature = "session-compaction")]
 pub use meerkat_session::DefaultCompactor;
 #[cfg(feature = "session-store")]
 pub use meerkat_session::PersistentSessionService;
+pub use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
 
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;

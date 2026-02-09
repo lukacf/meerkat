@@ -140,6 +140,10 @@ pub struct AgentBuildConfig {
     pub event_tx: Option<mpsc::Sender<AgentEvent>>,
     /// Override LLM client (for testing or embedding).
     pub llm_client_override: Option<Arc<dyn LlmClient>>,
+    /// Provider-specific parameters (e.g., thinking config, reasoning effort).
+    pub provider_params: Option<serde_json::Value>,
+    /// External tool dispatcher to compose with builtins (e.g., MCP callback tools).
+    pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -163,6 +167,8 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("budget_limits", &self.budget_limits)
             .field("event_tx", &self.event_tx.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
+            .field("provider_params", &self.provider_params.is_some())
+            .field("external_tools", &self.external_tools.is_some())
             .finish()
     }
 }
@@ -184,6 +190,8 @@ impl AgentBuildConfig {
             budget_limits: None,
             event_tx: None,
             llm_client_override: None,
+            provider_params: None,
+            external_tools: None,
         }
     }
 }
@@ -505,23 +513,23 @@ impl AgentFactory {
             }
         };
 
-        // 4. Create LLM adapter
+        // 4. Create LLM adapter (with optional provider_params and event channel)
         let model = build_config.model.clone();
-        let llm_adapter: Arc<dyn AgentLlmClient> = match build_config.event_tx.clone() {
-            Some(tx) => Arc::new(LlmClientAdapter::with_event_channel(
-                llm_client,
-                model.clone(),
-                tx,
-            )),
-            None => Arc::new(LlmClientAdapter::new(llm_client, model.clone())),
+        let mut llm_adapter_inner = match build_config.event_tx.clone() {
+            Some(tx) => LlmClientAdapter::with_event_channel(llm_client, model.clone(), tx),
+            None => LlmClientAdapter::new(llm_client, model.clone()),
         };
+        if let Some(params) = build_config.provider_params.clone() {
+            llm_adapter_inner = llm_adapter_inner.with_provider_params(Some(params));
+        }
+        let llm_adapter: Arc<dyn AgentLlmClient> = Arc::new(llm_adapter_inner);
 
         // 5. Resolve max_tokens
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
 
-        // 6. Build tool dispatcher
+        // 6. Build tool dispatcher (with optional external tools)
         let (mut tools, mut tool_usage_instructions) =
-            self.build_tool_dispatcher_for_agent(config)?;
+            self.build_tool_dispatcher_for_agent(config, build_config.external_tools)?;
 
         // 7. Create session store adapter
         #[cfg(feature = "jsonl-store")]
@@ -620,6 +628,16 @@ impl AgentFactory {
             builder = builder.with_hook_engine(engine);
         }
 
+        // 12b. Wire compactor (when session-compaction is enabled)
+        #[cfg(feature = "session-compaction")]
+        {
+            use meerkat_core::CompactionConfig;
+            let compactor = Arc::new(meerkat_session::DefaultCompactor::new(
+                CompactionConfig::default(),
+            ));
+            builder = builder.compactor(compactor);
+        }
+
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
 
@@ -648,9 +666,14 @@ impl AgentFactory {
     fn build_tool_dispatcher_for_agent(
         &self,
         _config: &Config,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !self.enable_builtins {
-            return Ok((Arc::new(EmptyToolDispatcher), String::new()));
+            // No builtins — return the external tools if provided, otherwise empty.
+            return match external {
+                Some(ext) => Ok((ext, String::new())),
+                None => Ok((Arc::new(EmptyToolDispatcher), String::new())),
+            };
         }
 
         // Create a task store - use in-memory for simplicity; callers that need
@@ -685,9 +708,9 @@ impl AgentFactory {
             BuiltinToolConfig::default()
         };
 
-        // Create composite dispatcher
+        // Create composite dispatcher (with optional external tools)
         let dispatcher =
-            CompositeDispatcher::new(task_store, &builtin_config, shell_config, None, None)?;
+            CompositeDispatcher::new(task_store, &builtin_config, shell_config, external, None)?;
         let usage_instructions = dispatcher.usage_instructions();
 
         Ok((Arc::new(dispatcher), usage_instructions))

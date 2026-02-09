@@ -45,10 +45,18 @@ pub fn build_compaction_context(
     last_compaction_turn: Option<u32>,
     current_turn: u32,
 ) -> CompactionContext {
+    let estimated_history_tokens = match estimate_tokens(messages) {
+        Ok(tokens) => tokens,
+        Err(err) => {
+            tracing::warn!("failed to estimate history tokens for compaction context: {err}");
+            0
+        }
+    };
+
     CompactionContext {
         last_input_tokens,
         message_count: messages.len(),
-        estimated_history_tokens: estimate_tokens(messages).unwrap_or(0),
+        estimated_history_tokens,
         last_compaction_turn,
         current_turn,
     }
@@ -74,16 +82,24 @@ where
 {
     let estimated = estimate_tokens(messages)?;
     let message_count = messages.len();
+    let mut event_stream_open = true;
 
     // 1. Emit CompactionStarted
-    if let Some(tx) = event_tx {
-        let _ = tx
-            .send(AgentEvent::CompactionStarted {
-                input_tokens: last_input_tokens,
-                estimated_history_tokens: estimated,
-                message_count,
-            })
-            .await;
+    if event_stream_open {
+        if let Some(tx) = event_tx {
+            if tx
+                .send(AgentEvent::CompactionStarted {
+                    input_tokens: last_input_tokens,
+                    estimated_history_tokens: estimated,
+                    message_count,
+                })
+                .await
+                .is_err()
+            {
+                event_stream_open = false;
+                tracing::warn!("compaction event stream receiver dropped before CompactionStarted");
+            }
+        }
     }
 
     // 2. Build the compaction prompt messages
@@ -110,24 +126,40 @@ where
                 }
             }
             if summary.is_empty() {
-                if let Some(tx) = event_tx {
-                    let _ = tx
-                        .send(AgentEvent::CompactionFailed {
-                            error: "LLM returned empty summary".to_string(),
-                        })
-                        .await;
+                if event_stream_open {
+                    if let Some(tx) = event_tx {
+                        if tx
+                            .send(AgentEvent::CompactionFailed {
+                                error: "LLM returned empty summary".to_string(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                "compaction event stream receiver dropped before CompactionFailed"
+                            );
+                        }
+                    }
                 }
                 return Err(CompactionError::EmptySummary);
             }
             (summary, result.usage().clone())
         }
         Err(e) => {
-            if let Some(tx) = event_tx {
-                let _ = tx
-                    .send(AgentEvent::CompactionFailed {
-                        error: e.to_string(),
-                    })
-                    .await;
+            if event_stream_open {
+                if let Some(tx) = event_tx {
+                    if tx
+                        .send(AgentEvent::CompactionFailed {
+                            error: e.to_string(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            "compaction event stream receiver dropped before CompactionFailed"
+                        );
+                    }
+                }
             }
             return Err(CompactionError::LlmFailed(e));
         }
@@ -138,14 +170,22 @@ where
     let messages_after = result.messages.len();
 
     // 5. Emit CompactionCompleted
-    if let Some(tx) = event_tx {
-        let _ = tx
-            .send(AgentEvent::CompactionCompleted {
-                summary_tokens: summary_usage.output_tokens,
-                messages_before: message_count,
-                messages_after,
-            })
-            .await;
+    if event_stream_open {
+        if let Some(tx) = event_tx {
+            if tx
+                .send(AgentEvent::CompactionCompleted {
+                    summary_tokens: summary_usage.output_tokens,
+                    messages_before: message_count,
+                    messages_after,
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    "compaction event stream receiver dropped before CompactionCompleted"
+                );
+            }
+        }
     }
 
     Ok(CompactionOutcome {

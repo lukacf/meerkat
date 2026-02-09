@@ -13,6 +13,7 @@ pub fn jsonrpc_code(err: &SessionError) -> i64 {
         SessionError::PersistenceDisabled => -32003,
         SessionError::CompactionDisabled => -32004,
         SessionError::NotRunning { .. } => -32005,
+        SessionError::Store(_) => -32006,
         SessionError::Agent(_) => -32000,
     }
 }
@@ -25,6 +26,7 @@ pub fn http_status(err: &SessionError) -> u16 {
         SessionError::PersistenceDisabled => 501,
         SessionError::CompactionDisabled => 501,
         SessionError::NotRunning { .. } => 409,
+        SessionError::Store(_) => 500,
         SessionError::Agent(_) => 500,
     }
 }

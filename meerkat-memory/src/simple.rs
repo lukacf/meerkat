@@ -40,11 +40,7 @@ impl Default for SimpleMemoryStore {
 
 #[async_trait]
 impl MemoryStore for SimpleMemoryStore {
-    async fn index(
-        &self,
-        content: &str,
-        metadata: MemoryMetadata,
-    ) -> Result<(), MemoryStoreError> {
+    async fn index(&self, content: &str, metadata: MemoryMetadata) -> Result<(), MemoryStoreError> {
         let mut entries = self.entries.write().await;
         entries.push(MemoryEntry {
             content: content.to_string(),
@@ -86,7 +82,11 @@ impl MemoryStore for SimpleMemoryStore {
             .collect();
 
         // Sort by score descending
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
 
         Ok(results)
@@ -155,10 +155,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_no_match() {
         let store = SimpleMemoryStore::new();
-        store
-            .index("Hello world", meta("s1"))
-            .await
-            .unwrap();
+        store.index("Hello world", meta("s1")).await.unwrap();
 
         let results = store.search("quantum computing", 10).await.unwrap();
         assert!(results.is_empty());

@@ -38,7 +38,9 @@ impl SessionProjector {
 
     /// Session directory path: `{output_dir}/sessions/{session_id}/`
     fn session_dir(&self, session_id: &SessionId) -> PathBuf {
-        self.output_dir.join("sessions").join(session_id.to_string())
+        self.output_dir
+            .join("sessions")
+            .join(session_id.to_string())
     }
 
     /// Project events for a session from the given checkpoint.
@@ -119,8 +121,24 @@ impl SessionProjector {
     pub async fn read_checkpoint(&self, session_id: &SessionId) -> u64 {
         let path = self.session_dir(session_id).join("checkpoint");
         match tokio::fs::read_to_string(&path).await {
-            Ok(s) => s.trim().parse().unwrap_or(0),
-            Err(_) => 0,
+            Ok(s) => match s.trim().parse() {
+                Ok(seq) => seq,
+                Err(err) => {
+                    tracing::warn!(
+                        checkpoint = ?path,
+                        "invalid checkpoint contents (defaulting to 0): {err}"
+                    );
+                    0
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(err) => {
+                tracing::warn!(
+                    checkpoint = ?path,
+                    "failed to read checkpoint (defaulting to 0): {err}"
+                );
+                0
+            }
         }
     }
 
@@ -170,7 +188,7 @@ pub enum ProjectionError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::event_store::{EventStoreError, StoredEvent, EVENT_SCHEMA_VERSION};
+    use crate::event_store::{EVENT_SCHEMA_VERSION, EventStoreError, StoredEvent};
     use meerkat_core::types::Usage;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -191,9 +209,7 @@ mod tests {
 
         fn add_events(&self, session_id: &SessionId, agent_events: &[AgentEvent]) {
             let mut map = self.events.lock().unwrap();
-            let entry = map
-                .entry(session_id.to_string())
-                .or_insert_with(Vec::new);
+            let entry = map.entry(session_id.to_string()).or_insert_with(Vec::new);
             let base_seq = entry.len() as u64;
             for (i, event) in agent_events.iter().enumerate() {
                 entry.push(StoredEvent {
@@ -310,18 +326,14 @@ mod tests {
         let seq1 = projector.replay(&store, &sid).await.unwrap();
 
         // Get file content after first projection
-        let events_content_1 = std::fs::read_to_string(
-            projector.session_dir(&sid).join("events.jsonl"),
-        )
-        .unwrap();
+        let events_content_1 =
+            std::fs::read_to_string(projector.session_dir(&sid).join("events.jsonl")).unwrap();
 
         // Replay (should produce identical output)
         let seq2 = projector.replay(&store, &sid).await.unwrap();
 
-        let events_content_2 = std::fs::read_to_string(
-            projector.session_dir(&sid).join("events.jsonl"),
-        )
-        .unwrap();
+        let events_content_2 =
+            std::fs::read_to_string(projector.session_dir(&sid).join("events.jsonl")).unwrap();
 
         assert_eq!(seq1, seq2);
         assert_eq!(events_content_1, events_content_2);
@@ -335,10 +347,7 @@ mod tests {
         let sid = SessionId::new();
 
         // Add first batch
-        store.add_events(
-            &sid,
-            &[AgentEvent::TurnStarted { turn_number: 0 }],
-        );
+        store.add_events(&sid, &[AgentEvent::TurnStarted { turn_number: 0 }]);
         projector.project(&store, &sid, 1).await.unwrap();
 
         // Verify checkpoint
@@ -361,10 +370,8 @@ mod tests {
         assert_eq!(seq, 3);
 
         // events.jsonl should have all 3 events
-        let events_content = std::fs::read_to_string(
-            projector.session_dir(&sid).join("events.jsonl"),
-        )
-        .unwrap();
+        let events_content =
+            std::fs::read_to_string(projector.session_dir(&sid).join("events.jsonl")).unwrap();
         let lines: Vec<&str> = events_content.trim().split('\n').collect();
         assert_eq!(lines.len(), 3);
     }

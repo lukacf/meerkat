@@ -8,12 +8,12 @@
 
 use async_trait::async_trait;
 use indexmap::IndexSet;
-use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionSummary, SessionUsage, SessionView, StartTurnRequest,
-};
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
+use meerkat_core::service::{
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
+    SessionUsage, SessionView, StartTurnRequest,
+};
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_store::SessionStore;
 use std::sync::Arc;
@@ -32,11 +32,7 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Create a new persistent session service.
-    pub fn new(
-        builder: B,
-        max_sessions: usize,
-        store: Arc<dyn SessionStore>,
-    ) -> Self {
+    pub fn new(builder: B, max_sessions: usize, store: Arc<dyn SessionStore>) -> Self {
         Self {
             inner: EphemeralSessionService::new(builder, max_sessions),
             store,
@@ -46,10 +42,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
-    async fn create_session(
-        &self,
-        req: CreateSessionRequest,
-    ) -> Result<RunResult, SessionError> {
+    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
         let result = self.inner.create_session(req).await?;
 
         // Persist the full session snapshot (messages + metadata) after first turn.
@@ -85,11 +78,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                     .store
                     .load(id)
                     .await
-                    .map_err(|e| {
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            format!("Store load failed: {e}"),
-                        ))
-                    })?
+                    .map_err(|e| SessionError::Store(Box::new(e)))?
                     .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
                 Ok(SessionView {
@@ -121,11 +110,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             .store
             .list(meerkat_store::SessionFilter::default())
             .await
-            .map_err(|e| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    format!("Store list failed: {e}"),
-                ))
-            })?;
+            .map_err(|e| SessionError::Store(Box::new(e)))?;
 
         for meta in stored {
             if !live_ids.contains(&meta.id) {
@@ -168,10 +153,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     async fn persist_full_session(&self, id: &SessionId) -> Result<(), SessionError> {
         let session = self.inner.export_session(id).await?;
 
-        self.store.save(&session).await.map_err(|e| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                format!("Store save failed: {e}"),
-            ))
-        })
+        self.store
+            .save(&session)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))
     }
 }

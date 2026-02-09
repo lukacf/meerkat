@@ -148,9 +148,7 @@ pub enum AgentEvent {
     },
 
     /// Context compaction failed (non-fatal — agent continues with uncompacted history).
-    CompactionFailed {
-        error: String,
-    },
+    CompactionFailed { error: String },
 
     // === Budget ===
     /// Budget warning (approaching limits)

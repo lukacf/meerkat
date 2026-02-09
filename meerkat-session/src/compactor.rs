@@ -2,9 +2,7 @@
 //!
 //! Gated behind the `session-compaction` feature.
 
-use meerkat_core::compact::{
-    CompactionConfig, CompactionContext, CompactionResult, Compactor,
-};
+use meerkat_core::compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
 use meerkat_core::types::Message;
 
 /// Summarization prompt sent to the LLM with the current history.
@@ -65,11 +63,7 @@ impl Compactor for DefaultCompactor {
         self.config.max_summary_tokens
     }
 
-    fn rebuild_history(
-        &self,
-        messages: &[Message],
-        summary: &str,
-    ) -> CompactionResult {
+    fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
         let mut rebuilt = Vec::new();
         let mut discarded = Vec::new();
 
@@ -211,7 +205,7 @@ mod tests {
                 content: "turn3".to_string(),
             }),
         ];
-        let result = c.rebuild_history(&messages,"summary text");
+        let result = c.rebuild_history(&messages, "summary text");
         assert!(matches!(&result.messages[0], Message::System(s) if s.content == "system"));
     }
 
@@ -232,7 +226,7 @@ mod tests {
                 content: "turn3".to_string(),
             }),
         ];
-        let result = c.rebuild_history(&messages,"summary");
+        let result = c.rebuild_history(&messages, "summary");
         // Summary + last 1 turn (turn3)
         assert_eq!(result.messages.len(), 2); // summary + turn3
         assert_eq!(result.discarded.len(), 2); // turn1, turn2
@@ -258,10 +252,33 @@ mod tests {
                 content: "t4".to_string(),
             }),
         ];
-        let result = c.rebuild_history(&messages,"summary");
+        let result = c.rebuild_history(&messages, "summary");
         // summary + last 2 turns (t3, t4)
         assert_eq!(result.messages.len(), 3);
         assert_eq!(result.discarded.len(), 2); // t1, t2
+    }
+
+    #[test]
+    fn test_rebuild_budget_larger_than_history_keeps_all_turns() {
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 10,
+            ..make_config()
+        });
+        let messages = vec![
+            Message::User(UserMessage {
+                content: "t1".to_string(),
+            }),
+            Message::User(UserMessage {
+                content: "t2".to_string(),
+            }),
+            Message::User(UserMessage {
+                content: "t3".to_string(),
+            }),
+        ];
+        let result = c.rebuild_history(&messages, "summary");
+        // Summary + all original turns (budget exceeds available turns)
+        assert_eq!(result.messages.len(), 4);
+        assert_eq!(result.discarded.len(), 0);
     }
 
     #[test]
@@ -281,7 +298,7 @@ mod tests {
                 content: "c".to_string(),
             }),
         ];
-        let result = c.rebuild_history(&messages,"summary");
+        let result = c.rebuild_history(&messages, "summary");
         // Discarded should be in original order: a, b
         assert_eq!(result.discarded.len(), 2);
         if let Message::User(u) = &result.discarded[0] {
@@ -318,9 +335,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_with_block_assistant_and_tool_results() {
-        use meerkat_core::types::{
-            AssistantBlock, BlockAssistantMessage, StopReason, ToolResult,
-        };
+        use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, ToolResult};
         use serde_json::value::RawValue;
 
         let args_raw = RawValue::from_string(r#"{"city":"Tokyo"}"#.to_string()).unwrap();

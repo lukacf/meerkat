@@ -46,5 +46,14 @@ tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "time
 tempfile = { workspace = true }
 ciborium = "0.2"
 
+[features]
+default = []
+integration-real-tests = []
+
+[[test]]
+name = "router_integration"
+path = "tests/router_integration.rs"
+required-features = ["integration-real-tests"]
+
 [lints]
 workspace = true

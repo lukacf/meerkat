@@ -12,6 +12,7 @@ repository.workspace = true
 meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
 meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
+async-trait = { workspace = true }
 indexmap = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -30,7 +31,6 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 futures = { workspace = true }
 async-stream = { workspace = true }
 tempfile = { workspace = true }
-async-trait = { workspace = true }
 
 [lints]
 workspace = true

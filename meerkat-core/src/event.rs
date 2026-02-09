@@ -6,7 +6,6 @@ use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
 use crate::types::{SessionId, StopReason, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
 
 /// Events emitted during agent execution
 ///
@@ -127,19 +126,37 @@ pub enum AgentEvent {
         timeout_ms: u64,
     },
 
-    // === Budget & Checkpointing ===
+    // === Compaction ===
+    /// Context compaction started.
+    CompactionStarted {
+        /// Input tokens from the last LLM call that triggered compaction.
+        input_tokens: u64,
+        /// Estimated total history tokens before compaction.
+        estimated_history_tokens: u64,
+        /// Number of messages before compaction.
+        message_count: usize,
+    },
+
+    /// Context compaction completed successfully.
+    CompactionCompleted {
+        /// Tokens consumed by the summary.
+        summary_tokens: u64,
+        /// Messages before compaction.
+        messages_before: usize,
+        /// Messages after compaction.
+        messages_after: usize,
+    },
+
+    /// Context compaction failed (non-fatal — agent continues with uncompacted history).
+    CompactionFailed { error: String },
+
+    // === Budget ===
     /// Budget warning (approaching limits)
     BudgetWarning {
         budget_type: BudgetType,
         used: u64,
         limit: u64,
         percent: f32,
-    },
-
-    /// Session checkpoint saved
-    CheckpointSaved {
-        session_id: SessionId,
-        path: Option<PathBuf>,
     },
 
     // === Retry Events ===
@@ -245,6 +262,25 @@ pub fn format_verbose_event_with_config(
             used,
             limit
         )),
+        AgentEvent::CompactionStarted {
+            input_tokens,
+            estimated_history_tokens,
+            message_count,
+        } => Some(format!(
+            "  ⟳ Compaction started: {} input tokens, ~{} history tokens, {} messages",
+            input_tokens, estimated_history_tokens, message_count
+        )),
+        AgentEvent::CompactionCompleted {
+            summary_tokens,
+            messages_before,
+            messages_after,
+        } => Some(format!(
+            "  ✓ Compaction complete: {} → {} messages, {} summary tokens",
+            messages_before, messages_after, summary_tokens
+        )),
+        AgentEvent::CompactionFailed { error } => {
+            Some(format!("  ✗ Compaction failed (continuing): {}", error))
+        }
         _ => None,
     }
 }
@@ -306,10 +342,6 @@ mod tests {
                 limit: 10000,
                 percent: 0.8,
             },
-            AgentEvent::CheckpointSaved {
-                session_id: SessionId::new(),
-                path: Some(PathBuf::from("/tmp/session.jsonl")),
-            },
             AgentEvent::Retrying {
                 attempt: 1,
                 max_attempts: 3,
@@ -329,6 +361,19 @@ mod tests {
             AgentEvent::RunFailed {
                 session_id: SessionId::new(),
                 error: "Budget exceeded".to_string(),
+            },
+            AgentEvent::CompactionStarted {
+                input_tokens: 120_000,
+                estimated_history_tokens: 150_000,
+                message_count: 42,
+            },
+            AgentEvent::CompactionCompleted {
+                summary_tokens: 2048,
+                messages_before: 42,
+                messages_after: 8,
+            },
+            AgentEvent::CompactionFailed {
+                error: "LLM request failed".to_string(),
             },
         ];
 

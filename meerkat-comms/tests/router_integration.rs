@@ -2,6 +2,7 @@
 //!
 //! These tests verify actual network I/O behavior and are slower than unit tests.
 
+#![cfg(feature = "integration-real-tests")]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use meerkat_comms::{
@@ -82,7 +83,8 @@ async fn write_envelope_async(
 }
 
 #[tokio::test]
-async fn test_router_send() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_router_send() {
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -131,7 +133,8 @@ async fn test_router_send() {
 }
 
 #[tokio::test]
-async fn test_router_resolves_peer_name() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_router_resolves_peer_name() {
     let keypair = make_keypair();
     let peer_keypair = make_keypair();
     let trusted_peers = make_trusted_peers_with_addr(
@@ -153,7 +156,8 @@ async fn test_router_resolves_peer_name() {
 }
 
 #[tokio::test]
-async fn test_router_connects_to_peer() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_router_connects_to_peer() {
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -180,7 +184,8 @@ async fn test_router_connects_to_peer() {
 }
 
 #[tokio::test]
-async fn test_router_signs_envelope() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_router_signs_envelope() {
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -231,7 +236,8 @@ async fn test_router_signs_envelope() {
 }
 
 #[tokio::test]
-async fn test_router_waits_for_ack() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_router_waits_for_ack() {
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -279,7 +285,8 @@ async fn test_router_waits_for_ack() {
 }
 
 #[tokio::test]
-async fn test_router_timeout_returns_offline() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_router_timeout_returns_offline() {
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -317,7 +324,8 @@ async fn test_router_timeout_returns_offline() {
 }
 
 #[tokio::test]
-async fn test_send_message() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_send_message() {
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -375,7 +383,8 @@ async fn test_send_message() {
 }
 
 #[tokio::test]
-async fn test_send_request() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_send_request() {
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -438,7 +447,8 @@ async fn test_send_request() {
 }
 
 #[tokio::test]
-async fn test_send_response() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_send_response() {
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -495,7 +505,8 @@ async fn test_send_response() {
 }
 
 #[tokio::test]
-async fn test_send_response_no_ack_wait() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_send_response_no_ack_wait() {
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -549,7 +560,8 @@ async fn test_send_response_no_ack_wait() {
 // === Inproc transport tests ===
 
 #[tokio::test]
-async fn test_router_inproc_send() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_router_inproc_send() {
     use meerkat_comms::{Inbox, InprocRegistry};
 
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
@@ -611,7 +623,8 @@ async fn test_router_inproc_send() {
 }
 
 #[tokio::test]
-async fn test_router_inproc_peer_not_found() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_router_inproc_peer_not_found() {
     use meerkat_comms::InprocRegistry;
 
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
@@ -647,7 +660,8 @@ async fn test_router_inproc_peer_not_found() {
 }
 
 #[tokio::test]
-async fn test_router_inproc_request_response() {
+#[ignore = "integration-real: socket integration + timing behavior"]
+async fn integration_real_router_inproc_request_response() {
     use meerkat_comms::{Inbox, InprocRegistry};
 
     let _lock = INPROC_REGISTRY_LOCK.lock().await;

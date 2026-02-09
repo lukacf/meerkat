@@ -1,3 +1,5 @@
+#![cfg(feature = "integration-real-tests")]
+
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::process::Command;

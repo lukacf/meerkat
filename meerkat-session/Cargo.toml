@@ -1,0 +1,35 @@
+[package]
+name = "meerkat-session"
+description = "Session service orchestration for Meerkat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+meerkat-core = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+indexmap = "2"
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# Optional dependencies (gated by features)
+meerkat-store = { workspace = true, optional = true }
+redb = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[features]
+default = []
+session-store = ["dep:redb", "dep:meerkat-store"]
+session-compaction = []
+
+[lints]
+workspace = true

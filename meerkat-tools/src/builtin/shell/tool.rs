@@ -696,6 +696,7 @@ mod tests {
     // ==================== Synchronous Execution Tests ====================
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_sync_execute() {
         if skip_if_no_nu() {
@@ -717,6 +718,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_timeout() {
         if skip_if_no_nu() {
@@ -737,6 +739,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_output_format() {
         if skip_if_no_nu() {
@@ -762,6 +765,7 @@ mod tests {
     // ==================== Environment Tests ====================
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_env_inheritance() {
         if skip_if_no_nu() {
@@ -783,6 +787,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_pwd_override() {
         if skip_if_no_nu() {
@@ -825,6 +830,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_call_background_success() {
         let temp_dir = TempDir::new().unwrap();
@@ -846,6 +852,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_call_success() {
         if skip_if_no_nu() {
@@ -871,6 +878,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_call_with_working_dir() {
         if skip_if_no_nu() {
@@ -964,6 +972,7 @@ mod tests {
     /// Commands that run longer than the specified timeout should be
     /// terminated and return timed_out: true in the output.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_timeout_enforced_sync() {
         if skip_if_no_nu() {
@@ -1007,6 +1016,7 @@ mod tests {
     /// Commands that produce non-UTF-8 bytes should not crash and should
     /// use lossy UTF-8 conversion.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_non_utf8_output() {
         let temp_dir = TempDir::new().unwrap();
@@ -1040,6 +1050,7 @@ mod tests {
     ///
     /// Commands with large output should capture all of it (within reason).
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_long_output_captured() {
         if skip_if_no_nu() {
@@ -1077,6 +1088,7 @@ mod tests {
     ///
     /// Multiple sync tool calls should be able to run concurrently via tokio.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_sync_parallel_execution() {
         use std::time::Instant;
@@ -1402,6 +1414,7 @@ mod tests {
     /// Commands with pipes like `echo hello | cat` should execute as pipelines,
     /// not have the `|` become a literal argument to echo.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_nushell_pipeline_works() {
         if skip_if_no_nu() {
@@ -1443,6 +1456,7 @@ mod tests {
     /// Commands with redirections like `echo hello | save file.txt` should write to files,
     /// not have the `|` become a literal argument.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_nushell_redirection_works() {
         if skip_if_no_nu() {

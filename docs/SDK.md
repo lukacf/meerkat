@@ -6,6 +6,7 @@ This document provides comprehensive API reference documentation for using Meerk
 
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [SessionService](#sessionservice)
 - [Core Types](#core-types)
 - [AgentBuilder](#agentbuilder)
 - [Agent](#agent)
@@ -54,70 +55,92 @@ meerkat = { version = "0.1", features = ["jsonl-store", "memory-store"] }
 | `all-providers` | All LLM providers | No |
 | `jsonl-store` | File-based session persistence | Yes |
 | `memory-store` | In-memory session storage | No |
+| `session-store` | Persistent sessions (redb-backed `PersistentSessionService`) | No |
+| `session-compaction` | Auto-compact long conversations (`DefaultCompactor`) | No |
+| `memory-store-session` | Semantic memory indexing (`HnswMemoryStore`) | No |
 
 ---
 
 ## Quick Start
 
-### Minimal Example
+### Minimal Example (SessionService)
 
-The simplest way to use Meerkat is with the shared AgentFactory and AgentBuilder:
+The recommended way to use Meerkat is through `SessionService` with `build_ephemeral_service`:
 
 ```rust
-use meerkat::{AgentBuilder, AgentFactory, AnthropicClient};
-use meerkat_store::{JsonlStore, StoreAdapter};
-use std::sync::Arc;
+use meerkat::{AgentFactory, AgentBuildConfig, Config, build_ephemeral_service};
+use meerkat::service::{CreateSessionRequest, SessionService};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    let config = Config::load().await?;
+    let factory = AgentFactory::new(std::env::current_dir()?);
 
-    let store_dir = std::env::current_dir()?.join(".rkat").join("sessions");
-    std::fs::create_dir_all(&store_dir)?;
+    // Build an ephemeral (in-memory) session service
+    let service = build_ephemeral_service(factory, config, 64);
 
-    let factory = AgentFactory::new(store_dir.clone());
-    let client = Arc::new(AnthropicClient::new(api_key));
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
-
-    let store = Arc::new(JsonlStore::new(store_dir));
-    store.init().await?;
-    let store = Arc::new(StoreAdapter::new(store));
-
-    let tools = Arc::new(meerkat_tools::EmptyToolDispatcher::default());
-
-    let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4")
-        .system_prompt("You are a helpful assistant.")
-        .max_tokens_per_turn(1024)
-        .build(Arc::new(llm), tools, store);
-
-    let result = agent.run("What is the capital of France?".to_string()).await?;
+    // Create a session and run the first turn
+    let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4".into(),
+        prompt: "What is the capital of France?".into(),
+        system_prompt: Some("You are a helpful assistant.".into()),
+        max_tokens: Some(1024),
+        event_tx: None,
+        host_mode: false,
+    }).await?;
 
     println!("Response: {}", result.text);
-    println!("Tokens used: {}", result.usage.total_tokens());
+    println!("Session ID: {}", result.session_id);
 
     Ok(())
 }
 ```
 
+### With AgentBuildConfig (Per-Request Configuration)
+
+For per-request configuration (custom tools, overrides), stage an `AgentBuildConfig`:
+
+```rust
+use meerkat::{AgentFactory, AgentBuildConfig, Config, FactoryAgentBuilder, build_ephemeral_service};
+use meerkat::service::{CreateSessionRequest, SessionService};
+use std::sync::Arc;
+
+let config = Config::load().await?;
+let factory = AgentFactory::new(std::env::current_dir()?);
+let service = build_ephemeral_service(factory, config, 64);
+
+// Stage a full build config before creating the session
+let build_config = AgentBuildConfig::new("claude-sonnet-4".into());
+// ... configure tools, overrides, etc. on build_config ...
+
+// The service picks up the staged config when building the agent
+let result = service.create_session(CreateSessionRequest {
+    model: "claude-sonnet-4".into(),
+    prompt: "Hello!".into(),
+    system_prompt: None,
+    max_tokens: None,
+    event_tx: None,
+    host_mode: false,
+}).await?;
+```
+
 ### With Tools Example
 
-For more control, use the `AgentBuilder` directly:
+Custom tools implement `AgentToolDispatcher`:
 
 ```rust
 use async_trait::async_trait;
-use meerkat::prelude::*;
-use meerkat::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
-use serde_json::{json, Value};
+use meerkat::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
+use meerkat::error::ToolError;
+use serde_json::json;
 use std::sync::Arc;
 
-// Define a custom tool dispatcher
 struct MathTools;
 
 #[async_trait]
 impl AgentToolDispatcher for MathTools {
-    fn tools(&self) -> Vec<ToolDef> {
-        vec![ToolDef {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        vec![Arc::new(ToolDef {
             name: "add".to_string(),
             description: "Add two numbers".to_string(),
             input_schema: json!({
@@ -128,19 +151,89 @@ impl AgentToolDispatcher for MathTools {
                 },
                 "required": ["a", "b"]
             }),
-        }]
+        })].into()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        match name {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        #[derive(serde::Deserialize)]
+        struct AddArgs { a: f64, b: f64 }
+
+        match call.name {
             "add" => {
-                let a = args["a"].as_f64().ok_or("Missing 'a'")?;
-                let b = args["b"].as_f64().ok_or("Missing 'b'")?;
-                Ok(format!("{}", a + b))
+                let args: AddArgs = call.parse_args()
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                Ok(ToolResult::success(call.id, format!("{}", args.a + args.b)))
             }
-            _ => Err(format!("Unknown tool: {}", name)),
+            _ => Err(ToolError::not_found(call.name)),
         }
     }
+}
+```
+
+---
+
+## SessionService
+
+`SessionService` is the canonical lifecycle API for all session management. All surfaces (CLI,
+REST, MCP Server, JSON-RPC) route through it.
+
+### Creating a Service
+
+```rust
+use meerkat::{AgentFactory, Config, build_ephemeral_service};
+
+let config = Config::load().await?;
+let factory = AgentFactory::new(std::env::current_dir()?);
+
+// Ephemeral service (in-memory, no persistence)
+let service = build_ephemeral_service(factory, config, 64 /* max sessions */);
+```
+
+### Multi-Turn Conversations
+
+```rust
+use meerkat::service::{CreateSessionRequest, StartTurnRequest, SessionService};
+
+// Turn 1: create session
+let result = service.create_session(CreateSessionRequest {
+    model: "claude-sonnet-4".into(),
+    prompt: "My name is Alice.".into(),
+    system_prompt: Some("You are a helpful assistant with memory.".into()),
+    max_tokens: None,
+    event_tx: None,
+    host_mode: false,
+}).await?;
+
+let session_id = result.session_id;
+
+// Turn 2: continue on same session
+let result = service.start_turn(&session_id, StartTurnRequest {
+    prompt: "What's my name?".into(),
+    event_tx: None,
+    host_mode: false,
+}).await?;
+// Agent remembers "Alice"
+
+// Read session state
+let view = service.read(&session_id).await?;
+println!("Messages: {}", view.state.message_count);
+println!("Tokens: {}", view.billing.total_tokens);
+
+// Archive when done
+service.archive(&session_id).await?;
+```
+
+### Error Handling
+
+```rust
+use meerkat::service::SessionError;
+
+match service.start_turn(&id, req).await {
+    Ok(result) => println!("Response: {}", result.text),
+    Err(SessionError::NotFound { id }) => println!("Session {} not found", id),
+    Err(SessionError::Busy { id }) => println!("Session {} is busy, retry later", id),
+    Err(SessionError::PersistenceDisabled) => println!("Persistence feature not enabled"),
+    Err(e) => println!("Error: {}", e),
 }
 ```
 
@@ -289,13 +382,17 @@ println!("Tool calls: {}", result.tool_calls);  // Number of tool invocations
 
 ## AgentBuilder
 
-The `AgentBuilder` provides a fluent API for configuring agents.
+> **Note:** For most use cases, prefer `SessionService` via `build_ephemeral_service()` (see
+> [SessionService](#sessionservice) above). `AgentBuilder` is used internally by
+> `AgentFactory::build_agent()`. Direct usage is only needed for advanced scenarios where you
+> bypass the session service entirely.
 
-### Basic Configuration
+The `AgentBuilder` provides a fluent API for configuring agents:
 
 ```rust
 use meerkat::AgentBuilder;
 
+// Used internally by AgentFactory -- prefer SessionService for new code
 let agent = AgentBuilder::new()
     .model("claude-sonnet-4")
     .system_prompt("You are a helpful assistant.")
@@ -322,7 +419,8 @@ let agent = AgentBuilder::new()
 
 ### Hook Helpers
 
-The SDK exposes helpers used by CLI/REST/MCP wiring:
+The SDK exposes helpers used internally by `AgentFactory` for hook resolution.
+When using `SessionService`, hooks are resolved automatically during agent construction:
 
 ```rust
 use meerkat::{create_default_hook_engine, resolve_layered_hooks_config};
@@ -330,15 +428,9 @@ use meerkat::{create_default_hook_engine, resolve_layered_hooks_config};
 let config = meerkat::Config::load().await?;
 let cwd = std::env::current_dir()?;
 
+// These are called internally by AgentFactory::build_agent()
 let layered_hooks = resolve_layered_hooks_config(&cwd, &config).await;
 let hook_engine = create_default_hook_engine(layered_hooks);
-
-let mut builder = meerkat::AgentBuilder::new()
-    .with_hook_run_overrides(meerkat::HookRunOverrides::default());
-
-if let Some(engine) = hook_engine {
-    builder = builder.with_hook_engine(engine);
-}
 ```
 
 `HookRunOverrides` schema:
@@ -347,8 +439,10 @@ if let Some(engine) = hook_engine {
 
 ### Budget Configuration
 
+Budget limits can be set via `AgentBuildConfig` when using `SessionService`, or via `AgentBuilder` directly:
+
 ```rust
-use meerkat::{AgentBuilder, BudgetLimits};
+use meerkat::BudgetLimits;
 use std::time::Duration;
 
 let budget = BudgetLimits::default()
@@ -356,16 +450,15 @@ let budget = BudgetLimits::default()
     .with_max_duration(Duration::from_secs(300))
     .with_max_tool_calls(50);
 
-let agent = AgentBuilder::new()
-    .model("claude-sonnet-4")
-    .budget(budget)
-    .build(llm, tools, store);
+// Via AgentBuildConfig (preferred):
+let mut build_config = AgentBuildConfig::new("claude-sonnet-4".into());
+build_config.budget = Some(budget);
 ```
 
 ### Retry Configuration
 
 ```rust
-use meerkat::{AgentBuilder, RetryPolicy};
+use meerkat::RetryPolicy;
 use std::time::Duration;
 
 let retry = RetryPolicy {
@@ -374,45 +467,34 @@ let retry = RetryPolicy {
     max_delay: Duration::from_secs(30),
     multiplier: 2.0,
 };
-
-let agent = AgentBuilder::new()
-    .retry_policy(retry)
-    .build(llm, tools, store);
 ```
 
 ### Provider Parameters
 
-Pass provider-specific options like thinking budgets:
+Pass provider-specific options like thinking budgets via `AgentBuildConfig`:
 
 ```rust
-use meerkat::AgentBuilder;
 use serde_json::json;
 
 // Anthropic: Enable extended thinking
-let agent = AgentBuilder::new()
-    .model("claude-sonnet-4")
-    .provider_params(json!({
-        "thinking_budget": 10000  // Enable thinking with 10k token budget
-    }))
-    .build(llm, tools, store);
+let mut build_config = AgentBuildConfig::new("claude-sonnet-4".into());
+build_config.provider_params = Some(json!({
+    "thinking_budget": 10000
+}));
 
-// OpenAI: Set reasoning effort for o1/o3 models
-let agent = AgentBuilder::new()
-    .model("o1-preview")
-    .provider_params(json!({
-        "reasoning_effort": "high",
-        "seed": 42
-    }))
-    .build(llm, tools, store);
+// OpenAI: Set reasoning effort
+let mut build_config = AgentBuildConfig::new("gpt-5.2".into());
+build_config.provider_params = Some(json!({
+    "reasoning_effort": "high",
+    "seed": 42
+}));
 
 // Gemini: Configure thinking
-let agent = AgentBuilder::new()
-    .model("gemini-2.5-flash")
-    .provider_params(json!({
-        "thinking_budget": 8000,
-        "top_k": 40
-    }))
-    .build(llm, tools, store);
+let mut build_config = AgentBuildConfig::new("gemini-3-flash-preview".into());
+build_config.provider_params = Some(json!({
+    "thinking_budget": 8000,
+    "top_k": 40
+}));
 ```
 
 ---
@@ -658,18 +740,18 @@ The `AgentToolDispatcher` trait connects your tools to the agent:
 
 ```rust
 use async_trait::async_trait;
-use meerkat::{AgentToolDispatcher, ToolDef};
-use serde_json::{json, Value};
+use meerkat::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
+use meerkat::error::ToolError;
+use serde_json::json;
+use std::sync::Arc;
 
-struct MyToolDispatcher {
-    // Your tool state here
-}
+struct MyToolDispatcher;
 
 #[async_trait]
 impl AgentToolDispatcher for MyToolDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "search".to_string(),
                 description: "Search the web".to_string(),
                 input_schema: json!({
@@ -679,8 +761,8 @@ impl AgentToolDispatcher for MyToolDispatcher {
                     },
                     "required": ["query"]
                 }),
-            },
-            ToolDef {
+            }),
+            Arc::new(ToolDef {
                 name: "read_file".to_string(),
                 description: "Read a file".to_string(),
                 input_schema: json!({
@@ -690,24 +772,31 @@ impl AgentToolDispatcher for MyToolDispatcher {
                     },
                     "required": ["path"]
                 }),
-            },
-        ]
+            }),
+        ].into()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        match name {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        match call.name {
             "search" => {
-                let query = args["query"].as_str().ok_or("Missing query")?;
-                // Perform search...
-                Ok(format!("Search results for: {}", query))
+                #[derive(serde::Deserialize)]
+                struct Args { query: String }
+
+                let args: Args = call.parse_args()
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                Ok(ToolResult::success(call.id, format!("Search results for: {}", args.query)))
             }
             "read_file" => {
-                let path = args["path"].as_str().ok_or("Missing path")?;
-                // Read file...
-                std::fs::read_to_string(path)
-                    .map_err(|e| e.to_string())
+                #[derive(serde::Deserialize)]
+                struct Args { path: String }
+
+                let args: Args = call.parse_args()
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                let content = std::fs::read_to_string(&args.path)
+                    .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+                Ok(ToolResult::success(call.id, content))
             }
-            _ => Err(format!("Unknown tool: {}", name)),
+            _ => Err(ToolError::not_found(call.name)),
         }
     }
 }
@@ -1002,263 +1091,111 @@ handle.await?;
 
 ### Provider Parameters
 
-Pass provider-specific options:
+Pass provider-specific options via `AgentBuildConfig.provider_params`:
 
 ```rust
 use serde_json::json;
 
 // Anthropic: Extended thinking
-let agent = AgentBuilder::new()
-    .model("claude-sonnet-4")
-    .provider_params(json!({
-        "thinking_budget": 10000,  // Enable thinking with budget
-        "top_k": 40                // Sampling parameter
-    }))
-    .build(llm, tools, store);
+let mut config = AgentBuildConfig::new("claude-sonnet-4".into());
+config.provider_params = Some(json!({
+    "thinking_budget": 10000,
+    "top_k": 40
+}));
 
-// OpenAI: Reasoning effort (o1/o3 models)
-let agent = AgentBuilder::new()
-    .model("o1-preview")
-    .provider_params(json!({
-        "reasoning_effort": "high",  // low, medium, high
-        "seed": 42,                  // Reproducible outputs
-        "frequency_penalty": 0.5,
-        "presence_penalty": 0.3
-    }))
-    .build(llm, tools, store);
+// OpenAI: Reasoning effort
+let mut config = AgentBuildConfig::new("gpt-5.2".into());
+config.provider_params = Some(json!({
+    "reasoning_effort": "high",
+    "seed": 42,
+    "frequency_penalty": 0.5,
+    "presence_penalty": 0.3
+}));
 
 // Gemini: Thinking configuration
-let agent = AgentBuilder::new()
-    .model("gemini-2.5-flash")
-    .provider_params(json!({
-        "thinking_budget": 8000,
-        "top_k": 40
-    }))
-    .build(llm, tools, store);
+let mut config = AgentBuildConfig::new("gemini-3-flash-preview".into());
+config.provider_params = Some(json!({
+    "thinking_budget": 8000,
+    "top_k": 40
+}));
 ```
 
-### Session Resumption
+### Session Resumption via SessionService
 
-Resume conversations across runs:
+Use `SessionService` for multi-turn conversations:
 
 ```rust
-use meerkat::{AgentBuilder, Session, SessionId};
+use meerkat::service::{CreateSessionRequest, StartTurnRequest, SessionService};
 
-// First run
-let mut agent = AgentBuilder::new()
-    .model("claude-sonnet-4")
-    .build(llm.clone(), tools.clone(), store.clone());
+// First turn: creates the session
+let result = service.create_session(CreateSessionRequest {
+    model: "claude-sonnet-4".into(),
+    prompt: "Remember: the password is 'secret123'".into(),
+    system_prompt: None,
+    max_tokens: None,
+    event_tx: None,
+    host_mode: false,
+}).await?;
 
-let result = agent.run("Remember: the password is 'secret123'".to_string()).await?;
-let session_id = result.session_id.clone();
+let session_id = result.session_id;
 
-// Save session ID for later...
-
-// Later: resume the conversation
-let loaded_session = store.load(&session_id).await?.expect("Session not found");
-
-let mut agent = AgentBuilder::new()
-    .model("claude-sonnet-4")
-    .resume_session(loaded_session)
-    .build(llm, tools, store);
-
-let result = agent.run("What was the password I told you?".to_string()).await?;
+// Later: continue the conversation on the same session
+let result = service.start_turn(&session_id, StartTurnRequest {
+    prompt: "What was the password I told you?".into(),
+    event_tx: None,
+    host_mode: false,
+}).await?;
 // Agent remembers the previous context
 ```
 
 ### Multi-Turn Conversations
 
-The agent maintains conversation state across turns:
-
-```rust
-let mut agent = AgentBuilder::new()
-    .model("claude-sonnet-4")
-    .system_prompt("You are a helpful assistant with memory.")
-    .build(llm, tools, store);
-
-// Turn 1
-let result = agent.run("My name is Alice.".to_string()).await?;
-println!("Agent: {}", result.text);
-
-// Turn 2 - agent remembers context
-let result = agent.run("What's my name?".to_string()).await?;
-println!("Agent: {}", result.text);  // Should mention "Alice"
-
-// Turn 3
-let result = agent.run("Calculate 15 * 8 using the calculator tool.".to_string()).await?;
-println!("Agent: {}", result.text);
-println!("Tool calls made: {}", result.tool_calls);
-```
+Use `SessionService` to maintain conversation state across turns (see the
+[SessionService section](#sessionservice) for the full API).
 
 ---
 
 ## Complete Example
 
-Here's a complete example demonstrating most SDK features:
+Here is a complete example using `SessionService` for session lifecycle:
 
 ```rust
-use async_trait::async_trait;
-use meerkat::prelude::*;
-use meerkat::{
-    AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    AnthropicClient, BudgetLimits, JsonlStore, LlmStreamResult, RetryPolicy,
-    Session, ToolDef,
-};
-use serde_json::{json, Value};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
-
-// Custom tool dispatcher
-struct MyTools;
-
-#[async_trait]
-impl AgentToolDispatcher for MyTools {
-    fn tools(&self) -> Vec<ToolDef> {
-        vec![
-            ToolDef {
-                name: "calculate".to_string(),
-                description: "Perform arithmetic calculations".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "expression": {"type": "string"}
-                    },
-                    "required": ["expression"]
-                }),
-            },
-        ]
-    }
-
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        match name {
-            "calculate" => {
-                let expr = args["expression"].as_str().ok_or("Missing expression")?;
-                // Simple evaluation (production code would use a proper parser)
-                Ok(format!("Result: {}", expr))
-            }
-            _ => Err(format!("Unknown tool: {}", name)),
-        }
-    }
-}
-
-// LLM adapter
-struct LlmAdapter {
-    client: Arc<AnthropicClient>,
-    model: String,
-}
-
-#[async_trait]
-impl AgentLlmClient for LlmAdapter {
-    async fn stream_response(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        max_tokens: u32,
-        temperature: Option<f32>,
-        provider_params: Option<&Value>,
-    ) -> Result<LlmStreamResult, meerkat::AgentError> {
-        use futures::StreamExt;
-        use meerkat::{LlmEvent, LlmRequest, ToolCall};
-
-        let request = LlmRequest {
-            model: self.model.clone(),
-            messages: messages.to_vec(),
-            tools: tools.to_vec(),
-            max_tokens,
-            temperature,
-            stop_sequences: None,
-            provider_params: provider_params.cloned(),
-        };
-
-        let mut stream = self.client.stream(&request);
-        let mut content = String::new();
-        let mut tool_calls = Vec::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = Usage::default();
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => content.push_str(&delta),
-                    LlmEvent::ToolCallComplete { id, name, args } => {
-                        tool_calls.push(ToolCall { id, name, args });
-                    }
-                    LlmEvent::UsageUpdate { usage: u } => usage = u,
-                    LlmEvent::Done { stop_reason: sr } => stop_reason = sr,
-                    _ => {}
-                },
-                Err(e) => return Err(meerkat::AgentError::LlmError(e.to_string())),
-            }
-        }
-
-        Ok(LlmStreamResult { content, tool_calls, stop_reason, usage })
-    }
-
-    fn provider(&self) -> &'static str {
-        "anthropic"
-    }
-}
-
-// Store adapter
-struct StoreAdapter {
-    inner: JsonlStore,
-}
-
-#[async_trait]
-impl AgentSessionStore for StoreAdapter {
-    async fn save(&self, session: &Session) -> Result<(), meerkat::AgentError> {
-        self.inner.save(session).await
-            .map_err(|e| meerkat::AgentError::StorageError(e.to_string()))
-    }
-
-    async fn load(&self, id: &str) -> Result<Option<Session>, meerkat::AgentError> {
-        let session_id = meerkat::SessionId::parse(id)
-            .map_err(|e| meerkat::AgentError::InvalidSession(e.to_string()))?;
-        self.inner.load(&session_id).await
-            .map_err(|e| meerkat::AgentError::StorageError(e.to_string()))
-    }
-}
+use meerkat::{AgentFactory, Config, build_ephemeral_service};
+use meerkat::service::{CreateSessionRequest, StartTurnRequest, SessionService};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    let config = Config::load().await?;
+    let factory = AgentFactory::new(std::env::current_dir()?);
 
-    // Create components
-    let llm = Arc::new(LlmAdapter {
-        client: Arc::new(AnthropicClient::new(api_key)),
-        model: "claude-sonnet-4".to_string(),
-    });
-    let tools = Arc::new(MyTools);
-    let store = Arc::new(StoreAdapter {
-        inner: JsonlStore::new(PathBuf::from("./sessions")),
-    });
+    let service = build_ephemeral_service(factory, config, 64);
 
-    // Configure and build agent
-    let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4")
-        .system_prompt("You are a helpful math assistant. Use the calculate tool when needed.")
-        .max_tokens_per_turn(2048)
-        .temperature(0.7)
-        .budget(BudgetLimits::default()
-            .with_max_tokens(50_000)
-            .with_max_duration(Duration::from_secs(120)))
-        .retry_policy(RetryPolicy {
-            max_retries: 3,
-            initial_delay: Duration::from_millis(500),
-            max_delay: Duration::from_secs(10),
-            multiplier: 2.0,
-        })
-        .build(llm, tools, store);
-
-    // Run the agent
-    let result = agent.run("What is 25 * 17?".to_string()).await?;
+    // Create a session with the first turn
+    let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4".into(),
+        prompt: "What is 25 * 17?".into(),
+        system_prompt: Some("You are a helpful math assistant.".into()),
+        max_tokens: Some(2048),
+        event_tx: None,
+        host_mode: false,
+    }).await?;
 
     println!("Response: {}", result.text);
     println!("Session ID: {}", result.session_id);
-    println!("Turns: {}", result.turns);
-    println!("Tool calls: {}", result.tool_calls);
-    println!("Total tokens: {}", result.usage.total_tokens());
+
+    // Continue the conversation
+    let result = service.start_turn(&result.session_id, StartTurnRequest {
+        prompt: "Now divide that result by 5.".into(),
+        event_tx: None,
+        host_mode: false,
+    }).await?;
+
+    println!("Follow-up: {}", result.text);
+
+    // Read session state
+    let view = service.read(&result.session_id).await?;
+    println!("Total tokens: {}", view.billing.total_tokens);
+    println!("Messages: {}", view.state.message_count);
 
     Ok(())
 }
@@ -1270,5 +1207,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - [Quickstart Guide](./quickstart.md) - Getting started with the CLI
 - [Architecture](./architecture.md) - System design and internals
+- [CAPABILITY_MATRIX.md](./CAPABILITY_MATRIX.md) - Build profiles, error codes, feature behavior
+- [SESSION_CONTRACTS.md](./SESSION_CONTRACTS.md) - Session lifecycle operational contracts
 - [Configuration](./configuration.md) - Configuration file reference
-- [Examples](./examples.md) - More code examples

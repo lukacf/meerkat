@@ -8,11 +8,17 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[[test]]
+name = "integration_shell_jobs"
+path = "tests/integration_shell_jobs.rs"
+required-features = ["integration-real-tests"]
+
 [features]
 default = ["sub-agents", "comms", "mcp"]
 sub-agents = ["dep:meerkat-client"]
 comms = ["dep:meerkat-comms"]
 mcp = ["dep:meerkat-mcp"]
+integration-real-tests = []
 
 [dependencies]
 meerkat-core = { workspace = true }

@@ -24,17 +24,28 @@ pub struct OpenAiClient {
 impl OpenAiClient {
     /// Create a new OpenAI client with the given API key
     pub fn new(api_key: String) -> Self {
-        let http = crate::http::build_http_client(reqwest::Client::builder())
-            .unwrap_or_else(|_| reqwest::Client::new());
+        Self::new_with_base_url(api_key, "https://api.openai.com".to_string())
+    }
+
+    /// Create a new OpenAI client with an explicit base URL
+    pub fn new_with_base_url(api_key: String, base_url: String) -> Self {
+        let http =
+            crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
+                .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             api_key,
-            base_url: "https://api.openai.com".to_string(),
+            base_url,
             http,
         }
     }
 
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
+        if let Ok(http) =
+            crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &url)
+        {
+            self.http = http;
+        }
         self.base_url = url;
         self
     }

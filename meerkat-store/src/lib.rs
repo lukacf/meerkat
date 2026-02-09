@@ -12,9 +12,12 @@ pub mod jsonl;
 #[cfg(feature = "memory")]
 pub mod memory;
 
+pub mod redb_store;
+
 pub use adapter::StoreAdapter;
 pub use error::StoreError;
 pub use index::SessionIndex;
+pub use redb_store::RedbSessionStore;
 
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};

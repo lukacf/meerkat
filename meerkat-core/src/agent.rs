@@ -4,6 +4,7 @@
 
 mod builder;
 pub mod comms_impl;
+pub mod compact;
 mod extraction;
 mod hook_impl;
 mod runner;
@@ -203,4 +204,10 @@ where
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
     pub(super) hook_run_overrides: HookRunOverrides,
+    /// Optional context compaction strategy.
+    pub(crate) compactor: Option<Arc<dyn crate::compact::Compactor>>,
+    /// Input tokens from the last LLM response (for compaction trigger).
+    pub(crate) last_input_tokens: u64,
+    /// Turn number when compaction last occurred.
+    pub(crate) last_compaction_turn: Option<u32>,
 }

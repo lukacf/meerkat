@@ -146,6 +146,21 @@ pub use meerkat_tools::ToolError;
 mod factory;
 pub use factory::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent, provider_key};
 
+// Factory-backed SessionService wiring
+mod service_factory;
+pub use service_factory::{FactoryAgent, FactoryAgentBuilder, build_ephemeral_service};
+
+// Session service
+pub use meerkat_core::{
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
+    SessionUsage, SessionView, StartTurnRequest,
+};
+#[cfg(feature = "session-compaction")]
+pub use meerkat_session::DefaultCompactor;
+#[cfg(feature = "session-store")]
+pub use meerkat_session::PersistentSessionService;
+pub use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
+
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;
 

@@ -3,6 +3,7 @@
 //! These tests verify that background jobs spawned via the `shell` tool are visible
 //! to the `shell_jobs`, `shell_job_status`, and `shell_job_cancel` tools.
 
+#![cfg(feature = "integration-real-tests")]
 #![allow(clippy::panic, clippy::unwrap_used)]
 
 use meerkat_core::AgentToolDispatcher;

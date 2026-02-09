@@ -13,6 +13,7 @@ meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
 meerkat-mcp = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
+meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
 async-trait = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }

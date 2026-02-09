@@ -117,7 +117,9 @@ mod tests {
     // ==================== Output Tests ====================
 
     #[tokio::test]
-    async fn test_shell_jobs_list_tool_output() {
+    #[cfg(feature = "integration-real-tests")]
+    #[ignore = "integration-real: spawns shell processes"]
+    async fn integration_real_shell_jobs_list_tool_output() {
         let temp_dir = TempDir::new().unwrap();
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();

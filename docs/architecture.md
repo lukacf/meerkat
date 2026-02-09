@@ -19,40 +19,61 @@ Meerkat is designed as a **minimal, composable agent harness**. It provides the 
 ```
                                     +------------------+
                                     |     meerkat      |  <- Facade crate
-                                    |  (re-exports &   |     SDK helpers
-                                    |   SDK helpers)   |
+                                    | (FactoryAgent-   |     FactoryAgentBuilder
+                                    |  Builder, SDK)   |     build_ephemeral_service
                                     +--------+---------+
                                              |
-         +-----------------------------------+-----------------------------------+
-         |                   |               |               |                   |
-+--------v-------+  +--------v-------+  +----v----+  +------v------+  +---------v---------+
-| meerkat-client |  | meerkat-store  |  | meerkat |  | meerkat-mcp |  | meerkat-mcp-server|
-| (LLM providers)|  | (persistence)  |  | -tools  |  |   -client   |  | (expose as MCP)   |
-+--------+-------+  +--------+-------+  +----+----+  +------+------+  +---------+---------+
-         |                   |               |               |                   |
-         +-------------------+-------+-------+---------------+-------------------+
+   +----------+----------+----------+--------+--------+----------+----------+
+   |          |          |          |        |        |          |          |
++--v---+ +---v----+ +---v---+ +----v---+ +--v---+ +--v---+ +----v---+ +----v-----+
+|client| |session | | store | |  mcp   | |tools | |memory| | hooks  | |mcp-server|
++------+ +--------+ +-------+ +--------+ +------+ +------+ +--------+ +----------+
+|Anthr.| |Ephemera| | JSONL | |McpRoutr| |Regist| |Hnsw  | |In-proc | |meerkat_  |
+|OpenAI| |Persist.| | redb  | |Stdio   | |Valid. | |Simple| |Command | |run/resume|
+|Gemini| |Compact.| |Memory | |HTTP/SSE| |      | |      | |HTTP    | |          |
++--+---+ +---+----+ +---+---+ +---+----+ +--+---+ +--+---+ +---+----+ +----+-----+
+   |         |          |         |          |        |          |          |
+   +---------+----------+---------+----------+--------+----------+----------+
                                      |
                              +-------v-------+
                              | meerkat-core  |  <- No I/O dependencies
-                             | (agent loop,  |     Pure logic
-                             |  state, types)|
+                             | Traits, loop  |     Pure logic
+                             | SessionError  |     SessionService trait
                              +---------------+
 ```
+
+**SessionService routing:** All four surfaces (CLI, REST, MCP Server, JSON-RPC) route through
+`SessionService` for the full session lifecycle. `AgentFactory::build_agent()` centralizes all
+agent construction. Zero `AgentBuilder::new()` calls in surface crates.
 
 ### Detailed Component View
 
 ```
 +-----------------------------------------------------------------------------+
 |                              Access Patterns                                 |
-+---------------+---------------+---------------------+-----------+-----------+
-|  meerkat-cli  |  meerkat-mcp  |   meerkat (SDK)     | meerkat-  | meerkat-  |
-|  (headless)   |  (server)     |                     | rest(HTTP)| rpc(stdio)|
-+-------+-------+-------+-------+----------+----------+-----+-----+-----+-----+
-        |               |                  |                      |
-        +---------------+---------+--------+----------------------+
-                                  |
-                                  v
-+-----------------------------------------------------------------------------+
++----------+-----------+-------------+---------------+----------+-------------+
+|meerkat-  |meerkat-mcp|meerkat (SDK)|  meerkat-rest | meerkat- |             |
+|cli       |(server)   |             |  (HTTP)       | rpc      |             |
+|(headless)|(expose as |             |               | (stdio)  |             |
+|          | MCP tools)|             |               |          |             |
++----+-----+-----+-----+------+------+-------+------+----+-----+             |
+     |           |            |              |           |                    |
+     +-----------+-----+------+--------------+-----------+                    |
+                       |                                                      |
+                       v                                                      |
+          +---------------------------+                                       |
+          |  SessionService (trait)   | <-- All surfaces route through this   |
+          | create / turn / interrupt |                                       |
+          | read / list / archive     |                                       |
+          +------------+--------------+                                       |
+                       |                                                      |
+                       v                                                      |
+          +---------------------------+                                       |
+          |  AgentFactory             |                                       |
+          |  ::build_agent()          | <-- Centralized agent construction    |
+          +------------+--------------+                                       |
+                       |                                                      |
++----------------------v------------------------------------------------------+
 |                              meerkat-core                                    |
 |                                                                              |
 |  +------------------------------------------------------------------------+  |
@@ -64,31 +85,27 @@ Meerkat is designed as a **minimal, composable agent harness**. It provides the 
 |  |  +-- budget: Budget                                 (resource limits)  |  |
 |  |  +-- retry_policy: RetryPolicy                      (error handling)   |  |
 |  |  +-- state: LoopState                               (state machine)    |  |
+|  |  +-- compactor: Option<Arc<dyn Compactor>>          (context compact)  |  |
 |  |  +-- sub_agent_manager: SubAgentManager             (child agents)     |  |
 |  +------------------------------------------------------------------------+  |
 +-----------------------------------------------------------------------------+
                                   |
-                    +-------------+-------------+
-                    |             |             |
-                    v             v             v
-            +-------------+ +-------------+ +-------------+
-            |meerkat-     | |meerkat-     | |meerkat-     |
-            |client       | |tools        | |store        |
-            |             | |             | |             |
-            | Anthropic   | | Registry    | | JsonlStore  |
-            | OpenAI      | | Dispatcher  | | MemoryStore |
-            | Gemini      | | Validation  | |             |
-            +-------------+ +------+------+ +-------------+
-                                   |
-                                   v
-                           +-----------------+
-                           | meerkat-mcp-    |
-                           | client          |
-                           |                 |
-                           | MCP Protocol    |
-                           | Tool Discovery  |
-                           | Tool Dispatch   |
-                           +-----------------+
+          +-----------+-----------+-----------+-----------+
+          |           |           |           |           |
+          v           v           v           v           v
+   +----------+ +----------+ +--------+ +----------+ +--------+
+   | client   | |  tools   | | store  | | session  | | memory |
+   | Anthropic| | Registry | | JSONL  | | Ephemeral| | Hnsw   |
+   | OpenAI   | | Dispatch | | redb   | | Persist. | | Simple |
+   | Gemini   | | Valid.   | | Memory | | Compact. | |        |
+   +----------+ +----+-----+ +--------+ +----------+ +--------+
+                     |
+                     v
+              +-----------+
+              |meerkat-mcp|
+              | McpRouter |
+              | Stdio/HTTP|
+              +-----------+
 ```
 
 ## Crate Structure
@@ -98,10 +115,13 @@ Meerkat is designed as a **minimal, composable agent harness**. It provides the 
 The heart of Meerkat. Contains:
 
 - **Agent**: The main execution engine
-- **Types**: `Message`, `Session`, `ToolCall`, `ToolResult`, `Usage`, etc.
+- **Types**: `Message`, `Session`, `ToolCall`, `ToolResult`, `Usage`, `ToolCallView`, etc.
+- **Trait contracts**: `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`
+- **Service types**: `SessionError`, `CreateSessionRequest`, `StartTurnRequest`, `SessionView`, `SessionInfo`, `SessionUsage`
 - **Budget**: Resource tracking and enforcement
 - **Retry**: Exponential backoff with jitter
 - **State Machine**: `LoopState` for agent lifecycle management
+- **Compaction**: `Compactor` trait, `CompactionConfig`, compaction flow wired into agent loop
 - **Sub-agents**: Fork and spawn operations
 - **Hook contracts**: typed hook points, decisions, patches, invocation/outcome envelopes
 
@@ -152,8 +172,29 @@ pub enum LlmEvent {
 Session persistence:
 
 - **JsonlStore**: Production storage using append-only JSONL files
+- **RedbSessionStore**: redb-backed storage (feature-gated by `session-store`)
 - **MemoryStore**: In-memory storage for testing
 - **SessionStore trait**: Implement for custom backends
+
+### meerkat-session
+
+Session service orchestration:
+
+- **EphemeralSessionService**: In-memory session lifecycle (always available)
+- **PersistentSessionService**: Durable sessions backed by `RedbEventStore` (feature: `session-store`)
+- **DefaultCompactor**: Context compaction implementation (feature: `session-compaction`)
+- **EventStore trait / RedbEventStore**: Append-only event log for sessions
+- **SessionProjector**: Materializes `.rkat/sessions/` files from events (derived, not canonical)
+
+Feature gates: `session-store`, `session-compaction`.
+
+### meerkat-memory
+
+Semantic memory indexing:
+
+- **HnswMemoryStore**: Production memory store using hnsw_rs + redb (feature: `memory-store-session`)
+- **SimpleMemoryStore**: In-memory implementation for testing
+- **MemoryStore trait** (defined in meerkat-core): indexing, retrieval, similarity search
 
 ### meerkat-tools
 
@@ -163,12 +204,12 @@ Tool management:
 - **ToolDispatcher**: Route tool calls with timeout handling
 - **Schema validation**: JSON Schema validation of tool arguments
 
-### meerkat-mcp-client
+### meerkat-mcp
 
-MCP protocol implementation:
+MCP protocol client implementation:
 
 - **McpConnection**: Manages stdio connection to MCP server
-- **McpRouter**: Routes tool calls to appropriate MCP servers
+- **McpRouter**: Routes tool calls to appropriate MCP servers (implements `AgentToolDispatcher`)
 - **Protocol handling**: Initialize, tools/list, tools/call
 
 ### meerkat-rpc
@@ -186,17 +227,21 @@ events stream back as JSON-RPC notifications.
 
 ### meerkat (facade)
 
-The main entry point. Re-exports types and provides the AgentFactory facade:
+The main entry point. Re-exports types and provides:
 
-```rust
-// SDK factory
-pub use meerkat_agent::AgentFactory;
+- **AgentFactory**: Centralized agent construction pipeline shared across all surfaces
+- **FactoryAgentBuilder**: Bridges `AgentFactory` into `SessionAgentBuilder` for `EphemeralSessionService`
+- **FactoryAgent**: Wraps `DynAgent` implementing `SessionAgent`
+- **build_ephemeral_service()**: Convenience constructor for `EphemeralSessionService<FactoryAgentBuilder>`
+- **AgentBuildConfig**: Per-request configuration (model, system prompt, tools, `override_builtins`, `override_shell`)
 
-// Re-exports all public types
-pub use meerkat_core::{Agent, AgentBuilder, Session, Message, ...};
-pub use meerkat_client::{LlmClient, LlmEvent, ...};
-pub use meerkat_store::{SessionStore, ...};
-```
+The `FactoryAgentBuilder` pattern works as follows:
+
+1. Surface crate stages an `AgentBuildConfig` into the `build_config_slot`
+2. Surface calls `service.create_session(req)`
+3. `EphemeralSessionService` calls `builder.build_agent(req, event_tx)`
+4. `FactoryAgentBuilder` checks the slot, picks up the staged config, delegates to `AgentFactory::build_agent()`
+5. If no config was staged, a minimal config is built from `CreateSessionRequest` fields
 
 ## Agent Loop
 
@@ -416,14 +461,14 @@ pub trait AgentLlmClient: Send + Sync {
     ///
     /// # Arguments
     /// * `messages` - Conversation history
-    /// * `tools` - Available tool definitions
+    /// * `tools` - Available tool definitions (Arc for zero-copy sharing)
     /// * `max_tokens` - Maximum tokens to generate
     /// * `temperature` - Sampling temperature
     /// * `provider_params` - Provider-specific parameters (e.g., thinking config)
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&Value>,
@@ -439,6 +484,7 @@ pub trait AgentLlmClient: Send + Sync {
 ```rust
 use meerkat_core::{AgentLlmClient, AgentError, LlmStreamResult, Message, ToolDef};
 use serde_json::Value;
+use std::sync::Arc;
 
 pub struct CustomClient { /* ... */ }
 
@@ -447,7 +493,7 @@ impl AgentLlmClient for CustomClient {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&Value>,
@@ -473,26 +519,30 @@ Implement `AgentToolDispatcher` (defined in `meerkat-core/src/agent.rs`):
 #[async_trait]
 pub trait AgentToolDispatcher: Send + Sync {
     /// Get available tool definitions
-    fn tools(&self) -> Vec<ToolDef>;
+    fn tools(&self) -> Arc<[Arc<ToolDef>]>;
 
     /// Execute a tool call
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String>;
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError>;
 }
 ```
+
+`ToolCallView` is a zero-allocation borrowed view: `{ id: &str, name: &str, args: &RawValue }`.
+Use `call.parse_args::<T>()` to deserialize arguments into a concrete type.
 
 **Example Implementation:**
 
 ```rust
-use meerkat_core::{AgentToolDispatcher, ToolDef};
-use serde_json::Value;
+use meerkat_core::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
+use meerkat_core::error::ToolError;
+use std::sync::Arc;
 
 pub struct CustomDispatcher { /* ... */ }
 
 #[async_trait]
 impl AgentToolDispatcher for CustomDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "my_tool".to_string(),
                 description: "Does something useful".to_string(),
                 input_schema: serde_json::json!({
@@ -502,18 +552,21 @@ impl AgentToolDispatcher for CustomDispatcher {
                     },
                     "required": ["arg"]
                 }),
-            }
-        ]
+            })
+        ].into()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        match name {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        match call.name {
             "my_tool" => {
-                // Execute tool logic
-                let arg = args.get("arg").and_then(|v| v.as_str()).unwrap_or("");
-                Ok(format!("Processed: {}", arg))
+                #[derive(serde::Deserialize)]
+                struct Args { arg: String }
+
+                let args: Args = call.parse_args()
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                Ok(ToolResult::success(call.id, format!("Processed: {}", args.arg)))
             }
-            _ => Err(format!("Unknown tool: {}", name))
+            _ => Err(ToolError::not_found(call.name)),
         }
     }
 }
@@ -580,10 +633,10 @@ impl AgentSessionStore for DatabaseStore {
 
 ### MCP Integration
 
-Add MCP servers for tool discovery using `McpRouter` (defined in `meerkat-mcp-client/src/router.rs`):
+Add MCP servers for tool discovery using `McpRouter` (defined in `meerkat-mcp/src/router.rs`):
 
 ```rust
-use meerkat_mcp_client::{McpRouter, McpServerConfig};
+use meerkat_mcp::{McpRouter, McpServerConfig};
 use std::collections::HashMap;
 
 let mut router = McpRouter::new();
@@ -784,35 +837,49 @@ See [DESIGN.md §15](../DESIGN.md#15-security-considerations) for full security 
         |
         v
 +-------+--------+
-|    meerkat     |
+|    meerkat     |  (facade: FactoryAgentBuilder, build_ephemeral_service)
 +-------+--------+
         |
-        +---------------------+---------------------+
-        |                     |                     |
-        v                     v                     v
-+-------+--------+   +--------+-------+   +--------+-------+
-| meerkat-client |   | meerkat-tools  |   | meerkat-store  |
-+-------+--------+   +--------+-------+   +--------+-------+
-        |                     |                     |
-        |            +--------+-------+             |
-        |            | meerkat-mcp-   |             |
-        |            |    client      |             |
-        |            +--------+-------+             |
-        |                     |                     |
-        +----------+----------+----------+----------+
-                   |
-                   v
-           +-------+-------+
-           | meerkat-core  |
-           +---------------+
+        +----------+----------+----------+----------+----------+
+        |          |          |          |          |          |
+        v          v          v          v          v          v
++-------+--+ +----+-----+ +--+-----+ +--+-----+ +--+------+ +--+------+
+|  client  | |  tools   | | store  | |session | | memory  | |  hooks  |
++-------+--+ +----+-----+ +--+-----+ +--+-----+ +--+------+ +--+------+
+        |         |           |          |          |          |
+        |    +----+-----+    |          |          |          |
+        |    | meerkat-  |   |          |          |          |
+        |    |   mcp     |   |          |          |          |
+        |    +----+------+   |          |          |          |
+        |         |          |          |          |          |
+        +---------+----+-----+----+-----+----+-----+----+-----+
+                       |
+                       v
+               +-------+-------+
+               | meerkat-core  |  (trait contracts, types, agent loop)
+               +---------------+
 ```
+
+**Crate Ownership:**
+
+| Owner | Owns |
+|-------|------|
+| `meerkat-core` | Trait contracts (`SessionService`, `Compactor`, `MemoryStore`, `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`), `SessionError`, agent loop, types |
+| `meerkat-store` | `SessionStore` implementations (JSONL, redb, in-memory) |
+| `meerkat-session` | Session orchestration (`EphemeralSessionService`, `PersistentSessionService`), `EventStore` |
+| `meerkat-memory` | `HnswMemoryStore`, `SimpleMemoryStore` |
+| `meerkat` (facade) | Feature wiring, re-exports, `FactoryAgentBuilder`, `FactoryAgent`, `build_ephemeral_service` |
 
 **Dependency Rules:**
 1. `meerkat-core` depends on nothing in the workspace (only external crates)
 2. All other crates depend on `meerkat-core` for types and traits
-3. `meerkat-tools` depends on `meerkat-mcp-client` for MCP routing
-4. `meerkat` (facade) re-exports from all crates
+3. `meerkat-tools` depends on `meerkat-mcp` for MCP routing
+4. `meerkat` (facade) re-exports from all crates and provides the `FactoryAgentBuilder`
 5. `meerkat-cli` is the top-level binary crate
+
+**`.rkat/` as derived projection:** `.rkat/sessions/` files are materialized by `SessionProjector`
+from the event store. They are derived output, not canonical state. Deleting them and replaying
+from the event store produces identical content.
 
 **Key External Dependencies:**
 

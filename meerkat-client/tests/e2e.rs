@@ -11,7 +11,9 @@ use meerkat_client::{
 use meerkat_core::{Message, StopReason, UserMessage};
 use schemars::JsonSchema;
 use serde_json::{Map, Value};
-use tokio::net::TcpListener;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+use tokio::net::{TcpListener, TcpStream};
 
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
@@ -32,8 +34,26 @@ async fn spawn_test_server(
         let _ = axum::serve(listener, app).await;
     });
 
-    tokio::task::yield_now().await;
+    wait_for_server_ready(addr).await?;
     Ok((base_url, AbortOnDrop(handle)))
+}
+
+async fn wait_for_server_ready(addr: SocketAddr) -> Result<(), std::io::Error> {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(err);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
 }
 
 async fn spawn_test_server_or_skip(
@@ -188,7 +208,9 @@ async fn test_anthropic_auth_error() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
-    let client = AnthropicClient::new("invalid-key".to_string())?.with_base_url(base_url);
+    let client = AnthropicClient::builder("invalid-key".to_string())
+        .base_url(base_url)
+        .build()?;
 
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
@@ -230,7 +252,9 @@ async fn test_anthropic_message_stop_without_newline_yields_done()
         return Ok(());
     };
 
-    let client = AnthropicClient::new("test-key".to_string())?.with_base_url(base_url);
+    let client = AnthropicClient::builder("test-key".to_string())
+        .base_url(base_url)
+        .build()?;
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
         vec![Message::User(UserMessage {
@@ -291,7 +315,9 @@ async fn test_anthropic_message_stop_without_space_prefix_yields_done()
         return Ok(());
     };
 
-    let client = AnthropicClient::new("test-key".to_string())?.with_base_url(base_url);
+    let client = AnthropicClient::builder("test-key".to_string())
+        .base_url(base_url)
+        .build()?;
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
         vec![Message::User(UserMessage {
@@ -349,7 +375,9 @@ async fn test_anthropic_stream_end_without_done_yields_success()
     );
     let (base_url, _server) = spawn_test_server(app).await?;
 
-    let client = AnthropicClient::new("test-key".to_string())?.with_base_url(base_url);
+    let client = AnthropicClient::builder("test-key".to_string())
+        .base_url(base_url)
+        .build()?;
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
         vec![Message::User(UserMessage {
@@ -570,7 +598,7 @@ async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
-    let client = OpenAiClient::new("invalid-key".to_string()).with_base_url(base_url);
+    let client = OpenAiClient::new_with_base_url("invalid-key".to_string(), base_url);
 
     let request = LlmRequest::new(
         "gpt-4o-mini",

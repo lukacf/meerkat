@@ -13,6 +13,8 @@ meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
+meerkat-session = { workspace = true }
+meerkat-memory = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 meerkat-hooks = { workspace = true }
@@ -40,6 +42,7 @@ nix = { workspace = true }
 
 [features]
 default = ["anthropic", "jsonl-store", "comms", "mcp", "sub-agents"]
+integration-real-tests = []
 
 # LLM providers
 anthropic = ["meerkat-client/anthropic"]
@@ -50,6 +53,11 @@ all-providers = ["anthropic", "openai", "gemini"]
 # Storage backends
 jsonl-store = ["meerkat-store/jsonl"]
 memory-store = ["meerkat-store/memory"]
+
+# Session capabilities
+session-store = ["meerkat-session/session-store"]
+session-compaction = ["meerkat-session/session-compaction"]
+memory-store-session = ["dep:meerkat-memory"]
 
 # Optional subsystems
 comms = ["dep:meerkat-comms", "meerkat-tools/comms"]
@@ -63,3 +71,18 @@ workspace = true
 name = "comms_verbose"
 path = "examples/comms_verbose.rs"
 required-features = ["comms"]
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "e2e_comms"
+path = "tests/e2e_comms.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "e2e_shell"
+path = "tests/e2e_shell.rs"
+required-features = ["integration-real-tests"]

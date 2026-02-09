@@ -4,7 +4,6 @@
 [agent]
 model = "claude-opus-4-6"
 max_tokens_per_turn = 16384
-checkpoint_interval = 5
 budget_warning_threshold = 0.8
 
 [models]

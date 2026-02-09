@@ -28,6 +28,7 @@ pub struct AgentBuilder {
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
     pub(super) hook_run_overrides: HookRunOverrides,
+    pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
 }
 
 impl AgentBuilder {
@@ -44,6 +45,7 @@ impl AgentBuilder {
             comms_runtime: None,
             hook_engine: None,
             hook_run_overrides: HookRunOverrides::default(),
+            compactor: None,
         }
     }
 
@@ -137,6 +139,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the context compactor.
+    pub fn compactor(mut self, compactor: Arc<dyn crate::compact::Compactor>) -> Self {
+        self.compactor = Some(compactor);
+        self
+    }
+
     /// Build the agent
     pub async fn build<C, T, S>(
         self,
@@ -177,6 +185,9 @@ impl AgentBuilder {
             comms_runtime: self.comms_runtime,
             hook_engine: self.hook_engine,
             hook_run_overrides: self.hook_run_overrides,
+            compactor: self.compactor,
+            last_input_tokens: 0,
+            last_compaction_turn: None,
         }
     }
 }

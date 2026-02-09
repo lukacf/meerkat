@@ -5,6 +5,8 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let state = meerkat_mcp_server::MeerkatMcpState::new().await;
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = BufReader::new(stdin).lines();
@@ -37,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let response = handle_request(&request).await;
+        let response = handle_request(&state, &request).await;
         stdout.write_all(format!("{response}\n").as_bytes()).await?;
         stdout.flush().await?;
     }
@@ -45,7 +47,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_request(request: &Value) -> Value {
+async fn handle_request(
+    state: &meerkat_mcp_server::MeerkatMcpState,
+    request: &Value,
+) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -83,7 +88,7 @@ async fn handle_request(request: &Value) -> Value {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            match meerkat_mcp_server::handle_tools_call(name, &arguments).await {
+            match meerkat_mcp_server::handle_tools_call(state, name, &arguments).await {
                 Ok(result) => json!({
                     "jsonrpc": "2.0",
                     "id": id,

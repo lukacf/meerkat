@@ -1,20 +1,29 @@
 //! SessionRuntime - keeps agents alive between turns.
 //!
-//! Each session gets a dedicated tokio task that exclusively owns the `Agent`,
-//! solving the `cancel(&mut self)` requirement without mutex. Communication
-//! between the runtime and session tasks happens through channels.
+//! Delegates to [`EphemeralSessionService`] for session lifecycle management.
+//! `FactoryAgentBuilder` bridges `AgentFactory::build_agent()` into the
+//! `SessionAgentBuilder` / `SessionAgent` traits used by the service.
+//!
+//! The runtime preserves the two-step create-then-run API required by the
+//! JSON-RPC handlers: `create_session()` stages a build config and returns a
+//! `SessionId`; the first `start_turn()` call for that ID materializes the
+//! session inside the service (which runs the first turn).
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use indexmap::IndexMap;
-use meerkat::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent};
+use meerkat::{AgentBuildConfig, AgentFactory, DynAgent, EphemeralSessionService, SessionAgent};
 use meerkat_client::LlmClient;
-use meerkat_core::Config;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::service::{
+    CreateSessionRequest, SessionError, SessionService, StartTurnRequest,
+};
 use meerkat_core::types::{RunResult, SessionId};
-use tokio::sync::{RwLock, mpsc, oneshot, watch};
+use meerkat_core::{Config, Session};
+use meerkat_session::SessionSnapshot;
+use tokio::sync::{Mutex, RwLock, mpsc};
 
-use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::RpcError;
 
@@ -53,27 +62,111 @@ pub struct SessionInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Internal types
+// FactoryAgent — wraps DynAgent for SessionAgent
 // ---------------------------------------------------------------------------
 
-/// Commands sent from the runtime to a session task.
-enum SessionCommand {
-    StartTurn {
-        prompt: String,
-        event_tx: mpsc::Sender<AgentEvent>,
-        result_tx: oneshot::Sender<Result<RunResult, meerkat_core::AgentError>>,
-    },
-    Interrupt {
-        ack_tx: oneshot::Sender<()>,
-    },
-    Shutdown,
+/// Wrapper around [`DynAgent`] implementing [`SessionAgent`].
+struct FactoryAgent {
+    agent: DynAgent,
 }
 
-/// Handle stored in the sessions map, used to communicate with a session task.
-struct SessionHandle {
-    command_tx: mpsc::Sender<SessionCommand>,
-    state_rx: watch::Receiver<SessionState>,
-    session_id: SessionId,
+#[async_trait]
+impl SessionAgent for FactoryAgent {
+    async fn run_with_events(
+        &mut self,
+        prompt: String,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        self.agent.run_with_events(prompt, event_tx).await
+    }
+
+    fn cancel(&mut self) {
+        self.agent.cancel();
+    }
+
+    fn session_id(&self) -> SessionId {
+        self.agent.session().id().clone()
+    }
+
+    fn snapshot(&self) -> SessionSnapshot {
+        let session = self.agent.session();
+        SessionSnapshot {
+            created_at: session.created_at(),
+            updated_at: session.updated_at(),
+            message_count: session.messages().len(),
+            total_tokens: session.total_tokens(),
+            usage: session.total_usage(),
+            last_assistant_text: session.last_assistant_text(),
+        }
+    }
+
+    fn session_clone(&self) -> Session {
+        self.agent.session().clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FactoryAgentBuilder — bridges AgentFactory into SessionAgentBuilder
+// ---------------------------------------------------------------------------
+
+/// Implements [`meerkat::SessionAgentBuilder`] by delegating to
+/// [`AgentFactory::build_agent()`].
+///
+/// A shared `build_config_slot` allows the [`SessionRuntime`] to pass the
+/// full [`AgentBuildConfig`] to the builder before the service calls
+/// `build_agent`.
+struct FactoryAgentBuilder {
+    factory: AgentFactory,
+    config: Config,
+    default_llm_client: Option<Arc<dyn LlmClient>>,
+    /// Slot for passing a full `AgentBuildConfig` from `SessionRuntime` to the
+    /// builder when the service materializes a pending session.
+    build_config_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
+}
+
+#[async_trait]
+impl meerkat::SessionAgentBuilder for FactoryAgentBuilder {
+    type Agent = FactoryAgent;
+
+    async fn build_agent(
+        &self,
+        req: &CreateSessionRequest,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<FactoryAgent, SessionError> {
+        // If a full build config was staged, use it. Otherwise construct one
+        // from the CreateSessionRequest fields.
+        let mut build_config = {
+            let mut slot = self.build_config_slot.lock().await;
+            slot.take().unwrap_or_else(|| {
+                let mut bc = AgentBuildConfig::new(req.model.clone());
+                bc.system_prompt = req.system_prompt.clone();
+                bc.max_tokens = req.max_tokens;
+                bc
+            })
+        };
+
+        // Wire the event channel so the LLM adapter streams through it.
+        build_config.event_tx = Some(event_tx);
+
+        // Inject the default LLM client if the caller didn't provide one.
+        if build_config.llm_client_override.is_none() {
+            if let Some(ref client) = self.default_llm_client {
+                build_config.llm_client_override = Some(client.clone());
+            }
+        }
+
+        let agent = self
+            .factory
+            .build_agent(build_config, &self.config)
+            .await
+            .map_err(|e| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    e.to_string(),
+                ))
+            })?;
+
+        Ok(FactoryAgent { agent })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -82,13 +175,19 @@ struct SessionHandle {
 
 /// Core runtime that manages agent sessions.
 ///
-/// Each session is backed by a dedicated tokio task that exclusively owns the
-/// `Agent` value. The runtime communicates with session tasks via channels.
+/// Wraps [`EphemeralSessionService`] for session lifecycle management while
+/// preserving the two-step create-then-run API required by JSON-RPC handlers.
 pub struct SessionRuntime {
-    sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
-    factory: AgentFactory,
-    config: Config,
+    service: EphemeralSessionService<FactoryAgentBuilder>,
+    /// Sessions that have been "created" (ID returned to caller) but not yet
+    /// materialized in the service. The first `start_turn` call promotes them.
+    pending: RwLock<IndexMap<SessionId, AgentBuildConfig>>,
     max_sessions: usize,
+    /// Serializes create-then-promote operations to prevent two concurrent
+    /// `start_turn` calls from racing through the build config slot.
+    promote_lock: Mutex<()>,
+    /// Shared slot between the runtime and the builder.
+    build_config_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
     /// Override LLM client for all sessions (primarily for testing).
     pub default_llm_client: Option<Arc<dyn LlmClient>>,
 }
@@ -96,95 +195,62 @@ pub struct SessionRuntime {
 impl SessionRuntime {
     /// Create a new session runtime.
     pub fn new(factory: AgentFactory, config: Config, max_sessions: usize) -> Self {
-        Self {
-            sessions: RwLock::new(IndexMap::new()),
+        let build_config_slot = Arc::new(Mutex::new(None));
+
+        let builder = FactoryAgentBuilder {
             factory,
             config,
+            default_llm_client: None,
+            build_config_slot: build_config_slot.clone(),
+        };
+
+        let service = EphemeralSessionService::new(builder, max_sessions);
+
+        Self {
+            service,
+            pending: RwLock::new(IndexMap::new()),
             max_sessions,
+            promote_lock: Mutex::new(()),
+            build_config_slot,
             default_llm_client: None,
         }
     }
 
     /// Create a new session with the given build configuration.
     ///
-    /// Returns the session ID on success.
+    /// Returns the session ID on success. The session is staged as "pending"
+    /// and will be materialized inside the service on the first `start_turn`.
     pub async fn create_session(
         &self,
         build_config: AgentBuildConfig,
     ) -> Result<SessionId, RpcError> {
-        // Check capacity
+        // Check combined capacity (pending + active).
         {
-            let sessions = self.sessions.read().await;
-            if sessions.len() >= self.max_sessions {
+            let pending = self.pending.read().await;
+            let active = self.service.list(Default::default()).await.map_err(session_error_to_rpc)?.len();
+            let total = pending.len() + active;
+            if total >= self.max_sessions {
                 return Err(RpcError {
                     code: error::INTERNAL_ERROR,
-                    message: format!(
-                        "Max sessions reached ({}/{})",
-                        sessions.len(),
-                        self.max_sessions
-                    ),
+                    message: format!("Max sessions reached ({}/{})", total, self.max_sessions),
                     data: None,
                 });
             }
         }
 
-        // Inject default LLM client if the caller didn't provide one.
-        let build_config = if build_config.llm_client_override.is_none() {
-            if let Some(ref client) = self.default_llm_client {
-                AgentBuildConfig {
-                    llm_client_override: Some(client.clone()),
-                    ..build_config
-                }
-            } else {
-                build_config
-            }
-        } else {
-            build_config
-        };
+        // Pre-create a session to claim a stable SessionId.
+        let session = Session::new();
+        let session_id = session.id().clone();
 
-        // Create the permanent event channel for this session.
-        let (agent_event_tx, agent_event_rx) =
-            mpsc::channel::<AgentEvent>(NOTIFICATION_CHANNEL_CAPACITY);
-
-        // Wire the event_tx into the build config so the LLM adapter streams
-        // TextDelta events through it.
+        // Inject the pre-created session so the agent builder will reuse this ID.
         let build_config = AgentBuildConfig {
-            event_tx: Some(agent_event_tx.clone()),
+            resume_session: Some(session),
             ..build_config
         };
 
-        // Build the agent
-        let agent = self
-            .factory
-            .build_agent(build_config, &self.config)
-            .await
-            .map_err(build_error_to_rpc)?;
-
-        let session_id = agent.session().id().clone();
-
-        // Create session task channels
-        let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(8);
-        let (state_tx, state_rx) = watch::channel(SessionState::Idle);
-
-        // Spawn the session task
-        tokio::spawn(session_task(
-            agent,
-            agent_event_tx,
-            agent_event_rx,
-            command_rx,
-            state_tx,
-        ));
-
-        // Store the handle
-        let handle = SessionHandle {
-            command_tx,
-            state_rx,
-            session_id: session_id.clone(),
-        };
-
         {
-            let mut sessions = self.sessions.write().await;
-            sessions.insert(session_id.clone(), handle);
+            let mut pending = self.pending.write().await;
+            pending.insert(session_id.clone(), build_config);
         }
 
         Ok(session_id)
@@ -200,175 +266,166 @@ impl SessionRuntime {
         prompt: String,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, RpcError> {
-        let (result_tx, result_rx) = oneshot::channel();
+        // Check if this is a pending (not-yet-materialized) session.
+        let pending_config = {
+            let mut pending = self.pending.write().await;
+            pending.swap_remove(session_id)
+        };
 
-        {
-            let sessions = self.sessions.read().await;
-            let handle = sessions.get(session_id).ok_or_else(|| RpcError {
-                code: error::SESSION_NOT_FOUND,
-                message: format!("Session not found: {session_id}"),
-                data: None,
-            })?;
-
-            // Check if the session is busy
-            let state = *handle.state_rx.borrow();
-            if state == SessionState::Running {
-                return Err(RpcError {
-                    code: error::SESSION_BUSY,
-                    message: format!("Session {session_id} is busy"),
-                    data: None,
-                });
+        if let Some(mut build_config) = pending_config {
+            // Inject default LLM client if the caller didn't provide one.
+            if build_config.llm_client_override.is_none() {
+                if let Some(ref client) = self.default_llm_client {
+                    build_config.llm_client_override = Some(client.clone());
+                }
             }
 
-            handle
-                .command_tx
-                .send(SessionCommand::StartTurn {
-                    prompt,
-                    event_tx,
-                    result_tx,
-                })
+            // Promote via the service. Serialize to prevent concurrent promotes
+            // from racing through the shared build config slot.
+            let _guard = self.promote_lock.lock().await;
+
+            // Stage the full build config for the builder.
+            {
+                let mut slot = self.build_config_slot.lock().await;
+                *slot = Some(build_config);
+            }
+
+            let req = CreateSessionRequest {
+                model: String::new(), // builder will use the staged config
+                prompt,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: Some(event_tx),
+            };
+
+            let result = self
+                .service
+                .create_session(req)
                 .await
-                .map_err(|_| RpcError {
-                    code: error::INTERNAL_ERROR,
-                    message: "Session task has exited".to_string(),
-                    data: None,
-                })?;
+                .map_err(session_error_to_rpc)?;
+
+            return Ok(result);
         }
 
-        // Wait for the turn to complete
-        let result = result_rx.await.map_err(|_| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: "Session task dropped the result channel".to_string(),
-            data: None,
-        })?;
+        // Normal turn on an existing session.
+        let req = StartTurnRequest {
+            prompt,
+            event_tx: Some(event_tx),
+        };
 
-        result.map_err(agent_error_to_rpc)
+        self.service
+            .start_turn(session_id, req)
+            .await
+            .map_err(session_error_to_rpc)
     }
 
     /// Interrupt a running turn on the given session.
     ///
     /// If the session is idle, this is a no-op.
     pub async fn interrupt(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions.get(session_id).ok_or_else(|| RpcError {
-            code: error::SESSION_NOT_FOUND,
-            message: format!("Session not found: {session_id}"),
-            data: None,
-        })?;
-
-        let state = *handle.state_rx.borrow();
-        if state != SessionState::Running {
-            // Not running - nothing to interrupt
-            return Ok(());
+        // Pending sessions have no running turn.
+        {
+            let pending = self.pending.read().await;
+            if pending.contains_key(session_id) {
+                return Ok(());
+            }
         }
 
-        let (ack_tx, ack_rx) = oneshot::channel();
-        handle
-            .command_tx
-            .send(SessionCommand::Interrupt { ack_tx })
-            .await
-            .map_err(|_| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: "Session task has exited".to_string(),
-                data: None,
-            })?;
-
-        // Wait for acknowledgement
-        let _ = ack_rx.await;
-        Ok(())
+        match self.service.interrupt(session_id).await {
+            Ok(()) => Ok(()),
+            // The service returns NotRunning when no turn is active — map to no-op.
+            Err(SessionError::NotRunning { .. }) => Ok(()),
+            Err(e) => Err(session_error_to_rpc(e)),
+        }
     }
 
     /// Get the current state of a session, or `None` if the session does not exist.
     pub async fn session_state(&self, session_id: &SessionId) -> Option<SessionState> {
-        let sessions = self.sessions.read().await;
-        sessions.get(session_id).map(|h| *h.state_rx.borrow())
+        // Check pending sessions first.
+        {
+            let pending = self.pending.read().await;
+            if pending.contains_key(session_id) {
+                return Some(SessionState::Idle);
+            }
+        }
+
+        // Use `list()` instead of `read()` to avoid blocking on a
+        // `ReadSnapshot` command while a turn is in progress. `list()`
+        // reads state from non-blocking watch receivers.
+        if let Ok(summaries) = self.service.list(Default::default()).await {
+            for summary in &summaries {
+                if summary.session_id == *session_id {
+                    return Some(if summary.is_active {
+                        SessionState::Running
+                    } else {
+                        SessionState::Idle
+                    });
+                }
+            }
+        }
+
+        None
     }
 
     /// Archive (remove) a session.
     pub async fn archive_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        let mut sessions = self.sessions.write().await;
-        let handle = sessions.swap_remove(session_id).ok_or_else(|| RpcError {
-            code: error::SESSION_NOT_FOUND,
-            message: format!("Session not found: {session_id}"),
-            data: None,
-        })?;
+        // Check pending sessions first.
+        {
+            let mut pending = self.pending.write().await;
+            if pending.swap_remove(session_id).is_some() {
+                return Ok(());
+            }
+        }
 
-        // Send shutdown command. Ignore errors if the task already exited.
-        let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
-        Ok(())
+        self.service
+            .archive(session_id)
+            .await
+            .map_err(session_error_to_rpc)
     }
 
     /// List all active sessions.
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .values()
-            .map(|h| SessionInfo {
-                session_id: h.session_id.clone(),
-                state: *h.state_rx.borrow(),
-            })
-            .collect()
+        let mut result = Vec::new();
+
+        // Include pending sessions as Idle.
+        {
+            let pending = self.pending.read().await;
+            for session_id in pending.keys() {
+                result.push(SessionInfo {
+                    session_id: session_id.clone(),
+                    state: SessionState::Idle,
+                });
+            }
+        }
+
+        // Include active sessions from the service.
+        if let Ok(summaries) = self.service.list(Default::default()).await {
+            for summary in summaries {
+                let state = if summary.is_active {
+                    SessionState::Running
+                } else {
+                    SessionState::Idle
+                };
+                result.push(SessionInfo {
+                    session_id: summary.session_id,
+                    state,
+                });
+            }
+        }
+
+        result
     }
 
     /// Shut down the runtime, closing all sessions.
     pub async fn shutdown(&self) {
-        let mut sessions = self.sessions.write().await;
-        for (_id, handle) in sessions.drain(..) {
-            let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
+        // Clear pending sessions.
+        {
+            let mut pending = self.pending.write().await;
+            pending.clear();
         }
-    }
-}
 
-// ---------------------------------------------------------------------------
-// Session task
-// ---------------------------------------------------------------------------
-
-/// Long-lived task that exclusively owns a `DynAgent` and processes commands.
-async fn session_task(
-    mut agent: DynAgent,
-    agent_event_tx: mpsc::Sender<AgentEvent>,
-    mut agent_event_rx: mpsc::Receiver<AgentEvent>,
-    mut commands: mpsc::Receiver<SessionCommand>,
-    state_tx: watch::Sender<SessionState>,
-) {
-    while let Some(cmd) = commands.recv().await {
-        match cmd {
-            SessionCommand::StartTurn {
-                prompt,
-                event_tx,
-                result_tx,
-            } => {
-                state_tx.send_replace(SessionState::Running);
-
-                let run_fut = agent.run_with_events(prompt, agent_event_tx.clone());
-                tokio::pin!(run_fut);
-
-                let result = loop {
-                    tokio::select! {
-                        result = &mut run_fut => break result,
-                        Some(event) = agent_event_rx.recv() => {
-                            let _ = event_tx.send(event).await;
-                        }
-                    }
-                };
-
-                // Drain any remaining events after the run completes
-                while let Ok(event) = agent_event_rx.try_recv() {
-                    let _ = event_tx.send(event).await;
-                }
-
-                state_tx.send_replace(SessionState::Idle);
-                let _ = result_tx.send(result);
-            }
-            SessionCommand::Interrupt { ack_tx } => {
-                agent.cancel();
-                let _ = ack_tx.send(());
-            }
-            SessionCommand::Shutdown => {
-                state_tx.send_replace(SessionState::ShuttingDown);
-                break;
-            }
-        }
+        // Shut down the service.
+        self.service.shutdown().await;
     }
 }
 
@@ -376,28 +433,29 @@ async fn session_task(
 // Error mapping
 // ---------------------------------------------------------------------------
 
-fn agent_error_to_rpc(err: meerkat_core::AgentError) -> RpcError {
+fn session_error_to_rpc(err: SessionError) -> RpcError {
     let code = match &err {
-        meerkat_core::AgentError::TokenBudgetExceeded { .. }
-        | meerkat_core::AgentError::TimeBudgetExceeded { .. }
-        | meerkat_core::AgentError::ToolCallBudgetExceeded { .. } => error::BUDGET_EXHAUSTED,
-        meerkat_core::AgentError::HookDenied { .. } => error::HOOK_DENIED,
-        meerkat_core::AgentError::Llm { .. } => error::PROVIDER_ERROR,
-        meerkat_core::AgentError::SessionNotFound(_) => error::SESSION_NOT_FOUND,
-        _ => error::INTERNAL_ERROR,
-    };
-    RpcError {
-        code,
-        message: err.to_string(),
-        data: None,
-    }
-}
-
-fn build_error_to_rpc(err: BuildAgentError) -> RpcError {
-    let code = match &err {
-        BuildAgentError::MissingApiKey { .. } | BuildAgentError::UnknownProvider { .. } => {
-            error::PROVIDER_ERROR
-        }
+        SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
+        SessionError::Busy { .. } => error::SESSION_BUSY,
+        SessionError::NotRunning { .. } => error::INTERNAL_ERROR,
+        SessionError::Agent(agent_err) => match agent_err {
+            meerkat_core::AgentError::TokenBudgetExceeded { .. }
+            | meerkat_core::AgentError::TimeBudgetExceeded { .. }
+            | meerkat_core::AgentError::ToolCallBudgetExceeded { .. } => error::BUDGET_EXHAUSTED,
+            meerkat_core::AgentError::HookDenied { .. } => error::HOOK_DENIED,
+            meerkat_core::AgentError::Llm { .. } => error::PROVIDER_ERROR,
+            meerkat_core::AgentError::SessionNotFound(_) => error::SESSION_NOT_FOUND,
+            meerkat_core::AgentError::InternalError(msg) => {
+                // Build errors (missing API key, unknown provider) are tunneled
+                // through InternalError from the builder.
+                if msg.contains("API key") || msg.contains("provider") {
+                    error::PROVIDER_ERROR
+                } else {
+                    error::INTERNAL_ERROR
+                }
+            }
+            _ => error::INTERNAL_ERROR,
+        },
         _ => error::INTERNAL_ERROR,
     };
     RpcError {

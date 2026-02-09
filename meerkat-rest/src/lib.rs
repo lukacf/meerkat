@@ -11,7 +11,6 @@
 //! When enabled, the REST instance uses its instance-scoped data directory
 //! as the project root for task storage and shell working directory.
 
-use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -25,30 +24,18 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
-    AgentBuilder, AgentEvent, AgentToolDispatcher, JsonlStore, OutputSchema, SessionId,
-    SessionMeta, SessionStore, ToolDef, ToolError, ToolResult, create_default_hook_engine,
-    resolve_layered_hooks_config,
+    AgentBuildConfig, AgentEvent, AgentFactory, JsonlStore, LlmClient, OutputSchema, SessionId,
+    SessionMeta, SessionStore,
 };
-#[cfg(feature = "comms")]
-use meerkat::{build_comms_runtime_from_config, compose_tools_with_comms};
-use meerkat_client::{LlmClient, LlmClientAdapter, ProviderResolver};
-#[cfg(feature = "comms")]
-use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::{
     Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider, SchemaWarning,
-    SessionMetadata, SessionTooling, SystemPromptConfig, ToolCallView, format_verbose_event,
-};
-use meerkat_store::StoreAdapter;
-use meerkat_tools::builtin::{
-    BuiltinToolConfig, CompositeDispatcher, FileTaskStore, ToolPolicyLayer, ensure_rkat_dir,
-    shell::ShellConfig,
+    SessionTooling, format_verbose_event,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::convert::Infallible;
-use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -182,32 +169,6 @@ async fn load_config_from_store(store: &dyn ConfigStore) -> Config {
         tracing::warn!("Failed to apply env overrides: {}", err);
     }
     config
-}
-
-fn resolve_provider(input: Option<Provider>, model: &str) -> Result<Provider, ApiError> {
-    match input {
-        Some(provider) => Ok(provider),
-        None => {
-            let inferred = ProviderResolver::infer_from_model(model);
-            if inferred == Provider::Other {
-                Err(ApiError::BadRequest(format!(
-                    "Cannot infer provider from model '{}'. Please specify a provider explicitly.",
-                    model
-                )))
-            } else {
-                Ok(inferred)
-            }
-        }
-    }
-}
-
-fn provider_key(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Anthropic => "anthropic",
-        Provider::OpenAI => "openai",
-        Provider::Gemini => "gemini",
-        Provider::Other => "other",
-    }
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, ApiError> {
@@ -386,199 +347,49 @@ async fn patch_config(
     Ok(Json(updated))
 }
 
-/// Create a tool dispatcher based on configuration
-///
-/// When builtins are enabled, creates a CompositeDispatcher with task tools
-/// and optionally shell tools. Otherwise returns an EmptyToolDispatcher.
-fn create_tool_dispatcher(
-    project_root: Option<&PathBuf>,
-    enable_builtins: bool,
-    enable_shell: bool,
-) -> Result<(Arc<dyn AgentToolDispatcher>, String), ApiError> {
-    if !enable_builtins {
-        return Ok((Arc::new(EmptyToolDispatcher), String::new()));
-    }
-
-    // Need project root for file-based task store
-    let project_root = project_root.ok_or_else(|| {
-        ApiError::Configuration("project_root required when built-in tools are enabled".to_string())
-    })?;
-
-    // Create file-based task store
-    let task_store = Arc::new(FileTaskStore::in_project(project_root));
-
-    // Create shell config if shell is enabled
-    let shell_config = if enable_shell {
-        Some(ShellConfig::with_project_root(project_root.clone()))
-    } else {
-        None
-    };
-
-    // Create builtin tool config - if shell is enabled, enable shell tools in policy
-    let config = if enable_shell {
-        BuiltinToolConfig {
-            policy: ToolPolicyLayer::new()
-                .enable_tool("shell")
-                .enable_tool("shell_job_status")
-                .enable_tool("shell_jobs")
-                .enable_tool("shell_job_cancel"),
-            ..Default::default()
-        }
-    } else {
-        BuiltinToolConfig::default()
-    };
-
-    // Create composite dispatcher
-    let dispatcher = CompositeDispatcher::new(task_store, &config, shell_config, None, None)
-        .map_err(|e| ApiError::Internal(format!("Failed to create tool dispatcher: {}", e)))?;
-
-    let tool_usage_instructions = dispatcher.usage_instructions();
-    Ok((Arc::new(dispatcher), tool_usage_instructions))
-}
-
-async fn ensure_rkat_dir_async(project_root: &std::path::Path) -> Result<(), ApiError> {
-    let project_root = project_root.to_path_buf();
-    tokio::task::spawn_blocking(move || ensure_rkat_dir(&project_root))
-        .await
-        .map_err(|e| ApiError::Internal(format!("Directory creation task failed: {}", e)))?
-        .map_err(|e| ApiError::Internal(format!("Failed to create .rkat directory: {}", e)))?;
-    Ok(())
-}
-
 /// Create and run a new session
 async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
     let host_mode = resolve_host_mode(req.host_mode)?;
-
-    // Validate host mode requirements
-    #[cfg(feature = "comms")]
-    if host_mode && req.comms_name.is_none() {
-        return Err(ApiError::BadRequest(
-            "host_mode requires comms_name to be set".to_string(),
-        ));
-    }
-
     let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let config = load_config_from_store(state.config_store.as_ref()).await;
-    let provider = resolve_provider(req.provider, &model)?;
 
-    let store = JsonlStore::new(state.store_path.clone());
-    store
-        .init()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Store init failed: {}", e)))?;
-
-    let llm_client = match state.llm_client_override.clone() {
-        Some(client) => client,
-        None => {
-            if ProviderResolver::api_key_for(provider).is_none() {
-                return Err(ApiError::Configuration(format!(
-                    "API key not set for provider '{}'",
-                    provider_key(provider)
-                )));
-            }
-
-            let base_url = config
-                .providers
-                .base_urls
-                .as_ref()
-                .and_then(|map| map.get(provider_key(provider)).cloned());
-            ProviderResolver::client_for(provider, base_url)
-        }
-    };
     let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
     let verbose = req.verbose;
-    let llm_adapter = Arc::new(LlmClientAdapter::with_event_channel(
-        llm_client,
-        model.to_string(),
-        agent_event_tx.clone(),
-    ));
-    if state.enable_builtins {
-        let project_root = state.project_root.as_ref().ok_or_else(|| {
-            ApiError::Configuration(
-                "project_root required when built-in tools are enabled".to_string(),
-            )
-        })?;
-        ensure_rkat_dir_async(project_root).await?;
-    }
-    let (mut tools, mut tool_usage_instructions) = create_tool_dispatcher(
-        state.project_root.as_ref(),
-        state.enable_builtins,
-        state.enable_shell,
-    )?;
-    let store_adapter = Arc::new(StoreAdapter::new(Arc::new(store)));
 
-    // Create comms runtime if host_mode is enabled
-    // Note: inproc_only() already registers in InprocRegistry, no need to start listeners
-    #[cfg(feature = "comms")]
-    let comms_runtime = if host_mode {
-        let comms_name = req.comms_name.as_ref().ok_or_else(|| {
-            ApiError::Configuration("comms_name required when host_mode is enabled".to_string())
-        })?;
-        let base_dir = state
-            .project_root
-            .clone()
-            .or_else(|| state.store_path.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(rest_instance_root);
-        let runtime = build_comms_runtime_from_config(&config, base_dir, comms_name)
-            .await
-            .map_err(ApiError::Internal)?;
-        Some(runtime)
-    } else {
-        None
+    let mut factory = AgentFactory::new(state.store_path.clone())
+        .builtins(state.enable_builtins)
+        .shell(state.enable_shell);
+    if let Some(ref project_root) = state.project_root {
+        factory = factory.project_root(project_root.clone());
+    }
+
+    let build_config = AgentBuildConfig {
+        model: model.to_string(),
+        provider: req.provider,
+        max_tokens: Some(max_tokens),
+        system_prompt: req.system_prompt,
+        output_schema: req.output_schema,
+        structured_output_retries: req.structured_output_retries,
+        hooks_override: req.hooks_override.unwrap_or_default(),
+        host_mode,
+        comms_name: req.comms_name.clone(),
+        resume_session: None,
+        budget_limits: None,
+        event_tx: Some(agent_event_tx.clone()),
+        llm_client_override: state.llm_client_override.clone(),
+        provider_params: None,
+        external_tools: None,
     };
 
-    #[cfg(feature = "comms")]
-    if let Some(ref runtime) = comms_runtime {
-        let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
-            .map_err(|e| ApiError::Internal(format!("Failed to compose comms tools: {}", e)))?;
-        tools = composed.0;
-        tool_usage_instructions = composed.1;
-    }
+    let mut agent = factory
+        .build_agent(build_config, &config)
+        .await
+        .map_err(|e| ApiError::Agent(format!("{e}")))?;
 
-    let hooks_base_dir = state
-        .project_root
-        .as_deref()
-        .unwrap_or_else(|| FsPath::new("."));
-    let layered_hooks = resolve_layered_hooks_config(hooks_base_dir, &config).await;
-    let hook_engine = create_default_hook_engine(layered_hooks);
-
-    let mut builder = AgentBuilder::new()
-        .model(model.clone())
-        .max_tokens_per_turn(max_tokens)
-        .budget(config.budget_limits())
-        .structured_output_retries(req.structured_output_retries)
-        .with_hook_run_overrides(req.hooks_override.clone().unwrap_or_default());
-
-    // Add output schema if provided
-    if let Some(ref schema) = req.output_schema {
-        builder = builder.output_schema(schema.clone());
-    }
-
-    // Use caller-provided system prompt if set, otherwise use default
-    let mut system_prompt = match req.system_prompt.clone() {
-        Some(prompt) => prompt,
-        None => SystemPromptConfig::new().compose().await,
-    };
-    if !tool_usage_instructions.is_empty() {
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(&tool_usage_instructions);
-    }
-    builder = builder.system_prompt(system_prompt);
-
-    // Add comms runtime if enabled
-    #[cfg(feature = "comms")]
-    if let Some(runtime) = comms_runtime {
-        builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
-    }
-    if let Some(hook_engine) = hook_engine {
-        builder = builder.with_hook_engine(hook_engine);
-    }
-
-    let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
     let session_id = agent.session().id().clone();
     let broadcast_tx = state.event_tx.clone();
     let forward_task = tokio::spawn(async move {
@@ -594,22 +405,6 @@ async fn create_session(
             });
         }
     });
-    let metadata = SessionMetadata {
-        model: model.to_string(),
-        max_tokens,
-        provider,
-        tooling: SessionTooling {
-            builtins: state.enable_builtins,
-            shell: state.enable_shell,
-            comms: host_mode,
-            subagents: false,
-        },
-        host_mode,
-        comms_name: req.comms_name.clone(),
-    };
-    if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
-        tracing::warn!("Failed to store session metadata: {}", err);
-    }
 
     // Run agent based on mode
     let result = if host_mode {
@@ -705,6 +500,8 @@ async fn continue_session(
 
     let config = load_config_from_store(state.config_store.as_ref()).await;
     let stored_metadata = session.session_metadata();
+
+    // Resolve tooling flags from stored metadata, falling back to server defaults
     let tooling = stored_metadata
         .as_ref()
         .map(|meta| meta.tooling.clone())
@@ -714,6 +511,7 @@ async fn continue_session(
             comms: false,
             subagents: false,
         });
+
     let model = req
         .model
         .or_else(|| {
@@ -726,11 +524,9 @@ async fn continue_session(
         .max_tokens
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
         .unwrap_or(state.max_tokens);
-    let provider = resolve_provider(
-        req.provider
-            .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider)),
-        &model,
-    )?;
+    let provider = req
+        .provider
+        .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider));
     let host_mode_requested = req.host_mode
         || stored_metadata
             .as_ref()
@@ -743,115 +539,39 @@ async fn continue_session(
             .and_then(|meta| meta.comms_name.clone())
     });
 
-    #[cfg(feature = "comms")]
-    if host_mode && comms_name.is_none() {
-        return Err(ApiError::BadRequest(
-            "host_mode requires comms_name to be set".to_string(),
-        ));
-    }
-
-    let llm_client = match state.llm_client_override.clone() {
-        Some(client) => client,
-        None => {
-            if ProviderResolver::api_key_for(provider).is_none() {
-                return Err(ApiError::Configuration(format!(
-                    "API key not set for provider '{}'",
-                    provider_key(provider)
-                )));
-            }
-
-            let base_url = config
-                .providers
-                .base_urls
-                .as_ref()
-                .and_then(|map| map.get(provider_key(provider)).cloned());
-            ProviderResolver::client_for(provider, base_url)
-        }
-    };
     let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
     let verbose = req.verbose;
-    let llm_adapter = Arc::new(LlmClientAdapter::with_event_channel(
-        llm_client,
-        model.to_string(),
-        agent_event_tx.clone(),
-    ));
-    if tooling.builtins {
-        let project_root = state.project_root.as_ref().ok_or_else(|| {
-            ApiError::Configuration(
-                "project_root required when built-in tools are enabled".to_string(),
-            )
-        })?;
-        ensure_rkat_dir_async(project_root).await?;
-    }
-    let (mut tools, mut tool_usage_instructions) =
-        create_tool_dispatcher(state.project_root.as_ref(), tooling.builtins, tooling.shell)?;
-    let store_adapter = Arc::new(StoreAdapter::new(Arc::new(store)));
 
-    #[cfg(feature = "comms")]
-    let comms_runtime = if host_mode {
-        let comms_name = comms_name.as_ref().ok_or_else(|| {
-            ApiError::Configuration("comms_name required when host_mode is enabled".to_string())
-        })?;
-        let base_dir = state
-            .project_root
-            .clone()
-            .or_else(|| state.store_path.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(rest_instance_root);
-        let runtime = build_comms_runtime_from_config(&config, base_dir, comms_name)
-            .await
-            .map_err(ApiError::Internal)?;
-        Some(runtime)
-    } else {
-        None
+    let mut factory = AgentFactory::new(state.store_path.clone())
+        .builtins(tooling.builtins)
+        .shell(tooling.shell);
+    if let Some(ref project_root) = state.project_root {
+        factory = factory.project_root(project_root.clone());
+    }
+
+    let build_config = AgentBuildConfig {
+        model: model.to_string(),
+        provider,
+        max_tokens: Some(max_tokens),
+        system_prompt: req.system_prompt,
+        output_schema: req.output_schema,
+        structured_output_retries: req.structured_output_retries,
+        hooks_override: req.hooks_override.unwrap_or_default(),
+        host_mode,
+        comms_name,
+        resume_session: Some(session),
+        budget_limits: None,
+        event_tx: Some(agent_event_tx.clone()),
+        llm_client_override: state.llm_client_override.clone(),
+        provider_params: None,
+        external_tools: None,
     };
 
-    #[cfg(feature = "comms")]
-    if let Some(ref runtime) = comms_runtime {
-        let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
-            .map_err(|e| ApiError::Internal(format!("Failed to compose comms tools: {}", e)))?;
-        tools = composed.0;
-        tool_usage_instructions = composed.1;
-    }
+    let mut agent = factory
+        .build_agent(build_config, &config)
+        .await
+        .map_err(|e| ApiError::Agent(format!("{e}")))?;
 
-    let hooks_base_dir = state
-        .project_root
-        .as_deref()
-        .unwrap_or_else(|| FsPath::new("."));
-    let layered_hooks = resolve_layered_hooks_config(hooks_base_dir, &config).await;
-    let hook_engine = create_default_hook_engine(layered_hooks);
-
-    let mut builder = AgentBuilder::new()
-        .model(model.clone())
-        .max_tokens_per_turn(max_tokens)
-        .budget(config.budget_limits())
-        .structured_output_retries(req.structured_output_retries)
-        .with_hook_run_overrides(req.hooks_override.clone().unwrap_or_default())
-        .resume_session(session);
-
-    // Add output schema if provided
-    if let Some(ref schema) = req.output_schema {
-        builder = builder.output_schema(schema.clone());
-    }
-
-    let mut system_prompt = match req.system_prompt.clone() {
-        Some(prompt) => prompt,
-        None => SystemPromptConfig::new().compose().await,
-    };
-    if !tool_usage_instructions.is_empty() {
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(&tool_usage_instructions);
-    }
-    builder = builder.system_prompt(system_prompt);
-
-    #[cfg(feature = "comms")]
-    if let Some(runtime) = comms_runtime {
-        builder = builder.with_comms_runtime(Arc::new(runtime) as Arc<dyn CommsRuntimeTrait>);
-    }
-    if let Some(hook_engine) = hook_engine {
-        builder = builder.with_hook_engine(hook_engine);
-    }
-
-    let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
     let session_id = agent.session().id().clone();
     let broadcast_tx = state.event_tx.clone();
     let forward_task = tokio::spawn(async move {
@@ -867,17 +587,6 @@ async fn continue_session(
             });
         }
     });
-    let metadata = SessionMetadata {
-        model: model.to_string(),
-        max_tokens,
-        provider,
-        tooling,
-        host_mode,
-        comms_name,
-    };
-    if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
-        tracing::warn!("Failed to store session metadata: {}", err);
-    }
 
     let result = if host_mode {
         agent
@@ -1013,25 +722,6 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// Empty tool dispatcher
-#[derive(Debug)]
-pub struct EmptyToolDispatcher;
-
-#[async_trait]
-impl AgentToolDispatcher for EmptyToolDispatcher {
-    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        Arc::from([])
-    }
-
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
-        Err(ToolError::not_found(call.name))
-    }
-}
-
-/// Tool dispatcher that can be either empty or composite
-///
-/// This enum allows us to use different tool dispatcher implementations
-/// while still satisfying the generic type requirements of AgentBuilder.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1072,82 +762,6 @@ mod tests {
         let state = AppState::load_from(temp.path().to_path_buf()).await;
         assert!(!state.enable_builtins);
         assert!(!state.enable_shell);
-    }
-
-    #[test]
-    fn test_create_tool_dispatcher_without_builtins() {
-        let result = create_tool_dispatcher(None, false, false);
-        assert!(result.is_ok());
-        let (dispatcher, _) = result.unwrap();
-        // Empty dispatcher should have no tools
-        assert!(dispatcher.tools().is_empty());
-    }
-
-    #[test]
-    fn test_create_tool_dispatcher_with_builtins() {
-        let temp = TempDir::new().unwrap();
-        let temp_dir = temp.path().to_path_buf();
-
-        let result = create_tool_dispatcher(Some(&temp_dir), true, false);
-        assert!(result.is_ok());
-        let (dispatcher, _) = result.unwrap();
-        // Should have task tools
-        let tools = dispatcher.tools();
-        let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
-        assert!(tool_names.contains(&"task_create"));
-        assert!(tool_names.contains(&"task_list"));
-        // Should not have shell tools (not enabled)
-        assert!(!tool_names.contains(&"shell"));
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    #[test]
-    fn test_create_tool_dispatcher_with_shell() {
-        let temp_dir = std::env::temp_dir().join("meerkat-rest-test-shell");
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let state = AppState {
-            enable_builtins: true,
-            enable_shell: true,
-            project_root: Some(temp_dir.clone()),
-            ..Default::default()
-        };
-        let result = create_tool_dispatcher(
-            state.project_root.as_ref(),
-            state.enable_builtins,
-            state.enable_shell,
-        );
-        assert!(result.is_ok());
-        let (dispatcher, _) = result.unwrap();
-        // Should have both task and shell tools
-        let tools = dispatcher.tools();
-        let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
-        assert!(tool_names.contains(&"task_create"));
-        assert!(tool_names.contains(&"shell"));
-        assert!(tool_names.contains(&"shell_job_status"));
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    #[test]
-    fn test_create_tool_dispatcher_requires_project_root() {
-        let state = AppState {
-            enable_builtins: true,
-            enable_shell: false,
-            project_root: None,
-            ..Default::default()
-        };
-        let result = create_tool_dispatcher(
-            state.project_root.as_ref(),
-            state.enable_builtins,
-            state.enable_shell,
-        );
-        assert!(result.is_err());
-        let err = result.err().expect("expected configuration error");
-        assert!(matches!(err, ApiError::Configuration(_)));
     }
 
     #[test]

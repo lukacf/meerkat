@@ -1,28 +1,18 @@
 //! Adapters to bridge existing crate types to agent traits
 
+#[cfg(feature = "mcp")]
 use async_trait::async_trait;
+#[cfg(feature = "mcp")]
 use meerkat_core::{ToolCallView, ToolDef, ToolResult, agent::AgentToolDispatcher};
+#[cfg(feature = "mcp")]
 use meerkat_tools::ToolError;
+#[cfg(feature = "mcp")]
 use serde_json::Value;
+#[cfg(feature = "mcp")]
 use std::sync::Arc;
-
-/// Empty tool dispatcher for when no tools are configured
-pub struct EmptyToolDispatcher;
-
-#[async_trait]
-impl AgentToolDispatcher for EmptyToolDispatcher {
-    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        Arc::from([])
-    }
-
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
-        Err(ToolError::not_found(call.name))
-    }
-}
 
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouter;
-use meerkat_tools::builtin::CompositeDispatcher;
 #[cfg(feature = "mcp")]
 use tokio::sync::RwLock;
 
@@ -97,60 +87,6 @@ impl AgentToolDispatcher for McpRouterAdapter {
                 })
             }
             None => Err(ToolError::execution_failed("MCP router has been shut down")),
-        }
-    }
-}
-
-/// Combined tool dispatcher that can be empty, MCP-backed, or composite (with builtins)
-pub enum CliToolDispatcher {
-    Empty(EmptyToolDispatcher),
-    #[cfg(feature = "mcp")]
-    Mcp(Box<McpRouterAdapter>),
-    Composite(std::sync::Arc<CompositeDispatcher>),
-    /// Dispatcher wrapped with comms tools (uses Arc to match wrap_with_comms output)
-    #[cfg(feature = "comms")]
-    WithComms(Arc<dyn AgentToolDispatcher>),
-}
-
-impl CliToolDispatcher {
-    /// Gracefully shutdown MCP connections (no-op for Empty and Composite)
-    pub async fn shutdown(&self) {
-        match self {
-            CliToolDispatcher::Empty(_) => {}
-            #[cfg(feature = "mcp")]
-            CliToolDispatcher::Mcp(adapter) => adapter.shutdown().await,
-            CliToolDispatcher::Composite(_) => {
-                // CompositeDispatcher doesn't have external connections to shut down
-            }
-            #[cfg(feature = "comms")]
-            CliToolDispatcher::WithComms(_) => {
-                // Comms connections are managed by CommsRuntime
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl AgentToolDispatcher for CliToolDispatcher {
-    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        match self {
-            CliToolDispatcher::Empty(d) => d.tools(),
-            #[cfg(feature = "mcp")]
-            CliToolDispatcher::Mcp(d) => d.tools(),
-            CliToolDispatcher::Composite(d) => d.tools(),
-            #[cfg(feature = "comms")]
-            CliToolDispatcher::WithComms(d) => d.tools(),
-        }
-    }
-
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
-        match self {
-            CliToolDispatcher::Empty(d) => d.dispatch(call).await,
-            #[cfg(feature = "mcp")]
-            CliToolDispatcher::Mcp(d) => d.dispatch(call).await,
-            CliToolDispatcher::Composite(d) => d.dispatch(call).await,
-            #[cfg(feature = "comms")]
-            CliToolDispatcher::WithComms(d) => d.dispatch(call).await,
         }
     }
 }

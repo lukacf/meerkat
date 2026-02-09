@@ -4,7 +4,6 @@
 //! as MCP tools: meerkat_run and meerkat_resume.
 
 use meerkat::{JsonlStore, OutputSchema, SessionStore, ToolError, ToolResult};
-use meerkat_client::ProviderResolver;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
@@ -148,32 +147,6 @@ async fn load_config_async() -> Config {
     let mut config = store.get().await.unwrap_or_else(|_| Config::default());
     let _ = config.apply_env_overrides();
     config
-}
-
-fn resolve_provider(input: Option<ProviderInput>, model: &str) -> Result<Provider, String> {
-    match input {
-        Some(provider) => Ok(provider.to_provider()),
-        None => {
-            let inferred = ProviderResolver::infer_from_model(model);
-            if inferred == Provider::Other {
-                Err(format!(
-                    "Cannot infer provider from model '{}'. Please specify a provider explicitly.",
-                    model
-                ))
-            } else {
-                Ok(inferred)
-            }
-        }
-    }
-}
-
-fn provider_key(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Anthropic => "anthropic",
-        Provider::OpenAI => "openai",
-        Provider::Gemini => "gemini",
-        Provider::Other => "other",
-    }
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, String> {

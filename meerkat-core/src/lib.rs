@@ -5,11 +5,13 @@
 
 pub mod agent;
 pub mod budget;
+pub mod compact;
 pub mod config;
 pub mod config_store;
 pub mod error;
 pub mod event;
 pub mod gateway;
+pub mod memory;
 pub mod hooks;
 pub mod mcp_config;
 pub mod ops;
@@ -17,6 +19,7 @@ pub mod prompt;
 pub mod provider;
 pub mod retry;
 pub mod schema;
+pub mod service;
 pub mod session;
 pub mod state;
 pub mod sub_agent;
@@ -29,6 +32,9 @@ pub use agent::{
     CommsRuntime, FilteredToolDispatcher, LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
+pub use compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
+pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
+
 pub use config::{
     AgentConfig, BudgetConfig, CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta,
     ConfigScope, HookEntryConfig, HookRunOverrides, HookRuntimeConfig, HooksConfig, LimitsConfig,
@@ -57,6 +63,10 @@ pub use ops::{
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
 pub use retry::RetryPolicy;
+pub use service::{
+    CreateSessionRequest, SessionError, SessionQuery, SessionService, SessionSummary, SessionView,
+    StartTurnRequest,
+};
 pub use schema::{
     CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };

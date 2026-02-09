@@ -101,6 +101,42 @@ where
                 return Ok(self.build_result(turn_count, tool_call_count));
             }
 
+            // Check compaction trigger (before CallingLlm)
+            if self.state == LoopState::CallingLlm {
+                if let Some(ref compactor) = self.compactor {
+                    let ctx = crate::agent::compact::build_compaction_context(
+                        self.session.messages(),
+                        self.last_input_tokens,
+                        self.last_compaction_turn,
+                        turn_count,
+                    );
+                    if compactor.should_compact(&ctx) {
+                        let outcome = crate::agent::compact::run_compaction(
+                            self.client.as_ref(),
+                            compactor,
+                            self.session.messages(),
+                            self.last_input_tokens,
+                            turn_count,
+                            &event_tx,
+                        )
+                        .await;
+
+                        if let Ok(outcome) = outcome {
+                            // Replace session messages
+                            *self.session.messages_mut() = outcome.new_messages;
+                            // Record compaction usage
+                            self.session.record_usage(outcome.summary_usage.clone());
+                            self.budget.record_usage(&outcome.summary_usage);
+                            // Update tracking
+                            self.last_input_tokens = 0;
+                            self.last_compaction_turn = Some(turn_count);
+                            // Drop discarded (future: index into MemoryStore)
+                        }
+                        // On failure: non-fatal, continue with uncompacted history
+                    }
+                }
+            }
+
             match self.state {
                 LoopState::CallingLlm => {
                     // Emit turn start
@@ -196,6 +232,7 @@ where
 
                     // Update budget + session usage
                     self.budget.record_usage(&result.usage);
+                    self.last_input_tokens = result.usage.input_tokens;
                     self.session.record_usage(result.usage.clone());
 
                     let (blocks, stop_reason, usage) = result.into_parts();

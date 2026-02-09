@@ -50,9 +50,14 @@ ANTHROPIC_API_KEY=... cargo run --example simple
 
 ```
 meerkat-core      → Agent loop, types, budget, retry, state machine (no I/O deps)
+                     Also: SessionService trait, Compactor trait, MemoryStore trait, SessionError
 meerkat-client    → LLM providers (Anthropic, OpenAI, Gemini) implementing AgentLlmClient
-meerkat-store     → Session persistence (JsonlStore, MemoryStore) implementing AgentSessionStore
+meerkat-store     → Session persistence (JsonlStore, MemoryStore, RedbSessionStore) implementing SessionStore
 meerkat-tools     → Tool registry and validation implementing AgentToolDispatcher
+meerkat-session   → Session service orchestration (EphemeralSessionService, DefaultCompactor)
+                     Features: session-store (PersistentSessionService, RedbEventStore),
+                               session-compaction (DefaultCompactor)
+meerkat-memory    → Semantic memory store (SimpleMemoryStore)
 meerkat-mcp-client → MCP protocol client, McpRouter for tool routing
 meerkat-mcp-server → Expose Meerkat as MCP tools (meerkat_run, meerkat_resume)
 meerkat-rpc       → JSON-RPC stdio server (stateful SessionRuntime, IDE/desktop integration)
@@ -65,6 +70,9 @@ meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 - `AgentLlmClient` - LLM provider abstraction
 - `AgentToolDispatcher` - Tool routing abstraction
 - `AgentSessionStore` - Session persistence abstraction
+- `SessionService` - Canonical session lifecycle (create/turn/interrupt/read/list/archive)
+- `Compactor` - Context compaction strategy
+- `MemoryStore` - Semantic memory indexing
 
 **Agent loop state machine:** `CallingLlm` → `WaitingForOps` → `DrainingEvents` → `Completed` (with `ErrorRecovery` and `Cancelling` branches)
 
@@ -115,9 +123,20 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 ## Key Files
 
 - `meerkat-core/src/agent.rs` - Main agent execution loop
+- `meerkat-core/src/agent/compact.rs` - Compaction flow (wired into agent loop)
 - `meerkat-core/src/state.rs` - LoopState state machine
 - `meerkat-core/src/types.rs` - Core types (Message, Session, ToolCall, etc.)
+- `meerkat-core/src/service/mod.rs` - SessionService trait, SessionError
+- `meerkat-core/src/compact.rs` - Compactor trait, CompactionConfig
+- `meerkat-core/src/memory.rs` - MemoryStore trait
 - `meerkat-client/src/anthropic.rs` - Anthropic streaming implementation
+- `meerkat-session/src/ephemeral.rs` - EphemeralSessionService (in-memory session lifecycle)
+- `meerkat-session/src/compactor.rs` - DefaultCompactor implementation
+- `meerkat-session/src/event_store.rs` - EventStore trait
+- `meerkat-session/src/redb_events.rs` - RedbEventStore implementation
+- `meerkat-session/src/projector.rs` - SessionProjector (materializes .rkat/ files)
+- `meerkat-store/src/redb_store.rs` - RedbSessionStore implementation
+- `meerkat-memory/src/simple.rs` - SimpleMemoryStore implementation
 - `meerkat-mcp-client/src/router.rs` - MCP tool routing
 - `meerkat-cli/src/main.rs` - CLI entry point
 - `meerkat/src/factory.rs` - AgentFactory, DynAgent, AgentBuildConfig (consolidated agent construction)

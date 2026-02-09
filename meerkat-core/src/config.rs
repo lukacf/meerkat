@@ -615,8 +615,6 @@ pub struct AgentConfig {
     pub max_tokens_per_turn: u32,
     /// Temperature for sampling
     pub temperature: Option<f32>,
-    /// Checkpoint after this many turns
-    pub checkpoint_interval: Option<u32>,
     /// Warning threshold for budget (0.0-1.0)
     pub budget_warning_threshold: f32,
     /// Maximum turns before forced stop
@@ -653,7 +651,6 @@ impl Default for AgentConfig {
                 .and_then(|cfg| cfg.max_tokens_per_turn)
                 .unwrap_or_default(),
             temperature: None,
-            checkpoint_interval: agent.and_then(|cfg| cfg.checkpoint_interval),
             budget_warning_threshold: agent
                 .and_then(|cfg| cfg.budget_warning_threshold)
                 .unwrap_or_default(),
@@ -778,7 +775,6 @@ const CONFIG_TEMPLATE_TOML: &str = include_str!("config_template.toml");
 struct TemplateAgentDefaults {
     model: Option<String>,
     max_tokens_per_turn: Option<u32>,
-    checkpoint_interval: Option<u32>,
     budget_warning_threshold: Option<f32>,
 }
 
@@ -945,8 +941,6 @@ impl Default for ProviderConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
-    /// Storage backend type
-    pub backend: StorageBackend,
     /// Directory for file-based storage
     pub directory: Option<PathBuf>,
 }
@@ -954,19 +948,9 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            backend: StorageBackend::Jsonl,
             directory: data_dir().map(|d| d.join("sessions")),
         }
     }
-}
-
-/// Available storage backends
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum StorageBackend {
-    #[default]
-    Jsonl,
-    Memory,
 }
 
 /// Budget configuration

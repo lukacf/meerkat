@@ -93,6 +93,21 @@ test-feature-matrix-surface:
 	cargo test -p meerkat-cli --no-default-features --features mcp -- --nocapture
 	cargo check -p meerkat-cli --no-default-features --features comms,mcp
 
+# Session capability matrix (A-F builds from spec)
+test-session-matrix:
+	@echo "$(GREEN)Running session capability matrix...$(NC)"
+	@echo "  Build A: no-default-features (ephemeral only)"
+	cargo check -p meerkat-session --no-default-features
+	cargo test -p meerkat-session --no-default-features --lib --tests
+	@echo "  Build B: session-store"
+	cargo check -p meerkat-session --no-default-features --features session-store
+	@echo "  Build C: (memory-store — Phase 6)"
+	@echo "  Build D: session-compaction"
+	cargo check -p meerkat-session --no-default-features --features session-compaction
+	@echo "  Build E: session-store (Phase 6 combo)"
+	@echo "  Build F: all session features"
+	cargo check -p meerkat-session --no-default-features --features session-store,session-compaction
+
 # Full feature matrix
 test-feature-matrix: test-feature-matrix-lib test-feature-matrix-surface
 

@@ -12,7 +12,7 @@ use meerkat::{build_comms_runtime_from_config, compose_tools_with_comms};
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
 #[cfg(feature = "comms")]
 use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
-use meerkat_core::error::{invalid_session_id, invalid_session_id_message, store_error};
+use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
     SessionMetadata, SessionTooling, SystemPromptConfig, ToolCallView, format_verbose_event,
@@ -1406,7 +1406,7 @@ fn wrap_tool_payload(payload: Value) -> Value {
 // Adapter types needed for the MCP server
 
 use async_trait::async_trait;
-use meerkat::{AgentSessionStore, AgentToolDispatcher, Message, ToolDef};
+use meerkat::{AgentToolDispatcher, Message, ToolDef};
 
 /// MCP tool dispatcher - exposes tools to the LLM and handles callback tools
 /// by returning a special error that signals the MCP client needs to handle the tool call
@@ -1462,29 +1462,8 @@ impl AgentToolDispatcher for MpcToolDispatcher {
     }
 }
 
-/// Session store adapter
-pub struct SessionStoreAdapter<S: SessionStore> {
-    store: Arc<S>,
-}
-
-impl<S: SessionStore> SessionStoreAdapter<S> {
-    pub fn new(store: Arc<S>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait]
-impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
-    async fn save(&self, session: &Session) -> Result<(), AgentError> {
-        self.store.save(session).await.map_err(store_error)
-    }
-
-    async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
-        let session_id = meerkat::SessionId::parse(id).map_err(invalid_session_id)?;
-
-        self.store.load(&session_id).await.map_err(store_error)
-    }
-}
+// SessionStoreAdapter removed — use meerkat_store::StoreAdapter instead.
+use meerkat_store::StoreAdapter as SessionStoreAdapter;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

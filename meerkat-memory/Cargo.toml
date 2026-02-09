@@ -1,6 +1,6 @@
 [package]
-name = "meerkat-store"
-description = "Session persistence for Meerkat"
+name = "meerkat-memory"
+description = "Semantic memory store for Meerkat"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,23 +10,18 @@ repository.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-async-trait = { workspace = true }
 tracing = { workspace = true }
-redb = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
 [features]
-default = ["jsonl", "memory"]
-jsonl = []
-memory = []
+default = []
 
 [lints]
 workspace = true

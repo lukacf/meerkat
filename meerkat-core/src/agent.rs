@@ -3,6 +3,7 @@
 //! The Agent struct ties together all components and runs the agent loop.
 
 mod builder;
+pub mod compact;
 pub mod comms_impl;
 mod extraction;
 mod hook_impl;
@@ -203,4 +204,10 @@ where
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
     pub(super) hook_run_overrides: HookRunOverrides,
+    /// Optional context compaction strategy.
+    pub(crate) compactor: Option<Arc<dyn crate::compact::Compactor>>,
+    /// Input tokens from the last LLM response (for compaction trigger).
+    pub(crate) last_input_tokens: u64,
+    /// Turn number when compaction last occurred.
+    pub(crate) last_compaction_turn: Option<u32>,
 }

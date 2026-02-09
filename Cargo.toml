@@ -13,6 +13,8 @@ members = [
     "meerkat-comms",
     "meerkat-hooks",
     "meerkat-rpc",
+    "meerkat-session",
+    "meerkat-memory",
     "test-fixtures/mcp-test-server",
     "tests/integration",
 ]
@@ -90,6 +92,8 @@ meerkat = { path = "meerkat", default-features = false }
 meerkat-comms = { path = "meerkat-comms" }
 meerkat-hooks = { path = "meerkat-hooks" }
 meerkat-rpc = { path = "meerkat-rpc" }
+meerkat-session = { path = "meerkat-session", default-features = false }
+meerkat-memory = { path = "meerkat-memory", default-features = false }
 
 
 [workspace.lints.rust]

@@ -54,6 +54,7 @@ pub struct SessionSnapshot {
 enum SessionCommand {
     StartTurn {
         prompt: String,
+        host_mode: bool,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
     },
@@ -113,6 +114,13 @@ pub trait SessionAgentBuilder: Send + Sync {
 pub trait SessionAgent: Send {
     /// Run the agent with the given prompt, streaming events.
     async fn run_with_events(
+        &mut self,
+        prompt: String,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError>;
+
+    /// Run the agent in host mode: process prompt then stay alive for comms.
+    async fn run_host_mode_with_events(
         &mut self,
         prompt: String,
         event_tx: mpsc::Sender<AgentEvent>,
@@ -300,10 +308,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         }
 
         // Run the first turn
+        let host_mode = req.host_mode;
         let (result_tx, result_rx) = oneshot::channel();
         if command_tx
             .send(SessionCommand::StartTurn {
                 prompt,
+                host_mode,
                 event_tx: caller_event_tx,
                 result_tx,
             })
@@ -357,6 +367,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 .command_tx
                 .send(SessionCommand::StartTurn {
                     prompt: req.prompt,
+                    host_mode: req.host_mode,
                     event_tx: req.event_tx,
                     result_tx,
                 })
@@ -509,6 +520,7 @@ async fn session_task<A: SessionAgent>(
         match cmd {
             SessionCommand::StartTurn {
                 prompt,
+                host_mode,
                 event_tx,
                 result_tx,
             } => {
@@ -518,8 +530,13 @@ async fn session_task<A: SessionAgent>(
                 // Scope the pinned future so its mutable borrow of `agent` is
                 // released before we call `agent.snapshot()`.
                 let result = {
-                    let run_fut = agent.run_with_events(prompt, agent_event_tx.clone());
-                    tokio::pin!(run_fut);
+                    let run_fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<RunResult, meerkat_core::error::AgentError>> + Send + '_>> = if host_mode {
+                        Box::pin(agent.run_host_mode_with_events(prompt, agent_event_tx.clone()))
+                    } else {
+                        Box::pin(agent.run_with_events(prompt, agent_event_tx.clone()))
+                    };
+                    // run_fut is already Pin<Box<...>>, no tokio::pin! needed.
+                    let mut run_fut = run_fut;
 
                     let r = loop {
                         tokio::select! {

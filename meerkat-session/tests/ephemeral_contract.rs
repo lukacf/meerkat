@@ -62,6 +62,15 @@ impl SessionAgent for MockAgent {
         })
     }
 
+    async fn run_host_mode_with_events(
+        &mut self,
+        prompt: String,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        // Mock host mode delegates to regular run for testing purposes
+        self.run_with_events(prompt, event_tx).await
+    }
+
     fn cancel(&mut self) {
         // No-op for mock
     }
@@ -150,6 +159,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
+        host_mode: false,
     }
 }
 
@@ -180,6 +190,7 @@ async fn test_start_turn_on_existing_session() {
         .start_turn(
             &session_id,
             StartTurnRequest {
+                host_mode: false,
                 prompt: "Follow up".to_string(),
                 event_tx: None,
             },
@@ -276,6 +287,7 @@ async fn test_turn_on_archived_session_returns_not_found() {
         .start_turn(
             &session_id,
             StartTurnRequest {
+                host_mode: false,
                 prompt: "After archive".to_string(),
                 event_tx: None,
             },
@@ -307,6 +319,7 @@ async fn test_concurrent_turns_return_busy() {
             .start_turn(
                 &sid_clone,
                 StartTurnRequest {
+                    host_mode: false,
                     prompt: "Slow".to_string(),
                     event_tx: None,
                 },
@@ -322,6 +335,7 @@ async fn test_concurrent_turns_return_busy() {
         .start_turn(
             &session_id,
             StartTurnRequest {
+                host_mode: false,
                 prompt: "Fast".to_string(),
                 event_tx: None,
             },
@@ -353,6 +367,7 @@ async fn test_interrupt_cancels_inflight_turn() {
             .start_turn(
                 &sid_clone,
                 StartTurnRequest {
+                    host_mode: false,
                     prompt: "Slow".to_string(),
                     event_tx: None,
                 },

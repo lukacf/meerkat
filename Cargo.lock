@@ -1728,7 +1728,6 @@ dependencies = [
  "meerkat",
  "meerkat-client",
  "meerkat-core",
- "meerkat-session",
  "serde",
  "serde_json",
  "tempfile",

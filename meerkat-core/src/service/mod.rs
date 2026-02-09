@@ -73,6 +73,9 @@ pub struct CreateSessionRequest {
     pub max_tokens: Option<u32>,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<AgentEvent>>,
+    /// Run in host mode: process prompt then stay alive for comms messages.
+    /// This is a session-level property applied to all turns.
+    pub host_mode: bool,
 }
 
 /// Request to start a new turn on an existing session.
@@ -82,6 +85,8 @@ pub struct StartTurnRequest {
     pub prompt: String,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<AgentEvent>>,
+    /// Run this turn in host mode.
+    pub host_mode: bool,
 }
 
 /// Query parameters for listing sessions.

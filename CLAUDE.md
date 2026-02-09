@@ -76,11 +76,15 @@ meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 
 **Agent loop state machine:** `CallingLlm` → `WaitingForOps` → `DrainingEvents` → `Completed` (with `ErrorRecovery` and `Cancelling` branches)
 
-**Crate ownership:** `meerkat-core` owns trait contracts. `meerkat-store` owns `SessionStore` implementations. `meerkat-session` owns session orchestration (`EphemeralSessionService`, `PersistentSessionService`) and `EventStore`. `meerkat-memory` owns `HnswMemoryStore`. The facade (`meerkat`) wires features and re-exports.
+**Crate ownership:** `meerkat-core` owns trait contracts. `meerkat-store` owns `SessionStore` implementations. `meerkat-session` owns session orchestration (`EphemeralSessionService`, `PersistentSessionService`) and `EventStore`. `meerkat-memory` owns `HnswMemoryStore`. The facade (`meerkat`) wires features, re-exports, and provides `FactoryAgentBuilder`/`FactoryAgent`/`build_ephemeral_service`.
 
-**Capability matrix:** See `docs/CAPABILITY_MATRIX.md` for build profiles, error codes, and feature behavior.
+**Agent construction:** All surfaces use `AgentFactory::build_agent()` for centralized prompt assembly, provider resolution, tool dispatcher setup, comms wiring, and hook resolution. Zero `AgentBuilder::new()` calls in surface crates.
 
-**`.rkat/sessions/` files** are derived projection output (materialized by `SessionProjector`), NOT canonical state. Deleting them and replaying from the event store produces identical content. Never use `.rkat/` files as the source of truth for session resume.
+**Session lifecycle:** `SessionService` trait manages stateful session lifecycle (create/turn/interrupt/read/list/archive). Currently used by RPC (`SessionRuntime` wraps `EphemeralSessionService`). Stateless surfaces (CLI, REST, MCP) use `build_agent()` directly per-request — `SessionService` is optional for stateless patterns.
+
+**Capability matrix:** See `docs/CAPABILITY_MATRIX.md` for build profiles, error codes, and feature behavior. See `docs/SESSION_CONTRACTS.md` for concurrency, durability, and compaction semantics.
+
+**`.rkat/sessions/` files** are derived projection output (materialized by `SessionProjector`), NOT canonical state. Deleting them and replaying from the event store produces identical content.
 
 ## MCP Server Management
 

@@ -11,9 +11,10 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use indexmap::IndexMap;
-use meerkat::{AgentBuildConfig, AgentFactory, DynAgent, EphemeralSessionService, SessionAgent};
+use meerkat::{
+    AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder,
+};
 use meerkat_client::LlmClient;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
@@ -21,7 +22,6 @@ use meerkat_core::service::{
 };
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_core::{Config, Session};
-use meerkat_session::SessionSnapshot;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::error;
@@ -61,113 +61,7 @@ pub struct SessionInfo {
     pub state: SessionState,
 }
 
-// ---------------------------------------------------------------------------
-// FactoryAgent — wraps DynAgent for SessionAgent
-// ---------------------------------------------------------------------------
-
-/// Wrapper around [`DynAgent`] implementing [`SessionAgent`].
-struct FactoryAgent {
-    agent: DynAgent,
-}
-
-#[async_trait]
-impl SessionAgent for FactoryAgent {
-    async fn run_with_events(
-        &mut self,
-        prompt: String,
-        event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.agent.run_with_events(prompt, event_tx).await
-    }
-
-    fn cancel(&mut self) {
-        self.agent.cancel();
-    }
-
-    fn session_id(&self) -> SessionId {
-        self.agent.session().id().clone()
-    }
-
-    fn snapshot(&self) -> SessionSnapshot {
-        let session = self.agent.session();
-        SessionSnapshot {
-            created_at: session.created_at(),
-            updated_at: session.updated_at(),
-            message_count: session.messages().len(),
-            total_tokens: session.total_tokens(),
-            usage: session.total_usage(),
-            last_assistant_text: session.last_assistant_text(),
-        }
-    }
-
-    fn session_clone(&self) -> Session {
-        self.agent.session().clone()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FactoryAgentBuilder — bridges AgentFactory into SessionAgentBuilder
-// ---------------------------------------------------------------------------
-
-/// Implements [`meerkat::SessionAgentBuilder`] by delegating to
-/// [`AgentFactory::build_agent()`].
-///
-/// A shared `build_config_slot` allows the [`SessionRuntime`] to pass the
-/// full [`AgentBuildConfig`] to the builder before the service calls
-/// `build_agent`.
-struct FactoryAgentBuilder {
-    factory: AgentFactory,
-    config: Config,
-    default_llm_client: Option<Arc<dyn LlmClient>>,
-    /// Slot for passing a full `AgentBuildConfig` from `SessionRuntime` to the
-    /// builder when the service materializes a pending session.
-    build_config_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
-}
-
-#[async_trait]
-impl meerkat::SessionAgentBuilder for FactoryAgentBuilder {
-    type Agent = FactoryAgent;
-
-    async fn build_agent(
-        &self,
-        req: &CreateSessionRequest,
-        event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<FactoryAgent, SessionError> {
-        // If a full build config was staged, use it. Otherwise construct one
-        // from the CreateSessionRequest fields.
-        let mut build_config = {
-            let mut slot = self.build_config_slot.lock().await;
-            slot.take().unwrap_or_else(|| {
-                let mut bc = AgentBuildConfig::new(req.model.clone());
-                bc.system_prompt = req.system_prompt.clone();
-                bc.max_tokens = req.max_tokens;
-                bc
-            })
-        };
-
-        // Wire the event channel so the LLM adapter streams through it.
-        build_config.event_tx = Some(event_tx);
-
-        // Inject the default LLM client if the caller didn't provide one.
-        if build_config.llm_client_override.is_none() {
-            if let Some(ref client) = self.default_llm_client {
-                build_config.llm_client_override = Some(client.clone());
-            }
-        }
-
-        let agent = self
-            .factory
-            .build_agent(build_config, &self.config)
-            .await
-            .map_err(|e| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    e.to_string(),
-                ))
-            })?;
-
-        Ok(FactoryAgent { agent })
-    }
-}
+// FactoryAgent and FactoryAgentBuilder are imported from meerkat::service_factory.
 
 // ---------------------------------------------------------------------------
 // SessionRuntime
@@ -195,15 +89,8 @@ pub struct SessionRuntime {
 impl SessionRuntime {
     /// Create a new session runtime.
     pub fn new(factory: AgentFactory, config: Config, max_sessions: usize) -> Self {
-        let build_config_slot = Arc::new(Mutex::new(None));
-
-        let builder = FactoryAgentBuilder {
-            factory,
-            config,
-            default_llm_client: None,
-            build_config_slot: build_config_slot.clone(),
-        };
-
+        let builder = FactoryAgentBuilder::new(factory, config);
+        let build_config_slot = builder.build_config_slot.clone();
         let service = EphemeralSessionService::new(builder, max_sessions);
 
         Self {
@@ -296,6 +183,7 @@ impl SessionRuntime {
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: Some(event_tx),
+                host_mode: false, // host_mode is encoded in the staged AgentBuildConfig
             };
 
             let result = self
@@ -311,6 +199,7 @@ impl SessionRuntime {
         let req = StartTurnRequest {
             prompt,
             event_tx: Some(event_tx),
+            host_mode: false,
         };
 
         self.service

@@ -146,6 +146,10 @@ pub use meerkat_tools::ToolError;
 mod factory;
 pub use factory::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent, provider_key};
 
+// Factory-backed SessionService wiring
+mod service_factory;
+pub use service_factory::{FactoryAgent, FactoryAgentBuilder, build_ephemeral_service};
+
 // Session service
 pub use meerkat_core::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,

@@ -12,7 +12,6 @@ repository.workspace = true
 meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
 meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
-meerkat-session = { workspace = true }
 async-trait = { workspace = true }
 indexmap = "2"
 serde = { workspace = true }

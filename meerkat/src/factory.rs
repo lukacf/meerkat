@@ -14,7 +14,7 @@ use meerkat_client::{
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
-    SessionTooling, SystemPromptConfig,
+    SessionTooling,
 };
 #[cfg(feature = "sub-agents")]
 use meerkat_core::{ConcurrencyLimits, SubAgentManager};
@@ -482,7 +482,7 @@ impl AgentFactory {
     ///   SessionMetadata.
     pub async fn build_agent(
         &self,
-        build_config: AgentBuildConfig,
+        mut build_config: AgentBuildConfig,
         config: &Config,
     ) -> Result<DynAgent, BuildAgentError> {
         // 1. Validate host_mode
@@ -538,6 +538,8 @@ impl AgentFactory {
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
 
         // 6. Build tool dispatcher (with optional external tools and per-build overrides)
+        //    Extract system_prompt before build_config is partially moved.
+        let per_request_prompt = build_config.system_prompt.take();
         let effective_builtins = build_config
             .override_builtins
             .unwrap_or(self.enable_builtins);
@@ -607,15 +609,14 @@ impl AgentFactory {
         let layered_hooks = resolve_layered_hooks_config(hooks_root, config).await;
         let hook_engine = create_default_hook_engine(layered_hooks);
 
-        // 11. Build system prompt
-        let mut system_prompt = match build_config.system_prompt {
-            Some(prompt) => prompt,
-            None => SystemPromptConfig::new().compose().await,
-        };
-        if !tool_usage_instructions.is_empty() {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(&tool_usage_instructions);
-        }
+        // 11. Build system prompt (single canonical path)
+        let system_prompt = crate::assemble_system_prompt(
+            config,
+            per_request_prompt.as_deref(),
+            &[],
+            &tool_usage_instructions,
+        )
+        .await;
 
         // 12. Build AgentBuilder
         let budget_limits = build_config

@@ -1,6 +1,6 @@
 # Roadmap Progress
 
-**Current Phase:** 3
+**Current Phase:** 4
 
 **Current Status:** gating
 
@@ -63,11 +63,13 @@
 
 ## Phase 4 — Python + TypeScript SDKs
 
-- [ ] Codegen pipeline (`tools/sdk-codegen/`)
-- [ ] Python SDK (`sdks/python/`)
-- [ ] TypeScript SDK (`sdks/typescript/`)
-- [ ] Conformance tests
-- [ ] E2E tests pass against minimal, standard, full profiles
+- [x] Codegen pipeline (`tools/sdk-codegen/generate.py`) — reads artifacts/schemas/, generates typed code
+- [x] Python SDK (`sdks/python/`) — MeerkatClient with async subprocess lifecycle, capability gating, version checks
+- [x] TypeScript SDK (`sdks/typescript/`) — MeerkatClient with subprocess lifecycle, capability gating, version checks
+- [x] Generated types committed (Python: dataclasses, TypeScript: interfaces)
+- [x] Error types (MeerkatError, CapabilityUnavailableError, SessionNotFoundError, SkillNotFoundError)
+- [x] Conformance tests (Python: 8 type/error tests passing)
+- [ ] E2E tests pass against minimal, standard, full profiles (requires live runtime)
 
 ## Phase 5 — SDK Builder
 
@@ -130,3 +132,11 @@
 - performance-gate: PASS
 - spec-accuracy-gate: PASS (AgentBuilder setters, factory wiring, skill inventory injection all verified)
 - rust-quality-gate: PASS
+
+### Phase 4 — Attempt 1
+
+- build-gate: PASS (Rust workspace clean)
+- test-gate: PASS (Rust tests + Python conformance tests: 8 passing)
+- performance-gate: PASS
+- spec-accuracy-gate: PASS (codegen pipeline, Python/TS SDKs, generated types, conformance tests)
+- rust-quality-gate: PASS (no Rust changes in this phase beyond docs)

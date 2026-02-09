@@ -9,15 +9,36 @@ use crate::types::{AssistantBlock, Message, Usage};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Errors that can occur during compaction.
+#[derive(Debug, thiserror::Error)]
+pub enum CompactionError {
+    /// The LLM call for summarization failed.
+    #[error("compaction LLM call failed: {0}")]
+    LlmFailed(#[from] crate::error::AgentError),
+
+    /// The LLM returned an empty summary.
+    #[error("LLM returned empty summary")]
+    EmptySummary,
+
+    /// Failed to estimate token count (serialization error).
+    #[error("token estimation failed: {0}")]
+    EstimationFailed(String),
+}
+
 /// Estimate token count from message history (JSON bytes / 4).
-pub fn estimate_tokens(messages: &[Message]) -> u64 {
-    let json_bytes = serde_json::to_string(messages)
-        .map(|s| s.len())
-        .unwrap_or(0);
-    json_bytes as u64 / 4
+///
+/// Returns an error if the messages cannot be serialized, rather than
+/// silently returning 0.
+pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
+    let json = serde_json::to_string(messages)
+        .map_err(|e| CompactionError::EstimationFailed(e.to_string()))?;
+    Ok(json.len() as u64 / 4)
 }
 
 /// Build a `CompactionContext` from current agent state.
+///
+/// Falls back to 0 estimated tokens if serialization fails (non-fatal for
+/// context building — the should_compact check will use last_input_tokens).
 pub fn build_compaction_context(
     messages: &[Message],
     last_input_tokens: u64,
@@ -27,7 +48,7 @@ pub fn build_compaction_context(
     CompactionContext {
         last_input_tokens,
         message_count: messages.len(),
-        estimated_history_tokens: estimate_tokens(messages),
+        estimated_history_tokens: estimate_tokens(messages).unwrap_or(0),
         last_compaction_turn,
         current_turn,
     }
@@ -37,10 +58,9 @@ pub fn build_compaction_context(
 ///
 /// 1. Emit CompactionStarted
 /// 2. Call LLM with compaction prompt
-/// 3. On failure: emit CompactionFailed, return without mutating session
+/// 3. On failure: emit CompactionFailed, return error without mutating session
 /// 4. Rebuild history via compactor
-/// 5. Replace session messages
-/// 6. Emit CompactionCompleted
+/// 5. Emit CompactionCompleted
 pub async fn run_compaction<C>(
     client: &C,
     compactor: &Arc<dyn Compactor>,
@@ -48,11 +68,11 @@ pub async fn run_compaction<C>(
     last_input_tokens: u64,
     current_turn: u32,
     event_tx: &Option<mpsc::Sender<AgentEvent>>,
-) -> Result<CompactionOutcome, ()>
+) -> Result<CompactionOutcome, CompactionError>
 where
     C: crate::agent::AgentLlmClient + ?Sized,
 {
-    let estimated = estimate_tokens(messages);
+    let estimated = estimate_tokens(messages)?;
     let message_count = messages.len();
 
     // 1. Emit CompactionStarted
@@ -80,7 +100,7 @@ where
         .stream_response(&compaction_messages, &[], max_summary_tokens, None, None)
         .await;
 
-    let summary = match llm_result {
+    let (summary_text, summary_usage) = match llm_result {
         Ok(result) => {
             // Extract summary text from response blocks
             let mut summary = String::new();
@@ -90,7 +110,6 @@ where
                 }
             }
             if summary.is_empty() {
-                // Empty summary — treat as failure
                 if let Some(tx) = event_tx {
                     let _ = tx
                         .send(AgentEvent::CompactionFailed {
@@ -98,12 +117,11 @@ where
                         })
                         .await;
                 }
-                return Err(());
+                return Err(CompactionError::EmptySummary);
             }
             (summary, result.usage().clone())
         }
         Err(e) => {
-            // 5. On failure: emit CompactionFailed, return without mutating
             if let Some(tx) = event_tx {
                 let _ = tx
                     .send(AgentEvent::CompactionFailed {
@@ -111,23 +129,15 @@ where
                     })
                     .await;
             }
-            return Err(());
+            return Err(CompactionError::LlmFailed(e));
         }
     };
 
-    let (summary_text, summary_usage) = summary;
-
-    // 6. Detect system prompt
-    let system_prompt = messages.iter().find_map(|m| match m {
-        Message::System(s) => Some(s.content.as_str()),
-        _ => None,
-    });
-
-    // 7. Rebuild history
-    let result = compactor.rebuild_history(system_prompt, messages, &summary_text);
+    // 4. Rebuild history — extract system prompt from messages directly
+    let result = compactor.rebuild_history(messages, &summary_text);
     let messages_after = result.messages.len();
 
-    // 8. Emit CompactionCompleted
+    // 5. Emit CompactionCompleted
     if let Some(tx) = event_tx {
         let _ = tx
             .send(AgentEvent::CompactionCompleted {

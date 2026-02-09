@@ -64,8 +64,8 @@ pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig}
 pub use provider::Provider;
 pub use retry::RetryPolicy;
 pub use service::{
-    CreateSessionRequest, SessionError, SessionQuery, SessionService, SessionSummary, SessionView,
-    StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
+    SessionUsage, SessionView, StartTurnRequest,
 };
 pub use schema::{
     CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,

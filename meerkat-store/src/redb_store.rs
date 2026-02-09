@@ -79,76 +79,85 @@ impl SessionStore for RedbSessionStore {
     async fn save(&self, session: &Session) -> Result<(), StoreError> {
         let id_key = session_id_key(session.id());
         let upd_key = updated_key(session.id(), session.updated_at());
+        let session_id = session.id().clone();
         let json = serde_json::to_vec(session)
             .map_err(StoreError::Serialization)?;
+        let db = self.db.clone();
 
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        {
-            // Remove old updated key if session already existed
-            let mut by_id_table = write_txn
-                .open_table(SESSIONS_BY_ID)
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db
+                .begin_write()
                 .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            let mut by_updated_table = write_txn
-                .open_table(SESSIONS_BY_UPDATED)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-            // If existing, parse to get old updated_at for removing old index key
-            if let Some(old_data) = by_id_table
-                .get(id_key.as_slice())
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?
             {
-                if let Ok(old_session) = serde_json::from_slice::<Session>(old_data.value()) {
-                    let old_key = updated_key(session.id(), old_session.updated_at());
-                    let _ = by_updated_table.remove(old_key.as_slice());
+                let mut by_id_table = write_txn
+                    .open_table(SESSIONS_BY_ID)
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+                let mut by_updated_table = write_txn
+                    .open_table(SESSIONS_BY_UPDATED)
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+
+                // Remove old updated key if session already existed
+                if let Some(old_data) = by_id_table
+                    .get(id_key.as_slice())
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?
+                {
+                    if let Ok(old_session) = serde_json::from_slice::<Session>(old_data.value()) {
+                        let old_key = updated_key(&session_id, old_session.updated_at());
+                        let _ = by_updated_table.remove(old_key.as_slice());
+                    }
                 }
+
+                by_id_table
+                    .insert(id_key.as_slice(), json.as_slice())
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+
+                by_updated_table
+                    .insert(upd_key.as_slice(), EMPTY_VALUE)
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
             }
-
-            // Write session data
-            by_id_table
-                .insert(id_key.as_slice(), json.as_slice())
+            write_txn
+                .commit()
                 .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
-            // Write updated index
-            by_updated_table
-                .insert(upd_key.as_slice(), EMPTY_VALUE)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map_err(StoreError::Join)?
     }
 
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
         let id_key = session_id_key(id);
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let table = read_txn
-            .open_table(SESSIONS_BY_ID)
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        let db = self.db.clone();
 
-        match table
-            .get(id_key.as_slice())
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?
-        {
-            Some(data) => {
-                let session: Session = serde_json::from_slice(data.value())
-                    .map_err(StoreError::Serialization)?;
-                Ok(Some(session))
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db
+                .begin_read()
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+            let table = read_txn
+                .open_table(SESSIONS_BY_ID)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+
+            match table
+                .get(id_key.as_slice())
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?
+            {
+                Some(data) => {
+                    let session: Session = serde_json::from_slice(data.value())
+                        .map_err(StoreError::Serialization)?;
+                    Ok(Some(session))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
+        })
+        .await
+        .map_err(StoreError::Join)?
     }
 
     async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
-        let read_txn = self
-            .db
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || {
+        let read_txn = db
             .begin_read()
             .map_err(|e| StoreError::Database(Box::new(e.into())))?;
         let by_id = read_txn
@@ -216,7 +225,11 @@ impl SessionStore for RedbSessionStore {
 
         // Apply offset
         if let Some(offset) = filter.offset {
-            results = results.into_iter().skip(offset).collect();
+            if offset < results.len() {
+                results = results.split_off(offset);
+            } else {
+                results.clear();
+            }
         }
 
         // Apply limit
@@ -225,41 +238,48 @@ impl SessionStore for RedbSessionStore {
         }
 
         Ok(results)
+        })
+        .await
+        .map_err(StoreError::Join)?
     }
 
     async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
         let id_key = session_id_key(id);
+        let id_owned = id.clone();
+        let db = self.db.clone();
 
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        {
-            let mut by_id_table = write_txn
-                .open_table(SESSIONS_BY_ID)
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db
+                .begin_write()
                 .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            let mut by_updated_table = write_txn
-                .open_table(SESSIONS_BY_UPDATED)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-            // Get old updated_at for removing index key
-            if let Some(data) = by_id_table
-                .get(id_key.as_slice())
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?
             {
-                if let Ok(session) = serde_json::from_slice::<Session>(data.value()) {
-                    let old_key = updated_key(id, session.updated_at());
-                    let _ = by_updated_table.remove(old_key.as_slice());
+                let mut by_id_table = write_txn
+                    .open_table(SESSIONS_BY_ID)
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+                let mut by_updated_table = write_txn
+                    .open_table(SESSIONS_BY_UPDATED)
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+
+                if let Some(data) = by_id_table
+                    .get(id_key.as_slice())
+                    .map_err(|e| StoreError::Database(Box::new(e.into())))?
+                {
+                    if let Ok(session) = serde_json::from_slice::<Session>(data.value()) {
+                        let old_key = updated_key(&id_owned, session.updated_at());
+                        let _ = by_updated_table.remove(old_key.as_slice());
+                    }
                 }
+
+                let _ = by_id_table.remove(id_key.as_slice());
             }
+            write_txn
+                .commit()
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
 
-            let _ = by_id_table.remove(id_key.as_slice());
-        }
-        write_txn
-            .commit()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map_err(StoreError::Join)?
     }
 }
 

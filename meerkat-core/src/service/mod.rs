@@ -89,6 +89,8 @@ pub struct SessionQuery {
 }
 
 /// Summary of a session (for list results).
+///
+/// Kept lightweight — no billing data. Use `read()` for full details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub session_id: SessionId,
@@ -99,17 +101,37 @@ pub struct SessionSummary {
     pub is_active: bool,
 }
 
-/// Detailed view of a session.
+/// Detailed view of a session's state and history metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionView {
+pub struct SessionInfo {
     pub session_id: SessionId,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
     pub message_count: usize,
-    pub total_tokens: u64,
-    pub usage: Usage,
     pub is_active: bool,
     pub last_assistant_text: Option<String>,
+}
+
+/// Billing/usage data for a session, returned separately from state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionUsage {
+    pub total_tokens: u64,
+    pub usage: Usage,
+}
+
+/// Combined session view (state + usage). Convenience wrapper used by
+/// `SessionService::read()` to avoid requiring two calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionView {
+    pub state: SessionInfo,
+    pub billing: SessionUsage,
+}
+
+impl SessionView {
+    /// Convenience: session ID from the state.
+    pub fn session_id(&self) -> &SessionId {
+        &self.state.session_id
+    }
 }
 
 /// Canonical session lifecycle abstraction.

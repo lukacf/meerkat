@@ -148,8 +148,8 @@ pub use factory::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent, pro
 
 // Session service
 pub use meerkat_core::{
-    CreateSessionRequest, SessionError, SessionQuery, SessionService, SessionSummary, SessionView,
-    StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
+    SessionUsage, SessionView, StartTurnRequest,
 };
 pub use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
 #[cfg(feature = "session-compaction")]

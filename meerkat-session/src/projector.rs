@@ -13,7 +13,7 @@
 //! Idempotent: replaying from checkpoint produces identical output.
 //! `.rkat/` files are derived output, never canonical source for resume.
 
-use crate::event_store::{EventStore, StoredEvent};
+use crate::event_store::EventStore;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::types::SessionId;
 use std::path::{Path, PathBuf};
@@ -166,16 +166,11 @@ pub enum ProjectionError {
     EventStore(String),
 }
 
-// Suppress unused import warnings for StoredEvent
-fn _assert_stored_event_used(e: &StoredEvent) {
-    let _ = e.seq;
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::event_store::{EventStoreError, EVENT_SCHEMA_VERSION};
+    use crate::event_store::{EventStoreError, StoredEvent, EVENT_SCHEMA_VERSION};
     use meerkat_core::types::Usage;
     use std::collections::HashMap;
     use std::sync::Mutex;

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryMetadata {
     /// The session ID this memory originated from.
-    pub session_id: String,
+    pub session_id: crate::types::SessionId,
     /// Turn number within the session.
     pub turn: Option<u32>,
     /// When the memory was indexed.

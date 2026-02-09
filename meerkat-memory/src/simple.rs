@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use meerkat_core::memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 
 /// Entry in the simple memory store.
 #[derive(Debug, Clone)]
@@ -16,8 +16,9 @@ struct MemoryEntry {
 
 /// Simple in-memory store using substring matching.
 ///
-/// Suitable for development and testing. Production use cases
-/// should use `HnswMemoryStore` with vector embeddings.
+/// This is a **test-only** implementation. Production use cases should use a
+/// vector-embedding-based store (e.g. HNSW). The substring matching here is
+/// not suitable for semantic search.
 pub struct SimpleMemoryStore {
     entries: RwLock<Vec<MemoryEntry>>,
 }
@@ -44,10 +45,7 @@ impl MemoryStore for SimpleMemoryStore {
         content: &str,
         metadata: MemoryMetadata,
     ) -> Result<(), MemoryStoreError> {
-        let mut entries = self
-            .entries
-            .write()
-            .map_err(|e| MemoryStoreError::Index(format!("lock poisoned: {e}")))?;
+        let mut entries = self.entries.write().await;
         entries.push(MemoryEntry {
             content: content.to_string(),
             metadata,
@@ -60,10 +58,7 @@ impl MemoryStore for SimpleMemoryStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryResult>, MemoryStoreError> {
-        let entries = self
-            .entries
-            .read()
-            .map_err(|e| MemoryStoreError::Index(format!("lock poisoned: {e}")))?;
+        let entries = self.entries.read().await;
 
         let query_lower = query.to_lowercase();
         let query_words: Vec<&str> = query_lower.split_whitespace().collect();
@@ -102,11 +97,12 @@ impl MemoryStore for SimpleMemoryStore {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use meerkat_core::types::SessionId;
     use std::time::SystemTime;
 
-    fn meta(session: &str) -> MemoryMetadata {
+    fn meta(_label: &str) -> MemoryMetadata {
         MemoryMetadata {
-            session_id: session.to_string(),
+            session_id: SessionId::new(),
             turn: Some(1),
             indexed_at: SystemTime::now(),
         }

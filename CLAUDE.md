@@ -57,7 +57,7 @@ meerkat-tools     → Tool registry and validation implementing AgentToolDispatc
 meerkat-session   → Session service orchestration (EphemeralSessionService, DefaultCompactor)
                      Features: session-store (PersistentSessionService, RedbEventStore),
                                session-compaction (DefaultCompactor)
-meerkat-memory    → Semantic memory store (SimpleMemoryStore)
+meerkat-memory    → Semantic memory (HnswMemoryStore via hnsw_rs + redb, SimpleMemoryStore for tests)
 meerkat-mcp-client → MCP protocol client, McpRouter for tool routing
 meerkat-mcp-server → Expose Meerkat as MCP tools (meerkat_run, meerkat_resume)
 meerkat-rpc       → JSON-RPC stdio server (stateful SessionRuntime, IDE/desktop integration)
@@ -75,6 +75,12 @@ meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 - `MemoryStore` - Semantic memory indexing
 
 **Agent loop state machine:** `CallingLlm` → `WaitingForOps` → `DrainingEvents` → `Completed` (with `ErrorRecovery` and `Cancelling` branches)
+
+**Crate ownership:** `meerkat-core` owns trait contracts. `meerkat-store` owns `SessionStore` implementations. `meerkat-session` owns session orchestration (`EphemeralSessionService`, `PersistentSessionService`) and `EventStore`. `meerkat-memory` owns `HnswMemoryStore`. The facade (`meerkat`) wires features and re-exports.
+
+**Capability matrix:** See `docs/CAPABILITY_MATRIX.md` for build profiles, error codes, and feature behavior.
+
+**`.rkat/sessions/` files** are derived projection output (materialized by `SessionProjector`), NOT canonical state. Deleting them and replaying from the event store produces identical content. Never use `.rkat/` files as the source of truth for session resume.
 
 ## MCP Server Management
 

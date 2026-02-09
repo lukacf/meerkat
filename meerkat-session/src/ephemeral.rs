@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionQuery, SessionService, SessionSummary, SessionView,
-    StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -321,8 +321,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             id: id.clone(),
         })?;
 
-        let state = *handle.state_rx.borrow();
-        if state != SessionState::Running {
+        // Check turn_lock atomically — if false, no turn is running.
+        // This avoids the TOCTOU race of checking state_rx then sending.
+        if !handle.turn_lock.load(Ordering::Acquire) {
             return Err(SessionError::NotRunning { id: id.clone() });
         }
 
@@ -364,16 +365,20 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             ))
         })?;
 
-        let state = *handle.state_rx.borrow();
+        let is_active = *handle.state_rx.borrow() == SessionState::Running;
         Ok(SessionView {
-            session_id: snapshot.session_id,
-            created_at: snapshot.created_at,
-            updated_at: snapshot.updated_at,
-            message_count: snapshot.message_count,
-            total_tokens: snapshot.total_tokens,
-            usage: snapshot.usage,
-            is_active: state == SessionState::Running,
-            last_assistant_text: snapshot.last_assistant_text,
+            state: SessionInfo {
+                session_id: snapshot.session_id,
+                created_at: snapshot.created_at,
+                updated_at: snapshot.updated_at,
+                message_count: snapshot.message_count,
+                is_active,
+                last_assistant_text: snapshot.last_assistant_text,
+            },
+            billing: SessionUsage {
+                total_tokens: snapshot.total_tokens,
+                usage: snapshot.usage,
+            },
         })
     }
 
@@ -396,7 +401,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .collect();
 
         if let Some(offset) = query.offset {
-            summaries = summaries.into_iter().skip(offset).collect();
+            if offset < summaries.len() {
+                summaries = summaries.split_off(offset);
+            } else {
+                summaries.clear();
+            }
         }
         if let Some(limit) = query.limit {
             summaries.truncate(limit);

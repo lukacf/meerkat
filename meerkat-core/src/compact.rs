@@ -5,7 +5,6 @@
 //! live in `meerkat-session` (behind the `session-compaction` feature).
 
 use crate::types::Message;
-use serde::{Deserialize, Serialize};
 
 /// Context provided to `Compactor::should_compact` for trigger decisions.
 #[derive(Debug, Clone)]
@@ -32,7 +31,7 @@ pub struct CompactionResult {
 }
 
 /// Configuration for the default compactor implementation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CompactionConfig {
     /// Compaction triggers when `last_input_tokens >= auto_compact_threshold`.
     pub auto_compact_threshold: u64,
@@ -70,6 +69,9 @@ pub trait Compactor: Send + Sync {
 
     /// Rebuild the session history from a summary and current messages.
     ///
+    /// The system prompt is extracted from `messages` directly (the first
+    /// `Message::System` if present). No dual source of truth.
+    ///
     /// The implementation should:
     /// 1. Preserve any `Message::System` verbatim.
     /// 2. Inject a summary message.
@@ -77,7 +79,6 @@ pub trait Compactor: Send + Sync {
     /// 4. Return everything else as `discarded`.
     fn rebuild_history(
         &self,
-        system_prompt: Option<&str>,
         messages: &[Message],
         summary: &str,
     ) -> CompactionResult;

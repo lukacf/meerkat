@@ -180,8 +180,8 @@ async fn test_read_active_session() {
     let session_id = sessions[0].session_id.clone();
 
     let view = service.read(&session_id).await.unwrap();
-    assert_eq!(view.session_id, session_id);
-    assert!(!view.is_active); // Should be idle after turn completes
+    assert_eq!(view.state.session_id, session_id);
+    assert!(!view.state.is_active); // Should be idle after turn completes
 }
 
 #[tokio::test]

@@ -67,18 +67,15 @@ impl Compactor for DefaultCompactor {
 
     fn rebuild_history(
         &self,
-        system_prompt: Option<&str>,
         messages: &[Message],
         summary: &str,
     ) -> CompactionResult {
         let mut rebuilt = Vec::new();
         let mut discarded = Vec::new();
 
-        // 1. Preserve system prompt
-        if let Some(prompt) = system_prompt {
-            rebuilt.push(Message::System(meerkat_core::types::SystemMessage {
-                content: prompt.to_string(),
-            }));
+        // 1. Preserve system prompt (extracted from messages, single source of truth)
+        if let Some(Message::System(sys)) = messages.first() {
+            rebuilt.push(Message::System(sys.clone()));
         }
 
         // 2. Inject summary as a user message
@@ -214,7 +211,7 @@ mod tests {
                 content: "turn3".to_string(),
             }),
         ];
-        let result = c.rebuild_history(Some("system"), &messages, "summary text");
+        let result = c.rebuild_history(&messages,"summary text");
         assert!(matches!(&result.messages[0], Message::System(s) if s.content == "system"));
     }
 
@@ -235,7 +232,7 @@ mod tests {
                 content: "turn3".to_string(),
             }),
         ];
-        let result = c.rebuild_history(None, &messages, "summary");
+        let result = c.rebuild_history(&messages,"summary");
         // Summary + last 1 turn (turn3)
         assert_eq!(result.messages.len(), 2); // summary + turn3
         assert_eq!(result.discarded.len(), 2); // turn1, turn2
@@ -261,7 +258,7 @@ mod tests {
                 content: "t4".to_string(),
             }),
         ];
-        let result = c.rebuild_history(None, &messages, "summary");
+        let result = c.rebuild_history(&messages,"summary");
         // summary + last 2 turns (t3, t4)
         assert_eq!(result.messages.len(), 3);
         assert_eq!(result.discarded.len(), 2); // t1, t2
@@ -284,7 +281,7 @@ mod tests {
                 content: "c".to_string(),
             }),
         ];
-        let result = c.rebuild_history(None, &messages, "summary");
+        let result = c.rebuild_history(&messages,"summary");
         // Discarded should be in original order: a, b
         assert_eq!(result.discarded.len(), 2);
         if let Message::User(u) = &result.discarded[0] {
@@ -312,10 +309,81 @@ mod tests {
                 content: "c".to_string(),
             }),
         ];
-        let result = c.rebuild_history(None, &messages, "summary");
+        let result = c.rebuild_history(&messages, "summary");
         // Only the summary message should remain
         assert_eq!(result.messages.len(), 1);
         // All original messages should be discarded
         assert_eq!(result.discarded.len(), 3);
+    }
+
+    #[test]
+    fn test_rebuild_with_block_assistant_and_tool_results() {
+        use meerkat_core::types::{
+            AssistantBlock, BlockAssistantMessage, StopReason, ToolResult,
+        };
+        use serde_json::value::RawValue;
+
+        let args_raw = RawValue::from_string(r#"{"city":"Tokyo"}"#.to_string()).unwrap();
+
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 1,
+            ..make_config()
+        });
+
+        // Simulate a realistic conversation:
+        // Turn 1: User → BlockAssistant(tool call) → ToolResults → BlockAssistant(text)
+        // Turn 2: User → BlockAssistant(text)
+        let messages = vec![
+            Message::System(SystemMessage {
+                content: "You are helpful.".to_string(),
+            }),
+            // Turn 1
+            Message::User(UserMessage {
+                content: "What is the weather?".to_string(),
+            }),
+            Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::ToolUse {
+                    id: "tc_1".to_string(),
+                    name: "get_weather".to_string(),
+                    args: args_raw,
+                    meta: None,
+                }],
+                stop_reason: StopReason::ToolUse,
+            }),
+            Message::ToolResults {
+                results: vec![ToolResult {
+                    tool_use_id: "tc_1".to_string(),
+                    content: "Sunny, 25C".to_string(),
+                    is_error: false,
+                }],
+            },
+            Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "It's sunny in Tokyo!".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+            }),
+            // Turn 2
+            Message::User(UserMessage {
+                content: "Thanks!".to_string(),
+            }),
+            Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "You're welcome!".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+            }),
+        ];
+
+        let result = c.rebuild_history(&messages, "Summary of weather conversation");
+
+        // System prompt + summary + last turn (User "Thanks!" + BlockAssistant "You're welcome!")
+        assert_eq!(result.messages.len(), 4); // system + summary + user + assistant
+        assert!(matches!(&result.messages[0], Message::System(_)));
+
+        // Discarded: turn 1 (User + BlockAssistant + ToolResults + BlockAssistant = 4 messages)
+        assert_eq!(result.discarded.len(), 4);
     }
 }

@@ -495,22 +495,23 @@ async fn create_session(
         override_shell: None,
     };
 
-    {
+    // Hold the slot lock across staging + create to prevent concurrent
+    // requests from overwriting each other's staged config.
+    let result = {
         let mut slot = state.builder_slot.lock().await;
         *slot = Some(build_config);
-    }
 
-    // Call the session service
-    let svc_req = SvcCreateSessionRequest {
-        model: model.to_string(),
-        prompt: req.prompt,
-        system_prompt: None, // Already in build_config
-        max_tokens: Some(max_tokens),
-        event_tx: Some(caller_event_tx),
-        host_mode,
+        let svc_req = SvcCreateSessionRequest {
+            model: model.to_string(),
+            prompt: req.prompt,
+            system_prompt: None, // Already in build_config
+            max_tokens: Some(max_tokens),
+            event_tx: Some(caller_event_tx),
+            host_mode,
+        };
+
+        state.session_service.create_session(svc_req).await
     };
-
-    let result = state.session_service.create_session(svc_req).await;
 
     // Wait for the event forwarder to drain
     let _ = forward_task.await;
@@ -672,28 +673,32 @@ async fn continue_session(
                 override_shell: Some(tooling.shell),
             };
 
-            {
-                let mut slot = state.builder_slot.lock().await;
-                *slot = Some(build_config);
-            }
+            // Hold slot lock across staging + create to prevent races.
+            let mut slot = state.builder_slot.lock().await;
+            *slot = Some(build_config);
 
             let svc_req = SvcCreateSessionRequest {
                 model: model.to_string(),
                 prompt: req.prompt,
                 system_prompt: None,
                 max_tokens: Some(max_tokens),
-                event_tx: Some(caller_event_tx),
+                event_tx: Some(caller_event_tx.clone()),
                 host_mode: continue_host_mode,
             };
 
-            state
+            let r = state
                 .session_service
                 .create_session(svc_req)
                 .await
-                .map_err(|e| ApiError::Agent(format!("{e}")))
+                .map_err(|e| ApiError::Agent(format!("{e}")));
+            drop(slot);
+            r
         }
         Err(err) => return session_error_to_api_result(err, &session_id),
     };
+
+    // Drop the sender so the forwarder sees channel closure and can drain.
+    drop(caller_event_tx);
 
     // Wait for the event forwarder to drain
     let _ = forward_task.await;

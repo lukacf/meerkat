@@ -58,7 +58,7 @@ meerkat-session   → Session service orchestration (EphemeralSessionService, De
                      Features: session-store (PersistentSessionService, RedbEventStore),
                                session-compaction (DefaultCompactor)
 meerkat-memory    → Semantic memory (HnswMemoryStore via hnsw_rs + redb, SimpleMemoryStore for tests)
-meerkat-mcp-client → MCP protocol client, McpRouter for tool routing
+meerkat-mcp       → MCP protocol client, McpRouter for tool routing
 meerkat-mcp-server → Expose Meerkat as MCP tools (meerkat_run, meerkat_resume)
 meerkat-rpc       → JSON-RPC stdio server (stateful SessionRuntime, IDE/desktop integration)
 meerkat-rest      → Optional REST API server
@@ -80,7 +80,7 @@ meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 
 **Agent construction:** All surfaces use `AgentFactory::build_agent()` for centralized prompt assembly, provider resolution, tool dispatcher setup, comms wiring, and hook resolution. Zero `AgentBuilder::new()` calls in surface crates.
 
-**Session lifecycle:** `SessionService` trait manages stateful session lifecycle (create/turn/interrupt/read/list/archive). Currently used by RPC (`SessionRuntime` wraps `EphemeralSessionService`). Stateless surfaces (CLI, REST, MCP) use `build_agent()` directly per-request — `SessionService` is optional for stateless patterns.
+**Session lifecycle:** All four surfaces (CLI, REST, MCP Server, JSON-RPC) route through `SessionService` for the full session lifecycle (create/turn/interrupt/read/list/archive). `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Surfaces stage per-request config via `build_config_slot` before calling `create_session()`.
 
 **Capability matrix:** See `docs/CAPABILITY_MATRIX.md` for build profiles, error codes, and feature behavior. See `docs/SESSION_CONTRACTS.md` for concurrency, durability, and compaction semantics.
 
@@ -147,9 +147,10 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-session/src/projector.rs` - SessionProjector (materializes .rkat/ files)
 - `meerkat-store/src/redb_store.rs` - RedbSessionStore implementation
 - `meerkat-memory/src/simple.rs` - SimpleMemoryStore implementation
-- `meerkat-mcp-client/src/router.rs` - MCP tool routing
+- `meerkat-mcp/src/router.rs` - MCP tool routing
 - `meerkat-cli/src/main.rs` - CLI entry point
 - `meerkat/src/factory.rs` - AgentFactory, DynAgent, AgentBuildConfig (consolidated agent construction)
+- `meerkat/src/service_factory.rs` - FactoryAgentBuilder, FactoryAgent, build_ephemeral_service
 - `meerkat-rpc/src/session_runtime.rs` - SessionRuntime (stateful agent manager)
 - `meerkat-rpc/src/router.rs` - JSON-RPC method dispatch
 - `meerkat-rpc/src/server.rs` - RPC server main loop

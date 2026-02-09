@@ -17,7 +17,7 @@ A comprehensive guide to get you running with Meerkat, the Rust Agentic Interfac
 
 ### Rust Toolchain
 
-Meerkat requires Rust 1.85 or later:
+Meerkat requires Rust 1.85 or later (pinned to 1.89.0 via `rust-toolchain.toml`):
 
 ```bash
 # Install Rust (if not already installed)
@@ -95,6 +95,9 @@ Available features:
 - `all-providers` - All of the above
 - `jsonl-store` (default) - Persistent session storage
 - `memory-store` - In-memory session storage
+- `session-store` - Durable sessions with redb-backed `PersistentSessionService`
+- `session-compaction` - Auto-compact long conversations
+- `memory-store-session` - Semantic memory indexing
 
 ---
 
@@ -175,10 +178,10 @@ Options:
 rkat run --model claude-opus-4-6 "Explain quantum computing"
 
 # Use OpenAI
-rkat run --model gpt-4o "Write a haiku"
+rkat run --model gpt-5.2 "Write a haiku"
 
 # Use Gemini
-rkat run --model gemini-2.0-flash "Summarize this text"
+rkat run --model gemini-3-flash-preview "Summarize this text"
 
 # Stream output in real-time
 rkat run --stream "Write a short story"
@@ -313,13 +316,13 @@ ANTHROPIC_API_KEY=your-key cargo run
 ```rust
 // OpenAI
 let result = meerkat::with_openai(std::env::var("OPENAI_API_KEY")?)
-    .model("gpt-4o")
+    .model("gpt-5.2")
     .run("Hello!")
     .await?;
 
 // Gemini
 let result = meerkat::with_gemini(std::env::var("GOOGLE_API_KEY")?)
-    .model("gemini-2.0-flash-exp")
+    .model("gemini-3-flash-preview")
     .run("Hello!")
     .await?;
 ```
@@ -342,16 +345,15 @@ let result = meerkat::with_anthropic(api_key)
 
 ### With Custom Tools (Full Example)
 
-For custom tools, use the full `AgentBuilder` API:
+For custom tools, implement `AgentToolDispatcher` and use `SessionService`:
 
 ```rust
 use async_trait::async_trait;
-use meerkat::prelude::*;
-use meerkat::{
-    AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    LlmStreamResult, Session, ToolDef,
-};
-use serde_json::{json, Value};
+use meerkat::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
+use meerkat::error::ToolError;
+use meerkat::{AgentFactory, Config, build_ephemeral_service};
+use meerkat::service::{CreateSessionRequest, SessionService};
+use serde_json::json;
 use std::sync::Arc;
 
 // Define your tool dispatcher
@@ -359,9 +361,9 @@ struct MathTools;
 
 #[async_trait]
 impl AgentToolDispatcher for MathTools {
-    fn tools(&self) -> Vec<ToolDef> {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![
-            ToolDef {
+            Arc::new(ToolDef {
                 name: "add".to_string(),
                 description: "Add two numbers together".to_string(),
                 input_schema: json!({
@@ -372,8 +374,8 @@ impl AgentToolDispatcher for MathTools {
                     },
                     "required": ["a", "b"]
                 }),
-            },
-            ToolDef {
+            }),
+            Arc::new(ToolDef {
                 name: "multiply".to_string(),
                 description: "Multiply two numbers".to_string(),
                 input_schema: json!({
@@ -384,144 +386,42 @@ impl AgentToolDispatcher for MathTools {
                     },
                     "required": ["a", "b"]
                 }),
-            },
-        ]
+            }),
+        ].into()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        let a = args["a"].as_f64().ok_or("Missing 'a'")?;
-        let b = args["b"].as_f64().ok_or("Missing 'b'")?;
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        #[derive(serde::Deserialize)]
+        struct Args { a: f64, b: f64 }
 
-        match name {
-            "add" => Ok(format!("{}", a + b)),
-            "multiply" => Ok(format!("{}", a * b)),
-            _ => Err(format!("Unknown tool: {}", name)),
+        let args: Args = call.parse_args()
+            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+
+        match call.name {
+            "add" => Ok(ToolResult::success(call.id, format!("{}", args.a + args.b))),
+            "multiply" => Ok(ToolResult::success(call.id, format!("{}", args.a * args.b))),
+            _ => Err(ToolError::not_found(call.name)),
         }
-    }
-}
-
-// LLM adapter wrapping the Anthropic client
-struct LlmAdapter {
-    client: Arc<AnthropicClient>,
-    model: String,
-}
-
-impl LlmAdapter {
-    fn new(api_key: String, model: String) -> Self {
-        Self {
-            client: Arc::new(AnthropicClient::new(api_key)),
-            model,
-        }
-    }
-}
-
-#[async_trait]
-impl AgentLlmClient for LlmAdapter {
-    async fn stream_response(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        max_tokens: u32,
-        temperature: Option<f32>,
-        provider_params: Option<&serde_json::Value>,
-    ) -> Result<LlmStreamResult, meerkat::AgentError> {
-        use futures::StreamExt;
-        use meerkat::{LlmEvent, LlmRequest, StopReason, ToolCall, Usage};
-
-        let request = LlmRequest {
-            model: self.model.clone(),
-            messages: messages.to_vec(),
-            tools: tools.to_vec(),
-            max_tokens,
-            temperature,
-            stop_sequences: None,
-            provider_params: provider_params.cloned(),
-        };
-
-        let mut stream = self.client.stream(&request);
-
-        let mut content = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = Usage::default();
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(event) => match event {
-                    LlmEvent::TextDelta { delta } => content.push_str(&delta),
-                    LlmEvent::ToolCallComplete { id, name, args } => {
-                        tool_calls.push(ToolCall { id, name, args });
-                    }
-                    LlmEvent::UsageUpdate { usage: u } => usage = u,
-                    LlmEvent::Done { stop_reason: sr } => stop_reason = sr,
-                    _ => {}
-                },
-                Err(e) => return Err(meerkat::AgentError::LlmError(e.to_string())),
-            }
-        }
-
-        Ok(LlmStreamResult {
-            content,
-            tool_calls,
-            stop_reason,
-            usage,
-        })
-    }
-
-    fn provider(&self) -> &'static str {
-        "anthropic"
-    }
-}
-
-// In-memory session store
-struct MemoryStore {
-    sessions: std::sync::Mutex<std::collections::HashMap<String, Session>>,
-}
-
-impl MemoryStore {
-    fn new() -> Self {
-        Self {
-            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl AgentSessionStore for MemoryStore {
-    async fn save(&self, session: &Session) -> Result<(), meerkat::AgentError> {
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions.insert(session.id().to_string(), session.clone());
-        Ok(())
-    }
-
-    async fn load(&self, id: &str) -> Result<Option<Session>, meerkat::AgentError> {
-        let sessions = self.sessions.lock().unwrap();
-        Ok(sessions.get(id).cloned())
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    let config = Config::load().await?;
+    let factory = AgentFactory::new(std::env::current_dir()?);
+    let service = build_ephemeral_service(factory, config, 64);
 
-    // Create components
-    let llm = Arc::new(LlmAdapter::new(api_key, "claude-sonnet-4".to_string()));
-    let tools = Arc::new(MathTools);
-    let store = Arc::new(MemoryStore::new());
-
-    // Build and run the agent
-    let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4")
-        .system_prompt("You are a math assistant. Use tools to perform calculations.")
-        .max_tokens_per_turn(1024)
-        .build(llm, tools, store);
-
-    let result = agent
-        .run("What is 25 + 17, then multiply by 3?".to_string())
-        .await?;
+    let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4".into(),
+        prompt: "What is 25 + 17, then multiply by 3?".into(),
+        system_prompt: Some("You are a math assistant. Use tools to perform calculations.".into()),
+        max_tokens: Some(1024),
+        event_tx: None,
+        host_mode: false,
+    }).await?;
 
     println!("Response: {}", result.text);
-    println!("Tool calls: {}", result.tool_calls);
+    println!("Session ID: {}", result.session_id);
 
     Ok(())
 }
@@ -563,14 +463,19 @@ ANTHROPIC_API_KEY=your-key cargo run --example multi_turn_tools
 ### Architecture Overview
 
 ```
-meerkat-core      -> Agent loop, types, budget, retry, state machine
+meerkat-core      -> Agent loop, types, trait contracts (SessionService, Compactor, MemoryStore)
+meerkat-session   -> Session service orchestration (Ephemeral, Persistent, Compactor)
+meerkat-memory    -> Semantic memory (HnswMemoryStore, SimpleMemoryStore)
 meerkat-client    -> LLM providers (Anthropic, OpenAI, Gemini)
-meerkat-store     -> Session persistence (JsonlStore, MemoryStore)
+meerkat-store     -> Session persistence (JSONL, redb, in-memory)
 meerkat-tools     -> Tool registry and validation
-meerkat-mcp-client -> MCP protocol client, tool routing
+meerkat-mcp       -> MCP protocol client, tool routing
 meerkat-cli       -> CLI binary (rkat)
-meerkat           -> Facade crate with SDK helpers
+meerkat           -> Facade crate (AgentFactory, FactoryAgentBuilder, build_ephemeral_service)
 ```
+
+All surfaces (CLI, REST, MCP Server, JSON-RPC) route through `SessionService`.
+See [CAPABILITY_MATRIX.md](./CAPABILITY_MATRIX.md) for build profiles and error codes.
 
 ### Exit Codes
 

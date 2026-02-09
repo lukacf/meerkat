@@ -2,7 +2,39 @@
 
 ## SessionService Lifecycle
 
-All surfaces (SDK, CLI, REST, JSON-RPC, MCP) route through `SessionService`. The contract is identical regardless of transport.
+All surfaces (CLI, REST, JSON-RPC, MCP Server) route through `SessionService` for the full
+session lifecycle. The contract is identical regardless of transport.
+
+```
+CLI ─────────┐
+REST ────────┤
+MCP Server ──┤──► SessionService ──► AgentFactory::build_agent()
+JSON-RPC ────┘
+```
+
+### Agent Construction
+
+Agent construction is fully centralized in `AgentFactory::build_agent()`. Surface crates
+contain zero `AgentBuilder::new()` calls. The `FactoryAgentBuilder` bridges `AgentFactory` into
+the `SessionAgentBuilder` trait used by `EphemeralSessionService`.
+
+Surfaces that need per-request configuration (e.g. `override_builtins`, `override_shell`,
+specific tools) stage a full `AgentBuildConfig` into the `build_config_slot` **before**
+calling `create_session()`:
+
+```rust
+// Surface code (CLI, REST, etc.)
+let build_config = AgentBuildConfig::new(model)
+    .with_system_prompt(system_prompt)
+    .with_override_builtins(override_builtins)
+    .with_override_shell(override_shell);
+
+factory_builder.stage_config(build_config).await;
+let result = service.create_session(req).await?;
+```
+
+If no config is staged, `FactoryAgentBuilder` falls back to building a minimal config from the
+`CreateSessionRequest` fields.
 
 ### Session Creation
 
@@ -11,14 +43,17 @@ All surfaces (SDK, CLI, REST, JSON-RPC, MCP) route through `SessionService`. The
 - Always works in every build profile.
 - Returns `RunResult` with the session ID for subsequent turns.
 - The session is live (in-memory) until archived.
+- Supports `host_mode`: process the prompt then stay alive for comms messages.
 
 ### Turn Execution
 
 `start_turn(id, req)` runs a new turn on an existing session.
 
 - **Busy check**: Uses atomic compare-and-swap on the turn lock. Exactly one caller wins; others get `SESSION_BUSY`.
-- **Sequential execution**: Turns run one at a time per session. No queueing — callers retry on Busy.
+- **Sequential execution**: Turns run one at a time per session. No queueing -- callers retry on Busy.
 - **Event streaming**: If `event_tx` is provided, events are forwarded during the turn.
+- **Host mode**: When `host_mode: true`, the agent processes the prompt then stays alive
+  waiting for comms messages (peer-to-peer inter-agent communication).
 
 ### Interruption
 
@@ -108,4 +143,10 @@ No durability. Process death loses all session state.
 - No sensitive data filtering in compaction summaries
 - Event store records all `AgentEvent` variants including `ToolCallRequested` (contains tool arguments)
 - No encryption at rest (redb files are plaintext)
-- `.rkat/` projection files are derived — deleting and replaying produces identical content
+- `.rkat/sessions/` files are derived projection output (materialized by `SessionProjector`), NOT
+  canonical state. Deleting them and replaying from the event store produces identical content.
+
+## See Also
+
+- [CAPABILITY_MATRIX.md](./CAPABILITY_MATRIX.md) -- build profiles, error codes, feature behavior
+- [architecture.md](./architecture.md) -- crate structure and agent loop details

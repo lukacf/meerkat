@@ -126,17 +126,12 @@ Meerkat includes **first-class support for secure agent-to-agent communication**
 
 ```rust
 use meerkat_comms::{CommsConfig, Keypair, TrustedPeers};
-use meerkat_comms_agent::{CommsAgent, CommsManager};
 
 // Each agent has an Ed25519 identity
 let keypair = Keypair::generate();
-let manager = CommsManager::new(config);
 
-// Wrap your agent with comms capabilities
-let agent = CommsAgent::new(inner_agent, manager);
-
-// Agent can now send/receive messages from trusted peers
-agent.run("Coordinate with agent-b on this task").await?;
+// Comms is wired into the agent at build time via AgentFactory.
+// The agent can then send/receive messages from trusted peers.
 ```
 
 **CLI support:**
@@ -145,7 +140,7 @@ agent.run("Coordinate with agent-b on this task").await?;
 rkat run --comms-name "agent-a" "Send results to agent-b"
 ```
 
-See [docs/ARCHITECTURE.md](docs/architecture.md) for the full comms protocol design.
+See [docs/architecture.md](docs/architecture.md) for the full architecture and comms protocol design.
 
 ## Architecture
 
@@ -158,38 +153,47 @@ See [docs/ARCHITECTURE.md](docs/architecture.md) for the full comms protocol des
                         │     meerkat      │  Facade crate
                         └────────┬─────────┘
                                  │
-     ┌───────────┬───────────────┼───────────────┬───────────┐
-     │           │               │               │           │
-┌────▼────┐ ┌────▼────┐ ┌────────▼────────┐ ┌───▼───┐ ┌─────▼─────┐
-│  core   │ │ client  │ │   mcp-client    │ │ store │ │   tools   │
-├─────────┤ ├─────────┤ ├─────────────────┤ ├───────┤ ├───────────┤
-│ Agent   │ │ LLM     │ │ MCP router      │ │ JSONL │ │ Registry  │
-│ loop    │ │ APIs    │ │ Tool dispatch   │ │ Memory│ │ Validate  │
-│ State   │ │         │ │                 │ │       │ │           │
-│ Budget  │ │Anthropic│ │ Stdio/HTTP/SSE  │ │       │ │           │
-│ Retry   │ │ OpenAI  │ │                 │ │       │ │           │
-│         │ │ Gemini  │ │                 │ │       │ │           │
-└─────────┘ └─────────┘ └─────────────────┘ └───────┘ └───────────┘
+     ┌───────────┬───────┬───────┼───────┬───────────┬───────────┐
+     │           │       │       │       │           │           │
+┌────▼────┐ ┌───▼───┐ ┌─▼───┐ ┌─▼─────┐ ┌───▼───┐ ┌─────▼─────┐
+│ client  │ │session│ │store│ │ mcp   │ │ tools │ │  memory   │
+├─────────┤ ├───────┤ ├─────┤ ├───────┤ ├───────┤ ├───────────┤
+│ LLM     │ │Session│ │JSONL│ │Router │ │ Reg.  │ │ HnswMem.  │
+│ APIs    │ │Service│ │ redb│ │Stdio  │ │ Valid.│ │ SimpleMem.│
+│Anthropic│ │Compact│ │     │ │HTTP   │ │       │ │           │
+│ OpenAI  │ │Events │ │     │ │SSE    │ │       │ │           │
+│ Gemini  │ │       │ │     │ │       │ │       │ │           │
+└─────────┘ └───────┘ └─────┘ └───────┘ └───────┘ └───────────┘
+                                 │
+                         ┌───────▼───────┐
+                         │  meerkat-core │  No I/O deps
+                         │  Traits, loop │  Pure logic
+                         │  SessionError │
+                         └───────────────┘
 ```
+
+All four surfaces (CLI, REST, MCP Server, JSON-RPC) route through `SessionService` for session lifecycle. `AgentFactory::build_agent()` centralizes all agent construction.
 
 ### Crates
 
 | Crate | Description |
 |-------|-------------|
-| `meerkat` | Facade crate with SDK helpers and re-exports |
-| `meerkat-core` | Agent loop, state machine, types (no I/O dependencies) |
+| `meerkat` | Facade crate: re-exports, `AgentFactory`, `FactoryAgentBuilder`, `build_ephemeral_service` |
+| `meerkat-core` | Agent loop, state machine, types, trait contracts (`SessionService`, `Compactor`, `MemoryStore`) |
+| `meerkat-session` | Session service orchestration (`EphemeralSessionService`, `DefaultCompactor`, `EventStore`) |
+| `meerkat-memory` | Semantic memory (`HnswMemoryStore` via hnsw_rs + redb, `SimpleMemoryStore`) |
 | `meerkat-hooks` | Hook runtime adapters + deterministic default hook engine |
 | `meerkat-client` | LLM providers: Anthropic, OpenAI, Gemini |
-| `meerkat-mcp-client` | MCP protocol client and tool router |
-| `meerkat-store` | Session persistence (JSONL, in-memory) |
+| `meerkat-mcp` | MCP protocol client and tool router |
+| `meerkat-store` | Session persistence (JSONL, redb, in-memory) |
 | `meerkat-tools` | Tool registry and validation |
 | `meerkat-cli` | CLI binary (`rkat`) |
 | `meerkat-rest` | Optional REST API server |
 | `meerkat-mcp-server` | Expose Meerkat as MCP tools |
-| **Multi-Agent** | |
+| `meerkat-rpc` | JSON-RPC stdio server (stateful `SessionRuntime`, IDE/desktop integration) |
 | `meerkat-comms` | Ed25519 encrypted P2P messaging protocol |
-| `meerkat-comms-agent` | Agent wrapper with inbox/outbox and routing |
-| `meerkat-comms-mcp` | Expose comms as MCP tools |
+
+See [docs/CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) for build profiles, error codes, and feature behavior.
 
 ### State Machine
 
@@ -213,16 +217,18 @@ Cancelling ◄──────────────────────
 ### Custom Tools
 
 ```rust
-use meerkat::{AgentToolDispatcher, ToolDef};
+use meerkat::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
+use meerkat::error::ToolError;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::json;
+use std::sync::Arc;
 
 struct Calculator;
 
 #[async_trait]
 impl AgentToolDispatcher for Calculator {
-    fn tools(&self) -> Vec<ToolDef> {
-        vec![ToolDef {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        vec![Arc::new(ToolDef {
             name: "add".into(),
             description: "Add two numbers".into(),
             input_schema: json!({
@@ -233,17 +239,20 @@ impl AgentToolDispatcher for Calculator {
                 },
                 "required": ["a", "b"]
             }),
-        }]
+        })].into()
     }
 
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        match name {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        #[derive(serde::Deserialize)]
+        struct AddArgs { a: f64, b: f64 }
+
+        match call.name {
             "add" => {
-                let a = args["a"].as_f64().unwrap();
-                let b = args["b"].as_f64().unwrap();
-                Ok((a + b).to_string())
+                let args: AddArgs = call.parse_args()
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                Ok(ToolResult::success(call.id, (args.a + args.b).to_string()))
             }
-            _ => Err("Unknown tool".into()),
+            _ => Err(ToolError::not_found(call.name)),
         }
     }
 }
@@ -268,37 +277,42 @@ let result = meerkat::with_anthropic(api_key)
 ### MCP Tools
 
 ```rust
-use meerkat::{McpRouter, McpServerConfig};
+use meerkat_mcp::{McpRouter, McpServerConfig};
 
 let mut router = McpRouter::new();
-router.add_server(McpServerConfig {
-    name: "filesystem".into(),
-    transport: StdioTransport {
-        command: "npx".into(),
-        args: vec!["-y".into(), "@anthropic/mcp-server-filesystem".into(), "/tmp".into()],
-        env: Default::default(),
-    }.into(),
-}).await?;
+router.add_server(McpServerConfig::stdio(
+    "filesystem",
+    "npx",
+    vec!["-y".into(), "@anthropic/mcp-server-filesystem".into(), "/tmp".into()],
+    Default::default(),
+)).await?;
 
-// Router implements AgentToolDispatcher
-let agent = AgentBuilder::new()
-    .build(llm, Arc::new(router), store);
+// McpRouter implements AgentToolDispatcher — pass it to AgentFactory::build_agent()
 ```
 
-### Session Resume
+### Session Lifecycle via SessionService
 
 ```rust
-// Run initial prompt
-let result = agent.run("Start a task").await?;
+use meerkat::service::{CreateSessionRequest, StartTurnRequest, SessionService};
+
+// Create a session and run the first turn
+let result = service.create_session(CreateSessionRequest {
+    model: "claude-sonnet-4".into(),
+    prompt: "Start a task".into(),
+    system_prompt: None,
+    max_tokens: None,
+    event_tx: None,
+    host_mode: false,
+}).await?;
+
 let session_id = result.session_id;
 
-// Later: resume the session
-let session = store.load(&session_id).await?.unwrap();
-let mut agent = AgentBuilder::new()
-    .resume_session(session)
-    .build(llm, tools, store);
-
-let result = agent.run("Continue the task").await?;
+// Later: run another turn on the same session
+let result = service.start_turn(&session_id, StartTurnRequest {
+    prompt: "Continue the task".into(),
+    event_tx: None,
+    host_mode: false,
+}).await?;
 ```
 
 ### Streaming
@@ -404,6 +418,28 @@ meerkat = { version = "0.1", features = ["anthropic", "openai", "gemini"] }
 | `all-providers` | All LLM providers |
 | `jsonl-store` | JSONL file storage (default) |
 | `memory-store` | In-memory storage |
+| `session-store` | Persistent sessions (redb-backed `PersistentSessionService`) |
+| `session-compaction` | Auto-compact long conversations (`DefaultCompactor`) |
+| `memory-store-session` | Semantic memory indexing (`HnswMemoryStore`) |
+
+### Pick Only What You Need
+
+```toml
+# Minimal: just the agent loop
+[dependencies]
+meerkat = { version = "0.1", default-features = false, features = ["anthropic"] }
+
+# Add persistence
+meerkat = { version = "0.1", default-features = false, features = ["anthropic", "session-store"] }
+
+# Add compaction
+meerkat = { version = "0.1", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
+
+# Kitchen sink
+meerkat = { version = "0.1", features = ["all-providers", "session-store", "session-compaction", "memory-store-session"] }
+```
+
+When a capability is disabled, the corresponding `SessionService` methods return typed errors (`SessionError::PersistenceDisabled`, `SessionError::CompactionDisabled`) rather than panicking or silently degrading. See [docs/CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) for the full behavior matrix.
 
 ## When to Use Meerkat
 

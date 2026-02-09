@@ -26,7 +26,8 @@ Meerkat is modular. Every feature is opt-in. This matrix shows what works in eac
 
 ## Error Codes
 
-Deterministic error codes across all surfaces:
+Deterministic error codes across all surfaces. Every `SessionError` variant maps to a stable
+string code and a transport-specific representation:
 
 | `SessionError` | Code | JSON-RPC | REST | MCP | CLI |
 |----------------|------|----------|------|-----|-----|
@@ -35,7 +36,17 @@ Deterministic error codes across all surfaces:
 | `PersistenceDisabled` | `SESSION_PERSISTENCE_DISABLED` | -32003 | 501 | tool error | stderr |
 | `CompactionDisabled` | `SESSION_COMPACTION_DISABLED` | -32004 | 501 | tool error | stderr |
 | `NotRunning` | `SESSION_NOT_RUNNING` | -32005 | 409 | tool error | exit 1 |
+| `Store` | `SESSION_STORE_ERROR` | -32000 | 500 | tool error | exit 1 |
 | `Agent` | `AGENT_ERROR` | -32000 | 500 | tool error | exit 1 |
+
+### Transport Error Mapping Summary
+
+- **JSON-RPC**: Custom error codes in the -32000..-32099 range. The `code` field of the
+  JSON-RPC error object carries the string code (e.g. `SESSION_NOT_FOUND`).
+- **REST**: HTTP status codes (404, 409, 500, 501). Error body includes `{ "code": "...", "message": "..." }`.
+- **MCP Server**: Tool calls return `is_error: true` with the error message and code in the content.
+- **CLI**: Non-zero exit codes. `exit 1` for errors, `exit 2` for budget exhaustion. Error
+  details printed to stderr.
 
 ## Pick Only What You Need
 
@@ -77,4 +88,11 @@ Events emitted: `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`.
 
 - **Ephemeral**: Process death loses all state.
 - **Persistent**: Snapshot saved AFTER turn completes. Crash mid-turn loses the in-flight turn.
-- `.rkat/sessions/` files are derived (projected) output, not canonical source.
+- `.rkat/sessions/` files are derived (projected) output, not canonical source. Deleting them
+  and replaying from the event store produces identical content.
+
+## See Also
+
+- [README](../README.md) -- project overview and quick start
+- [SESSION_CONTRACTS.md](./SESSION_CONTRACTS.md) -- concurrency, durability, and compaction semantics
+- [architecture.md](./architecture.md) -- crate structure and agent loop details

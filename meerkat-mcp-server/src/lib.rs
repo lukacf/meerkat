@@ -8,7 +8,9 @@ use meerkat::{
     OutputSchema, SessionStore, ToolError, ToolResult,
 };
 use meerkat_core::error::invalid_session_id_message;
-use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService};
+use meerkat_core::service::{
+    CreateSessionRequest, SessionError, SessionService, StartTurnRequest,
+};
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
     Session, ToolCallView, format_verbose_event,
@@ -506,23 +508,23 @@ async fn handle_meerkat_run(
         override_shell: Some(input.enable_builtins && enable_shell),
     };
 
-    // Stage the build config for the builder to pick up
-    {
+    // Hold slot lock across staging + create to prevent concurrent
+    // requests from overwriting each other's staged config.
+    let result = {
         let mut slot = state.build_config_slot.lock().await;
         *slot = Some(build_config);
-    }
 
-    // Route through the session service
-    let req = CreateSessionRequest {
-        model,
-        prompt: input.prompt,
-        system_prompt: None, // already in the staged build config
-        max_tokens: None,    // already in the staged build config
-        event_tx: event_tx.clone(),
-        host_mode,
+        let req = CreateSessionRequest {
+            model,
+            prompt: input.prompt,
+            system_prompt: None, // already in the staged build config
+            max_tokens: None,    // already in the staged build config
+            event_tx: event_tx.clone(),
+            host_mode,
+        };
+
+        state.service.create_session(req).await
     };
-
-    let result = state.service.create_session(req).await;
     drop(event_tx);
     if let Some(task) = event_task {
         let _ = task.await;
@@ -646,24 +648,37 @@ async fn handle_meerkat_resume(
         override_shell: Some(enable_builtins && enable_shell),
     };
 
-    // Stage the build config for the builder to pick up
-    {
-        let mut slot = state.build_config_slot.lock().await;
-        *slot = Some(build_config);
-    }
-
-    // Route through the session service. Because we set resume_session, the
-    // builder will reuse the existing session ID and messages.
-    let req = CreateSessionRequest {
-        model,
-        prompt,
-        system_prompt: None,
-        max_tokens: None,
+    // Try start_turn on the live session first (it may still be alive
+    // from a prior meerkat_run in the same MCP server process).
+    let turn_req = StartTurnRequest {
+        prompt: prompt.clone(),
         event_tx: event_tx.clone(),
         host_mode,
     };
 
-    let result = state.service.create_session(req).await;
+    let result = match state.service.start_turn(&session_id, turn_req).await {
+        Ok(run_result) => Ok(run_result),
+        Err(SessionError::NotFound { .. }) => {
+            // Session isn't live — hold slot lock, stage config, create.
+            let mut slot = state.build_config_slot.lock().await;
+            *slot = Some(build_config);
+
+            let req = CreateSessionRequest {
+                model,
+                prompt,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: event_tx.clone(),
+                host_mode,
+            };
+
+            let r = state.service.create_session(req).await;
+            drop(slot);
+            r
+        }
+        Err(other) => Err(other),
+    };
+
     drop(event_tx);
     if let Some(task) = event_task {
         let _ = task.await;

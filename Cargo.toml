@@ -15,6 +15,7 @@ members = [
     "meerkat-rpc",
     "meerkat-session",
     "meerkat-memory",
+    "meerkat-contracts",
     "test-fixtures/mcp-test-server",
     "tests/integration",
 ]
@@ -62,6 +63,10 @@ redb = "2"
 jsonschema = "0.26"
 schemars = { version = "1", features = ["derive"] }
 
+# Enum utilities
+strum = { version = "0.27", features = ["derive"] }
+inventory = "0.3"
+
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 dirs = "5.0"
@@ -94,6 +99,7 @@ meerkat-hooks = { path = "meerkat-hooks" }
 meerkat-rpc = { path = "meerkat-rpc" }
 meerkat-session = { path = "meerkat-session", default-features = false }
 meerkat-memory = { path = "meerkat-memory", default-features = false }
+meerkat-contracts = { path = "meerkat-contracts", default-features = false }
 
 
 [workspace.lints.rust]

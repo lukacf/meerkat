@@ -1,0 +1,32 @@
+[package]
+name = "meerkat-contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+schema = ["dep:schemars"]
+
+[dependencies]
+meerkat-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+inventory = { workspace = true }
+thiserror = { workspace = true }
+
+# Feature-gated
+schemars = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "emit-schemas"
+required-features = ["schema"]

@@ -1,5 +1,18 @@
 //! Hook runtimes (in-process, command, HTTP) and deterministic default engine.
 
+// Skill registration
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "hook-authoring",
+        name: "Hook Authoring",
+        description: "Writing hooks for the 7 hook points, execution modes, and decision semantics",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["hooks"],
+        body: include_str!("../skills/hook-authoring/SKILL.md"),
+        extensions: &[],
+    }
+}
+
 // Capability registration
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {

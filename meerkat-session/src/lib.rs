@@ -34,6 +34,20 @@ pub use compactor::DefaultCompactor;
 #[cfg(feature = "session-store")]
 pub use persistent::PersistentSessionService;
 
+// Skill registration
+#[cfg(feature = "session-store")]
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "session-management",
+        name: "Session Management",
+        description: "Session persistence, resume patterns, event store replay, compaction tuning",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["session_store"],
+        body: include_str!("../skills/session-management/SKILL.md"),
+        extensions: &[],
+    }
+}
+
 // Capability registrations
 #[cfg(feature = "session-store")]
 inventory::submit! {

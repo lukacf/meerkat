@@ -50,6 +50,19 @@ inventory::submit! {
     }
 }
 
+// Skill registration
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "multi-agent-comms",
+        name: "Multi-Agent Comms",
+        description: "Setting up host mode, peer trust, send vs request/response patterns",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["comms"],
+        body: include_str!("../skills/multi-agent-comms/SKILL.md"),
+        extensions: &[],
+    }
+}
+
 /// Validate whether host mode can be enabled.
 ///
 /// Returns `Ok(true)` if `requested` is true, `Ok(false)` if not.

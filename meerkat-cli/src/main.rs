@@ -1269,6 +1269,7 @@ async fn resume_session(
             shell: config.tools.shell_enabled,
             comms: config.tools.comms_enabled,
             subagents: config.tools.subagents_enabled,
+            active_skills: None,
         });
     let host_mode_requested = stored_metadata
         .as_ref()

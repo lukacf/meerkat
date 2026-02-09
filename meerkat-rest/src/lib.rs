@@ -638,6 +638,7 @@ async fn continue_session(
                     shell: state.enable_shell,
                     comms: false,
                     subagents: false,
+                    active_skills: None,
                 });
 
             let model = req

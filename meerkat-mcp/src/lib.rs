@@ -17,3 +17,16 @@ pub use router::McpRouter;
 
 // Re-export McpServerConfig from meerkat-core for backwards compatibility
 pub use meerkat_core::McpServerConfig;
+
+// Skill registration
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "mcp-server-setup",
+        name: "MCP Server Setup",
+        description: "How to configure MCP servers in .rkat/mcp.toml",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &[],
+        body: include_str!("../skills/mcp-server-setup/SKILL.md"),
+        extensions: &[],
+    }
+}

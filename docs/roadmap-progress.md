@@ -1,6 +1,6 @@
 # Roadmap Progress
 
-**Current Phase:** 2
+**Current Phase:** 3
 
 **Current Status:** gating
 
@@ -50,15 +50,16 @@
 
 ## Phase 3 — Skills System
 
-- [ ] Core skill contracts in `meerkat-core/src/skills/`
-- [ ] `meerkat-skills` crate with sources, parser, resolver, renderer, engine
-- [ ] Factory integration — wire `DefaultSkillEngine` into `AgentBuilder`
-- [ ] Prompt assembly includes skill inventory section
-- [ ] 8 embedded skills implemented in component crates
-- [ ] Skills capability registration
-- [ ] Session metadata extension (`active_skills`)
-- [ ] Memory indexing of compaction discards wired
-- [ ] Existing tests pass
+- [x] Core skill contracts in `meerkat-core/src/skills/` (SkillId, SkillScope, SkillDescriptor, SkillDocument, SkillError, SkillSource, SkillEngine traits)
+- [x] `meerkat-skills` crate with sources, parser, resolver, renderer, engine (14 tests)
+- [x] Factory integration — `skills` feature added to facade, `meerkat-skills` wired as optional dep
+- [x] Prompt assembly includes skill inventory section (extra_sections slot from Phase 0)
+- [x] 8 embedded skills implemented in component crates (task-workflow, shell-patterns, sub-agent-orchestration, multi-agent-comms, mcp-server-setup, hook-authoring, memory-retrieval, session-management)
+- [x] Skills capability registration (CapabilityId::Skills in meerkat-skills)
+- [x] Session metadata extension (`active_skills` added to SessionTooling)
+- [x] Memory indexing of compaction discards wired (Message::as_indexable_text(), AgentBuilder::memory_store() setter)
+- [x] Existing tests pass
+- [x] Skill events added to AgentEvent (SkillsResolved, SkillResolutionFailed)
 
 ## Phase 4 — Python + TypeScript SDKs
 
@@ -113,4 +114,19 @@
 - test-gate: PASS
 - performance-gate: PASS
 - spec-accuracy-gate: PASS (minor: REST inline store_path not delegated, functionally identical)
+- rust-quality-gate: PASS
+
+### Phase 3 — Attempt 1
+
+- spec-accuracy-gate: FAIL — AgentBuilder missing skill_engine/memory_store setters, factory not wiring skills
+
+### Phase 3 — Attempt 2 (fixes applied)
+
+- Fixed: AgentBuilder::skill_engine() and memory_store() setters added
+- Fixed: Factory wires DefaultSkillEngine with composite sources when skills feature enabled
+- Fixed: Skill inventory section injected into system prompt via extra_sections
+- build-gate: PASS
+- test-gate: PASS
+- performance-gate: PASS
+- spec-accuracy-gate: PASS (AgentBuilder setters, factory wiring, skill inventory injection all verified)
 - rust-quality-gate: PASS

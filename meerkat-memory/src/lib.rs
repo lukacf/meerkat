@@ -12,6 +12,19 @@ pub mod simple;
 pub use hnsw::HnswMemoryStore;
 pub use simple::SimpleMemoryStore;
 
+// Skill registration
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "memory-retrieval",
+        name: "Memory Retrieval",
+        description: "How semantic memory works with compaction and the MemoryStore trait",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["memory_store"],
+        body: include_str!("../skills/memory-retrieval/SKILL.md"),
+        extensions: &[],
+    }
+}
+
 // Capability registration
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {

@@ -12,6 +12,7 @@ repository.workspace = true
 # Internal crates
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
+meerkat-skills = { workspace = true }
 inventory = { workspace = true }
 
 # Serialization

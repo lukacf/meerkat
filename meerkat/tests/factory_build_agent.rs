@@ -173,6 +173,7 @@ async fn build_agent_sets_session_metadata() {
             shell: true,
             comms: false,
             subagents: false,
+            active_skills: None,
         }
     );
     assert!(!metadata.host_mode);
@@ -256,6 +257,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             shell: false,
             comms: false,
             subagents: false,
+            active_skills: None,
         },
         host_mode: false,
         comms_name: None,

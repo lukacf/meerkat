@@ -81,3 +81,41 @@ inventory::submit! {
         prerequisites: &[],
     }
 }
+
+// Skill registrations
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "task-workflow",
+        name: "Task Workflow",
+        description: "How to use task_create/task_update/task_list for structured work tracking",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["builtins"],
+        body: include_str!("../skills/task-workflow/SKILL.md"),
+        extensions: &[],
+    }
+}
+
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "shell-patterns",
+        name: "Shell Patterns",
+        description: "Background job patterns with shell and job management tools",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["builtins", "shell"],
+        body: include_str!("../skills/shell-patterns/SKILL.md"),
+        extensions: &[],
+    }
+}
+
+#[cfg(feature = "sub-agents")]
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "sub-agent-orchestration",
+        name: "Sub-Agent Orchestration",
+        description: "When to agent_spawn vs agent_fork, model selection, result aggregation",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["sub_agents"],
+        body: include_str!("../skills/sub-agent-orchestration/SKILL.md"),
+        extensions: &[],
+    }
+}

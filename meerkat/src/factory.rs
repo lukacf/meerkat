@@ -609,11 +609,61 @@ impl AgentFactory {
         let layered_hooks = resolve_layered_hooks_config(hooks_root, config).await;
         let hook_engine = create_default_hook_engine(layered_hooks);
 
-        // 11. Build system prompt (single canonical path)
+        // 11. Build skill engine and inventory section (if skills feature enabled)
+        #[cfg(feature = "skills")]
+        let skill_inventory_section = {
+            use meerkat_skills::{DefaultSkillEngine, EmbeddedSkillSource, FilesystemSkillSource, CompositeSkillSource};
+            use meerkat_core::skills::{SkillEngine, SkillScope};
+
+            let mut sources: Vec<Box<dyn meerkat_core::skills::SkillSource>> = Vec::new();
+
+            // Project-level skills (highest precedence)
+            let project_root = self.project_root.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+            sources.push(Box::new(FilesystemSkillSource::new(
+                project_root.join(".rkat/skills"),
+                SkillScope::Project,
+            )));
+
+            // User-level skills
+            if let Some(home) = std::env::var_os("HOME") {
+                sources.push(Box::new(FilesystemSkillSource::new(
+                    std::path::PathBuf::from(home).join(".rkat/skills"),
+                    SkillScope::User,
+                )));
+            }
+
+            // Embedded skills (lowest precedence)
+            sources.push(Box::new(EmbeddedSkillSource::new()));
+
+            let composite = CompositeSkillSource::new(sources);
+
+            // Collect available capability strings for filtering
+            let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
+                .into_iter()
+                .map(|c| c.id.to_string())
+                .collect();
+
+            let engine = DefaultSkillEngine::new(Box::new(composite), available_caps);
+
+            // Generate inventory section for system prompt
+            let section = engine.inventory_section().await.unwrap_or_default();
+            (Some(Arc::new(engine) as Arc<dyn SkillEngine>), section)
+        };
+        #[cfg(not(feature = "skills"))]
+        let skill_inventory_section: (Option<Arc<dyn meerkat_core::skills::SkillEngine>>, String) = (None, String::new());
+        let (skill_engine, inventory_section) = skill_inventory_section;
+        let _ = &skill_engine; // used below when skills feature is enabled
+
+        // 12. Build system prompt (single canonical path)
+        let extra_sections: Vec<&str> = if inventory_section.is_empty() {
+            vec![]
+        } else {
+            vec![inventory_section.as_str()]
+        };
         let system_prompt = crate::assemble_system_prompt(
             config,
             per_request_prompt.as_deref(),
-            &[],
+            &extra_sections,
             &tool_usage_instructions,
         )
         .await;
@@ -636,6 +686,9 @@ impl AgentFactory {
         }
         if let Some(session) = build_config.resume_session {
             builder = builder.resume_session(session);
+        }
+        if let Some(engine) = skill_engine {
+            builder = builder.skill_engine(engine);
         }
         #[cfg(feature = "comms")]
         if let Some(runtime) = comms_runtime {
@@ -671,6 +724,7 @@ impl AgentFactory {
                 shell: effective_shell,
                 comms: build_config.host_mode,
                 subagents: self.enable_subagents,
+                active_skills: None,
             },
             host_mode: build_config.host_mode,
             comms_name: build_config.comms_name,

@@ -86,6 +86,10 @@ impl SessionAgent for MockAgent {
             last_assistant_text: Some("Hello from mock".to_string()),
         }
     }
+
+    fn session_clone(&self) -> meerkat_core::Session {
+        meerkat_core::Session::with_id(self.session_id.clone())
+    }
 }
 
 struct MockAgentBuilder {

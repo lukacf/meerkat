@@ -12,6 +12,8 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
     SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
+#[allow(unused_imports)] // Used in read() fallback path
+use meerkat_core::Session;
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_store::SessionStore;
 use std::sync::Arc;
@@ -50,10 +52,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     ) -> Result<RunResult, SessionError> {
         let result = self.inner.create_session(req).await?;
 
-        // Persist the session snapshot after the first turn.
-        if let Ok(view) = self.inner.read(&result.session_id).await {
-            self.save_session_meta(&result.session_id, &view).await?;
-        }
+        // Persist the full session snapshot (messages + metadata) after first turn.
+        self.persist_full_session(&result.session_id).await?;
 
         Ok(result)
     }
@@ -65,10 +65,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     ) -> Result<RunResult, SessionError> {
         let result = self.inner.start_turn(id, req).await?;
 
-        // Persist snapshot after turn
-        if let Ok(view) = self.inner.read(id).await {
-            self.save_session_meta(id, &view).await?;
-        }
+        // Persist full session snapshot after turn.
+        self.persist_full_session(id).await?;
 
         Ok(result)
     }
@@ -163,25 +161,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
-    /// Save session metadata to the store.
-    async fn save_session_meta(
-        &self,
-        id: &SessionId,
-        view: &SessionView,
-    ) -> Result<(), SessionError> {
-        let mut session = self
-            .store
-            .load(id)
-            .await
-            .map_err(|e| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    format!("Store load failed: {e}"),
-                ))
-            })?
-            .unwrap_or_else(|| meerkat_core::Session::with_id(id.clone()));
-
-        session.record_usage(view.billing.usage.clone());
-        session.touch();
+    /// Export the full session from the live task and persist it to the store.
+    ///
+    /// This saves the complete session including all messages, metadata, and
+    /// usage — not just a lightweight summary.
+    async fn persist_full_session(&self, id: &SessionId) -> Result<(), SessionError> {
+        let session = self.inner.export_session(id).await?;
 
         self.store.save(&session).await.map_err(|e| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(

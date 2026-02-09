@@ -1,29 +1,44 @@
 #!/usr/bin/env bash
 # Test only crates with staged changes (fast pre-commit).
-# Falls back to workspace test if detection fails.
+# Falls back to full workspace test for root-level changes.
 set -euo pipefail
 
-# Get list of staged .rs and .toml files, extract crate directories
-CHANGED_CRATES=$(git diff --cached --name-only --diff-filter=ACMR \
-  | grep -E '\.(rs|toml)$' \
-  | sed -E 's|^([^/]+)/.*|\1|' \
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR \
+  | grep -E '\.(rs|toml)$' || true)
+
+if [ -z "$STAGED_FILES" ]; then
+  echo "No Rust/TOML changes staged, skipping tests."
+  exit 0
+fi
+
+# Check for root-level manifest changes (workspace Cargo.toml, Cargo.lock).
+# These can affect all crates, so run the full workspace test.
+if echo "$STAGED_FILES" | grep -qE '^Cargo\.(toml|lock)$'; then
+  echo "Workspace manifest changed — running full workspace test."
+  cargo test --workspace --lib --bins --tests
+  exit $?
+fi
+
+# Extract crate directories from changed file paths.
+# Files like "meerkat-core/src/foo.rs" → "meerkat-core"
+# Files without a "/" (root-level) are already handled above.
+CHANGED_CRATES=$(echo "$STAGED_FILES" \
+  | sed -n 's|^\([^/]*\)/.*|\1|p' \
   | sort -u \
   | while read -r dir; do
-      # Only include workspace members that have a Cargo.toml
       if [ -f "$dir/Cargo.toml" ]; then
         echo "$dir"
       fi
     done)
 
 if [ -z "$CHANGED_CRATES" ]; then
-  echo "No crate changes detected, skipping tests."
+  echo "No testable crate changes detected, skipping."
   exit 0
 fi
 
 # Build -p flags for each changed crate
 PKG_FLAGS=""
 for crate_dir in $CHANGED_CRATES; do
-  # Extract package name from Cargo.toml
   pkg=$(grep '^name' "$crate_dir/Cargo.toml" | head -1 | sed 's/.*= *"//' | sed 's/".*//')
   if [ -n "$pkg" ]; then
     PKG_FLAGS="$PKG_FLAGS -p $pkg"

@@ -64,6 +64,10 @@ enum SessionCommand {
     ReadSnapshot {
         reply_tx: oneshot::Sender<SessionSnapshot>,
     },
+    /// Export the full session (messages + metadata) for persistence.
+    ExportSession {
+        reply_tx: oneshot::Sender<meerkat_core::Session>,
+    },
     Shutdown,
 }
 
@@ -123,6 +127,13 @@ pub trait SessionAgent: Send {
 
     /// Take a snapshot of the current session state.
     fn snapshot(&self) -> SessionSnapshot;
+
+    /// Clone the full session (messages + metadata) for persistence.
+    ///
+    /// This is more expensive than `snapshot()` because it includes the
+    /// full message history. Only called by `PersistentSessionService`
+    /// after each turn.
+    fn session_clone(&self) -> meerkat_core::Session;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +157,37 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             builder,
             max_sessions,
         }
+    }
+
+    /// Export the full session (messages + metadata) for persistence.
+    ///
+    /// Returns the complete `Session` including message history. Used by
+    /// `PersistentSessionService` to save full snapshots after each turn.
+    pub async fn export_session(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::Session, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions.get(id).ok_or_else(|| SessionError::NotFound {
+            id: id.clone(),
+        })?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::ExportSession { reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })
     }
 
     /// Shut down all sessions.
@@ -498,6 +540,9 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::ReadSnapshot { reply_tx } => {
                 let _ = reply_tx.send(agent.snapshot());
+            }
+            SessionCommand::ExportSession { reply_tx } => {
+                let _ = reply_tx.send(agent.session_clone());
             }
             SessionCommand::Shutdown => {
                 state_tx.send_replace(SessionState::ShuttingDown);

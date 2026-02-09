@@ -33,3 +33,26 @@ pub use compactor::DefaultCompactor;
 
 #[cfg(feature = "session-store")]
 pub use persistent::PersistentSessionService;
+
+// Capability registrations
+#[cfg(feature = "session-store")]
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::SessionStore,
+        description: "PersistentSessionService, RedbEventStore, SessionProjector",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: Some("session-store"),
+        prerequisites: &[],
+    }
+}
+
+#[cfg(feature = "session-compaction")]
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::SessionCompaction,
+        description: "DefaultCompactor: auto-compact at token threshold, LLM summary, history rebuild",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: Some("session-compaction"),
+        prerequisites: &[],
+    }
+}

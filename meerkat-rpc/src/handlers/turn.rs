@@ -97,12 +97,7 @@ pub async fn handle_start(
         text: result.text,
         turns: result.turns,
         tool_calls: result.tool_calls,
-        usage: UsageResult {
-            input_tokens: result.usage.input_tokens,
-            output_tokens: result.usage.output_tokens,
-            cache_creation_tokens: result.usage.cache_creation_tokens,
-            cache_read_tokens: result.usage.cache_read_tokens,
-        },
+        usage: result.usage.into(),
     };
 
     RpcResponse::success(id, response)

@@ -1,6 +1,6 @@
 # Roadmap Progress
 
-**Current Phase:** 1
+**Current Phase:** 2
 
 **Current Status:** gating
 
@@ -34,18 +34,19 @@
 
 ## Phase 2 — Protocol Alignment
 
-- [ ] Replace local wire types in RPC with contracts imports
-- [ ] Replace local wire types in REST with contracts imports
-- [ ] Replace local wire types in MCP Server with contracts imports
-- [ ] Replace local wire types in CLI with contracts imports
-- [ ] Replace local error construction with `WireError` + protocol projection
-- [ ] Add `capabilities/get` to all four surfaces
-- [ ] Extract `resolve_host_mode()` to `meerkat-comms`
-- [ ] Extract `resolve_store_path()` to `meerkat-store`
-- [ ] Extract `spawn_event_forwarder()` to facade `meerkat/src/surface.rs`
-- [ ] Relocate `McpRouterAdapter` to `meerkat-mcp`
-- [ ] All feature-gated crates self-register capabilities via `inventory`
-- [ ] Existing tests pass
+- [x] Replace local wire types in RPC with contracts imports (UsageResult → WireUsage)
+- [x] Replace local wire types in REST with contracts imports (UsageResponse → WireUsage)
+- [x] Replace local wire types in MCP Server with contracts imports (uses contracts for capabilities)
+- [x] Replace local wire types in CLI with contracts imports (uses contracts for capabilities)
+- [x] Replace local error construction with `WireError` + protocol projection (WireError with From<SessionError>, ErrorCode projections)
+- [x] Add `capabilities/get` to all four surfaces (RPC, REST, MCP Server, CLI)
+- [x] Extract `resolve_host_mode()` to `meerkat-comms` as `validate_host_mode()`
+- [x] Extract `resolve_store_path()` to `meerkat-store`
+- [x] Extract `spawn_event_forwarder()` to facade `meerkat/src/surface.rs`
+- [x] Relocate `McpRouterAdapter` to `meerkat-mcp`
+- [x] All feature-gated crates self-register capabilities via `inventory` (Sessions, Streaming, StructuredOutput, Builtins, Shell, SubAgents, Comms, Hooks, MemoryStore, SessionStore, SessionCompaction)
+- [x] Existing tests pass
+- [x] Facade re-exports contracts types
 
 ## Phase 3 — Skills System
 
@@ -94,3 +95,22 @@
 - performance-gate: PASS
 - spec-accuracy-gate: PASS (missing events.json/rpc-methods.json/rest-openapi.json justified by core type JsonSchema limitations; facade re-exports deferred to Phase 2)
 - rust-quality-gate: PASS (strum/serde serialization mismatch fixed with #[strum(serialize_all)])
+
+### Phase 2 — Attempt 1
+
+- build-gate: PASS
+- test-gate: PASS
+- performance-gate: PASS
+- spec-accuracy-gate: FAIL — local resolve_host_mode/resolve_store_path/spawn_event_forwarder copies not removed; WireError not wired; RPC error codes inconsistent
+- rust-quality-gate: PASS
+
+### Phase 2 — Attempt 2 (fixes applied)
+
+- Fixed: resolve_host_mode() now delegates to meerkat_comms::validate_host_mode() in all 3 surfaces
+- Fixed: resolve_store_path() in MCP Server now delegates to meerkat_store::resolve_store_path()
+- Fixed: RPC error codes now use ErrorCode::jsonrpc_code() from contracts (made const)
+- build-gate: PASS
+- test-gate: PASS
+- performance-gate: PASS
+- spec-accuracy-gate: PASS (minor: REST inline store_path not delegated, functionally identical)
+- rust-quality-gate: PASS

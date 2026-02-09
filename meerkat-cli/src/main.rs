@@ -270,6 +270,9 @@ enum Commands {
 
     /// Start the JSON-RPC stdio server
     Rpc,
+
+    /// Show runtime capabilities
+    Capabilities,
 }
 
 #[derive(Subcommand)]
@@ -580,6 +583,10 @@ async fn main() -> anyhow::Result<ExitCode> {
             ConfigCommands::Patch { file, json } => handle_config_patch(file, json).await,
         },
         Commands::Rpc => handle_rpc().await,
+        Commands::Capabilities => {
+            handle_capabilities();
+            Ok(())
+        }
     };
 
     // Map result to exit code
@@ -880,6 +887,25 @@ async fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> any
     Ok(())
 }
 
+fn handle_capabilities() {
+    let registrations = meerkat::build_capabilities();
+    let response = meerkat::CapabilitiesResponse {
+        contract_version: meerkat::ContractVersion::CURRENT,
+        capabilities: registrations
+            .into_iter()
+            .map(|reg| meerkat::contracts::CapabilityEntry {
+                id: reg.id,
+                description: reg.description.to_string(),
+                status: meerkat::CapabilityStatus::Available,
+            })
+            .collect(),
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string())
+    );
+}
+
 async fn handle_rpc() -> anyhow::Result<()> {
     let (config, _config_base_dir) = load_config().await?;
     let store_path = get_session_store_dir().await;
@@ -978,12 +1004,20 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
 }
 
 fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
-    if requested && !cfg!(feature = "comms") {
-        return Err(anyhow::anyhow!(
-            "--host-mode requires comms support (build with --features comms)"
-        ));
+    #[cfg(feature = "comms")]
+    {
+        meerkat_comms::validate_host_mode(requested)
+            .map_err(|e| anyhow::anyhow!(e))
     }
-    Ok(requested && cfg!(feature = "comms"))
+    #[cfg(not(feature = "comms"))]
+    {
+        if requested {
+            return Err(anyhow::anyhow!(
+                "--host-mode requires comms support (build with --features comms)"
+            ));
+        }
+        Ok(false)
+    }
 }
 
 /// Load MCP tools as an external tool dispatcher for AgentBuildConfig.

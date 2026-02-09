@@ -11,3 +11,14 @@ pub mod simple;
 
 pub use hnsw::HnswMemoryStore;
 pub use simple::SimpleMemoryStore;
+
+// Capability registration
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::MemoryStore,
+        description: "HNSW semantic search + redb persistence (indexes compaction discards)",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: Some("memory-store"),
+        prerequisites: &[],
+    }
+}

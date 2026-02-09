@@ -32,7 +32,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Map to JSON-RPC error code.
-    pub fn jsonrpc_code(self) -> i32 {
+    pub const fn jsonrpc_code(self) -> i32 {
         match self {
             Self::SessionNotFound => -32001,
             Self::SessionBusy => -32002,
@@ -50,7 +50,7 @@ impl ErrorCode {
     }
 
     /// Map to HTTP status code.
-    pub fn http_status(self) -> u16 {
+    pub const fn http_status(self) -> u16 {
         match self {
             Self::SessionNotFound => 404,
             Self::SessionBusy => 409,
@@ -68,7 +68,7 @@ impl ErrorCode {
     }
 
     /// Map to CLI exit code.
-    pub fn cli_exit_code(self) -> i32 {
+    pub const fn cli_exit_code(self) -> i32 {
         match self {
             Self::SessionNotFound => 10,
             Self::SessionBusy => 11,

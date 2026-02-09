@@ -14,8 +14,8 @@ pub mod emit;
 
 // Re-exports for convenience
 pub use capability::{
-    CapabilitiesResponse, CapabilityId, CapabilityRegistration, CapabilityScope, CapabilityStatus,
-    build_capabilities,
+    CapabilitiesResponse, CapabilityEntry, CapabilityId, CapabilityRegistration, CapabilityScope,
+    CapabilityStatus, build_capabilities,
 };
 pub use error::{CapabilityHint, ErrorCategory, ErrorCode, WireError};
 pub use protocol::Protocol;

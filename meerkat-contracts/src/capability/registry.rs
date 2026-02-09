@@ -16,6 +16,37 @@ pub struct CapabilityRegistration {
 
 inventory::collect!(CapabilityRegistration);
 
+// Always-present capabilities (no feature gate, always compiled)
+inventory::submit! {
+    CapabilityRegistration {
+        id: CapabilityId::Sessions,
+        description: "Agent loop and session lifecycle",
+        scope: CapabilityScope::Universal,
+        requires_feature: None,
+        prerequisites: &[],
+    }
+}
+
+inventory::submit! {
+    CapabilityRegistration {
+        id: CapabilityId::Streaming,
+        description: "Event streaming during agent execution",
+        scope: CapabilityScope::Universal,
+        requires_feature: None,
+        prerequisites: &[],
+    }
+}
+
+inventory::submit! {
+    CapabilityRegistration {
+        id: CapabilityId::StructuredOutput,
+        description: "Schema-validated JSON output extraction",
+        scope: CapabilityScope::Universal,
+        requires_feature: None,
+        prerequisites: &[],
+    }
+}
+
 /// Collect all registered capabilities, sorted by [`CapabilityId`] ordinal
 /// for deterministic ordering regardless of `inventory` collection order.
 pub fn build_capabilities() -> Vec<&'static CapabilityRegistration> {
@@ -28,17 +59,6 @@ pub fn build_capabilities() -> Vec<&'static CapabilityRegistration> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Register a test capability to verify the inventory mechanism works.
-    inventory::submit! {
-        CapabilityRegistration {
-            id: CapabilityId::Sessions,
-            description: "Test: agent loop and session lifecycle",
-            scope: CapabilityScope::Universal,
-            requires_feature: None,
-            prerequisites: &[],
-        }
-    }
 
     #[test]
     fn test_build_capabilities_finds_registered() {

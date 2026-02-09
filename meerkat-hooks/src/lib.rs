@@ -1,5 +1,16 @@
 //! Hook runtimes (in-process, command, HTTP) and deterministic default engine.
 
+// Capability registration
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::Hooks,
+        description: "7 hook points, 3 runtimes (in-process/command/HTTP), deny/allow/rewrite semantics",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: None,
+        prerequisites: &[],
+    }
+}
+
 use chrono::Utc;
 use futures::StreamExt;
 use meerkat_core::{

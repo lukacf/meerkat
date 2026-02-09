@@ -38,3 +38,25 @@ pub use agent::dispatcher::{
     CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, wrap_with_comms,
 };
 pub use mcp::tools::{ToolContext, handle_tools_call, tools_list};
+
+// Capability registration
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::Comms,
+        description: "Inter-agent communication: send, request, response, list peers + host mode",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: Some("comms"),
+        prerequisites: &[],
+    }
+}
+
+/// Validate whether host mode can be enabled.
+///
+/// Returns `Ok(true)` if `requested` is true, `Ok(false)` if not.
+/// This function existing in `meerkat-comms` means comms is compiled.
+/// Surfaces that don't have comms feature-gated simply cannot call this.
+///
+/// This is the canonical validation point — all surfaces delegate here.
+pub fn validate_host_mode(requested: bool) -> Result<bool, String> {
+    Ok(requested)
+}

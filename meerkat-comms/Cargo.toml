@@ -11,6 +11,8 @@ repository.workspace = true
 [dependencies]
 # Internal crates
 meerkat-core = { workspace = true }
+meerkat-contracts = { workspace = true }
+inventory = { workspace = true }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }

@@ -49,3 +49,35 @@ pub use meerkat_comms::agent::{
 };
 pub use registry::ToolRegistry;
 pub use schema::{empty_object_schema, schema_for};
+
+// Capability registrations
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::Builtins,
+        description: "Built-in tools: task_list, task_create, task_get, task_update, wait, datetime",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: None,
+        prerequisites: &[],
+    }
+}
+
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::Shell,
+        description: "Shell tool with job management: shell, shell_jobs, shell_job_status, shell_job_cancel",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: None,
+        prerequisites: &[],
+    }
+}
+
+#[cfg(feature = "sub-agents")]
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::SubAgents,
+        description: "Sub-agent management: agent_spawn, agent_fork, agent_status, agent_cancel, agent_list",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: Some("sub-agents"),
+        prerequisites: &[],
+    }
+}

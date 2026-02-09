@@ -10,6 +10,8 @@ repository.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
+meerkat-contracts = { workspace = true }
+inventory = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

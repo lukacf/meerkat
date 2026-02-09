@@ -18,6 +18,7 @@ meerkat-memory = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 meerkat-hooks = { workspace = true }
+meerkat-contracts = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }

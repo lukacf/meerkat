@@ -198,12 +198,20 @@ fn rest_instance_root() -> PathBuf {
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, ApiError> {
-    if requested && !cfg!(feature = "comms") {
-        return Err(ApiError::BadRequest(
-            "host_mode requires comms support (build with --features comms)".to_string(),
-        ));
+    #[cfg(feature = "comms")]
+    {
+        meerkat_comms::validate_host_mode(requested)
+            .map_err(|e| ApiError::BadRequest(e))
     }
-    Ok(requested && cfg!(feature = "comms"))
+    #[cfg(not(feature = "comms"))]
+    {
+        if requested {
+            return Err(ApiError::BadRequest(
+                "host_mode requires comms support (build with --features comms)".to_string(),
+            ));
+        }
+        Ok(false)
+    }
 }
 
 /// Create session request
@@ -292,13 +300,8 @@ pub struct SessionResponse {
     pub schema_warnings: Option<Vec<SchemaWarning>>,
 }
 
-/// Usage response
-#[derive(Debug, Serialize)]
-pub struct UsageResponse {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-}
+/// Usage response — re-export from contracts.
+pub type UsageResponse = meerkat_contracts::WireUsage;
 
 /// Session details response
 #[derive(Debug, Serialize)]
@@ -329,12 +332,31 @@ pub fn router(state: AppState) -> Router {
             get(get_config).put(set_config).patch(patch_config),
         )
         .route("/health", get(health_check))
+        .route("/capabilities", get(get_capabilities))
         .with_state(state)
 }
 
 /// Health check endpoint
 async fn health_check() -> &'static str {
     "ok"
+}
+
+/// Get runtime capabilities
+async fn get_capabilities() -> Json<meerkat_contracts::CapabilitiesResponse> {
+    let registrations = meerkat_contracts::build_capabilities();
+    let capabilities = registrations
+        .into_iter()
+        .map(|reg| meerkat_contracts::CapabilityEntry {
+            id: reg.id,
+            description: reg.description.to_string(),
+            status: meerkat_contracts::CapabilityStatus::Available,
+        })
+        .collect();
+
+    Json(meerkat_contracts::CapabilitiesResponse {
+        contract_version: meerkat_contracts::ContractVersion::CURRENT,
+        capabilities,
+    })
 }
 
 /// Get the current config
@@ -403,11 +425,7 @@ fn run_result_to_response(result: meerkat_core::types::RunResult) -> SessionResp
         text: result.text,
         turns: result.turns,
         tool_calls: result.tool_calls,
-        usage: UsageResponse {
-            input_tokens: result.usage.input_tokens,
-            output_tokens: result.usage.output_tokens,
-            total_tokens: result.usage.total_tokens(),
-        },
+        usage: result.usage.into(),
         structured_output: result.structured_output,
         schema_warnings: result.schema_warnings,
     }
@@ -434,11 +452,7 @@ fn session_error_to_api_result(
                     text: "Agent is waiting for tool results".to_string(),
                     turns: 0,
                     tool_calls: 0,
-                    usage: UsageResponse {
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        total_tokens: 0,
-                    },
+                    usage: UsageResponse::default(),
                     structured_output: None,
                     schema_warnings: None,
                 }));

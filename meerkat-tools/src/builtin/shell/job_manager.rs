@@ -797,6 +797,7 @@ mod tests {
     // ==================== Spawn Job Tests ====================
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_spawn() {
         let temp_dir = TempDir::new().unwrap();
@@ -817,6 +818,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_spawn_immediate() {
         let temp_dir = TempDir::new().unwrap();
@@ -843,6 +845,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_spawn_running() {
         let temp_dir = TempDir::new().unwrap();
@@ -877,6 +880,7 @@ mod tests {
     // ==================== Get Status Tests ====================
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_get_status() {
         let temp_dir = TempDir::new().unwrap();
@@ -904,6 +908,7 @@ mod tests {
     // ==================== List Jobs Tests ====================
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_list_jobs() {
         let temp_dir = TempDir::new().unwrap();
@@ -969,6 +974,7 @@ mod tests {
     // ==================== Cancel Job Tests ====================
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_cancel() {
         let temp_dir = TempDir::new().unwrap();
@@ -997,6 +1003,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_cancel_signal() {
         let temp_dir = TempDir::new().unwrap();
@@ -1024,6 +1031,7 @@ mod tests {
     // ==================== Async Execution Tests (require actual shell) ====================
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_tokio_spawn() {
         let temp_dir = TempDir::new().unwrap();
@@ -1048,6 +1056,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_completed_status() {
         let temp_dir = TempDir::new().unwrap();
@@ -1081,6 +1090,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_failed_status() {
         let temp_dir = TempDir::new().unwrap();
@@ -1109,6 +1119,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_timeout_status() {
         let temp_dir = TempDir::new().unwrap();
@@ -1136,6 +1147,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_cancelled_status() {
         let temp_dir = TempDir::new().unwrap();
@@ -1167,6 +1179,7 @@ mod tests {
     // ==================== Event Notification Tests ====================
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_sends_completion_event() {
         let temp_dir = TempDir::new().unwrap();
@@ -1194,6 +1207,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_manager_event_payload() {
         let temp_dir = TempDir::new().unwrap();
@@ -1232,6 +1246,7 @@ mod tests {
     /// Spawning a job should return immediately without waiting for the
     /// command to complete. This verifies that spawn_job doesn't block.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_async_execution_nonblocking() {
         let temp_dir = TempDir::new().unwrap();
@@ -1277,6 +1292,7 @@ mod tests {
     /// A job that runs longer than its timeout should be terminated and
     /// marked as TimedOut.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_timeout_enforced() {
         let temp_dir = TempDir::new().unwrap();
@@ -1314,6 +1330,7 @@ mod tests {
     /// When a job is cancelled, the underlying process should be terminated
     /// and the job status should be Cancelled.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_kill_terminates_process() {
         let temp_dir = TempDir::new().unwrap();
@@ -1362,6 +1379,7 @@ mod tests {
     ///
     /// When spawning many jobs concurrently, each should get a unique ID.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_concurrent_job_spawning() {
         let temp_dir = TempDir::new().unwrap();
@@ -1417,6 +1435,7 @@ mod tests {
     // ==================== Job Cleanup Tests ====================
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_remove_job() {
         let temp_dir = TempDir::new().unwrap();
@@ -1447,6 +1466,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_count() {
         let temp_dir = TempDir::new().unwrap();
@@ -1471,6 +1491,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_completed_job_count() {
         let temp_dir = TempDir::new().unwrap();
@@ -1496,6 +1517,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_cleanup_respects_max_completed_jobs() {
         let temp_dir = TempDir::new().unwrap();
@@ -1557,6 +1579,7 @@ mod tests {
     /// Verifies that job output containing emoji, Chinese characters, and other
     /// multi-byte UTF-8 sequences is captured without panicking or data corruption.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_multibyte_utf8_output() {
         let temp_dir = TempDir::new().unwrap();
@@ -1601,6 +1624,7 @@ mod tests {
     /// Verifies that when cancel_job is called, the underlying process is
     /// fully terminated and reaped via child.kill().await (not just start_kill()).
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_kill_reaps_process() {
         let temp_dir = TempDir::new().unwrap();
@@ -1650,6 +1674,7 @@ mod tests {
     /// Verifies that when a background job finishes, the monitoring task
     /// automatically updates the job status to Completed with output captured.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_background_job_auto_completes() {
         let temp_dir = TempDir::new().unwrap();
@@ -1783,6 +1808,7 @@ mod tests {
     /// within a single lock scope, preventing race conditions where another
     /// operation could change the status between checking and modifying.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_cancel_job_atomic_status_check() {
         let temp_dir = TempDir::new().unwrap();
@@ -1843,6 +1869,7 @@ mod tests {
     /// so graceful_kill is invoked from the worker when a cancellation or
     /// timeout signal is received.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     #[cfg(unix)]
     async fn integration_real_graceful_kill_function_exists() {
@@ -1865,6 +1892,7 @@ mod tests {
     /// and performs all cleanup operations atomically, rather than using
     /// a read-then-write pattern that could cause race conditions.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_cleanup_atomicity() {
         let temp_dir = TempDir::new().unwrap();
@@ -1956,6 +1984,7 @@ mod tests {
 
     /// Regression test for Task #10: Error variant for non-running jobs
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_error_context_job_already_completed() {
         let temp_dir = TempDir::new().unwrap();
@@ -2012,6 +2041,7 @@ mod tests {
 
     /// Test running_job_count returns correct count of running jobs
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_running_job_count() {
         let temp_dir = TempDir::new().unwrap();
@@ -2037,6 +2067,7 @@ mod tests {
 
     /// Test that concurrency limit is enforced
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_concurrency_limit_enforced() {
         let temp_dir = TempDir::new().unwrap();
@@ -2070,6 +2101,7 @@ mod tests {
 
     /// Test that concurrency limit of 0 means unlimited
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_concurrency_limit_zero_means_unlimited() {
         let temp_dir = TempDir::new().unwrap();
@@ -2100,6 +2132,7 @@ mod tests {
     /// When a job completes, its started_at_unix should still be available in JobSummary,
     /// not reset to 0. This is important for displaying job history with accurate timestamps.
     #[tokio::test]
+    #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
     async fn integration_real_job_summary_preserves_started_at_for_completed_jobs() {
         let temp_dir = TempDir::new().unwrap();

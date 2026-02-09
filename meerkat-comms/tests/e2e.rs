@@ -164,7 +164,8 @@ fn test_e2e_mutual_trust_setup() {
 }
 
 #[tokio::test]
-async fn test_e2e_uds_message_exchange() {
+#[ignore = "integration-real: real socket I/O"]
+async fn integration_real_uds_message_exchange() {
     let _tmp_a = TempDir::new().unwrap();
     let tmp_b = TempDir::new().unwrap();
 
@@ -219,7 +220,8 @@ async fn test_e2e_uds_message_exchange() {
 }
 
 #[tokio::test]
-async fn test_e2e_tcp_message_exchange() {
+#[ignore = "integration-real: real socket I/O"]
+async fn integration_real_tcp_message_exchange() {
     // Find an available port
     let Some(listener) = bind_tcp_or_skip("127.0.0.1:0").await else {
         return;
@@ -271,7 +273,8 @@ async fn test_e2e_tcp_message_exchange() {
 }
 
 #[tokio::test]
-async fn test_e2e_request_response_flow() {
+#[ignore = "integration-real: real socket I/O"]
+async fn integration_real_request_response_flow() {
     let tmp = TempDir::new().unwrap();
     let sock_b = tmp.path().join("peer_b.sock");
     let sock_a = tmp.path().join("peer_a.sock");
@@ -339,7 +342,8 @@ async fn test_e2e_request_response_flow() {
 }
 
 #[tokio::test]
-async fn test_e2e_untrusted_rejected() {
+#[ignore = "integration-real: real socket I/O"]
+async fn integration_real_untrusted_rejected() {
     let tmp = TempDir::new().unwrap();
     let sock_b = tmp.path().join("peer_b.sock");
     let addr_b = format!("uds://{}", sock_b.display());
@@ -392,7 +396,8 @@ async fn test_e2e_untrusted_rejected() {
 }
 
 #[tokio::test]
-async fn test_e2e_concurrent_multi_peer() {
+#[ignore = "integration-real: real socket I/O"]
+async fn integration_real_concurrent_multi_peer() {
     let tmp = TempDir::new().unwrap();
 
     // Three peers: A, B, C

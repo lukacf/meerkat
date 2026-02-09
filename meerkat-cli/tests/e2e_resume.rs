@@ -1,3 +1,4 @@
+#![cfg(feature = "integration-real-tests")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use std::path::PathBuf;
 use tokio::process::Command;

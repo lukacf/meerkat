@@ -42,6 +42,7 @@ nix = { workspace = true }
 
 [features]
 default = ["anthropic", "jsonl-store", "comms", "mcp", "sub-agents"]
+integration-real-tests = []
 
 # LLM providers
 anthropic = ["meerkat-client/anthropic"]
@@ -70,3 +71,18 @@ workspace = true
 name = "comms_verbose"
 path = "examples/comms_verbose.rs"
 required-features = ["comms"]
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "e2e_comms"
+path = "tests/e2e_comms.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "e2e_shell"
+path = "tests/e2e_shell.rs"
+required-features = ["integration-real-tests"]

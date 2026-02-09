@@ -8,9 +8,7 @@ use meerkat::{
     OutputSchema, SessionStore, ToolError, ToolResult,
 };
 use meerkat_core::error::invalid_session_id_message;
-use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionService, StartTurnRequest,
-};
+use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
     Session, ToolCallView, format_verbose_event,
@@ -328,10 +326,7 @@ fn format_agent_result(
             });
             Ok(wrap_tool_payload(payload))
         }
-        Err(SessionError::Agent(meerkat::AgentError::CallbackPending {
-            tool_name,
-            args,
-        })) => {
+        Err(SessionError::Agent(meerkat::AgentError::CallbackPending { tool_name, args })) => {
             let payload = json!({
                 "content": [{
                     "type": "text",
@@ -445,6 +440,14 @@ async fn handle_meerkat_run(
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
     let host_mode = resolve_host_mode(input.host_mode)?;
+    if host_mode
+        && input
+            .comms_name
+            .as_ref()
+            .is_none_or(|name| name.trim().is_empty())
+    {
+        return Err("host_mode requires comms_name".to_string());
+    }
     let config = load_config_async().await;
     let model = input
         .model
@@ -479,12 +482,7 @@ async fn handle_meerkat_run(
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
     let event_task = event_rx.map(|rx| {
         let stream_notifier = if input.stream { notifier.clone() } else { None };
-        spawn_event_forwarder(
-            rx,
-            session_id.to_string(),
-            input.verbose,
-            stream_notifier,
-        )
+        spawn_event_forwarder(rx, session_id.to_string(), input.verbose, stream_notifier)
     });
 
     // Build config with per-request tool overrides
@@ -527,7 +525,9 @@ async fn handle_meerkat_run(
     };
     drop(event_tx);
     if let Some(task) = event_task {
-        let _ = task.await;
+        if let Err(e) = task.await {
+            tracing::warn!("event task panicked: {e}");
+        }
     }
 
     format_agent_result(result, &session_id)
@@ -589,6 +589,13 @@ async fn handle_meerkat_resume(
             .as_ref()
             .and_then(|meta| meta.comms_name.clone())
     });
+    if host_mode
+        && comms_name
+            .as_ref()
+            .is_none_or(|name| name.trim().is_empty())
+    {
+        return Err("host_mode requires comms_name".to_string());
+    }
     let model = input
         .model
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
@@ -619,12 +626,7 @@ async fn handle_meerkat_resume(
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
     let event_task = event_rx.map(|rx| {
         let stream_notifier = if input.stream { notifier.clone() } else { None };
-        spawn_event_forwarder(
-            rx,
-            session_id.to_string(),
-            input.verbose,
-            stream_notifier,
-        )
+        spawn_event_forwarder(rx, session_id.to_string(), input.verbose, stream_notifier)
     });
 
     // Build config with resume_session and per-request tool overrides
@@ -681,7 +683,9 @@ async fn handle_meerkat_resume(
 
     drop(event_tx);
     if let Some(task) = event_task {
-        let _ = task.await;
+        if let Err(e) = task.await {
+            tracing::warn!("event task panicked: {e}");
+        }
     }
 
     format_agent_result(result, &session_id)

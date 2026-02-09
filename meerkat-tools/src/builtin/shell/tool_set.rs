@@ -254,7 +254,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_tool_set_event_channel_receives_events() {
+    #[cfg(feature = "integration-real-tests")]
+    #[ignore = "integration-real: spawns shell processes"]
+    async fn integration_real_shell_tool_set_event_channel_receives_events() {
         use std::time::Duration;
 
         let temp_dir = tempfile::TempDir::new().unwrap();

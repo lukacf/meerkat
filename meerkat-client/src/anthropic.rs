@@ -27,6 +27,9 @@ pub struct AnthropicClient {
     api_key: String,
     base_url: String,
     http: reqwest::Client,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    pool_idle_timeout: Duration,
 }
 
 /// Builder for AnthropicClient
@@ -75,19 +78,27 @@ impl AnthropicClientBuilder {
 
     /// Build the client with configured HTTP settings
     pub fn build(self) -> Result<AnthropicClient, LlmError> {
-        let http = crate::http::build_http_client(
+        let base_url = self.base_url;
+        let connect_timeout = self.connect_timeout;
+        let request_timeout = self.request_timeout;
+        let pool_idle_timeout = self.pool_idle_timeout;
+        let http = crate::http::build_http_client_for_base_url(
             reqwest::Client::builder()
-                .connect_timeout(self.connect_timeout)
-                .timeout(self.request_timeout)
-                .pool_idle_timeout(self.pool_idle_timeout)
+                .connect_timeout(connect_timeout)
+                .timeout(request_timeout)
+                .pool_idle_timeout(pool_idle_timeout)
                 .pool_max_idle_per_host(4)
                 .tcp_keepalive(Duration::from_secs(30)),
+            &base_url,
         )?;
 
         Ok(AnthropicClient {
             api_key: self.api_key,
-            base_url: self.base_url,
+            base_url,
             http,
+            connect_timeout,
+            request_timeout,
+            pool_idle_timeout,
         })
     }
 }
@@ -113,6 +124,17 @@ impl AnthropicClient {
 
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
+        if let Ok(http) = crate::http::build_http_client_for_base_url(
+            reqwest::Client::builder()
+                .connect_timeout(self.connect_timeout)
+                .timeout(self.request_timeout)
+                .pool_idle_timeout(self.pool_idle_timeout)
+                .pool_max_idle_per_host(4)
+                .tcp_keepalive(Duration::from_secs(30)),
+            &url,
+        ) {
+            self.http = http;
+        }
         self.base_url = url;
         self
     }

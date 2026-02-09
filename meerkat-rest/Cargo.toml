@@ -12,6 +12,16 @@ repository.workspace = true
 name = "meerkat-rest"
 path = "src/main.rs"
 
+[[test]]
+name = "e2e_resume"
+path = "tests/e2e_resume.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "live_continue_tmp"
+path = "tests/live_continue_tmp.rs"
+required-features = ["integration-real-tests"]
+
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
 meerkat-core = { workspace = true }
@@ -37,6 +47,7 @@ dirs = { workspace = true }
 [features]
 default = ["comms"]
 comms = ["meerkat/comms"]
+integration-real-tests = []
 
 [dev-dependencies]
 hyper = { workspace = true }

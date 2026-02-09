@@ -12,6 +12,21 @@ repository.workspace = true
 name = "rkat"
 path = "src/main.rs"
 
+[[test]]
+name = "e2e_rkat_comms"
+path = "tests/e2e_rkat_comms.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "e2e_rkat_init"
+path = "tests/e2e_rkat_init.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "e2e_resume"
+path = "tests/e2e_resume.rs"
+required-features = ["integration-real-tests"]
+
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "jsonl-store", "sub-agents"] }
 meerkat-core = { workspace = true }
@@ -41,6 +56,7 @@ async-trait = { workspace = true }
 default = ["comms", "mcp"]
 comms = ["dep:meerkat-comms", "meerkat/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat/mcp"]
+integration-real-tests = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

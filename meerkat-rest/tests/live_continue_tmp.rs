@@ -1,3 +1,4 @@
+#![cfg(feature = "integration-real-tests")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use axum::body::Body;
 use axum::http::Request;
@@ -5,7 +6,7 @@ use http_body_util::BodyExt;
 use meerkat::{AgentFactory, Config, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_client::TestClient;
 use meerkat_core::MemoryConfigStore;
-use meerkat_rest::{router, AppState};
+use meerkat_rest::{AppState, router};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -13,7 +14,8 @@ use tokio::time::{Duration, timeout};
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn live_continue_hangs() {
+#[ignore = "integration-real: temporary regression reproducer (can hang)"]
+async fn integration_real_live_continue_hangs() {
     let temp_dir = TempDir::new().unwrap();
     let project_root = temp_dir.path().join("project");
     std::fs::create_dir_all(project_root.join(".rkat")).unwrap();

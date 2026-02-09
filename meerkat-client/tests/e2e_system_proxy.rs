@@ -1,3 +1,4 @@
+#![cfg(feature = "integration-real-tests")]
 #![allow(clippy::panic)]
 //! E2E check for macOS system proxy discovery.
 //!

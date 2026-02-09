@@ -1,3 +1,4 @@
+#![cfg(feature = "integration-real-tests")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -20,7 +21,8 @@ fn skip_if_no_prereqs() -> bool {
 }
 
 #[tokio::test]
-async fn integration_rest_resume_metadata() {
+#[ignore = "integration-real: resume flow can exceed fast-suite timing budget"]
+async fn integration_real_rest_resume_metadata() {
     if skip_if_no_prereqs() {
         return;
     }

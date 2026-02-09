@@ -202,8 +202,11 @@ impl SessionStore for RedbSessionStore {
 
                     results.push(meta);
 
-                    // Check limit (accounting for offset)
-                    let effective_limit = filter.offset.unwrap_or(0) + filter.limit.unwrap_or(usize::MAX);
+                    // Early exit: collect enough to satisfy offset + limit without overflow.
+                    let effective_limit = filter
+                        .offset
+                        .unwrap_or(0)
+                        .saturating_add(filter.limit.unwrap_or(usize::MAX));
                     if results.len() >= effective_limit {
                         break;
                     }

@@ -12,6 +12,8 @@ use meerkat_core::service::{
     StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, Usage};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
 
@@ -65,25 +67,34 @@ enum SessionCommand {
     Shutdown,
 }
 
+/// Lightweight summary updated after each turn, readable without querying the task.
+struct SessionSummaryCache {
+    updated_at: SystemTime,
+    message_count: usize,
+    total_tokens: u64,
+}
+
 /// Handle stored in the sessions map.
 struct SessionHandle {
     command_tx: mpsc::Sender<SessionCommand>,
     state_rx: watch::Receiver<SessionState>,
+    summary_rx: watch::Receiver<SessionSummaryCache>,
+    /// Atomic turn-admission lock. Set to `true` by the caller before sending
+    /// `StartTurn`, guaranteeing that only one turn is admitted at a time.
+    /// Reset to `false` by the session task after the turn completes.
+    turn_lock: Arc<AtomicBool>,
     session_id: SessionId,
     created_at: SystemTime,
 }
 
 // ---------------------------------------------------------------------------
-// Agent abstraction (used to build sessions without depending on AgentFactory)
+// Agent abstraction
 // ---------------------------------------------------------------------------
 
 /// Trait for building agents from session creation requests.
-///
-/// This abstracts over `AgentFactory` so `EphemeralSessionService` doesn't
-/// need to depend on the facade crate.
 #[async_trait]
 pub trait SessionAgentBuilder: Send + Sync {
-    /// The concrete agent type. Must support `run_with_events` and `cancel`.
+    /// The concrete agent type.
     type Agent: SessionAgent + Send + 'static;
 
     /// Build an agent for a new session.
@@ -144,6 +155,21 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         }
     }
+
+    /// Acquire the turn lock atomically. Returns Err(Busy) if already locked.
+    fn try_acquire_turn(handle: &SessionHandle) -> Result<(), SessionError> {
+        match handle.turn_lock.compare_exchange(
+            false,
+            true,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(SessionError::Busy {
+                id: handle.session_id.clone(),
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -181,27 +207,41 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
         let session_id = agent.session_id();
         let created_at = SystemTime::now();
+        let turn_lock = Arc::new(AtomicBool::new(false));
 
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
         let (state_tx, state_rx) = watch::channel(SessionState::Idle);
+        let (summary_tx, summary_rx) = watch::channel(SessionSummaryCache {
+            updated_at: created_at,
+            message_count: 0,
+            total_tokens: 0,
+        });
 
         // Spawn the session task
+        let task_turn_lock = turn_lock.clone();
         tokio::spawn(session_task(
             agent,
             agent_event_tx,
             agent_event_rx,
             command_rx,
             state_tx,
+            summary_tx,
+            task_turn_lock,
         ));
 
         // Store the handle
         let handle = SessionHandle {
             command_tx: command_tx.clone(),
             state_rx,
+            summary_rx,
+            turn_lock: turn_lock.clone(),
             session_id: session_id.clone(),
             created_at,
         };
+
+        // Acquire turn lock for the first turn (cannot fail — fresh session)
+        turn_lock.store(true, Ordering::Release);
 
         {
             let mut sessions = self.sessions.write().await;
@@ -218,6 +258,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             })
             .await
             .map_err(|_| {
+                turn_lock.store(false, Ordering::Release);
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                     "Session task exited before first turn".to_string(),
                 ))
@@ -245,11 +286,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 id: id.clone(),
             })?;
 
-            // Check if the session is busy
-            let state = *handle.state_rx.borrow();
-            if state == SessionState::Running {
-                return Err(SessionError::Busy { id: id.clone() });
-            }
+            // Atomic busy check via compare-and-swap. This is the single
+            // point of admission — if two callers race, exactly one wins.
+            Self::try_acquire_turn(handle)?;
 
             handle
                 .command_tx
@@ -260,6 +299,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 })
                 .await
                 .map_err(|_| {
+                    handle.turn_lock.store(false, Ordering::Release);
                     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                         "Session task has exited".to_string(),
                     ))
@@ -297,7 +337,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 ))
             })?;
 
-        // Wait for acknowledgement
         let _ = ack_rx.await;
         Ok(())
     }
@@ -344,12 +383,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .values()
             .map(|h| {
                 let state = *h.state_rx.borrow();
+                let cache = h.summary_rx.borrow();
                 SessionSummary {
                     session_id: h.session_id.clone(),
                     created_at: h.created_at,
-                    updated_at: h.created_at, // Updated on creation; full snapshot from task would be better
-                    message_count: 0,
-                    total_tokens: 0,
+                    updated_at: cache.updated_at,
+                    message_count: cache.message_count,
+                    total_tokens: cache.total_tokens,
                     is_active: state == SessionState::Running,
                 }
             })
@@ -371,7 +411,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             id: id.clone(),
         })?;
 
-        // Send shutdown command. Ignore errors if the task already exited.
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())
     }
@@ -382,12 +421,17 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 // ---------------------------------------------------------------------------
 
 /// Long-lived task that exclusively owns a session agent and processes commands.
+///
+/// The `turn_lock` is released after each turn completes, allowing the next
+/// `start_turn` call to proceed.
 async fn session_task<A: SessionAgent>(
     mut agent: A,
     agent_event_tx: mpsc::Sender<AgentEvent>,
     mut agent_event_rx: mpsc::Receiver<AgentEvent>,
     mut commands: mpsc::Receiver<SessionCommand>,
     state_tx: watch::Sender<SessionState>,
+    summary_tx: watch::Sender<SessionSummaryCache>,
+    turn_lock: Arc<AtomicBool>,
 ) {
     while let Some(cmd) = commands.recv().await {
         match cmd {
@@ -398,28 +442,45 @@ async fn session_task<A: SessionAgent>(
             } => {
                 state_tx.send_replace(SessionState::Running);
 
-                let run_fut = agent.run_with_events(prompt, agent_event_tx.clone());
-                tokio::pin!(run_fut);
+                // Scope the pinned future so its mutable borrow of `agent` is
+                // released before we call `agent.snapshot()`.
+                let result = {
+                    let run_fut = agent.run_with_events(prompt, agent_event_tx.clone());
+                    tokio::pin!(run_fut);
 
-                let result = loop {
-                    tokio::select! {
-                        result = &mut run_fut => break result,
-                        Some(event) = agent_event_rx.recv() => {
-                            if let Some(ref tx) = event_tx {
-                                let _ = tx.send(event).await;
+                    let r = loop {
+                        tokio::select! {
+                            result = &mut run_fut => break result,
+                            Some(event) = agent_event_rx.recv() => {
+                                if let Some(ref tx) = event_tx {
+                                    let _ = tx.send(event).await;
+                                }
                             }
                         }
-                    }
-                };
+                    };
 
-                // Drain any remaining events after the run completes
-                while let Ok(event) = agent_event_rx.try_recv() {
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(event).await;
+                    // Drain any remaining events
+                    while let Ok(event) = agent_event_rx.try_recv() {
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(event).await;
+                        }
                     }
-                }
+
+                    r
+                }; // run_fut dropped here
+
+                // Update cached summary
+                let snap = agent.snapshot();
+                summary_tx.send_replace(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                });
 
                 state_tx.send_replace(SessionState::Idle);
+                // Release the turn lock AFTER setting state to Idle and
+                // updating the summary, so the next caller sees consistent state.
+                turn_lock.store(false, Ordering::Release);
                 let _ = result_tx.send(result);
             }
             SessionCommand::Interrupt { ack_tx } => {

@@ -104,7 +104,10 @@ impl Compactor for DefaultCompactor {
             }
         }
 
-        let retain_from = if turn_starts.len() > self.config.recent_turn_budget {
+        let retain_from = if self.config.recent_turn_budget == 0 {
+            // Retain nothing — discard all history
+            history.len()
+        } else if turn_starts.len() > self.config.recent_turn_budget {
             let idx = turn_starts.len() - self.config.recent_turn_budget;
             turn_starts[idx]
         } else {
@@ -290,5 +293,29 @@ mod tests {
         if let Message::User(u) = &result.discarded[1] {
             assert_eq!(u.content, "b");
         }
+    }
+
+    #[test]
+    fn test_rebuild_zero_budget_discards_all() {
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 0,
+            ..make_config()
+        });
+        let messages = vec![
+            Message::User(UserMessage {
+                content: "a".to_string(),
+            }),
+            Message::User(UserMessage {
+                content: "b".to_string(),
+            }),
+            Message::User(UserMessage {
+                content: "c".to_string(),
+            }),
+        ];
+        let result = c.rebuild_history(None, &messages, "summary");
+        // Only the summary message should remain
+        assert_eq!(result.messages.len(), 1);
+        // All original messages should be discarded
+        assert_eq!(result.discarded.len(), 3);
     }
 }

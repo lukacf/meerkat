@@ -1,6 +1,6 @@
 # Skills System Redesign — Progress
 
-## Current Phase: 5
+## Current Phase: 6
 ## Current Status: implementing
 
 ---
@@ -129,25 +129,32 @@
 ## Phase 5: Configuration System
 
 ### Tests
-- [ ] test_default_config
-- [ ] test_parse_filesystem_repo
-- [ ] test_parse_http_repo
-- [ ] test_parse_git_repo
-- [ ] test_env_expansion_in_auth_token
-- [ ] test_env_expansion_missing_var_errors
-- [ ] test_merge_project_over_user
-- [ ] test_merge_project_shadows_user_repo
-- [ ] test_resolve_empty_config_uses_defaults
-- [ ] test_resolve_filesystem_repo
-- [ ] test_resolve_embedded_always_appended
-- [ ] test_resolve_disabled_returns_none
+- [x] test_default_config
+- [x] test_parse_filesystem_repo
+- [x] test_parse_http_repo
+- [x] test_parse_git_repo
+- [x] test_env_expansion_in_auth_token
+- [x] test_env_expansion_missing_var_errors
+- [x] test_merge_project_over_user
+- [x] test_merge_project_shadows_user_repo
+- [x] test_resolve_empty_config_uses_defaults
+- [x] test_resolve_filesystem_repo
+- [x] test_resolve_embedded_always_appended
+- [x] test_resolve_disabled_returns_none
 
 ### Implementation
-- [ ] SkillsConfig, SkillRepositoryConfig, SkillRepoTransport in meerkat-core
-- [ ] TOML loading with load() and load_from_paths()
-- [ ] Env expansion
-- [ ] resolve_repositories() in meerkat-skills
-- [ ] Add skills field to Config
+- [x] SkillsConfig, SkillRepositoryConfig, SkillRepoTransport in meerkat-core
+- [x] TOML loading with load() and load_from_paths()
+- [x] Env expansion
+- [x] resolve_repositories() in meerkat-skills
+- [x] Add skills field to Config
+
+### Gate Results — Attempt 1
+- build-gate: PASS
+- test-gate: PASS (10 skills_config + 4 resolve tests)
+- performance-gate: PASS
+- spec-accuracy-gate: PASS (all 12 tests, all items)
+- rust-quality-gate: PASS (no violations)
 
 ## Phase 6: Factory Wiring
 

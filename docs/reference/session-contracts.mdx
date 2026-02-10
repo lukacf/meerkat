@@ -1,18 +1,22 @@
-# Session Operational Contracts
+---
+title: "Session contracts"
+description: "SessionService lifecycle, concurrency, compaction, durability guarantees, and data governance."
+icon: "file-contract"
+---
 
-## SessionService Lifecycle
+## SessionService lifecycle
 
 All surfaces (CLI, REST, JSON-RPC, MCP Server) route through `SessionService` for the full
 session lifecycle. The contract is identical regardless of transport.
 
-```
-CLI ─────────┐
-REST ────────┤
-MCP Server ──┤──► SessionService ──► AgentFactory::build_agent()
-JSON-RPC ────┘
+```text
+CLI ----------+
+REST ---------+
+MCP Server ---+---> SessionService ---> AgentFactory::build_agent()
+JSON-RPC -----+
 ```
 
-### Agent Construction
+### Agent construction
 
 Agent construction is fully centralized in `AgentFactory::build_agent()`. Surface crates
 contain zero `AgentBuilder::new()` calls. The `FactoryAgentBuilder` bridges `AgentFactory` into
@@ -36,7 +40,7 @@ let result = service.create_session(req).await?;
 If no config is staged, `FactoryAgentBuilder` falls back to building a minimal config from the
 `CreateSessionRequest` fields.
 
-### Session Creation
+### Session creation
 
 `create_session(req)` builds an agent and runs the first turn.
 
@@ -45,15 +49,14 @@ If no config is staged, `FactoryAgentBuilder` falls back to building a minimal c
 - The session is live (in-memory) until archived.
 - Supports `host_mode`: process the prompt then stay alive for comms messages.
 
-### Turn Execution
+### Turn execution
 
 `start_turn(id, req)` runs a new turn on an existing session.
 
-- **Busy check**: Uses atomic compare-and-swap on the turn lock. Exactly one caller wins; others get `SESSION_BUSY`.
-- **Sequential execution**: Turns run one at a time per session. No queueing -- callers retry on Busy.
-- **Event streaming**: If `event_tx` is provided, events are forwarded during the turn.
-- **Host mode**: When `host_mode: true`, the agent processes the prompt then stays alive
-  waiting for comms messages (peer-to-peer inter-agent communication).
+- **Busy check**: uses atomic compare-and-swap on the turn lock. Exactly one caller wins; others get `SESSION_BUSY`.
+- **Sequential execution**: turns run one at a time per session. No queueing -- callers retry on Busy.
+- **Event streaming**: if `event_tx` is provided, events are forwarded during the turn.
+- **Host mode**: when `host_mode: true`, the agent processes the prompt then stays alive waiting for comms messages (peer-to-peer inter-agent communication).
 
 ### Interruption
 
@@ -63,15 +66,15 @@ If no config is staged, `FactoryAgentBuilder` falls back to building a minimal c
 - Sends cancel signal to the session task's agent.
 - The interrupted turn returns `AgentError::Cancelled`.
 
-### Reading Session State
+### Reading session state
 
 `read(id)` returns `SessionView` (state + billing separated).
 
 - For live sessions: queries the session task for a snapshot.
 - For persistent sessions (when `session-store` is enabled): falls back to the store.
-- Non-blocking — can run concurrently with a turn in progress.
+- Non-blocking -- can run concurrently with a turn in progress.
 
-### Listing Sessions
+### Listing sessions
 
 `list(query)` returns session summaries.
 
@@ -90,25 +93,45 @@ If no config is staged, `FactoryAgentBuilder` falls back to building a minimal c
 
 Context compaction is an optional, non-fatal session capability.
 
-### Trigger Rules
+### Trigger rules
 
 1. `last_input_tokens >= threshold` OR `estimated_history_tokens >= threshold`
 2. Never on the first turn (`current_turn == 0`)
 3. Blocked if `current_turn - last_compaction_turn < min_turns_between_compactions`
 
-### Compaction Flow
+### Compaction flow
 
-1. Emit `CompactionStarted`
-2. Clone messages, append compaction prompt as User message
-3. Call LLM with empty tools and `max_summary_tokens`
-4. On failure: emit `CompactionFailed`, continue with uncompacted history (non-fatal)
-5. Extract summary text from response
-6. Call `compactor.rebuild_history()` to produce new messages + discarded list
-7. Replace session messages
-8. Record compaction usage in budget
-9. Emit `CompactionCompleted`
+<Steps>
+  <Step title="Emit CompactionStarted">
+    Signal that compaction is beginning.
+  </Step>
+  <Step title="Clone and prompt">
+    Clone messages, append compaction prompt as User message.
+  </Step>
+  <Step title="Call LLM">
+    Call LLM with empty tools and `max_summary_tokens`.
+  </Step>
+  <Step title="Handle failure">
+    On failure: emit `CompactionFailed`, continue with uncompacted history (non-fatal).
+  </Step>
+  <Step title="Extract summary">
+    Extract summary text from response.
+  </Step>
+  <Step title="Rebuild history">
+    Call `compactor.rebuild_history()` to produce new messages + discarded list.
+  </Step>
+  <Step title="Replace messages">
+    Replace session messages.
+  </Step>
+  <Step title="Record usage">
+    Record compaction usage in budget.
+  </Step>
+  <Step title="Emit CompactionCompleted">
+    Signal that compaction finished.
+  </Step>
+</Steps>
 
-### Rebuild Algorithm
+### Rebuild algorithm
 
 1. Preserve `Message::System` verbatim (extracted from messages, single source of truth)
 2. Inject summary as `Message::User` with prefix
@@ -121,32 +144,35 @@ Context compaction is an optional, non-fatal session capability.
 - If budget exhausted before compaction, compaction is skipped
 - `max_summary_tokens` caps the summary LLM response
 
-## Durability Guarantees
+## Durability guarantees
 
-### Ephemeral Mode
+### Ephemeral mode
 
 No durability. Process death loses all session state.
 
-### Persistent Mode (`session-store`)
+### Persistent mode (`session-store`)
 
 - Snapshot saved AFTER a turn completes (not mid-turn)
 - Crash mid-turn loses the in-flight turn but preserves up to the last completed turn
 - redb provides ACID transactions with WAL
 
-### Compaction Durability
+### Compaction durability
 
 - Compacted session is saved as a regular snapshot
 - Pre-compaction history is NOT recoverable (unless indexed into MemoryStore)
 
-## Data Governance
+## Data governance
 
-- No sensitive data filtering in compaction summaries
-- Event store records all `AgentEvent` variants including `ToolCallRequested` (contains tool arguments)
-- No encryption at rest (redb files are plaintext)
+<Warning>
+No sensitive data filtering is applied in compaction summaries. The event store records all
+`AgentEvent` variants including `ToolCallRequested` (which contains tool arguments). No
+encryption at rest (redb files are plaintext).
+</Warning>
+
 - `.rkat/sessions/` files are derived projection output (materialized by `SessionProjector`), NOT
   canonical state. Deleting them and replaying from the event store produces identical content.
 
-## See Also
+## See also
 
-- [CAPABILITY_MATRIX.md](./CAPABILITY_MATRIX.md) -- build profiles, error codes, feature behavior
-- [architecture.md](./architecture.md) -- crate structure and agent loop details
+- [Capability matrix](/reference/capability-matrix) -- build profiles, error codes, feature behavior
+- [Architecture](/reference/architecture) -- crate structure and agent loop details

@@ -1,8 +1,12 @@
-# Capability Matrix
+---
+title: "Capability matrix"
+description: "Build profiles, feature gates, error codes, and capability behavior across Meerkat configurations."
+icon: "grid-2x2"
+---
 
 Meerkat is modular. Every feature is opt-in. This matrix shows what works in each build profile.
 
-## Build Profiles
+## Build profiles
 
 | Profile | Cargo Features | Use Case |
 |---------|---------------|----------|
@@ -11,7 +15,7 @@ Meerkat is modular. Every feature is opt-in. This matrix shows what works in eac
 | **Compacting** | `session-compaction` | Auto-compact long conversations |
 | **Full** | `session-store,session-compaction` | Persistent + compacting |
 
-## Capability Behavior
+## Capability behavior
 
 | Operation | Minimal | Persistent | Compacting | Full |
 |-----------|---------|-----------|------------|------|
@@ -24,7 +28,7 @@ Meerkat is modular. Every feature is opt-in. This matrix shows what works in eac
 | `archive` | Removes from memory | Removes from memory, snapshot kept | Removes from memory | Removes + snapshot kept |
 | Auto-compaction | No-op | No-op | Triggers at threshold | Triggers at threshold |
 
-## Error Codes
+## Error codes
 
 Deterministic error codes across all surfaces. Every `SessionError` variant maps to a stable
 string code and a transport-specific representation:
@@ -39,7 +43,7 @@ string code and a transport-specific representation:
 | `Store` | `SESSION_STORE_ERROR` | -32000 | 500 | tool error | exit 1 |
 | `Agent` | `AGENT_ERROR` | -32000 | 500 | tool error | exit 1 |
 
-### Transport Error Mapping Summary
+### Transport error mapping summary
 
 - **JSON-RPC**: Custom error codes in the -32000..-32099 range. The `code` field of the
   JSON-RPC error object carries the string code (e.g. `SESSION_NOT_FOUND`).
@@ -48,7 +52,7 @@ string code and a transport-specific representation:
 - **CLI**: Non-zero exit codes. `exit 1` for errors, `exit 2` for budget exhaustion. Error
   details printed to stderr.
 
-## Pick Only What You Need
+## Pick only what you need
 
 ```toml
 # Minimal: just the agent loop
@@ -65,7 +69,7 @@ meerkat = { version = "0.1", default-features = false, features = ["anthropic", 
 meerkat = { version = "0.1", features = ["all-providers", "session-store", "session-compaction", "comms", "mcp"] }
 ```
 
-## Compaction Behavior
+## Compaction behavior
 
 When `session-compaction` is enabled:
 
@@ -91,8 +95,7 @@ Events emitted: `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`.
 - `.rkat/sessions/` files are derived (projected) output, not canonical source. Deleting them
   and replaying from the event store produces identical content.
 
-## See Also
+## See also
 
-- [README](../README.md) -- project overview and quick start
-- [SESSION_CONTRACTS.md](./SESSION_CONTRACTS.md) -- concurrency, durability, and compaction semantics
-- [architecture.md](./architecture.md) -- crate structure and agent loop details
+- [Session contracts](/reference/session-contracts) -- concurrency, durability, and compaction semantics
+- [Architecture](/reference/architecture) -- crate structure and agent loop details

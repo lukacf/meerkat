@@ -1,8 +1,12 @@
-# Sub-Agents
+---
+title: "Sub-agents"
+description: "Hierarchical agent workflows where an LLM agent spawns and manages independent sub-agents"
+icon: "network"
+---
 
 Meerkat supports hierarchical agent workflows where an LLM agent can spawn and manage independent sub-agents. Sub-agents run concurrently in background tokio tasks and can use different providers/models (e.g., a Claude parent spawning Gemini or GPT sub-agents).
 
-## Feature Flag
+## Feature flag
 
 Sub-agents require the `sub-agents` feature flag, which is enabled by default in both the CLI and the facade crate.
 
@@ -19,7 +23,7 @@ let factory = AgentFactory::new(store_path)
     .subagents(true);
 ```
 
-## Available Tools
+## Available tools
 
 Sub-agents provide five tools, all disabled by default and gated behind the `sub-agents` feature and factory configuration:
 
@@ -31,60 +35,93 @@ Sub-agents provide five tools, all disabled by default and gated behind the `sub
 | `agent_cancel` | Cancel a running sub-agent |
 | `agent_list` | List all sub-agents with their current states |
 
-## Spawn vs Fork
+## Spawn vs fork
 
-### `agent_spawn`
+<Tabs>
+  <Tab title="agent_spawn">
+    Creates a new sub-agent with a **clean context**. The sub-agent starts fresh with only the provided prompt -- it does not inherit conversation history.
 
-Creates a new sub-agent with a **clean context**. The sub-agent starts fresh with only the provided prompt -- it does not inherit conversation history.
+    **Use for**: Independent tasks that do not need the parent's context.
 
-**Use for**: Independent tasks that do not need the parent's context.
+    **Parameters**:
 
-**Parameters**:
+    <ParamField path="prompt" type="string" required>
+      Initial prompt/task for the sub-agent.
+    </ParamField>
 
-| Parameter | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `prompt` | `string` | Yes | -- | Initial prompt/task for the sub-agent. |
-| `provider` | `string` | No | `"anthropic"` | LLM provider: `anthropic`, `openai`, `gemini`. |
-| `model` | `string` | No | Provider default | Model name. Must be in the allowlist for the provider. |
-| `tool_access` | `object` | No | `inherit` | Tool access policy (see below). |
-| `budget` | `object` | No | 50,000 tokens | Budget limits: `{ max_tokens, max_turns, max_tool_calls }`. |
-| `system_prompt` | `string` | No | Inherited or none | Override the system prompt for this sub-agent. |
-| `host_mode` | `boolean` | No | `false` | Keep agent alive processing comms messages after initial prompt. Requires `comms` feature. |
+    <ParamField path="provider" type="string" default="anthropic">
+      LLM provider: `anthropic`, `openai`, `gemini`.
+    </ParamField>
 
-**Response**:
+    <ParamField path="model" type="string">
+      Model name. Must be in the allowlist for the provider.
+    </ParamField>
 
-```json
-{
-  "agent_id": "019467d9-7e3a-7000-8000-000000000000",
-  "name": "sub-agent-019467d97e3a",
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-5",
-  "state": "running",
-  "message": "Sub-agent spawned successfully. Use agent_status to check progress."
-}
-```
+    <ParamField path="tool_access" type="object" default="inherit">
+      Tool access policy (see below).
+    </ParamField>
 
-### `agent_fork`
+    <ParamField path="budget" type="object" default="50,000 tokens">
+      Budget limits: `{ max_tokens, max_turns, max_tool_calls }`.
+    </ParamField>
 
-Creates a sub-agent that **inherits the full conversation history** from the parent. The fork prompt is appended as a new user message to the cloned session.
+    <ParamField path="system_prompt" type="string">
+      Override the system prompt for this sub-agent.
+    </ParamField>
 
-**Use for**: Parallel exploration of alternatives, or delegating subtasks that need the parent's context.
+    <ParamField path="host_mode" type="boolean" default="false">
+      Keep agent alive processing comms messages after initial prompt. Requires `comms` feature.
+    </ParamField>
 
-**Parameters**:
+    **Response**:
 
-| Parameter | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `prompt` | `string` | Yes | -- | Additional prompt appended to the inherited conversation history. |
-| `provider` | `string` | No | `"anthropic"` | LLM provider. |
-| `model` | `string` | No | Provider default | Model name. |
-| `tool_access` | `object` | No | `inherit` | Tool access policy. |
-| `budget_policy` | `string` | No | `"equal"` | Budget allocation: `equal`, `remaining`, `proportional`, or `fixed:<tokens>`. |
+    ```json
+    {
+      "agent_id": "019467d9-7e3a-7000-8000-000000000000",
+      "name": "sub-agent-019467d97e3a",
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "state": "running",
+      "message": "Sub-agent spawned successfully. Use agent_status to check progress."
+    }
+    ```
+  </Tab>
+  <Tab title="agent_fork">
+    Creates a sub-agent that **inherits the full conversation history** from the parent. The fork prompt is appended as a new user message to the cloned session.
 
-**Response** includes `messages_inherited` count showing how many messages were copied from the parent.
+    **Use for**: Parallel exploration of alternatives, or delegating subtasks that need the parent's context.
 
-**Note**: Forked agents do not run in host mode and inherit their system prompt from the session.
+    **Parameters**:
 
-## Tool Access Policies
+    <ParamField path="prompt" type="string" required>
+      Additional prompt appended to the inherited conversation history.
+    </ParamField>
+
+    <ParamField path="provider" type="string" default="anthropic">
+      LLM provider.
+    </ParamField>
+
+    <ParamField path="model" type="string">
+      Model name.
+    </ParamField>
+
+    <ParamField path="tool_access" type="object" default="inherit">
+      Tool access policy.
+    </ParamField>
+
+    <ParamField path="budget_policy" type="string" default="equal">
+      Budget allocation: `equal`, `remaining`, `proportional`, or `fixed:<tokens>`.
+    </ParamField>
+
+    **Response** includes `messages_inherited` count showing how many messages were copied from the parent.
+
+    <Note>
+    Forked agents do not run in host mode and inherit their system prompt from the session.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Tool access policies
 
 Both `agent_spawn` and `agent_fork` accept a `tool_access` parameter that controls which tools the sub-agent can use:
 
@@ -96,9 +133,11 @@ Both `agent_spawn` and `agent_fork` accept a `tool_access` parameter that contro
 
 The `tool_access` value can be provided as either a JSON object or a JSON-encoded string (for LLMs that stringify nested objects).
 
-**Important**: Sub-agents do NOT receive sub-agent tools (`agent_spawn`, `agent_fork`, etc.) in their tool set. This is enforced by the factory, which clones itself with `.subagents(false)` when building the sub-agent's tool dispatcher. This prevents uncontrolled recursive spawning (though nested spawning can be enabled via config -- see Concurrency Limits).
+<Warning>
+Sub-agents do NOT receive sub-agent tools (`agent_spawn`, `agent_fork`, etc.) in their tool set. This is enforced by the factory, which clones itself with `.subagents(false)` when building the sub-agent's tool dispatcher. This prevents uncontrolled recursive spawning (though nested spawning can be enabled via config -- see concurrency limits).
+</Warning>
 
-## Monitoring Sub-Agents
+## Monitoring sub-agents
 
 ### `agent_status`
 
@@ -157,7 +196,7 @@ Cancel a running sub-agent. Only agents in the `running` state can be cancelled.
 
 **Response**: `{ "success": true, "previous_state": "running", "message": "Sub-agent cancelled successfully" }`
 
-## Concurrency Limits
+## Concurrency limits
 
 Defined in `meerkat-core/src/ops.rs` as `ConcurrencyLimits`:
 
@@ -185,26 +224,27 @@ Defined in `meerkat-tools/src/builtin/sub_agent/config.rs`:
 | `inherit_system_prompt` | `bool` | `true` | Whether spawned agents inherit the parent's tool usage instructions as their system prompt. |
 | `enable_comms` | `bool` | `false` | Whether to enable parent-child communication via comms. |
 
-## Budget Allocation
+## Budget allocation
 
-### Spawn Budget
+<Tabs>
+  <Tab title="Spawn budget">
+    For `agent_spawn`, the budget is resolved as:
+    1. If `budget.max_tokens` is specified, use it (capped by `max_budget_per_agent` if set).
+    2. Otherwise, use `default_budget` (50,000 tokens by default).
+  </Tab>
+  <Tab title="Fork budget policies">
+    For `agent_fork`, the `budget_policy` parameter controls allocation:
 
-For `agent_spawn`, the budget is resolved as:
-1. If `budget.max_tokens` is specified, use it (capped by `max_budget_per_agent` if set).
-2. Otherwise, use `default_budget` (50,000 tokens by default).
+    | Policy | Behavior |
+    |---|---|
+    | `equal` (default) | Each fork gets `default_budget` tokens. |
+    | `remaining` | Fork gets the parent's remaining budget (currently falls back to `equal`). |
+    | `proportional` | Proportional allocation (currently falls back to `equal`). |
+    | `fixed:<N>` | Fixed budget of N tokens (capped by `max_budget_per_agent`). |
+  </Tab>
+</Tabs>
 
-### Fork Budget Policies
-
-For `agent_fork`, the `budget_policy` parameter controls allocation:
-
-| Policy | Behavior |
-|---|---|
-| `equal` (default) | Each fork gets `default_budget` tokens. |
-| `remaining` | Fork gets the parent's remaining budget (currently falls back to `equal`). |
-| `proportional` | Proportional allocation (currently falls back to `equal`). |
-| `fixed:<N>` | Fixed budget of N tokens (capped by `max_budget_per_agent`). |
-
-## Model Allowlists
+## Model allowlists
 
 Sub-agents validate requested models against a per-provider allowlist. The allowlist comes from either:
 
@@ -213,19 +253,34 @@ Sub-agents validate requested models against a per-provider allowlist. The allow
 
 The `agent_spawn` tool definition dynamically includes the allowed models in the `model` parameter description, so the LLM can see which models are available.
 
-## Sub-Agent Execution Lifecycle
+## Sub-agent execution lifecycle
 
-1. **Validation**: The tool validates the prompt (non-empty), provider, model (against allowlist), and concurrency limits.
-2. **Client creation**: An `LlmClient` is created via `LlmClientFactory` for the requested provider.
-3. **Session setup**:
-   - `agent_spawn`: Creates a new session with optional system prompt + user prompt.
-   - `agent_fork`: Clones the parent session and appends the fork prompt.
-4. **Registration**: The sub-agent is registered with the `SubAgentManager` before the task is spawned.
-5. **Background execution**: A tokio task runs the agent loop (`agent.run_pending()` or `agent.run_host_mode()` for host mode).
-6. **Completion**: On success, `manager.complete()` stores the result. On failure, `manager.fail()` stores the error. Both notify listeners via a `watch` channel.
-7. **Result collection**: Completed results are stored in a bounded deque (`MAX_COMPLETED_AGENTS = 256`) and can be queried via `agent_status` or `agent_list`.
+<Steps>
+  <Step title="Validation">
+    The tool validates the prompt (non-empty), provider, model (against allowlist), and concurrency limits.
+  </Step>
+  <Step title="Client creation">
+    An `LlmClient` is created via `LlmClientFactory` for the requested provider.
+  </Step>
+  <Step title="Session setup">
+    - `agent_spawn`: Creates a new session with optional system prompt + user prompt.
+    - `agent_fork`: Clones the parent session and appends the fork prompt.
+  </Step>
+  <Step title="Registration">
+    The sub-agent is registered with the `SubAgentManager` before the task is spawned.
+  </Step>
+  <Step title="Background execution">
+    A tokio task runs the agent loop (`agent.run_pending()` or `agent.run_host_mode()` for host mode).
+  </Step>
+  <Step title="Completion">
+    On success, `manager.complete()` stores the result. On failure, `manager.fail()` stores the error. Both notify listeners via a `watch` channel.
+  </Step>
+  <Step title="Result collection">
+    Completed results are stored in a bounded deque (`MAX_COMPLETED_AGENTS = 256`) and can be queried via `agent_status` or `agent_list`.
+  </Step>
+</Steps>
 
-## Comms Integration
+## Comms integration
 
 When the `comms` feature is enabled and the parent has comms configured:
 
@@ -235,7 +290,11 @@ When the `comms` feature is enabled and the parent has comms configured:
 4. The parent receives `comms` instructions in the spawn response explaining how to message the child.
 5. Communication uses in-process (`CommsBootstrap::for_child_inproc`) rather than network listeners.
 
-## Factory Wiring
+<Info>
+See the [comms guide](/guides/comms) for details on the inter-agent communication system.
+</Info>
+
+## Factory wiring
 
 In `meerkat/src/factory.rs`, when `enable_subagents` is true:
 
@@ -246,27 +305,29 @@ In `meerkat/src/factory.rs`, when `enable_subagents` is true:
 5. A `SubAgentToolSet` wraps all five tools with the shared state.
 6. The tool set is registered on the parent's `CompositeDispatcher` via `register_sub_agent_tools()`.
 
-## Best Practices
+## Best practices
 
-### When to Use Sub-Agents
-- Parallel independent tasks (e.g., analyze multiple files simultaneously).
-- Tasks requiring different model strengths (e.g., GPT for coding, Gemini for analysis).
-- Long-running work you want to delegate while doing other things.
-- Breaking complex problems into specialized subtasks.
+<CardGroup cols={2}>
+  <Card title="When to use sub-agents">
+    - Parallel independent tasks (e.g., analyze multiple files simultaneously).
+    - Tasks requiring different model strengths (e.g., GPT for coding, Gemini for analysis).
+    - Long-running work you want to delegate while doing other things.
+    - Breaking complex problems into specialized subtasks.
+  </Card>
+  <Card title="When NOT to use sub-agents">
+    - Simple tasks you can do directly.
+    - Tasks requiring tight coordination (use sequential steps instead).
+    - When you need immediate results (sub-agents add latency).
+  </Card>
+</CardGroup>
 
-### When NOT to Use Sub-Agents
-- Simple tasks you can do directly.
-- Tasks requiring tight coordination (use sequential steps instead).
-- When you need immediate results (sub-agents add latency).
+<Tip>
+Do NOT poll `agent_status` repeatedly -- this wastes tokens. Use `agent_list` to see all sub-agents at once (more efficient than individual status checks). Do other useful work, then check status once or twice near the end.
+</Tip>
 
-### Monitoring Tips
-- Do NOT poll `agent_status` repeatedly -- this wastes tokens. The agent will notify when it is done.
-- Use `agent_list` to see all sub-agents at once (more efficient than individual status checks).
-- Do other useful work, then check status once or twice near the end.
+## Architecture summary
 
-## Architecture Summary
-
-```
+```text
 meerkat-core/src/sub_agent.rs                         -- SubAgentManager, SubAgentInfo, ConcurrencyLimits enforcement
 meerkat-core/src/ops.rs                                -- ConcurrencyLimits, SpawnSpec, ToolAccessPolicy, ForkBudgetPolicy
 meerkat-tools/src/builtin/sub_agent/mod.rs             -- Module root, re-exports

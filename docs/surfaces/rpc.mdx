@@ -1,10 +1,12 @@
-# JSON-RPC Stdio Server
+---
+title: "JSON-RPC stdio server"
+description: "Stateful JSON-RPC 2.0 stdio interface for IDE integration, desktop apps, and automation tools."
+icon: "terminal"
+---
 
 Meerkat exposes a JSON-RPC 2.0 stdio interface for IDE integration, desktop
 apps, and automation tools. Unlike REST and MCP, the RPC server keeps agents
 alive between turns for fast multi-turn conversations.
-
----
 
 ## Starting the server
 
@@ -14,8 +16,6 @@ rkat rpc
 
 The server reads newline-delimited JSON (JSONL) from stdin and writes JSONL to
 stdout. Each line is a complete JSON-RPC 2.0 message.
-
----
 
 ## Protocol
 
@@ -28,7 +28,7 @@ types:
 
 ### Lifecycle
 
-```
+```text
 Client                          Server
   |                                |
   |-- initialize ----------------->|
@@ -51,21 +51,18 @@ Client                          Server
   |<-- result {} ------------------|
 ```
 
----
-
 ## Methods
 
 ### initialize
 
 Handshake. Returns server capabilities.
 
-Request:
-```json
+<CodeGroup>
+```json Request
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
 ```
 
-Response:
-```json
+```json Response
 {
   "jsonrpc": "2.0",
   "id": 1,
@@ -85,13 +82,14 @@ Response:
   }
 }
 ```
+</CodeGroup>
 
 ### session/create
 
 Create a new session and run the first turn.
 
-Request (minimal):
-```json
+<CodeGroup>
+```json Request (minimal)
 {
   "jsonrpc": "2.0",
   "id": 2,
@@ -102,8 +100,7 @@ Request (minimal):
 }
 ```
 
-Request (full):
-```json
+```json Request (full)
 {
   "jsonrpc": "2.0",
   "id": 2,
@@ -130,31 +127,75 @@ Request (full):
   }
 }
 ```
+</CodeGroup>
 
 Only `prompt` is required. All other fields are optional and fall back to
 config defaults.
 
 #### Parameter reference
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `prompt` | `string` | **(required)** | The user prompt to send to the agent |
-| `model` | `string \| null` | `"claude-sonnet-4-5"` | Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`) |
-| `provider` | `string \| null` | inferred from model | Provider name: `"anthropic"`, `"openai"`, `"gemini"`, `"other"` |
-| `max_tokens` | `u32 \| null` | config default | Max tokens per turn |
-| `system_prompt` | `string \| null` | `null` | Override system prompt |
-| `output_schema` | `object \| null` | `null` | JSON schema for structured output extraction (wrapper or raw schema) |
-| `structured_output_retries` | `u32` | `2` | Max retries for structured output validation |
-| `hooks_override` | `HookRunOverrides \| null` | `null` | Run-scoped hook overrides (entries to add, hook IDs to disable) |
-| `enable_builtins` | `bool` | `false` | Enable built-in tools (task management, etc.) |
-| `enable_shell` | `bool` | `false` | Enable shell tool (requires `enable_builtins`) |
-| `enable_subagents` | `bool` | `false` | Enable sub-agent tools (fork, spawn) |
-| `enable_memory` | `bool` | `false` | Enable semantic memory (`memory_search` tool + compaction indexing) |
-| `host_mode` | `bool` | `false` | Run in host mode for inter-agent comms (requires `comms_name`) |
-| `comms_name` | `string \| null` | `null` | Agent name for inter-agent communication |
-| `provider_params` | `object \| null` | `null` | Provider-specific parameters (e.g., thinking config, reasoning effort) |
+<ParamField body="prompt" type="string" required>
+  The user prompt to send to the agent.
+</ParamField>
+
+<ParamField body="model" type="string | null" default="claude-sonnet-4-5">
+  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`).
+</ParamField>
+
+<ParamField body="provider" type="string | null" default="inferred from model">
+  Provider name: `"anthropic"`, `"openai"`, `"gemini"`, `"other"`.
+</ParamField>
+
+<ParamField body="max_tokens" type="u32 | null" default="config default">
+  Max tokens per turn.
+</ParamField>
+
+<ParamField body="system_prompt" type="string | null" default="null">
+  Override system prompt.
+</ParamField>
+
+<ParamField body="output_schema" type="object | null" default="null">
+  JSON schema for structured output extraction (wrapper or raw schema).
+</ParamField>
+
+<ParamField body="structured_output_retries" type="u32" default="2">
+  Max retries for structured output validation.
+</ParamField>
+
+<ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
+  Run-scoped hook overrides (entries to add, hook IDs to disable).
+</ParamField>
+
+<ParamField body="enable_builtins" type="bool" default="false">
+  Enable built-in tools (task management, etc.).
+</ParamField>
+
+<ParamField body="enable_shell" type="bool" default="false">
+  Enable shell tool (requires `enable_builtins`).
+</ParamField>
+
+<ParamField body="enable_subagents" type="bool" default="false">
+  Enable sub-agent tools (fork, spawn).
+</ParamField>
+
+<ParamField body="enable_memory" type="bool" default="false">
+  Enable semantic memory (`memory_search` tool + compaction indexing).
+</ParamField>
+
+<ParamField body="host_mode" type="bool" default="false">
+  Run in host mode for inter-agent comms (requires `comms_name`).
+</ParamField>
+
+<ParamField body="comms_name" type="string | null" default="null">
+  Agent name for inter-agent communication.
+</ParamField>
+
+<ParamField body="provider_params" type="object | null" default="null">
+  Provider-specific parameters (e.g., thinking config, reasoning effort).
+</ParamField>
 
 Response:
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -182,13 +223,12 @@ During execution, `session/event` notifications are emitted (see
 
 List active sessions.
 
-Request:
-```json
+<CodeGroup>
+```json Request
 {"jsonrpc":"2.0","id":3,"method":"session/list"}
 ```
 
-Response:
-```json
+```json Response
 {
   "jsonrpc": "2.0",
   "id": 3,
@@ -200,12 +240,12 @@ Response:
   }
 }
 ```
+</CodeGroup>
 
 ### session/read
 
 Get session state.
 
-Request:
 ```json
 {"jsonrpc":"2.0","id":4,"method":"session/read","params":{"session_id":"01936f8a-..."}}
 ```
@@ -214,7 +254,6 @@ Request:
 
 Remove a session from the runtime.
 
-Request:
 ```json
 {"jsonrpc":"2.0","id":5,"method":"session/archive","params":{"session_id":"01936f8a-..."}}
 ```
@@ -223,7 +262,6 @@ Request:
 
 Start a new turn on an existing session.
 
-Request:
 ```json
 {
   "jsonrpc": "2.0",
@@ -243,7 +281,6 @@ Returns the same result shape as `session/create`. Fails with error code
 
 Cancel an in-flight turn. No-op if the session is idle.
 
-Request:
 ```json
 {"jsonrpc":"2.0","id":7,"method":"turn/interrupt","params":{"session_id":"01936f8a-..."}}
 ```
@@ -254,13 +291,12 @@ Return runtime capabilities with status resolved against config. This lists
 every capability known to Meerkat with its current status (available, disabled
 by policy, not compiled, etc.).
 
-Request:
-```json
+<CodeGroup>
+```json Request
 {"jsonrpc":"2.0","id":8,"method":"capabilities/get"}
 ```
 
-Response:
-```json
+```json Response
 {
   "jsonrpc": "2.0",
   "id": 8,
@@ -311,6 +347,7 @@ Response:
   }
 }
 ```
+</CodeGroup>
 
 Possible `status` values:
 
@@ -344,8 +381,6 @@ Merge-patch the config (RFC 7396).
 ```json
 {"jsonrpc":"2.0","id":11,"method":"config/patch","params":{"max_tokens":8192}}
 ```
-
----
 
 ## Notifications
 
@@ -383,9 +418,7 @@ Event types match the `AgentEvent` enum in `meerkat-core`:
 | `budget_warning` | Approaching resource limits |
 | `retrying` | Retrying after transient error |
 
----
-
-## Error Codes
+## Error codes
 
 Standard JSON-RPC codes plus Meerkat-specific application codes:
 
@@ -402,14 +435,12 @@ Standard JSON-RPC codes plus Meerkat-specific application codes:
 | -32003 | Budget exhausted | Resource limits reached |
 | -32004 | Hook denied | Hook blocked the operation |
 
----
-
 ## Architecture
 
 The RPC server is **stateful**: agents stay alive between turns. This is the
 key difference from REST (stateless per-request) and MCP (callback pattern).
 
-```
+```text
 Client (IDE, app) <--stdio JSONL--> RpcServer
                                        |
                                   MethodRouter
@@ -427,12 +458,12 @@ Each session gets a dedicated tokio task that exclusively owns the `Agent`.
 This solves the `cancel(&mut self)` requirement without mutex. Commands
 (`StartTurn`, `Interrupt`, `Shutdown`) are sent via channels.
 
+<Note>
 **Backpressure:** The notification channel is bounded. When the client reads
 slowly, the agent naturally slows down.
+</Note>
 
----
-
-## Comparison with Other Surfaces
+## Comparison with other surfaces
 
 | | CLI | REST | MCP | RPC |
 |---|---|---|---|---|
@@ -442,11 +473,9 @@ slowly, the agent naturally slows down.
 | Cancellation | Ctrl+C | N/A | N/A | `turn/interrupt` |
 | Bidirectional | No | No (SSE one-way) | Partial | **Yes** |
 
----
+## See also
 
-## See Also
-
-- [CLI Reference](./CLI.md)
-- [REST API](./rest.md)
-- [MCP](./mcp.md)
-- [Architecture](./architecture.md)
+- [CLI reference](/CLI)
+- [REST API](/surfaces/rest)
+- [MCP](/surfaces/mcp)
+- [Architecture](/reference/architecture)

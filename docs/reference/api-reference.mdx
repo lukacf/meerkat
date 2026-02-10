@@ -1,12 +1,14 @@
-# API Reference
-
-This document provides a comprehensive reference for all public types, traits, and functions in Meerkat.
+---
+title: "API reference"
+description: "Comprehensive reference for all public types, traits, and functions in Meerkat."
+icon: "book"
+---
 
 ## Module: `meerkat`
 
 The main entry point. Re-exports types from all sub-crates.
 
-### SDK Helpers
+### SDK helpers
 
 AgentFactory is the shared entry point for SDK construction:
 
@@ -57,8 +59,6 @@ pub use meerkat::prelude::*;
 // - RunResult, AgentEvent, AgentError
 // - SessionId, Usage
 ```
-
----
 
 ## Module: `meerkat_core`
 
@@ -142,7 +142,7 @@ impl AgentBuilder {
 }
 ```
 
-### Hook Contracts
+### Hook contracts
 
 Core hook interfaces are exposed from `meerkat_core` and re-exported by `meerkat`. Hooks execute at defined points in the agent loop. Each hook entry specifies a point, execution mode (foreground/background), capability (observe/guardrail/rewrite), and a runtime adapter (in-process, command, or HTTP). See `meerkat-hooks` for the `DefaultHookEngine` implementation.
 
@@ -605,8 +605,6 @@ pub enum BudgetType {
 }
 ```
 
----
-
 ## Traits
 
 ### AgentLlmClient
@@ -669,8 +667,6 @@ pub trait AgentSessionStore: Send + Sync {
     async fn list(&self) -> Result<Vec<SessionId>, AgentError>;
 }
 ```
-
----
 
 ## Module: `meerkat_contracts`
 
@@ -837,7 +833,7 @@ impl ContractVersion {
 // + Display, FromStr, Copy, Ord
 ```
 
-### Wire Request Fragments
+### Wire request fragments
 
 Composable request parameter groups. Protocol crates inline the fields they support and provide accessor methods returning the fragment type. No `#[serde(flatten)]`:
 
@@ -958,8 +954,6 @@ pub struct SchemaWarning {
 }
 ```
 
----
-
 ## Module: `meerkat_core::skills`
 
 Skill system contracts. The `meerkat-skills` crate provides implementations.
@@ -1055,8 +1049,6 @@ pub trait SkillEngine: Send + Sync {
     ) -> Result<String, SkillError>;
 }
 ```
-
----
 
 ## Module: `meerkat_client`
 
@@ -1220,8 +1212,6 @@ impl GeminiClient {
 impl LlmClient for GeminiClient { ... }
 ```
 
----
-
 ## Module: `meerkat_store`
 
 Session persistence implementations.
@@ -1262,8 +1252,6 @@ impl MemoryStore {
 
 impl AgentSessionStore for MemoryStore { ... }
 ```
-
----
 
 ## Module: `meerkat_mcp_client`
 
@@ -1367,8 +1355,6 @@ pub enum McpError {
 }
 ```
 
----
-
 ## Module: `meerkat_tools`
 
 Tool registry and validation.
@@ -1426,9 +1412,7 @@ where
 impl<F> AgentToolDispatcher for ToolDispatcher<F> { ... }
 ```
 
----
-
-## Sub-Agent Operations
+## Sub-agent operations
 
 ### Fork
 
@@ -1516,13 +1500,11 @@ impl Agent {
 }
 ```
 
----
-
-## CLI Commands
+## CLI commands
 
 ### rkat run
 
-```
+```text
 rkat run [OPTIONS] <PROMPT>
 
 Arguments:
@@ -1541,7 +1523,7 @@ Options:
 
 ### rkat resume
 
-```
+```text
 rkat resume [OPTIONS] <SESSION_ID> <PROMPT>
 
 Arguments:
@@ -1557,7 +1539,7 @@ Options:
 
 ### rkat sessions
 
-```
+```text
 rkat sessions <COMMAND>
 
 Commands:
@@ -1571,16 +1553,14 @@ Options:
 rkat sessions show <SESSION_ID>
 ```
 
----
-
-## REST API Endpoints
+## REST API endpoints
 
 ### POST /sessions
 
 Create and run a new session.
 
-Request:
-```json
+<CodeGroup>
+```json Request
 {
   "prompt": "Your prompt here",
   "model": "claude-sonnet-4",
@@ -1589,8 +1569,7 @@ Request:
 }
 ```
 
-Response:
-```json
+```json Response
 {
   "session_id": "01936f8a-7b2c-7000-8000-000000000001",
   "text": "Response text",
@@ -1603,12 +1582,12 @@ Response:
   "stop_reason": "end_turn"
 }
 ```
+</CodeGroup>
 
-### POST /sessions/{id}/messages
+### POST /sessions/\{id\}/messages
 
 Continue an existing session.
 
-Request:
 ```json
 {
   "prompt": "Follow-up message"
@@ -1617,11 +1596,10 @@ Request:
 
 Response: Same as POST /sessions
 
-### GET /sessions/{id}
+### GET /sessions/\{id\}
 
 Get session details.
 
-Response:
 ```json
 {
   "id": "01936f8a-7b2c-7000-8000-000000000001",
@@ -1636,7 +1614,7 @@ Response:
 }
 ```
 
-### GET /sessions/{id}/events
+### GET /sessions/\{id\}/events
 
 Server-Sent Events stream for real-time updates.
 
@@ -1650,9 +1628,7 @@ Event types:
 - `run_completed`
 - `run_failed`
 
----
-
-## MCP Server Tools
+## MCP server tools
 
 When running as an MCP server, Meerkat exposes these tools:
 
@@ -1660,7 +1636,6 @@ When running as an MCP server, Meerkat exposes these tools:
 
 Run a new agent with a prompt.
 
-Input:
 ```json
 {
   "prompt": "Your prompt",
@@ -1674,7 +1649,6 @@ Input:
 
 Resume an existing session.
 
-Input:
 ```json
 {
   "session_id": "01936f8a-7b2c-7000-8000-000000000001",

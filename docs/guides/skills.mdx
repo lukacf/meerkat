@@ -1,8 +1,12 @@
-# Skills
+---
+title: "Skills"
+description: "Domain-specific knowledge injection via markdown documents with YAML frontmatter"
+icon: "graduation-cap"
+---
 
 Meerkat's skill system provides domain-specific knowledge injection into the agent's context. Skills are markdown documents with YAML frontmatter that can be discovered from multiple sources, gated by required capabilities, and injected into the system prompt or per-turn context.
 
-## Core Types
+## Core types
 
 All core types are defined in `meerkat-core/src/skills/mod.rs`:
 
@@ -62,7 +66,7 @@ Error variants for skill operations:
 | `Load(Cow<'static, str>)` | I/O or loading failure |
 | `Parse(Cow<'static, str>)` | Frontmatter or content parsing failure |
 
-## Skill Sources
+## Skill sources
 
 Skill sources implement the `SkillSource` trait (from `meerkat-core/src/skills/mod.rs`):
 
@@ -74,6 +78,7 @@ pub trait SkillSource: Send + Sync {
 }
 ```
 
+<Accordion title="Source implementations">
 ### `EmbeddedSkillSource`
 
 Collects skills registered at compile time via `inventory::submit!`. Uses `collect_registered_skills()` to iterate over static `SkillRegistration` entries.
@@ -99,8 +104,9 @@ Wraps multiple sources with deduplication. **First source wins** for duplicate s
 ### `InMemorySkillSource`
 
 Test-only source backed by a `Vec<SkillDocument>`. Used in unit tests.
+</Accordion>
 
-## Source Precedence
+## Source precedence
 
 The `AgentFactory::build_agent()` method (in `meerkat/src/factory.rs`) constructs the `CompositeSkillSource` with sources in this order:
 
@@ -108,9 +114,11 @@ The `AgentFactory::build_agent()` method (in `meerkat/src/factory.rs`) construct
 2. **User** (`~/.rkat/skills/`)
 3. **Embedded** (builtin skills from component crates)
 
+<Note>
 Because `CompositeSkillSource` uses first-source-wins deduplication, a project skill with the same ID as a builtin skill overrides the builtin.
+</Note>
 
-## SKILL.md Format
+## SKILL.md format
 
 Each skill is a markdown file with YAML frontmatter parsed by `parse_skill_md()` in `meerkat-skills/src/parser.rs`:
 
@@ -136,7 +144,7 @@ When running background jobs...
 
 The frontmatter is delimited by `---` markers. The body (everything after the closing `---`) is stored as the skill's `body` field.
 
-## Capability Gating
+## Capability gating
 
 Skills are filtered by required capabilities before being shown or injected. The `DefaultSkillEngine` (in `meerkat-skills/src/engine.rs`) filters the inventory using `filter_by_capabilities()`:
 
@@ -145,7 +153,7 @@ Skills are filtered by required capabilities before being shown or injected. The
 - A skill is included only if **all** its required capabilities are present in the available set.
 - A skill with an empty `requires_capabilities` list is always available.
 
-## Skill Resolution
+## Skill resolution
 
 The resolver (in `meerkat-skills/src/resolver.rs`) supports two reference formats:
 
@@ -164,36 +172,37 @@ The `SkillResolutionMode` enum (in `meerkat-skills/src/config.rs`) currently has
 
 The renderer (in `meerkat-skills/src/renderer.rs`) produces two output formats:
 
-### Inventory section (`render_inventory`)
+<Tabs>
+  <Tab title="Inventory section">
+    Generates a `## Available Skills` section listing all available skills for the system prompt:
 
-Generates a `## Available Skills` section listing all available skills for the system prompt:
+    ```text
+    ## Available Skills
 
-```
-## Available Skills
+    - `/task-workflow` -- How to use task_create/task_update/task_list for structured work tracking
+    - `/shell-patterns` -- Background job patterns with shell and job management tools
+    ```
 
-- `/task-workflow` -- How to use task_create/task_update/task_list for structured work tracking
-- `/shell-patterns` -- Background job patterns with shell and job management tools
-```
+    This section is injected into the system prompt via the `extra_sections` parameter of `assemble_system_prompt()` in `meerkat/src/prompt_assembly.rs`.
+  </Tab>
+  <Tab title="Injection block">
+    Wraps the skill body in XML-style tags for per-turn injection:
 
-This section is injected into the system prompt via the `extra_sections` parameter of `assemble_system_prompt()` in `meerkat/src/prompt_assembly.rs`.
+    ```xml
+    <skill name="Shell Patterns">
+    # Shell Patterns
 
-### Injection block (`render_injection`)
-
-Wraps the skill body in XML-style tags for per-turn injection:
-
-```xml
-<skill name="Shell Patterns">
-# Shell Patterns
-
-When running background jobs...
-</skill>
-```
+    When running background jobs...
+    </skill>
+    ```
+  </Tab>
+</Tabs>
 
 ### Size limits
 
 `MAX_INJECTION_BYTES` is set to 32 KiB (32 * 1024 bytes). If an injection block exceeds this limit, it is truncated with a warning log.
 
-## Skill Engine
+## Skill engine
 
 The `SkillEngine` trait (from `meerkat-core/src/skills/mod.rs`):
 
@@ -213,7 +222,7 @@ The `DefaultSkillEngine` implementation:
 - `inventory_section()`: Lists all skills filtered by available capabilities, renders with `render_inventory()`.
 - `resolve_and_render()`: Resolves each reference, loads the skill document, renders injection blocks, joins with `\n\n`.
 
-## Embedded Skills Registration
+## Embedded skills registration
 
 Component crates register skills at compile time using the `inventory` crate. The `SkillRegistration` struct (in `meerkat-skills/src/registration.rs`):
 
@@ -247,7 +256,7 @@ inventory::submit! {
 
 All registered skills are collected at runtime via `collect_registered_skills()`.
 
-## Embedded Skills
+## Embedded skills
 
 The following skills are embedded in component crates:
 
@@ -275,38 +284,39 @@ pub struct SkillsConfig {
 }
 ```
 
-## Custom Skills
+## Custom skills
 
-### Project-level skills
+<Tabs>
+  <Tab title="Project-level">
+    Create a subdirectory under `.rkat/skills/` with a `SKILL.md` file:
 
-Create a subdirectory under `.rkat/skills/` with a `SKILL.md` file:
+    ```
+    .rkat/skills/
+      my-deployment/
+        SKILL.md
+    ```
 
-```
-.rkat/skills/
-  my-deployment/
-    SKILL.md
-```
+    Example `.rkat/skills/my-deployment/SKILL.md`:
 
-Example `.rkat/skills/my-deployment/SKILL.md`:
+    ```markdown
+    ---
+    name: Deployment Guide
+    description: Project-specific deployment procedures
+    requires_capabilities: []
+    ---
 
-```markdown
----
-name: Deployment Guide
-description: Project-specific deployment procedures
-requires_capabilities: []
----
+    # Deployment Guide
 
-# Deployment Guide
+    1. Run `make build` to create the release binary.
+    2. Deploy via `./deploy.sh production`.
+    ```
+  </Tab>
+  <Tab title="User-level">
+    Same structure under `~/.rkat/skills/`. These are available across all projects but have lower precedence than project-level skills.
+  </Tab>
+</Tabs>
 
-1. Run `make build` to create the release binary.
-2. Deploy via `./deploy.sh production`.
-```
-
-### User-level skills
-
-Same structure under `~/.rkat/skills/`. These are available across all projects but have lower precedence than project-level skills.
-
-## Wire Parameters
+## Wire parameters
 
 Skills are controlled per-request via `SkillsParams` (from `meerkat-contracts/src/wire/params.rs`):
 
@@ -317,7 +327,7 @@ pub struct SkillsParams {
 }
 ```
 
-## SDK Usage
+## SDK usage
 
 ### Building a skill engine
 

@@ -1,6 +1,8 @@
-# Meerkat Built-in Tools Reference
-
-This document is a comprehensive reference for all built-in tools available in Meerkat (`rkat`). Every tool name, parameter, type, and default value is derived directly from source code.
+---
+title: "Built-in tools reference"
+description: "Comprehensive reference for all built-in tools available in Meerkat, including parameters, types, and defaults."
+icon: "wrench"
+---
 
 ## Overview
 
@@ -27,11 +29,9 @@ This document is a comprehensive reference for all built-in tools available in M
 | `send_response` | Comms | Yes (when comms active) | `comms` | Send a response to a previous request |
 | `list_peers` | Comms | Yes (when comms active) | `comms` | List all trusted peers and their connection status |
 
----
+## Enabling and disabling tools
 
-## Enabling and Disabling Tools
-
-### Factory-Level Flags
+### Factory-level flags
 
 `AgentFactory` controls which tool categories are available via builder methods:
 
@@ -45,7 +45,7 @@ This document is a comprehensive reference for all built-in tools available in M
 
 **Source:** `meerkat/src/factory.rs` -- `AgentFactory` struct and builder methods.
 
-### Per-Build Overrides
+### Per-build overrides
 
 Each `AgentBuildConfig` can override factory-level flags for a single agent build:
 
@@ -64,7 +64,7 @@ All default to `None` (use factory-level setting).
 
 Individual tools can be enabled or disabled via `ToolPolicyLayer` in `BuiltinToolConfig`. When shell is enabled, a `ToolPolicyLayer` is applied that activates the four shell tools (which have `default_enabled: false`). The same mechanism applies to sub-agent tools.
 
-### Capability Registrations
+### Capability registrations
 
 Capabilities are registered via the `inventory` crate in `meerkat-tools/src/lib.rs`:
 
@@ -72,14 +72,11 @@ Capabilities are registered via the `inventory` crate in `meerkat-tools/src/lib.
 - **Shell** (`CapabilityId::Shell`): `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`. Controlled by `config.tools.shell_enabled`.
 - **SubAgents** (`CapabilityId::SubAgents`): `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list`. Requires `sub-agents` feature.
 
----
-
-## Task Tools
+## Task tools
 
 Task tools provide structured work tracking. They are enabled by default when builtins are on. Tasks are persisted via `TaskStore` (either `FileTaskStore` on disk or `MemoryTaskStore` in-memory).
 
-### Task Data Model
-
+<Accordion title="Task data model">
 A `Task` object returned by task tools has these fields:
 
 | Field | Type | Description |
@@ -100,6 +97,7 @@ A `Task` object returned by task tools has these fields:
 | `metadata` | `Object` | Arbitrary key-value metadata |
 
 **Source:** `meerkat-tools/src/builtin/types.rs` -- `Task` struct.
+</Accordion>
 
 ### `task_create`
 
@@ -107,18 +105,39 @@ Create a new task in the project task list.
 
 **Default enabled:** Yes
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `subject` | `String` | Yes | -- | Short subject/title of the task |
-| `description` | `String` | Yes | -- | Detailed description of what needs to be done |
-| `priority` | `String` | No | `"medium"` | `"low"`, `"medium"`, or `"high"` |
-| `labels` | `String[]` | No | `[]` | Labels/tags for categorization |
-| `blocks` | `String[]` | No | `[]` | Task IDs that this task blocks |
-| `blocked_by` | `String[]` | No | `[]` | Task IDs that block this task |
-| `owner` | `String` | No | `null` | Owner/assignee |
-| `metadata` | `Object` | No | `{}` | Arbitrary key-value metadata |
+<ParamField body="subject" type="String" required>
+  Short subject/title of the task.
+</ParamField>
 
-**Returns:** The created `Task` object (see Task Data Model above).
+<ParamField body="description" type="String" required>
+  Detailed description of what needs to be done.
+</ParamField>
+
+<ParamField body="priority" type="String" default="medium">
+  `"low"`, `"medium"`, or `"high"`.
+</ParamField>
+
+<ParamField body="labels" type="String[]" default="[]">
+  Labels/tags for categorization.
+</ParamField>
+
+<ParamField body="blocks" type="String[]" default="[]">
+  Task IDs that this task blocks.
+</ParamField>
+
+<ParamField body="blocked_by" type="String[]" default="[]">
+  Task IDs that block this task.
+</ParamField>
+
+<ParamField body="owner" type="String" default="null">
+  Owner/assignee.
+</ParamField>
+
+<ParamField body="metadata" type="Object" default="{}">
+  Arbitrary key-value metadata.
+</ParamField>
+
+**Returns:** The created `Task` object (see task data model above).
 
 **Source:** `meerkat-tools/src/builtin/tasks/task_create.rs`
 
@@ -128,9 +147,9 @@ Get a task by its ID.
 
 **Default enabled:** Yes
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `id` | `String` | Yes | -- | The task ID to retrieve |
+<ParamField body="id" type="String" required>
+  The task ID to retrieve.
+</ParamField>
 
 **Returns:** The `Task` object matching the given ID.
 
@@ -144,10 +163,13 @@ List tasks in the project, optionally filtered by status or labels.
 
 **Default enabled:** Yes
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `status` | `String` | No | `null` (all) | Filter by status: `"pending"`, `"in_progress"`, or `"completed"` |
-| `labels` | `String[]` | No | `null` (all) | Filter by labels (tasks matching any label) |
+<ParamField body="status" type="String" default="null (all)">
+  Filter by status: `"pending"`, `"in_progress"`, or `"completed"`.
+</ParamField>
+
+<ParamField body="labels" type="String[]" default="null (all)">
+  Filter by labels (tasks matching any label).
+</ParamField>
 
 **Returns:** Array of `Task` objects matching the filters.
 
@@ -159,20 +181,53 @@ Update an existing task. Only provided fields are modified; omitted fields remai
 
 **Default enabled:** Yes
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `id` | `String` | Yes | -- | The task ID to update |
-| `subject` | `String` | No | unchanged | New subject/title |
-| `description` | `String` | No | unchanged | New description |
-| `status` | `String` | No | unchanged | New status: `"pending"`, `"in_progress"`, or `"completed"` |
-| `priority` | `String` | No | unchanged | New priority: `"low"`, `"medium"`, or `"high"` |
-| `labels` | `String[]` | No | unchanged | Replace all labels |
-| `owner` | `String` | No | unchanged | New owner/assignee |
-| `metadata` | `Object` | No | unchanged | Merge metadata (set key to `null` to remove) |
-| `add_blocks` | `String[]` | No | `[]` | Task IDs to add to the `blocks` list |
-| `remove_blocks` | `String[]` | No | `[]` | Task IDs to remove from the `blocks` list |
-| `add_blocked_by` | `String[]` | No | `[]` | Task IDs to add to the `blocked_by` list |
-| `remove_blocked_by` | `String[]` | No | `[]` | Task IDs to remove from the `blocked_by` list |
+<ParamField body="id" type="String" required>
+  The task ID to update.
+</ParamField>
+
+<ParamField body="subject" type="String" default="unchanged">
+  New subject/title.
+</ParamField>
+
+<ParamField body="description" type="String" default="unchanged">
+  New description.
+</ParamField>
+
+<ParamField body="status" type="String" default="unchanged">
+  New status: `"pending"`, `"in_progress"`, or `"completed"`.
+</ParamField>
+
+<ParamField body="priority" type="String" default="unchanged">
+  New priority: `"low"`, `"medium"`, or `"high"`.
+</ParamField>
+
+<ParamField body="labels" type="String[]" default="unchanged">
+  Replace all labels.
+</ParamField>
+
+<ParamField body="owner" type="String" default="unchanged">
+  New owner/assignee.
+</ParamField>
+
+<ParamField body="metadata" type="Object" default="unchanged">
+  Merge metadata (set key to `null` to remove).
+</ParamField>
+
+<ParamField body="add_blocks" type="String[]" default="[]">
+  Task IDs to add to the `blocks` list.
+</ParamField>
+
+<ParamField body="remove_blocks" type="String[]" default="[]">
+  Task IDs to remove from the `blocks` list.
+</ParamField>
+
+<ParamField body="add_blocked_by" type="String[]" default="[]">
+  Task IDs to add to the `blocked_by` list.
+</ParamField>
+
+<ParamField body="remove_blocked_by" type="String[]" default="[]">
+  Task IDs to remove from the `blocked_by` list.
+</ParamField>
 
 **Returns:** The updated `Task` object.
 
@@ -180,14 +235,11 @@ Update an existing task. Only provided fields are modified; omitted fields remai
 
 **Source:** `meerkat-tools/src/builtin/tasks/task_update.rs`
 
----
-
-## Shell Tools
+## Shell tools
 
 Shell tools execute commands and manage background jobs. They are all `default_enabled: false` and require the factory-level `enable_shell` flag (or a `ToolPolicyLayer` override) to be active.
 
-### Shell Configuration
-
+<Accordion title="Shell configuration">
 Shell behavior is controlled by `ShellConfig`:
 
 | Config Field | Type | Default | Description |
@@ -205,9 +257,9 @@ Shell behavior is controlled by `ShellConfig`:
 | `security_patterns` | `Vec<String>` | `[]` | Glob patterns for allow/deny lists |
 
 **Source:** `meerkat-tools/src/builtin/shell/config.rs`
+</Accordion>
 
-### Shell Security Modes
-
+<Accordion title="Shell security modes">
 The `SecurityEngine` validates commands before execution using POSIX-compliant word splitting (`shlex`) and glob pattern matching (`globset`).
 
 | Mode | Behavior |
@@ -219,6 +271,7 @@ The `SecurityEngine` validates commands before execution using POSIX-compliant w
 Patterns are matched against the canonicalized command invocation. The engine parses the full command string into individual words, then validates the executable (first word) and the full command string against the pattern set.
 
 **Source:** `meerkat-tools/src/builtin/shell/security.rs`
+</Accordion>
 
 ### `shell`
 
@@ -226,16 +279,24 @@ Execute a shell command. Uses POSIX-style parsing for policy checks; runs via Nu
 
 **Default enabled:** No (requires shell to be enabled)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `command` | `String` | Yes | -- | The command to execute (POSIX-style parsing for policy checks) |
-| `working_dir` | `String` | No | Project root | Working directory (relative to project root) |
-| `timeout_secs` | `u64` | No | Config default (30) | Timeout in seconds |
-| `background` | `bool` | No | `false` | If `true`, run in background and return job ID immediately |
+<ParamField body="command" type="String" required>
+  The command to execute (POSIX-style parsing for policy checks).
+</ParamField>
 
-**Returns (foreground):**
+<ParamField body="working_dir" type="String" default="Project root">
+  Working directory (relative to project root).
+</ParamField>
 
-```json
+<ParamField body="timeout_secs" type="u64" default="Config default (30)">
+  Timeout in seconds.
+</ParamField>
+
+<ParamField body="background" type="bool" default="false">
+  If `true`, run in background and return job ID immediately.
+</ParamField>
+
+<CodeGroup>
+```json Returns (foreground)
 {
   "exit_code": 0,
   "stdout": "...",
@@ -245,17 +306,18 @@ Execute a shell command. Uses POSIX-style parsing for policy checks; runs via Nu
 }
 ```
 
-Output is truncated to the last 100,000 characters if it exceeds that limit. Fields `stdout_lossy` and `stderr_lossy` indicate whether output was lossy-decoded from non-UTF-8 bytes.
-
-**Returns (background, `background: true`):**
-
-```json
+```json Returns (background)
 {
   "job_id": "job_<uuid-v7>",
   "status": "running",
   "message": "Background job started"
 }
 ```
+</CodeGroup>
+
+<Note>
+Output is truncated to the last 100,000 characters if it exceeds that limit. Fields `stdout_lossy` and `stderr_lossy` indicate whether output was lossy-decoded from non-UTF-8 bytes.
+</Note>
 
 **Source:** `meerkat-tools/src/builtin/shell/tool.rs`
 
@@ -266,8 +328,6 @@ List all background shell jobs.
 **Default enabled:** No (requires shell to be enabled)
 
 **Parameters:** None (empty object).
-
-**Returns:** Array of `JobSummary` objects:
 
 ```json
 [
@@ -290,11 +350,9 @@ Check status of a background shell job. Returns full job details including outpu
 
 **Default enabled:** No (requires shell to be enabled)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `job_id` | `String` | Yes | -- | The job ID to check |
-
-**Returns:** Full `BackgroundJob` object:
+<ParamField body="job_id" type="String" required>
+  The job ID to check.
+</ParamField>
 
 ```json
 {
@@ -317,11 +375,9 @@ Cancel a running background shell job.
 
 **Default enabled:** No (requires shell to be enabled)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `job_id` | `String` | Yes | -- | The job ID to cancel |
-
-**Returns:**
+<ParamField body="job_id" type="String" required>
+  The job ID to cancel.
+</ParamField>
 
 ```json
 {
@@ -334,22 +390,19 @@ Cancel a running background shell job.
 
 **Source:** `meerkat-tools/src/builtin/shell/job_cancel_tool.rs`
 
-### Shell Types
-
+<Accordion title="Shell types">
 **JobId format:** `"job_"` followed by a UUID v7 string.
 
 **JobStatus variants:** `Running`, `Completed`, `Failed`, `TimedOut`, `Cancelled` (serialized as lowercase snake_case strings).
 
 **Source:** `meerkat-tools/src/builtin/shell/types.rs`
+</Accordion>
 
----
-
-## Sub-Agent Tools
+## Sub-agent tools
 
 Sub-agent tools allow spawning, forking, monitoring, and cancelling child agents. They are all `default_enabled: false` and require both the `sub-agents` Cargo feature and the factory-level `enable_subagents` flag.
 
-### Shared Types
-
+<Accordion title="Shared types">
 **ToolAccessInput** (tagged union, `"policy"` discriminator):
 
 | Variant | Fields | Description |
@@ -367,6 +420,7 @@ Example: `{"policy": "allow_list", "tools": ["shell", "task_list"]}`
 | `max_tokens` | `u64` | No | Maximum tokens for the sub-agent |
 | `max_turns` | `u32` | No | Maximum turns for the sub-agent |
 | `max_tool_calls` | `u32` | No | Maximum tool calls for the sub-agent |
+</Accordion>
 
 ### `agent_spawn`
 
@@ -374,19 +428,37 @@ Spawn a new sub-agent with clean context. The sub-agent starts fresh with only t
 
 **Default enabled:** No (requires `sub-agents` feature + subagents enabled)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `prompt` | `String` | Yes | -- | Initial prompt/task for the sub-agent |
-| `provider` | `String` | No | Parent's provider | LLM provider: `"anthropic"`, `"openai"`, or `"gemini"` |
-| `model` | `String` | No | Provider's default | Model name (provider-specific) |
-| `tool_access` | `ToolAccessInput` | No | `inherit` | Tool access policy (see Shared Types) |
-| `budget` | `BudgetInput` | No | Inherited | Budget limits (see Shared Types) |
-| `system_prompt` | `String` | No | `null` | Override system prompt for the sub-agent |
-| `host_mode` | `bool` | No | `false` | Agent stays alive processing comms after initial prompt (only with `comms` feature) |
+<ParamField body="prompt" type="String" required>
+  Initial prompt/task for the sub-agent.
+</ParamField>
 
-Note: The `host_mode` parameter is only present when the `comms` feature is enabled. Without `comms`, `SpawnParamsNoComms` is used which omits this field.
+<ParamField body="provider" type="String" default="Parent's provider">
+  LLM provider: `"anthropic"`, `"openai"`, or `"gemini"`.
+</ParamField>
 
-**Returns:**
+<ParamField body="model" type="String" default="Provider's default">
+  Model name (provider-specific).
+</ParamField>
+
+<ParamField body="tool_access" type="ToolAccessInput" default="inherit">
+  Tool access policy (see shared types).
+</ParamField>
+
+<ParamField body="budget" type="BudgetInput" default="Inherited">
+  Budget limits (see shared types).
+</ParamField>
+
+<ParamField body="system_prompt" type="String" default="null">
+  Override system prompt for the sub-agent.
+</ParamField>
+
+<ParamField body="host_mode" type="bool" default="false">
+  Agent stays alive processing comms after initial prompt (only with `comms` feature).
+</ParamField>
+
+<Note>
+The `host_mode` parameter is only present when the `comms` feature is enabled. Without `comms`, `SpawnParamsNoComms` is used which omits this field.
+</Note>
 
 ```json
 {
@@ -409,15 +481,25 @@ Fork the current agent with continued context. The forked agent inherits the par
 
 **Default enabled:** No (requires `sub-agents` feature + subagents enabled)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `prompt` | `String` | Yes | -- | Additional prompt/instruction appended to inherited conversation history |
-| `provider` | `String` | No | Parent's provider | `"anthropic"`, `"openai"`, or `"gemini"` |
-| `model` | `String` | No | Provider's default | Model name (provider-specific) |
-| `tool_access` | `ToolAccessInput` | No | `inherit` | Tool access policy (see Shared Types) |
-| `budget_policy` | `String` | No | `null` | Budget allocation: `"equal"`, `"remaining"`, `"proportional"`, or `"fixed:N"` |
+<ParamField body="prompt" type="String" required>
+  Additional prompt/instruction appended to inherited conversation history.
+</ParamField>
 
-**Returns:**
+<ParamField body="provider" type="String" default="Parent's provider">
+  `"anthropic"`, `"openai"`, or `"gemini"`.
+</ParamField>
+
+<ParamField body="model" type="String" default="Provider's default">
+  Model name (provider-specific).
+</ParamField>
+
+<ParamField body="tool_access" type="ToolAccessInput" default="inherit">
+  Tool access policy (see shared types).
+</ParamField>
+
+<ParamField body="budget_policy" type="String" default="null">
+  Budget allocation: `"equal"`, `"remaining"`, `"proportional"`, or `"fixed:N"`.
+</ParamField>
 
 ```json
 {
@@ -439,11 +521,9 @@ Get status and output of a sub-agent by ID. Use this to poll for completion.
 
 **Default enabled:** No (requires `sub-agents` feature + subagents enabled)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `agent_id` | `String` | Yes | -- | UUID of the sub-agent |
-
-**Returns:**
+<ParamField body="agent_id" type="String" required>
+  UUID of the sub-agent.
+</ParamField>
 
 ```json
 {
@@ -466,11 +546,9 @@ Cancel a running sub-agent.
 
 **Default enabled:** No (requires `sub-agents` feature + subagents enabled)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `agent_id` | `String` | Yes | -- | UUID of the sub-agent to cancel |
-
-**Returns:**
+<ParamField body="agent_id" type="String" required>
+  UUID of the sub-agent to cancel.
+</ParamField>
 
 ```json
 {
@@ -490,8 +568,6 @@ List all sub-agents spawned by this agent.
 **Default enabled:** No (requires `sub-agents` feature + subagents enabled)
 
 **Parameters:** None (empty object).
-
-**Returns:**
 
 ```json
 {
@@ -513,9 +589,7 @@ List all sub-agents spawned by this agent.
 
 **Source:** `meerkat-tools/src/builtin/sub_agent/list.rs`
 
----
-
-## Memory Tool
+## Memory tool
 
 The memory search tool lives in the `meerkat-memory` crate and is composed into the tool dispatcher as a separate `MemorySearchDispatcher` (implementing `AgentToolDispatcher`). It is NOT part of `CompositeDispatcher` -- it is wired via `ToolGateway` when the `memory-store-session` feature is enabled and `enable_memory` is `true`.
 
@@ -523,14 +597,15 @@ The memory search tool lives in the `meerkat-memory` crate and is composed into 
 
 Search semantic memory for past conversation content. Memory contains text from earlier conversation turns that were compacted away to save context space.
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `query` | `String` | Yes | -- | Natural language search query describing what you want to recall |
-| `limit` | `usize` | No | `5` | Maximum number of results to return (max: 20) |
+<ParamField body="query" type="String" required>
+  Natural language search query describing what you want to recall.
+</ParamField>
+
+<ParamField body="limit" type="usize" default="5">
+  Maximum number of results to return (max: 20).
+</ParamField>
 
 The `limit` is capped at 20 regardless of the requested value.
-
-**Returns:** JSON array of memory results:
 
 ```json
 [
@@ -547,9 +622,7 @@ Returns an empty array if no matches are found.
 
 **Source:** `meerkat-memory/src/tool.rs`
 
----
-
-## Utility Tools
+## Utility tools
 
 Utility tools are general-purpose helpers enabled by default when builtins are on.
 
@@ -559,24 +632,21 @@ Pause execution for the specified number of seconds. Supports fractional seconds
 
 **Default enabled:** Yes
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `seconds` | `f64` | Yes | -- | Duration to wait (range: 0.1 to 300.0) |
+<ParamField body="seconds" type="f64" required>
+  Duration to wait (range: 0.1 to 300.0).
+</ParamField>
 
 Maximum wait time is 300 seconds (5 minutes). Values below 0.1 or above 300.0 are rejected.
 
-**Returns (completed):**
-
-```json
+<CodeGroup>
+```json Returns (completed)
 {
   "waited_seconds": 5.0,
   "status": "complete"
 }
 ```
 
-**Returns (interrupted):**
-
-```json
+```json Returns (interrupted)
 {
   "waited_seconds": 2.3,
   "requested_seconds": 5.0,
@@ -584,6 +654,7 @@ Maximum wait time is 300 seconds (5 minutes). Values below 0.1 or above 300.0 ar
   "reason": "cancellation signal received"
 }
 ```
+</CodeGroup>
 
 **Source:** `meerkat-tools/src/builtin/utility/wait.rs`
 
@@ -594,8 +665,6 @@ Get the current date and time. Returns ISO 8601 formatted datetime and Unix time
 **Default enabled:** Yes
 
 **Parameters:** None (empty object).
-
-**Returns:**
 
 ```json
 {
@@ -613,9 +682,7 @@ Get the current date and time. Returns ISO 8601 formatted datetime and Unix time
 
 **Source:** `meerkat-tools/src/builtin/utility/datetime.rs`
 
----
-
-## Comms Tools
+## Comms tools
 
 Comms tools enable inter-agent communication. They require the `comms` Cargo feature (`dep:meerkat-comms`) and the factory-level `enable_comms` flag. Unlike other tool categories, comms tools are provided as a separate `CommsToolSurface` dispatcher (implementing `AgentToolDispatcher`) and composed via `ToolGateway`, NOT bundled into `CompositeDispatcher`.
 
@@ -629,12 +696,13 @@ Send a simple text message to a trusted peer. The peer receives it in their inbo
 
 **Default enabled:** Yes (when comms is active)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `to` | `String` | Yes | -- | Peer name to send the message to |
-| `body` | `String` | Yes | -- | Message content |
+<ParamField body="to" type="String" required>
+  Peer name to send the message to.
+</ParamField>
 
-**Returns:**
+<ParamField body="body" type="String" required>
+  Message content.
+</ParamField>
 
 ```json
 {
@@ -650,13 +718,17 @@ Send a request to a trusted peer and wait for acknowledgement. Use this for stru
 
 **Default enabled:** Yes (when comms is active)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `to` | `String` | Yes | -- | Peer name to send the request to |
-| `intent` | `String` | Yes | -- | Request intent/action identifier |
-| `params` | `any` | No | `null` | Request parameters (arbitrary JSON) |
+<ParamField body="to" type="String" required>
+  Peer name to send the request to.
+</ParamField>
 
-**Returns:**
+<ParamField body="intent" type="String" required>
+  Request intent/action identifier.
+</ParamField>
+
+<ParamField body="params" type="any" default="null">
+  Request parameters (arbitrary JSON).
+</ParamField>
 
 ```json
 {
@@ -672,14 +744,21 @@ Send a response back to a previous request from a peer.
 
 **Default enabled:** Yes (when comms is active)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `to` | `String` | Yes | -- | Peer name to send the response to |
-| `in_reply_to` | `String` (UUID) | Yes | -- | ID of the request being responded to |
-| `status` | `String` | Yes | -- | Response status: `"accepted"`, `"completed"`, or `"failed"` |
-| `result` | `any` | No | `null` | Response result data (arbitrary JSON) |
+<ParamField body="to" type="String" required>
+  Peer name to send the response to.
+</ParamField>
 
-**Returns:**
+<ParamField body="in_reply_to" type="String (UUID)" required>
+  ID of the request being responded to.
+</ParamField>
+
+<ParamField body="status" type="String" required>
+  Response status: `"accepted"`, `"completed"`, or `"failed"`.
+</ParamField>
+
+<ParamField body="result" type="any" default="null">
+  Response result data (arbitrary JSON).
+</ParamField>
 
 ```json
 {
@@ -697,8 +776,6 @@ List all trusted peers and their connection status.
 
 **Parameters:** None (empty object).
 
-**Returns:**
-
 ```json
 {
   "peers": [
@@ -713,9 +790,7 @@ List all trusted peers and their connection status.
 
 **Source:** `meerkat-comms/src/mcp/tools.rs` -- `ListPeersInput`
 
----
-
-## Cargo Feature Gates
+## Cargo feature gates
 
 Tool availability depends on compile-time features in the `meerkat-tools` crate:
 
@@ -728,9 +803,3 @@ Tool availability depends on compile-time features in the `meerkat-tools` crate:
 The `memory_search` tool is gated by the `memory-store-session` feature on the `meerkat` facade crate (not `meerkat-tools`), since `MemorySearchDispatcher` lives in `meerkat-memory`.
 
 **Source:** `meerkat-tools/Cargo.toml`
-
----
-
-## CODE ISSUES FOUND
-
-No code issues were found during this audit. All tool names, parameter names, types, defaults, and feature gates are consistent across tool implementations, capability registrations, and factory wiring.

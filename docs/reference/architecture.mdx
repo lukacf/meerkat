@@ -1,22 +1,22 @@
-# Architecture Guide
+---
+title: "Architecture"
+description: "Internal architecture, design decisions, crate structure, agent loop, and extension points."
+icon: "sitemap"
+---
 
-This document explains Meerkat's internal architecture, design decisions, and extension points.
+Meerkat is designed as a minimal, composable agent harness. It provides the core execution loop for LLM-powered agents without opinions about prompts, tools, or output formatting.
 
-## Overview
+## Design philosophy
 
-Meerkat is designed as a **minimal, composable agent harness**. It provides the core execution loop for LLM-powered agents without opinions about prompts, tools, or output formatting.
+1. **Minimal** -- provides the core execution loop without opinions about prompts, tools, or output formatting
+2. **Composable** -- clean trait boundaries allow swapping LLM providers, storage backends, and tool dispatchers
+3. **No I/O in core** -- `meerkat-core` has no network or filesystem dependencies; all I/O is in satellite crates
+4. **Streaming-first** -- all LLM interactions use streaming for responsive user experiences
+5. **Budget-aware** -- built-in resource tracking for tokens, time, and tool calls
 
-### Design Philosophy
+## High-level architecture
 
-1. **Minimal** - Provides the core execution loop without opinions about prompts, tools, or output formatting
-2. **Composable** - Clean trait boundaries allow swapping LLM providers, storage backends, and tool dispatchers
-3. **No I/O in Core** - `meerkat-core` has no network or filesystem dependencies; all I/O is in satellite crates
-4. **Streaming-First** - All LLM interactions use streaming for responsive user experiences
-5. **Budget-Aware** - Built-in resource tracking for tokens, time, and tool calls
-
-### High-Level Architecture
-
-```
+```text
                                     +------------------+
                                     |     meerkat      |  <- Facade crate
                                     | (FactoryAgent-   |     FactoryAgentBuilder
@@ -42,13 +42,15 @@ Meerkat is designed as a **minimal, composable agent harness**. It provides the 
                              +---------------+
 ```
 
+<Note>
 **SessionService routing:** All four surfaces (CLI, REST, MCP Server, JSON-RPC) route through
 `SessionService` for the full session lifecycle. `AgentFactory::build_agent()` centralizes all
 agent construction. Zero `AgentBuilder::new()` calls in surface crates.
+</Note>
 
-### Detailed Component View
+### Detailed component view
 
-```
+```text
 +-----------------------------------------------------------------------------+
 |                              Access Patterns                                 |
 +----------+-----------+-------------+---------------+----------+-------------+
@@ -108,21 +110,21 @@ agent construction. Zero `AgentBuilder::new()` calls in surface crates.
               +-----------+
 ```
 
-## Crate Structure
+## Crate structure
 
 ### meerkat-core
 
 The heart of Meerkat. Contains:
 
-- **Agent**: The main execution engine
+- **Agent**: the main execution engine
 - **Types**: `Message`, `Session`, `ToolCall`, `ToolResult`, `Usage`, `ToolCallView`, etc.
 - **Trait contracts**: `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`
 - **Service types**: `SessionError`, `CreateSessionRequest`, `StartTurnRequest`, `SessionView`, `SessionInfo`, `SessionUsage`
-- **Budget**: Resource tracking and enforcement
-- **Retry**: Exponential backoff with jitter
-- **State Machine**: `LoopState` for agent lifecycle management
+- **Budget**: resource tracking and enforcement
+- **Retry**: exponential backoff with jitter
+- **State machine**: `LoopState` for agent lifecycle management
 - **Compaction**: `Compactor` trait, `CompactionConfig`, compaction flow wired into agent loop
-- **Sub-agents**: Fork and spawn operations
+- **Sub-agents**: fork and spawn operations
 - **Hook contracts**: typed hook points, decisions, patches, invocation/outcome envelopes
 
 ### meerkat-hooks
@@ -171,20 +173,20 @@ pub enum LlmEvent {
 
 Session persistence:
 
-- **JsonlStore**: Production storage using append-only JSONL files
+- **JsonlStore**: production storage using append-only JSONL files
 - **RedbSessionStore**: redb-backed storage (feature-gated by `session-store`)
-- **MemoryStore**: In-memory storage for testing
-- **SessionStore trait**: Implement for custom backends
+- **MemoryStore**: in-memory storage for testing
+- **SessionStore trait**: implement for custom backends
 
 ### meerkat-session
 
 Session service orchestration:
 
-- **EphemeralSessionService**: In-memory session lifecycle (always available)
-- **PersistentSessionService**: Durable sessions backed by `RedbEventStore` (feature: `session-store`)
-- **DefaultCompactor**: Context compaction implementation (feature: `session-compaction`)
-- **EventStore trait / RedbEventStore**: Append-only event log for sessions
-- **SessionProjector**: Materializes `.rkat/sessions/` files from events (derived, not canonical)
+- **EphemeralSessionService**: in-memory session lifecycle (always available)
+- **PersistentSessionService**: durable sessions backed by `RedbEventStore` (feature: `session-store`)
+- **DefaultCompactor**: context compaction implementation (feature: `session-compaction`)
+- **EventStore trait / RedbEventStore**: append-only event log for sessions
+- **SessionProjector**: materializes `.rkat/sessions/` files from events (derived, not canonical)
 
 Feature gates: `session-store`, `session-compaction`.
 
@@ -192,34 +194,34 @@ Feature gates: `session-store`, `session-compaction`.
 
 Semantic memory indexing:
 
-- **HnswMemoryStore**: Production memory store using hnsw_rs + redb (feature: `memory-store-session`)
-- **SimpleMemoryStore**: In-memory implementation for testing
+- **HnswMemoryStore**: production memory store using hnsw_rs + redb (feature: `memory-store-session`)
+- **SimpleMemoryStore**: in-memory implementation for testing
 - **MemoryStore trait** (defined in meerkat-core): indexing, retrieval, similarity search
 
 ### meerkat-tools
 
 Tool management:
 
-- **ToolRegistry**: Register and validate tool definitions
-- **ToolDispatcher**: Route tool calls with timeout handling
+- **ToolRegistry**: register and validate tool definitions
+- **ToolDispatcher**: route tool calls with timeout handling
 - **Schema validation**: JSON Schema validation of tool arguments
 
 ### meerkat-mcp
 
 MCP protocol client implementation:
 
-- **McpConnection**: Manages stdio connection to MCP server
-- **McpRouter**: Routes tool calls to appropriate MCP servers (implements `AgentToolDispatcher`)
-- **Protocol handling**: Initialize, tools/list, tools/call
+- **McpConnection**: manages stdio connection to MCP server
+- **McpRouter**: routes tool calls to appropriate MCP servers (implements `AgentToolDispatcher`)
+- **Protocol handling**: initialize, tools/list, tools/call
 
 ### meerkat-rpc
 
 JSON-RPC 2.0 stdio server for IDE and desktop app integration:
 
-- **SessionRuntime**: Stateful agent manager -- keeps agents alive between turns
+- **SessionRuntime**: stateful agent manager -- keeps agents alive between turns
 - **RpcServer**: JSONL transport multiplexing requests and notifications via `tokio::select!`
-- **MethodRouter**: Maps JSON-RPC methods to SessionRuntime/ConfigStore operations
-- **Handlers**: Typed param parsing and response construction for each method group
+- **MethodRouter**: maps JSON-RPC methods to SessionRuntime/ConfigStore operations
+- **Handlers**: typed param parsing and response construction for each method group
 
 Each session gets a dedicated tokio task with exclusive `Agent` ownership,
 enabling `cancel(&mut self)` without mutex. Commands flow through channels;
@@ -229,25 +231,39 @@ events stream back as JSON-RPC notifications.
 
 The main entry point. Re-exports types and provides:
 
-- **AgentFactory**: Centralized agent construction pipeline shared across all surfaces
-- **FactoryAgentBuilder**: Bridges `AgentFactory` into `SessionAgentBuilder` for `EphemeralSessionService`
-- **FactoryAgent**: Wraps `DynAgent` implementing `SessionAgent`
-- **build_ephemeral_service()**: Convenience constructor for `EphemeralSessionService<FactoryAgentBuilder>`
-- **AgentBuildConfig**: Per-request configuration (model, system prompt, tools, `override_builtins`, `override_shell`)
+- **AgentFactory**: centralized agent construction pipeline shared across all surfaces
+- **FactoryAgentBuilder**: bridges `AgentFactory` into `SessionAgentBuilder` for `EphemeralSessionService`
+- **FactoryAgent**: wraps `DynAgent` implementing `SessionAgent`
+- **build_ephemeral_service()**: convenience constructor for `EphemeralSessionService<FactoryAgentBuilder>`
+- **AgentBuildConfig**: per-request configuration (model, system prompt, tools, `override_builtins`, `override_shell`)
 
+<Accordion title="FactoryAgentBuilder pattern">
 The `FactoryAgentBuilder` pattern works as follows:
 
-1. Surface crate stages an `AgentBuildConfig` into the `build_config_slot`
-2. Surface calls `service.create_session(req)`
-3. `EphemeralSessionService` calls `builder.build_agent(req, event_tx)`
-4. `FactoryAgentBuilder` checks the slot, picks up the staged config, delegates to `AgentFactory::build_agent()`
-5. If no config was staged, a minimal config is built from `CreateSessionRequest` fields
+<Steps>
+  <Step title="Stage config">
+    Surface crate stages an `AgentBuildConfig` into the `build_config_slot`.
+  </Step>
+  <Step title="Create session">
+    Surface calls `service.create_session(req)`.
+  </Step>
+  <Step title="Build agent">
+    `EphemeralSessionService` calls `builder.build_agent(req, event_tx)`.
+  </Step>
+  <Step title="Delegate to factory">
+    `FactoryAgentBuilder` checks the slot, picks up the staged config, delegates to `AgentFactory::build_agent()`.
+  </Step>
+  <Step title="Fallback">
+    If no config was staged, a minimal config is built from `CreateSessionRequest` fields.
+  </Step>
+</Steps>
+</Accordion>
 
-## Agent Loop
+## Agent loop
 
 The agent executes a state machine loop defined by `LoopState` in `meerkat-core/src/state.rs`:
 
-```
+```text
                               +------------------+
                               |   CallingLlm     |<-----------+
                               | (waiting for LLM)|            |
@@ -281,11 +297,11 @@ The agent executes a state machine loop defined by `LoopState` in `meerkat-core/
 | `DrainingEvents` | Processing buffered operation events at turn boundary |
 | `Cancelling` | Gracefully stopping after cancel signal or budget exhaustion |
 | `ErrorRecovery` | Attempting recovery from transient LLM error |
-| `Completed` | Terminal state - agent has finished (success or failure) |
+| `Completed` | Terminal state -- agent has finished (success or failure) |
 
-### Valid State Transitions
+### Valid state transitions
 
-```
+```text
 CallingLlm     -> WaitingForOps   (ops pending after tool dispatch)
 CallingLlm     -> DrainingEvents  (tool_use stop reason)
 CallingLlm     -> Completed       (end_turn and no ops)
@@ -308,7 +324,7 @@ ErrorRecovery  -> Cancelling      (cancel during recovery)
 Completed      -> (no transitions, terminal state)
 ```
 
-### Turn Boundaries
+### Turn boundaries
 
 Turn boundaries are critical moments where:
 
@@ -320,7 +336,8 @@ Turn boundaries are critical moments where:
 6. Session is checkpointed
 7. `turn_boundary` hooks run before the next state transition
 
-Events that happen at turn boundaries:
+Events emitted at turn boundaries:
+
 - `TurnCompleted`
 - `ToolResultReceived`
 - `CheckpointSaved`
@@ -329,7 +346,7 @@ Events that happen at turn boundaries:
 - `HookRewriteApplied`
 - `HookPatchPublished`
 
-## Hook Insertion Points
+## Hook insertion points
 
 The core loop executes hooks at these points:
 
@@ -345,39 +362,56 @@ The core loop executes hooks at these points:
 Synchronous (`foreground`) patches are applied in-loop.
 Asynchronous (`background`) post-hook rewrites are event-only (`HookPatchPublished`) and do not retroactively mutate persisted session history.
 
-### Hooks Pipeline Architecture
+### Hook pipeline architecture
 
 The `DefaultHookEngine` (in `meerkat-hooks/src/lib.rs`) processes hooks in a two-phase pipeline:
 
-1. **Foreground phase** -- hooks sorted by `(priority ASC, registration_index ASC)` execute sequentially. Each hook receives a `HookInvocation` containing the hook point, session ID, turn number, and point-specific context (LLM request, tool call, etc.). Hooks return a `RuntimeHookResponse` with an optional `HookDecision` (Allow/Deny) and optional `HookPatch` list. A `Deny` decision short-circuits remaining hooks immediately.
-
-2. **Background phase** -- if no deny occurred, background hooks are spawned as independent tokio tasks bounded by a `Semaphore` (`background_max_concurrency`). Pre-hooks in background mode are forced to observe-only (patches and deny decisions are dropped). Post-hooks in background mode publish `HookPatchEnvelope` records that are drained on the next `execute()` call.
+<Steps>
+  <Step title="Foreground phase">
+    Hooks sorted by `(priority ASC, registration_index ASC)` execute sequentially. Each hook receives a `HookInvocation` containing the hook point, session ID, turn number, and point-specific context (LLM request, tool call, etc.). Hooks return a `RuntimeHookResponse` with an optional `HookDecision` (Allow/Deny) and optional `HookPatch` list. A `Deny` decision short-circuits remaining hooks immediately.
+  </Step>
+  <Step title="Background phase">
+    If no deny occurred, background hooks are spawned as independent tokio tasks bounded by a `Semaphore` (`background_max_concurrency`). Pre-hooks in background mode are forced to observe-only (patches and deny decisions are dropped). Post-hooks in background mode publish `HookPatchEnvelope` records that are drained on the next `execute()` call.
+  </Step>
+</Steps>
 
 Three runtime adapters invoke the actual hook logic:
-- **In-process**: calls a registered `InProcessHookHandler` (Rust closure) directly.
-- **Command**: spawns an external process, writes `HookInvocation` as JSON to stdin, reads `RuntimeHookResponse` from stdout. Stream sizes are bounded by `payload_max_bytes`.
-- **HTTP**: POSTs `HookInvocation` JSON to a remote endpoint and parses the response. Response body is bounded by `payload_max_bytes`.
 
+| Adapter | Mechanism |
+|---------|-----------|
+| **In-process** | Calls a registered `InProcessHookHandler` (Rust closure) directly |
+| **Command** | Spawns an external process, writes `HookInvocation` as JSON to stdin, reads `RuntimeHookResponse` from stdout. Stream sizes bounded by `payload_max_bytes` |
+| **HTTP** | POSTs `HookInvocation` JSON to a remote endpoint and parses the response. Response body bounded by `payload_max_bytes` |
+
+<Note>
 Run-scoped overrides (`HookRunOverrides`) allow callers to disable specific hooks or inject additional entries for a single run without mutating the base configuration.
+</Note>
 
-### Sub-Agent Task Management
+### Sub-agent task management
 
 Sub-agents are managed through the `SubAgentManager` (in `meerkat-core`) and the spawn/fork tools (in `meerkat-tools/src/builtin/sub_agent/`).
 
-**Spawn flow** (`agent_spawn`):
-1. The parent agent calls `agent_spawn` with a prompt, optional provider/model, tool access policy, and budget.
-2. `AgentSpawnTool` validates concurrency limits, nesting depth, provider/model against the allowlist, and prompt non-emptiness.
-3. A `FilteredDispatcher` wraps the parent's tool dispatcher if the child uses an `AllowList` or `DenyList` policy.
-4. An LLM client is created via `LlmClientFactory` for the resolved provider.
-5. A fresh session is created (no history inheritance). If comms is enabled, the child's prompt is enriched with parent communication context.
-6. `spawn_sub_agent_dyn()` registers the child in `SubAgentManager` and starts execution in a background tokio task.
-7. The parent receives the child's `OperationId` and name for tracking via `agent_status`.
+<Tabs>
+  <Tab title="Spawn flow">
+    The `agent_spawn` flow:
 
-**Fork flow** (`agent_fork`) creates branches with full conversation history, splitting the parent's budget according to `ForkBudgetPolicy`.
+    1. The parent agent calls `agent_spawn` with a prompt, optional provider/model, tool access policy, and budget.
+    2. `AgentSpawnTool` validates concurrency limits, nesting depth, provider/model against the allowlist, and prompt non-emptiness.
+    3. A `FilteredDispatcher` wraps the parent's tool dispatcher if the child uses an `AllowList` or `DenyList` policy.
+    4. An LLM client is created via `LlmClientFactory` for the resolved provider.
+    5. A fresh session is created (no history inheritance). If comms is enabled, the child's prompt is enriched with parent communication context.
+    6. `spawn_sub_agent_dyn()` registers the child in `SubAgentManager` and starts execution in a background tokio task.
+    7. The parent receives the child's `OperationId` and name for tracking via `agent_status`.
+  </Tab>
+  <Tab title="Fork flow">
+    The `agent_fork` flow creates branches with full conversation history, splitting the parent's budget according to `ForkBudgetPolicy`.
+  </Tab>
+  <Tab title="Lifecycle">
+    Children run independently. The parent polls `agent_status` to check completion. `agent_cancel` sends a cancellation signal. `SubAgentManager` enforces `ConcurrencyLimits` (max concurrent, max depth, max total).
+  </Tab>
+</Tabs>
 
-**Lifecycle**: children run independently. The parent polls `agent_status` to check completion. `agent_cancel` sends a cancellation signal. `SubAgentManager` enforces `ConcurrencyLimits` (max concurrent, max depth, max total).
-
-### Comms Transport Design
+### Comms transport design
 
 The `meerkat-comms` crate provides inter-agent communication with a layered architecture:
 
@@ -386,17 +420,20 @@ The `meerkat-comms` crate provides inter-agent communication with a layered arch
 **Trust layer** (`trust.rs`): `TrustedPeers` maintains a map of known peers (name, public key, address). Only messages from trusted peers are accepted.
 
 **Transport layer** (`transport/`): Three backends behind `PeerAddr`:
-- **UDS** (Unix Domain Sockets) -- local inter-process, lowest latency.
-- **TCP** -- cross-host communication.
-- **Inproc** (`InprocRegistry`) -- in-process channels for sub-agents in the same process. Uses a global registry; the sender looks up the peer by name, verifies the keypair signature, and delivers directly to the peer's inbox.
+
+| Backend | Use case |
+|---------|----------|
+| **UDS** (Unix Domain Sockets) | Local inter-process, lowest latency |
+| **TCP** | Cross-host communication |
+| **Inproc** (`InprocRegistry`) | In-process channels for sub-agents in the same process. Uses a global registry; the sender looks up the peer by name, verifies the keypair signature, and delivers directly to the peer's inbox |
 
 **Wire format**: `Envelope` containing `{id, from, to, kind, sig}`. `MessageKind` variants: `Message` (fire-and-forget text), `Request`/`Response` (intent + params / in_reply_to + status + result), `Ack` (delivery confirmation). The `Router` handles serialization via `TransportCodec` (length-prefixed framing) and waits for ACK on non-response messages with a configurable timeout.
 
 **Agent integration**: `CommsToolDispatcher` wraps the base tool dispatcher via `wrap_with_comms()`, overlaying comms tools (`comms_send`, `comms_request`, `comms_response`, `comms_list_peers`) without modifying the `CompositeDispatcher`. The `Inbox` is drained at turn boundaries (step 8 in the agent loop), injecting received messages into the session.
 
-### Data Flow Through Agent Loop
+### Data flow through agent loop
 
-```
+```text
 User Input
     |
     v
@@ -448,7 +485,7 @@ User Input
     +-------------------------------+
 ```
 
-## Type System
+## Type system
 
 ### Messages
 
@@ -468,7 +505,7 @@ pub struct AssistantMessage {
 }
 ```
 
-### Stop Reasons
+### Stop reasons
 
 ```rust
 pub enum StopReason {
@@ -497,9 +534,9 @@ pub enum AgentEvent {
 }
 ```
 
-## Extension Points
+## Extension points
 
-### Custom LLM Provider
+### Custom LLM provider
 
 Implement `AgentLlmClient` (defined in `meerkat-core/src/agent.rs`):
 
@@ -528,8 +565,7 @@ pub trait AgentLlmClient: Send + Sync {
 }
 ```
 
-**Example Implementation:**
-
+<Accordion title="Example implementation">
 ```rust
 use meerkat_core::{AgentLlmClient, AgentError, LlmStreamResult, Message, ToolDef};
 use serde_json::Value;
@@ -559,8 +595,9 @@ impl AgentLlmClient for CustomClient {
     }
 }
 ```
+</Accordion>
 
-### Custom Tool Dispatcher
+### Custom tool dispatcher
 
 Implement `AgentToolDispatcher` (defined in `meerkat-core/src/agent.rs`):
 
@@ -578,8 +615,7 @@ pub trait AgentToolDispatcher: Send + Sync {
 `ToolCallView` is a zero-allocation borrowed view: `{ id: &str, name: &str, args: &RawValue }`.
 Use `call.parse_args::<T>()` to deserialize arguments into a concrete type.
 
-**Example Implementation:**
-
+<Accordion title="Example implementation">
 ```rust
 use meerkat_core::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
 use meerkat_core::error::ToolError;
@@ -620,8 +656,9 @@ impl AgentToolDispatcher for CustomDispatcher {
     }
 }
 ```
+</Accordion>
 
-### Custom Session Store
+### Custom session store
 
 Implement `AgentSessionStore` (defined in `meerkat-core/src/agent.rs`):
 
@@ -636,8 +673,7 @@ pub trait AgentSessionStore: Send + Sync {
 }
 ```
 
-**Example Implementation:**
-
+<Accordion title="Example implementation">
 ```rust
 use meerkat_core::{AgentSessionStore, AgentError, Session};
 
@@ -679,8 +715,9 @@ impl AgentSessionStore for DatabaseStore {
     }
 }
 ```
+</Accordion>
 
-### MCP Integration
+### MCP integration
 
 Add MCP servers for tool discovery using `McpRouter` (defined in `meerkat-mcp/src/router.rs`):
 
@@ -708,13 +745,13 @@ let result = router.call_tool("tool_name", &serde_json::json!({"arg": "value"}))
 router.shutdown().await;
 ```
 
-## Sub-Agents
+## Sub-agents
 
-Meerkat supports spawning child agents for parallel work:
+Meerkat supports spawning child agents for parallel work.
 
 ### Fork
 
-Creates a child with **full conversation history**:
+Creates a child with full conversation history:
 
 ```rust
 let branches = vec![
@@ -733,7 +770,7 @@ agent.fork(branches).await?;
 
 ### Spawn
 
-Creates a child with **minimal context** per `ContextStrategy`:
+Creates a child with minimal context per `ContextStrategy`:
 
 ```rust
 let spec = SpawnSpec {
@@ -747,7 +784,7 @@ let spec = SpawnSpec {
 agent.spawn(spec).await?;
 ```
 
-### Context Strategies
+### Context strategies
 
 | Strategy | Description |
 |----------|-------------|
@@ -756,9 +793,9 @@ agent.spawn(spec).await?;
 | `Summary { max_tokens }` | Fit messages within token budget |
 | `Custom { messages }` | Provide explicit message list |
 
-## Error Handling
+## Error handling
 
-### LLM Errors
+### LLM errors
 
 ```rust
 pub enum LlmError {
@@ -790,7 +827,7 @@ impl LlmError {
 }
 ```
 
-### Retry Policy
+### Retry policy
 
 Retryable errors trigger exponential backoff:
 
@@ -802,11 +839,11 @@ pub struct RetryPolicy {
     pub multiplier: f64,
 }
 
-// Delay calculation with ±10% jitter
-delay = min(initial_delay * multiplier^attempt, max_delay) * random(0.9, 1.1)
+// Delay calculation with +/-10% jitter
+// delay = min(initial_delay * multiplier^attempt, max_delay) * random(0.9, 1.1)
 ```
 
-## Budget Enforcement
+## Budget enforcement
 
 Budget tracks three dimensions:
 
@@ -819,12 +856,13 @@ pub struct BudgetLimits {
 ```
 
 When a limit is exceeded:
+
 1. Current turn completes
 2. `BudgetType::*Exhausted` event is emitted
 3. Agent returns with partial results
 4. Exit code 2 indicates budget exhaustion
 
-## Performance Considerations
+## Performance considerations
 
 ### Streaming
 
@@ -842,7 +880,7 @@ while let Some(event) = stream.next().await {
 }
 ```
 
-### Parallel Tool Execution
+### Parallel tool execution
 
 When the LLM requests multiple tools, they execute in parallel:
 
@@ -857,7 +895,7 @@ let futures = tool_calls.iter().map(|tc| {
 let results = futures::future::join_all(futures).await;
 ```
 
-### Session Checkpointing
+### Session checkpointing
 
 Sessions are checkpointed after each turn to enable resumption:
 
@@ -867,19 +905,21 @@ store.save(&session).await?;
 emit(AgentEvent::CheckpointSaved { session_id });
 ```
 
-## Security Model
+## Security model
 
-1. **API Key Isolation**: Keys are passed explicitly, never stored
-2. **Tool Sandboxing**: Tools execute in MCP server processes
-3. **Input Validation**: JSON Schema validation for tool arguments
-4. **No Arbitrary Execution**: Meerkat doesn't execute code directly
-5. **Sub-agent Isolation**: Sub-agents cannot have comms enabled (no network exposure)
+1. **API key isolation**: keys are passed explicitly, never stored
+2. **Tool sandboxing**: tools execute in MCP server processes
+3. **Input validation**: JSON Schema validation for tool arguments
+4. **No arbitrary execution**: Meerkat does not execute code directly
+5. **Sub-agent isolation**: sub-agents cannot have comms enabled (no network exposure)
 
-See [DESIGN.md §15](../DESIGN.md#15-security-considerations) for full security considerations.
+<Warning>
+See the design document for full security considerations.
+</Warning>
 
-## Crate Dependencies
+## Crate dependencies
 
-```
+```text
 +----------------+
 |  meerkat-cli   |
 +-------+--------+
@@ -909,7 +949,7 @@ See [DESIGN.md §15](../DESIGN.md#15-security-considerations) for full security 
                +---------------+
 ```
 
-**Crate Ownership:**
+### Crate ownership
 
 | Owner | Owns |
 |-------|------|
@@ -919,18 +959,21 @@ See [DESIGN.md §15](../DESIGN.md#15-security-considerations) for full security 
 | `meerkat-memory` | `HnswMemoryStore`, `SimpleMemoryStore` |
 | `meerkat` (facade) | Feature wiring, re-exports, `FactoryAgentBuilder`, `FactoryAgent`, `build_ephemeral_service` |
 
-**Dependency Rules:**
+### Dependency rules
+
 1. `meerkat-core` depends on nothing in the workspace (only external crates)
 2. All other crates depend on `meerkat-core` for types and traits
 3. `meerkat-tools` depends on `meerkat-mcp` for MCP routing
 4. `meerkat` (facade) re-exports from all crates and provides the `FactoryAgentBuilder`
 5. `meerkat-cli` is the top-level binary crate
 
+<Note>
 **`.rkat/` as derived projection:** `.rkat/sessions/` files are materialized by `SessionProjector`
 from the event store. They are derived output, not canonical state. Deleting them and replaying
 from the event store produces identical content.
+</Note>
 
-**Key External Dependencies:**
+### Key external dependencies
 
 | Dependency | Purpose |
 |------------|---------|
@@ -944,23 +987,23 @@ from the event store produces identical content.
 | `thiserror` | Error type derivation |
 | `tracing` | Structured logging |
 
-## Configuration System
+## Configuration system
 
 Configuration supports layered loading with precedence:
 
-```
+```text
 defaults < user config < project config < CLI args
 ```
 
-**Configuration Files:**
+**Configuration files:**
 - User: `~/.config/meerkat/config.toml`
 - Project: `.rkat/config.toml` (searched up from cwd)
 - Local: `rkat.toml` (current directory)
 
-**Environment Variables (secrets only):**
-- `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` - Provider keys
+**Environment variables (secrets only):**
+- `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` -- provider keys
 
-**Example Config (TOML):**
+**Example config (TOML):**
 
 ```toml
 [agent]
@@ -984,11 +1027,11 @@ backend = "jsonl"
 directory = "~/.local/share/rkat/sessions"
 ```
 
-## Budget Pool for Sub-Agents
+## Budget pool for sub-agents
 
 The budget system supports allocation to sub-agents:
 
-```
+```text
 +------------------+
 |   BudgetPool     |
 |  (1000 tokens)   |
@@ -1013,12 +1056,15 @@ The budget system supports allocation to sub-agents:
    Available: 450
 ```
 
-**Fork Budget Policies:**
-- `EqualSplit` - Divide remaining budget equally among branches
-- `Proportional(weights)` - Divide according to weights
-- `Fixed(tokens)` - Fixed allocation per branch
+**Fork budget policies:**
 
-## Session Management
+| Policy | Behavior |
+|--------|----------|
+| `EqualSplit` | Divide remaining budget equally among branches |
+| `Proportional(weights)` | Divide according to weights |
+| `Fixed(tokens)` | Fixed allocation per branch |
+
+## Session management
 
 A `Session` maintains the complete conversation state (defined in `meerkat-core/src/session.rs`):
 
@@ -1033,17 +1079,23 @@ struct Session {
 }
 ```
 
-**Session Features:**
+**Session features:**
 - Fork sessions at any message index for branching conversations
 - Automatic token counting from assistant message usage
 - Metadata for custom application state
 - Serializable for persistence
 - Version field for future migrations
 
-**Session Operations:**
-- `push(message)` - Add a message to the session
-- `fork_at(index)` - Fork at specific message index
-- `fork()` - Fork with full history
-- `set_system_prompt(prompt)` - Set or replace system prompt
-- `total_tokens()` - Calculate total tokens used
-- `set_metadata(key, value)` - Store custom metadata
+**Session operations:**
+- `push(message)` -- add a message to the session
+- `fork_at(index)` -- fork at specific message index
+- `fork()` -- fork with full history
+- `set_system_prompt(prompt)` -- set or replace system prompt
+- `total_tokens()` -- calculate total tokens used
+- `set_metadata(key, value)` -- store custom metadata
+
+## See also
+
+- [Session contracts](/reference/session-contracts) -- concurrency, durability, and compaction semantics
+- [Capability matrix](/reference/capability-matrix) -- build profiles, error codes, feature behavior
+- [API reference](/reference/api-reference) -- public types, traits, and functions

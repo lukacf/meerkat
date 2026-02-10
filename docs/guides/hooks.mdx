@@ -1,8 +1,12 @@
-# Hooks
+---
+title: "Hooks"
+description: "Typed extension points within the agent loop for observation, guardrails, and content rewriting"
+icon: "webhook"
+---
 
 Meerkat's hook system provides typed extension points within the agent loop for observation, guardrails, and content rewriting. Hooks fire at deterministic points during agent execution and support three runtimes: in-process, command (subprocess), and HTTP.
 
-## Hook Points
+## Hook points
 
 The `HookPoint` enum defines 8 extension points (from `meerkat-core/src/hooks.rs`):
 
@@ -31,7 +35,7 @@ The `HookCapability` enum declares what a hook is allowed to do:
 
 Default failure policies are determined by `default_failure_policy()` in `meerkat-core/src/hooks.rs`. They can be overridden per-hook via the `failure_policy` field.
 
-## Execution Modes
+## Execution modes
 
 The `HookExecutionMode` enum controls whether a hook blocks the agent loop:
 
@@ -44,13 +48,17 @@ The `HookExecutionMode` enum controls whether a hook blocks the agent loop:
 
 Background hooks have two safety constraints enforced at configuration validation time:
 
-1. **Pre-point background hooks must be observe-only.** A background hook on a `is_pre()` point with any capability other than `Observe` is rejected with `HookEngineError::InvalidConfiguration`.
+<Warning>
+**Pre-point background hooks must be observe-only.** A background hook on a `is_pre()` point with any capability other than `Observe` is rejected with `HookEngineError::InvalidConfiguration`.
+</Warning>
 
-2. **Background hooks must use `FailOpen` policy.** A background hook with an effective policy of `FailClosed` is rejected with `HookEngineError::InvalidConfiguration`.
+<Warning>
+**Background hooks must use `FailOpen` policy.** A background hook with an effective policy of `FailClosed` is rejected with `HookEngineError::InvalidConfiguration`.
+</Warning>
 
 Background hooks on post-points publish patches via `HookPatchEnvelope` (containing `revision`, `hook_id`, `point`, `patch`, `published_at`). These envelopes are drained and included in the `HookExecutionReport` on subsequent `execute()` calls.
 
-## Failure Policies
+## Failure policies
 
 The `HookFailurePolicy` enum determines behavior when a hook times out or encounters a runtime error:
 
@@ -107,51 +115,51 @@ The `HookPatch` enum defines typed rewrite intents. Each variant is valid only a
 
 The `DefaultHookEngine` (in `meerkat-hooks/src/lib.rs`) supports three runtimes, selected by the `kind` field of `HookRuntimeConfig`:
 
-### `in_process`
+<Tabs>
+  <Tab title="In-process">
+    Calls a registered Rust closure. Config:
 
-Calls a registered Rust closure. Config:
+    ```json
+    { "type": "in_process", "name": "my-handler" }
+    ```
 
-```json
-{ "type": "in_process", "name": "my-handler" }
-```
+    The handler is registered at engine construction time via `DefaultHookEngine::with_in_process_handler()` or `register_in_process_handler()`. The handler type is:
 
-The handler is registered at engine construction time via `DefaultHookEngine::with_in_process_handler()` or `register_in_process_handler()`. The handler type is:
+    ```rust
+    type InProcessHookHandler = Arc<dyn Fn(HookInvocation) -> HandlerFuture + Send + Sync>;
+    ```
+  </Tab>
+  <Tab title="Command (subprocess)">
+    Spawns a subprocess. The `HookInvocation` is serialized as JSON to stdin; the process must write a `RuntimeHookResponse` JSON object to stdout. Config:
 
-```rust
-type InProcessHookHandler = Arc<dyn Fn(HookInvocation) -> HandlerFuture + Send + Sync>;
-```
+    ```json
+    {
+      "type": "command",
+      "command": "python3",
+      "args": ["hooks/safety_check.py"],
+      "env": { "LOG_LEVEL": "debug" }
+    }
+    ```
 
-### `command`
+    The subprocess payload size is capped at `payload_max_bytes` (default 128 KiB). Non-zero exit codes produce `HookEngineError::ExecutionFailed`.
+  </Tab>
+  <Tab title="HTTP">
+    Sends a POST request to a URL. The `HookInvocation` is the JSON body; the response must be a `RuntimeHookResponse` JSON object. Config:
 
-Spawns a subprocess. The `HookInvocation` is serialized as JSON to stdin; the process must write a `RuntimeHookResponse` JSON object to stdout. Config:
+    ```json
+    {
+      "type": "http",
+      "url": "https://hooks.example.com/safety",
+      "method": "POST",
+      "headers": { "Authorization": "Bearer $TOKEN" }
+    }
+    ```
 
-```json
-{
-  "type": "command",
-  "command": "python3",
-  "args": ["hooks/safety_check.py"],
-  "env": { "LOG_LEVEL": "debug" }
-}
-```
+    The `method` defaults to `"POST"` if not specified. Response body size is capped at `payload_max_bytes`.
+  </Tab>
+</Tabs>
 
-The subprocess payload size is capped at `payload_max_bytes` (default 128 KiB). Non-zero exit codes produce `HookEngineError::ExecutionFailed`.
-
-### `http`
-
-Sends a POST request to a URL. The `HookInvocation` is the JSON body; the response must be a `RuntimeHookResponse` JSON object. Config:
-
-```json
-{
-  "type": "http",
-  "url": "https://hooks.example.com/safety",
-  "method": "POST",
-  "headers": { "Authorization": "Bearer $TOKEN" }
-}
-```
-
-The `method` defaults to `"POST"` if not specified. Response body size is capped at `payload_max_bytes`.
-
-## Runtime Hook Response
+## Runtime hook response
 
 All three runtimes return the same `RuntimeHookResponse` structure:
 
@@ -166,7 +174,7 @@ All three runtimes return the same `RuntimeHookResponse` structure:
 
 Both `decision` and `patches` are optional. An empty response `{}` is equivalent to "no opinion".
 
-## Invocation Payload
+## Invocation payload
 
 Hooks receive a `HookInvocation` struct containing contextual data. Fields are populated based on the hook point:
 
@@ -182,23 +190,34 @@ Hooks receive a `HookInvocation` struct containing contextual data. Fields are p
 | `tool_call` | `Option<HookToolCall>` | `PreToolExecution` |
 | `tool_result` | `Option<HookToolResult>` | `PostToolExecution` |
 
-### Supporting types
-
+<Accordion title="Supporting types">
 - **`HookLlmRequest`**: `max_tokens`, `temperature`, `provider_params`, `message_count`
 - **`HookLlmResponse`**: `assistant_text`, `tool_call_names`, `stop_reason`, `usage`
 - **`HookToolCall`**: `tool_use_id`, `name`, `args`
 - **`HookToolResult`**: `tool_use_id`, `name`, `content`, `is_error`
+</Accordion>
 
-## Priority Ordering and Deny Short-Circuiting
+## Priority ordering and deny short-circuiting
 
 Foreground hooks are sorted by `priority` (ascending), then by `registration_index` (ascending, for determinism when priorities are equal). Lower numeric priority values run first.
 
 When a foreground hook returns `Deny`:
-1. The denial is recorded as the merged decision.
-2. **All remaining foreground hooks are skipped** (short-circuit).
-3. **All background hooks are skipped** (they only fire when no foreground `Deny` occurred).
 
-This means a priority-1 guardrail that denies will prevent a priority-100 observer from running.
+<Steps>
+  <Step title="Record denial">
+    The denial is recorded as the merged decision.
+  </Step>
+  <Step title="Skip remaining foreground hooks">
+    All remaining foreground hooks are skipped (short-circuit).
+  </Step>
+  <Step title="Skip background hooks">
+    All background hooks are skipped (they only fire when no foreground `Deny` occurred).
+  </Step>
+</Steps>
+
+<Note>
+A priority-1 guardrail that denies will prevent a priority-100 observer from running.
+</Note>
 
 ## Configuration
 
@@ -246,7 +265,7 @@ args = ["hooks/safety_check.py"]
 
 Hook entries from global config (`~/.rkat/config.toml`) and project config (`.rkat/config.toml`) are combined additively via `HooksConfig::append_entries_from()`. Global entries load first, then project entries are appended after them.
 
-## Per-Run Overrides
+## Per-run overrides
 
 The `HookRunOverrides` struct allows per-request hook customization:
 
@@ -259,30 +278,31 @@ pub struct HookRunOverrides {
 
 Disabled hooks are removed from the effective entry list. Override entries are appended after the filtered base entries. All resulting entries are re-validated.
 
-### CLI usage
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Inline JSON
+    rkat run "prompt" --hooks-override-json '{"disable":["safety-check"]}'
 
-```bash
-# Inline JSON
-rkat run "prompt" --hooks-override-json '{"disable":["safety-check"]}'
+    # From file
+    rkat run "prompt" --hooks-override-file overrides.json
+    ```
+  </Tab>
+  <Tab title="RPC / REST / MCP">
+    Hook overrides are passed via `HookParams`:
 
-# From file
-rkat run "prompt" --hooks-override-file overrides.json
-```
+    ```json
+    {
+      "hooks_override": {
+        "disable": ["safety-check"],
+        "entries": []
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
 
-### Wire format (RPC/REST/MCP)
-
-Hook overrides are passed via `HookParams`:
-
-```json
-{
-  "hooks_override": {
-    "disable": ["safety-check"],
-    "entries": []
-  }
-}
-```
-
-## Agent Events
+## Agent events
 
 The hook engine emits `AgentEvent` variants during execution (from `meerkat-core/src/agent/hook_impl.rs`):
 
@@ -294,7 +314,7 @@ The hook engine emits `AgentEvent` variants during execution (from `meerkat-core
 | `HookDenied` | A hook returns a `Deny` decision |
 | `HookPatchPublished` | A background hook publishes a patch envelope |
 
-## SDK Usage
+## SDK usage
 
 ### Registering an in-process hook
 
@@ -341,7 +361,3 @@ let overrides = HookRunOverrides {
 
 // Pass via AgentBuildConfig.hooks_override
 ```
-
-## CODE ISSUES FOUND
-
-1. The embedded `hook-authoring` SKILL.md (registered in `meerkat-hooks/src/lib.rs`) describes "7 hook points" in its description field, but the actual `HookPoint` enum has 8 variants. The SKILL.md body also references non-existent hook point names (`PreTurnStart`, `PostTurnEnd`, `PreSessionCreate`) that do not match the actual enum variants.

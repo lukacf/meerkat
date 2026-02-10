@@ -1,0 +1,94 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Meerkat",
+  "description": "A modular, high-performance agent harness built in Rust",
+  "theme": "maple",
+  "colors": {
+    "primary": "#D4882B",
+    "light": "#E8A84C",
+    "dark": "#B5711E"
+  },
+  "logo": {
+    "light": "/logo.png",
+    "dark": "/logo.png"
+  },
+  "navbar": {
+    "links": [
+      {
+        "type": "github",
+        "href": "https://github.com/lukacf/meerkat"
+      }
+    ]
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting started",
+            "pages": ["introduction", "configuration", "examples"]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/hooks",
+              "guides/skills",
+              "guides/structured-output",
+              "guides/memory",
+              "guides/sub-agents",
+              "guides/comms"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "SDKs",
+        "groups": [
+          {
+            "group": "SDKs",
+            "pages": ["SDK", "sdks/python", "sdks/typescript"]
+          }
+        ]
+      },
+      {
+        "tab": "CLI",
+        "groups": [
+          {
+            "group": "CLI",
+            "pages": ["CLI"]
+          }
+        ]
+      },
+      {
+        "tab": "Surfaces",
+        "groups": [
+          {
+            "group": "API surfaces",
+            "pages": ["surfaces/rest", "surfaces/rpc", "surfaces/mcp"]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/api-reference",
+              "reference/builtin-tools",
+              "reference/architecture",
+              "reference/capability-matrix",
+              "reference/session-contracts"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/lukacf/meerkat"
+    }
+  }
+}

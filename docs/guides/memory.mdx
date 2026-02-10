@@ -1,4 +1,8 @@
-# Memory & Compaction
+---
+title: "Memory and compaction"
+description: "Automatic context compaction and semantic memory for long-running conversations"
+icon: "brain"
+---
 
 Meerkat provides two complementary systems for managing long-running conversations:
 
@@ -7,7 +11,7 @@ Meerkat provides two complementary systems for managing long-running conversatio
 
 Together they allow agents to maintain coherent multi-turn sessions that exceed any single model's context limit.
 
-## Feature Flags
+## Feature flags
 
 Both systems require compile-time features and per-request enablement.
 
@@ -17,7 +21,9 @@ Both systems require compile-time features and per-request enablement.
 | Memory store backend | `memory-store` | `meerkat-store/memory` backend |
 | Memory + compaction wiring | `memory-store-session` | `HnswMemoryStore`, `MemorySearchDispatcher`, agent loop integration |
 
-The CLI's default features include `sub-agents` and `skills` but **not** `session-compaction` or `memory-store`. To enable them:
+<Note>
+The CLI's default features include `sub-agents` and `skills` but **not** `session-compaction` or `memory-store`. You must enable them explicitly.
+</Note>
 
 ```bash
 cargo build -p meerkat-cli --features session-compaction,memory-store
@@ -46,36 +52,55 @@ Defined in `meerkat-core/src/compact.rs`. Controls when and how compaction runs.
 | `max_summary_tokens` | `u32` | `4096` | Maximum tokens the LLM may produce for the compaction summary. |
 | `min_turns_between_compactions` | `u32` | `3` | Minimum turns that must elapse between consecutive compactions (loop guard to prevent runaway compaction). |
 
-## How Compaction Triggers
+## How compaction triggers
 
 Compaction is checked at every turn boundary, just before the `CallingLlm` state in the agent loop (`meerkat-core/src/agent/state.rs`).
 
 The decision flow:
 
-1. **Never on turn 0** -- the first turn always skips compaction.
-2. **Loop guard** -- if compaction occurred at turn N, no compaction until turn N + `min_turns_between_compactions`.
-3. **Dual threshold** -- compaction triggers if EITHER:
-   - `last_input_tokens >= auto_compact_threshold` (input tokens from the last LLM response), OR
-   - `estimated_history_tokens >= auto_compact_threshold` (JSON bytes of all messages / 4).
+<Steps>
+  <Step title="Skip turn 0">
+    The first turn always skips compaction.
+  </Step>
+  <Step title="Loop guard check">
+    If compaction occurred at turn N, no compaction until turn N + `min_turns_between_compactions`.
+  </Step>
+  <Step title="Dual threshold evaluation">
+    Compaction triggers if EITHER:
+    - `last_input_tokens >= auto_compact_threshold` (input tokens from the last LLM response), OR
+    - `estimated_history_tokens >= auto_compact_threshold` (JSON bytes of all messages / 4).
+  </Step>
+</Steps>
 
-## What Happens During Compaction
+## What happens during compaction
 
 When compaction triggers (`meerkat-core/src/agent/compact.rs`):
 
-1. **CompactionStarted event** is emitted with input/estimated token counts and message count.
-2. The current conversation history plus a **compaction prompt** is sent to the LLM with no tools and `max_summary_tokens` as the response limit.
-3. **On failure**: a CompactionFailed event is emitted and the session is not mutated (safe failure).
-4. **On success**: `DefaultCompactor::rebuild_history` produces new messages:
-   - System prompt is preserved verbatim (if present).
-   - A summary message is injected as a User message with the prefix `[Context compacted]`.
-   - The last `recent_turn_budget` complete turns are retained.
-   - All other messages become `discarded`.
-5. The session messages are replaced with the rebuilt history.
-6. Compaction usage is recorded against the session and budget.
-7. **CompactionCompleted event** is emitted with summary token count and before/after message counts.
+<Steps>
+  <Step title="Emit CompactionStarted event">
+    Emitted with input/estimated token counts and message count.
+  </Step>
+  <Step title="Send compaction prompt to LLM">
+    The current conversation history plus a compaction prompt is sent to the LLM with no tools and `max_summary_tokens` as the response limit.
+  </Step>
+  <Step title="Handle result">
+    **On failure**: a CompactionFailed event is emitted and the session is not mutated (safe failure).
 
-### The Compaction Prompt
+    **On success**: `DefaultCompactor::rebuild_history` produces new messages:
+    - System prompt is preserved verbatim (if present).
+    - A summary message is injected as a User message with the prefix `[Context compacted]`.
+    - The last `recent_turn_budget` complete turns are retained.
+    - All other messages become `discarded`.
+  </Step>
+  <Step title="Replace session messages">
+    The session messages are replaced with the rebuilt history.
+  </Step>
+  <Step title="Record usage and emit completion event">
+    Compaction usage is recorded against the session and budget. A **CompactionCompleted** event is emitted with summary token count and before/after message counts.
+  </Step>
+</Steps>
 
+<Accordion title="The compaction prompt">
 The `DefaultCompactor` sends this prompt to the LLM (defined in `meerkat-session/src/compactor.rs`):
 
 > You are performing a CONTEXT COMPACTION. Your job is to create a handoff summary so work can continue seamlessly.
@@ -88,8 +113,9 @@ The `DefaultCompactor` sends this prompt to the LLM (defined in `meerkat-session
 > - Tool call patterns that worked or failed
 >
 > Be concise and structured. Prioritize information the next context needs to act, not narrate.
+</Accordion>
 
-## Memory Indexing After Compaction
+## Memory indexing after compaction
 
 When both a `Compactor` and a `MemoryStore` are wired into the agent, discarded messages are indexed into semantic memory after compaction completes. This happens asynchronously (fire-and-forget via `tokio::spawn`).
 
@@ -99,11 +125,11 @@ For each discarded message:
 
 This means previously discarded conversation content becomes searchable via the `memory_search` tool.
 
-## The `memory_search` Tool
+## The `memory_search` tool
 
 Defined in `meerkat-memory/src/tool.rs` as `MemorySearchDispatcher`. It implements `AgentToolDispatcher` and provides a single tool.
 
-### Tool Definition
+### Tool definition
 
 | Property | Value |
 |---|---|
@@ -112,12 +138,15 @@ Defined in `meerkat-memory/src/tool.rs` as `MemorySearchDispatcher`. It implemen
 
 ### Parameters
 
-| Parameter | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `query` | `string` | Yes | -- | Natural language search query describing what you want to recall. |
-| `limit` | `integer` | No | `5` | Maximum number of results to return. Capped at 20. |
+<ParamField path="query" type="string" required>
+  Natural language search query describing what you want to recall.
+</ParamField>
 
-### Response Format
+<ParamField path="limit" type="integer" default="5">
+  Maximum number of results to return. Capped at 20.
+</ParamField>
+
+### Response format
 
 Returns a JSON array of result objects:
 
@@ -132,42 +161,53 @@ Returns a JSON array of result objects:
 ]
 ```
 
-- `score`: 0.0 (no match) to 1.0 (exact match). Typical useful matches are above 0.7.
-- `session_id`: The session the memory originated from (enables cross-session recall).
-- `turn`: The turn number within the session when the memory was indexed.
+<ResponseField name="content" type="string">
+  The text content of the memory entry.
+</ResponseField>
 
-## Memory Store Implementations
+<ResponseField name="score" type="number">
+  Similarity score from 0.0 (no match) to 1.0 (exact match). Typical useful matches are above 0.7.
+</ResponseField>
 
-### HnswMemoryStore (Production)
+<ResponseField name="session_id" type="string">
+  The session the memory originated from (enables cross-session recall).
+</ResponseField>
 
-Defined in `meerkat-memory/src/hnsw.rs`. Uses:
-- **hnsw_rs** (v0.3) for approximate nearest-neighbor search with cosine distance.
-- **redb** for persistent metadata and text storage.
+<ResponseField name="turn" type="integer">
+  The turn number within the session when the memory was indexed.
+</ResponseField>
 
-Storage layout: `.rkat/memory/memory.redb`
+## Memory store implementations
 
-Key characteristics:
-- **Embedding**: Bag-of-words TF with hash-based dimensionality reduction (4096-dimensional vectors, L2-normalized). Each word is hashed to a bucket and its presence increments that dimension.
-- **Persistence**: Data survives process restart. On `open()`, all existing entries are re-indexed into the HNSW graph from redb.
-- **Score conversion**: HNSW cosine distance (0 = identical, 2 = opposite) is converted to a 0..1 similarity score: `score = 1.0 - (distance / 2.0)`.
-- **Thread safety**: Insertions are serialized via a `Mutex` to couple point ID allocation with successful writes. Searches use a `RwLock` for concurrent reads.
-- **Constants**: `MAX_NB_CONNECTION = 16`, `MAX_LAYER = 16`, `EF_CONSTRUCTION = 200`, `DEFAULT_MAX_ELEMENTS = 100_000`.
+<Tabs>
+  <Tab title="HnswMemoryStore (production)">
+    Defined in `meerkat-memory/src/hnsw.rs`. Uses:
+    - **hnsw_rs** (v0.3) for approximate nearest-neighbor search with cosine distance.
+    - **redb** for persistent metadata and text storage.
 
-> **Note**: The current embedding is a baseline bag-of-words approach. The code comments indicate this should be replaced with a proper embedding model (e.g., sentence-transformers via ONNX runtime) for production quality.
+    Storage layout: `.rkat/memory/memory.redb`
 
-### SimpleMemoryStore (Test-only)
+    Key characteristics:
+    - **Embedding**: Bag-of-words TF with hash-based dimensionality reduction (4096-dimensional vectors, L2-normalized). Each word is hashed to a bucket and its presence increments that dimension.
+    - **Persistence**: Data survives process restart. On `open()`, all existing entries are re-indexed into the HNSW graph from redb.
+    - **Score conversion**: HNSW cosine distance (0 = identical, 2 = opposite) is converted to a 0..1 similarity score: `score = 1.0 - (distance / 2.0)`.
+    - **Thread safety**: Insertions are serialized via a `Mutex` to couple point ID allocation with successful writes. Searches use a `RwLock` for concurrent reads.
+    - **Constants**: `MAX_NB_CONNECTION = 16`, `MAX_LAYER = 16`, `EF_CONSTRUCTION = 200`, `DEFAULT_MAX_ELEMENTS = 100_000`.
+  </Tab>
+  <Tab title="SimpleMemoryStore (test-only)">
+    Defined in `meerkat-memory/src/simple.rs`. In-memory substring matching -- not suitable for production.
 
-Defined in `meerkat-memory/src/simple.rs`. In-memory substring matching -- not suitable for production.
+    - Stores entries in a `Vec<MemoryEntry>` behind a `RwLock`.
+    - Search: lowercases both query and content, counts matching words, scores as `matching_words / total_query_words`.
+    - No persistence -- data is lost when the process exits.
+  </Tab>
+</Tabs>
 
-- Stores entries in a `Vec<MemoryEntry>` behind a `RwLock`.
-- Search: lowercases both query and content, counts matching words, scores as `matching_words / total_query_words`.
-- No persistence -- data is lost when the process exits.
-
-## Factory Wiring
+## Factory wiring
 
 In `meerkat/src/factory.rs`, the `AgentFactory::build_agent()` method wires memory and compaction at steps 12b and 12c:
 
-### Step 12b: Memory Store + memory_search Tool
+### Step 12b: Memory store + memory_search tool
 
 Gated behind `#[cfg(feature = "memory-store-session")]` AND `effective_memory == true`:
 
@@ -184,7 +224,7 @@ Gated behind `#[cfg(feature = "session-compaction")]`:
 1. Creates a `DefaultCompactor` with `CompactionConfig::default()`.
 2. Sets it on the `AgentBuilder` via `.compactor(compactor)`.
 
-### Skill Integration
+### Skill integration
 
 The `meerkat-memory` crate registers an embedded skill via `inventory::submit!`:
 
@@ -196,33 +236,34 @@ The skill is automatically included in the system prompt when the `memory_store`
 
 ## Examples
 
-### Enabling Memory in the CLI
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Build with memory + compaction features
+    cargo build -p meerkat-cli --features session-compaction,memory-store
 
-```bash
-# Build with memory + compaction features
-cargo build -p meerkat-cli --features session-compaction,memory-store
+    # Run with memory enabled (if the CLI surfaces this flag)
+    rkat run --memory "Analyze this large codebase..."
+    ```
+  </Tab>
+  <Tab title="SDK">
+    ```rust
+    use meerkat::{AgentFactory, AgentBuildConfig};
 
-# Run with memory enabled (if the CLI surfaces this flag)
-rkat run --memory "Analyze this large codebase..."
-```
+    let factory = AgentFactory::new(".rkat/sessions")
+        .project_root(".")
+        .builtins(true)
+        .memory(true);
 
-### Programmatic Usage
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+    // Memory + compaction are wired automatically when:
+    //   1. The factory has memory(true)
+    //   2. The binary is compiled with session-compaction + memory-store-session features
 
-```rust
-use meerkat::{AgentFactory, AgentBuildConfig};
-
-let factory = AgentFactory::new(".rkat/sessions")
-    .project_root(".")
-    .builtins(true)
-    .memory(true);
-
-let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
-// Memory + compaction are wired automatically when:
-//   1. The factory has memory(true)
-//   2. The binary is compiled with session-compaction + memory-store-session features
-
-let agent = factory.build_agent(build_config, &config).await?;
-```
+    let agent = factory.build_agent(build_config, &config).await?;
+    ```
+  </Tab>
+</Tabs>
 
 ### Custom CompactionConfig
 
@@ -238,9 +279,9 @@ let compactor = DefaultCompactor::new(CompactionConfig {
 });
 ```
 
-## Architecture Summary
+## Architecture summary
 
-```
+```text
 meerkat-core/src/compact.rs       -- Compactor trait, CompactionConfig, CompactionContext
 meerkat-core/src/memory.rs        -- MemoryStore trait, MemoryMetadata, MemoryResult
 meerkat-core/src/agent/compact.rs -- run_compaction(), estimate_tokens(), CompactionOutcome

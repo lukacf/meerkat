@@ -1,12 +1,12 @@
-# rkat CLI Reference
-
-Complete command-line reference for the Meerkat CLI (`rkat`).
-
-## Overview
+---
+title: "CLI reference"
+description: "Complete command-line reference for the Meerkat CLI (rkat)."
+icon: "terminal"
+---
 
 `rkat` is the command-line interface for Meerkat, a minimal, high-performance agent harness for LLM-powered applications. It allows you to run AI agents directly from your terminal with support for multiple providers, MCP tools, session management, and streaming output.
 
-### Basic Usage
+## Basic usage
 
 ```bash
 rkat <COMMAND> [OPTIONS]
@@ -35,66 +35,83 @@ rkat run [OPTIONS] <PROMPT>
 
 ### Arguments
 
-| Argument | Description |
-|----------|-------------|
-| `<PROMPT>` | The prompt to execute (required) |
+<ParamField path="PROMPT" type="string" required>
+  The prompt to execute.
+</ParamField>
 
 ### Options
 
-#### Model Selection
+#### Model selection
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--model <MODEL>` | `claude-opus-4-6` | Model to use |
-| `-p, --provider <PROVIDER>` | Auto-detected | LLM provider: `anthropic`, `openai`, or `gemini` |
+<ParamField path="--model" type="string" default="claude-opus-4-6">
+  Model to use.
+</ParamField>
 
+<ParamField path="-p, --provider" type="string">
+  LLM provider: `anthropic`, `openai`, or `gemini`. Auto-detected from the model name if omitted.
+</ParamField>
+
+<Info>
 The provider is automatically inferred from the model name:
 - `claude-*` models use Anthropic
 - `gpt-*`, `o1-*`, `o3-*`, `chatgpt-*` models use OpenAI
 - `gemini-*` models use Gemini
+</Info>
 
-#### Token Limits
+#### Token limits
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--max-tokens <N>` | `4096` | Maximum tokens per turn |
-| `--max-total-tokens <N>` | Unlimited | Maximum total tokens for the run |
+<ParamField path="--max-tokens" type="integer" default="4096">
+  Maximum tokens per turn.
+</ParamField>
 
-#### Budget Limits
+<ParamField path="--max-total-tokens" type="integer">
+  Maximum total tokens for the run. Unlimited by default.
+</ParamField>
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--max-duration <DURATION>` | Unlimited | Maximum duration (e.g., `5m`, `1h30m`, `30s`) |
-| `--max-tool-calls <N>` | Unlimited | Maximum number of tool calls |
+#### Budget limits
+
+<ParamField path="--max-duration" type="string">
+  Maximum duration (e.g., `5m`, `1h30m`, `30s`). Unlimited by default.
+</ParamField>
+
+<ParamField path="--max-tool-calls" type="integer">
+  Maximum number of tool calls. Unlimited by default.
+</ParamField>
 
 #### Output
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--output <FORMAT>` | `text` | Output format: `text` or `json` |
-| `--stream` | Disabled | Stream response tokens as they arrive |
+<ParamField path="--output" type="string" default="text">
+  Output format: `text` or `json`.
+</ParamField>
 
-#### Provider Parameters
+<ParamField path="--stream" type="boolean" default="false">
+  Stream response tokens as they arrive.
+</ParamField>
 
-| Flag | Description |
-|------|-------------|
-| `--param <KEY=VALUE>` | Provider-specific parameter. Can be repeated. |
+#### Provider parameters
 
-See [Provider Parameters](#provider-parameters) for details.
+<ParamField path="--param" type="string">
+  Provider-specific parameter as `KEY=VALUE`. Can be repeated. See [provider parameters](#provider-parameters) for details.
+</ParamField>
 
-#### Inter-Agent Communication
+#### Inter-agent communication
 
-| Flag | Description |
-|------|-------------|
-| `--comms-name <NAME>` | Agent name for inter-agent communication. Enables comms if set. |
-| `--comms-listen-tcp <ADDR>` | TCP address to listen on (e.g., `0.0.0.0:4200`) |
-| `--no-comms` | Disable inter-agent communication entirely |
+<ParamField path="--comms-name" type="string">
+  Agent name for inter-agent communication. Enables comms if set.
+</ParamField>
+
+<ParamField path="--comms-listen-tcp" type="string">
+  TCP address to listen on (e.g., `0.0.0.0:4200`).
+</ParamField>
+
+<ParamField path="--no-comms" type="boolean">
+  Disable inter-agent communication entirely.
+</ParamField>
 
 ### Examples
 
-Basic usage:
-
-```bash
+<CodeGroup>
+```bash Basic usage
 # Simple prompt with default model
 rkat run "What is the capital of France?"
 
@@ -108,9 +125,7 @@ rkat run --model gpt-5.2 "Write a haiku about Rust"
 rkat run --model gemini-3-flash-preview "What are the benefits of async/await?"
 ```
 
-Output options:
-
-```bash
+```bash Output options
 # Stream response tokens as they arrive
 rkat run --stream "Tell me a story"
 
@@ -118,9 +133,7 @@ rkat run --stream "Tell me a story"
 rkat run --output json "What is 2+2?" | jq '.text'
 ```
 
-Budget constraints:
-
-```bash
+```bash Budget constraints
 # Limit run duration
 rkat run --max-duration 30s "Solve this complex problem"
 
@@ -131,15 +144,14 @@ rkat run --max-total-tokens 10000 "Analyze this codebase"
 rkat run --max-tool-calls 5 "Search for and summarize recent news"
 ```
 
-Provider parameters:
-
-```bash
+```bash Provider parameters
 # OpenAI reasoning effort
 rkat run --model o3-mini --param reasoning_effort=high "Solve this logic puzzle"
 
 # Anthropic thinking budget
 rkat run --model claude-sonnet-4 --param thinking_budget=10000 "Plan a project"
 ```
+</CodeGroup>
 
 ---
 
@@ -153,10 +165,13 @@ rkat resume <SESSION_ID> <PROMPT>
 
 ### Arguments
 
-| Argument | Description |
-|----------|-------------|
-| `<SESSION_ID>` | Session ID to resume |
-| `<PROMPT>` | The prompt to continue with |
+<ParamField path="SESSION_ID" type="string" required>
+  Session ID to resume.
+</ParamField>
+
+<ParamField path="PROMPT" type="string" required>
+  The prompt to continue with.
+</ParamField>
 
 ### Examples
 
@@ -190,9 +205,9 @@ List stored sessions.
 rkat sessions list [OPTIONS]
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--limit <N>` | `20` | Maximum number of sessions to show |
+<ParamField path="--limit" type="integer" default="20">
+  Maximum number of sessions to show.
+</ParamField>
 
 Output shows session ID, message count, creation time, and last update time.
 
@@ -267,48 +282,64 @@ Add an MCP server configuration.
 rkat mcp add [OPTIONS] <NAME> [-- <COMMAND>...]
 ```
 
-| Argument | Description |
-|----------|-------------|
-| `<NAME>` | Server name (must be unique within scope) |
-| `<COMMAND>...` | Command and arguments for stdio transport (after `--`) |
+<ParamField path="NAME" type="string" required>
+  Server name (must be unique within scope).
+</ParamField>
 
-| Flag | Description |
-|------|-------------|
-| `-t, --transport <TYPE>` | Transport type: `stdio`, `http`, or `sse`. Auto-detected from options. |
-| `-u, --url <URL>` | Server URL (for http/sse transports) |
-| `-H, --header <KEY:VALUE>` | HTTP header. Can be repeated. (for http/sse transports) |
-| `-e, --env <KEY=VALUE>` | Environment variable. Can be repeated. (for stdio transport) |
-| `--user` | Add to user scope instead of project (default: project) |
+<ParamField path="COMMAND" type="string">
+  Command and arguments for stdio transport (after `--`).
+</ParamField>
 
-##### Stdio Transport (Local Process)
+<ParamField path="-t, --transport" type="string">
+  Transport type: `stdio`, `http`, or `sse`. Auto-detected from options.
+</ParamField>
 
-For MCP servers that run as local processes:
+<ParamField path="-u, --url" type="string">
+  Server URL (for http/sse transports).
+</ParamField>
 
-```bash
-# Add a stdio server
-rkat mcp add my-tools -- npx -y @example/mcp-server
+<ParamField path="-H, --header" type="string">
+  HTTP header as `KEY:VALUE`. Can be repeated. (for http/sse transports)
+</ParamField>
 
-# With environment variables
-rkat mcp add api-tools -e API_KEY=secret123 -- python mcp_server.py
+<ParamField path="-e, --env" type="string">
+  Environment variable as `KEY=VALUE`. Can be repeated. (for stdio transport)
+</ParamField>
 
-# Add to user scope (global)
-rkat mcp add global-tools --user -- /usr/local/bin/mcp-server
-```
+<ParamField path="--user" type="boolean">
+  Add to user scope instead of project (default: project).
+</ParamField>
 
-##### HTTP Transport (Remote Server)
+<Tabs>
+  <Tab title="Stdio transport (local process)">
+    For MCP servers that run as local processes:
 
-For MCP servers accessible over HTTP:
+    ```bash
+    # Add a stdio server
+    rkat mcp add my-tools -- npx -y @example/mcp-server
 
-```bash
-# Streamable HTTP (default for URLs)
-rkat mcp add remote-tools --url https://mcp.example.com/api
+    # With environment variables
+    rkat mcp add api-tools -e API_KEY=secret123 -- python mcp_server.py
 
-# With authentication header
-rkat mcp add auth-tools --url https://mcp.example.com/api -H "Authorization:Bearer token123"
+    # Add to user scope (global)
+    rkat mcp add global-tools --user -- /usr/local/bin/mcp-server
+    ```
+  </Tab>
+  <Tab title="HTTP transport (remote server)">
+    For MCP servers accessible over HTTP:
 
-# Legacy SSE transport
-rkat mcp add sse-tools -t sse --url https://old.example.com/sse
-```
+    ```bash
+    # Streamable HTTP (default for URLs)
+    rkat mcp add remote-tools --url https://mcp.example.com/api
+
+    # With authentication header
+    rkat mcp add auth-tools --url https://mcp.example.com/api -H "Authorization:Bearer token123"
+
+    # Legacy SSE transport
+    rkat mcp add sse-tools -t sse --url https://old.example.com/sse
+    ```
+  </Tab>
+</Tabs>
 
 #### list
 
@@ -318,10 +349,13 @@ List configured MCP servers.
 rkat mcp list [OPTIONS]
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--scope <SCOPE>` | Filter by scope: `user`, `project`, or `local` (alias for project) |
-| `--json` | Output as JSON |
+<ParamField path="--scope" type="string">
+  Filter by scope: `user`, `project`, or `local` (alias for project).
+</ParamField>
+
+<ParamField path="--json" type="boolean">
+  Output as JSON.
+</ParamField>
 
 ```bash
 $ rkat mcp list
@@ -339,12 +373,16 @@ Get details of a specific MCP server.
 rkat mcp get [OPTIONS] <NAME>
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--scope <SCOPE>` | Search scope: `user`, `project`, or `local` |
-| `--json` | Output as JSON |
+<ParamField path="--scope" type="string">
+  Search scope: `user`, `project`, or `local`.
+</ParamField>
 
-```bash
+<ParamField path="--json" type="boolean">
+  Output as JSON.
+</ParamField>
+
+<CodeGroup>
+```bash Text output
 $ rkat mcp get project-tools
 Name:    project-tools
 Scope:   project
@@ -353,7 +391,9 @@ Command: npx
 Args:    -y @example/mcp-server
 Env:
   API_KEY=se...et
+```
 
+```bash JSON output
 $ rkat mcp get --json project-tools
 {
   "name": "project-tools",
@@ -364,6 +404,7 @@ $ rkat mcp get --json project-tools
   "scope": "project"
 }
 ```
+</CodeGroup>
 
 #### remove
 
@@ -373,11 +414,13 @@ Remove an MCP server configuration.
 rkat mcp remove [OPTIONS] <NAME>
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--scope <SCOPE>` | Scope to remove from: `user`, `project`, or `local` |
+<ParamField path="--scope" type="string">
+  Scope to remove from: `user`, `project`, or `local`.
+</ParamField>
 
+<Warning>
 If the server exists in multiple scopes and `--scope` is not specified, the command will error.
+</Warning>
 
 ```bash
 $ rkat mcp remove project-tools
@@ -399,13 +442,13 @@ The server reads/writes newline-delimited JSON-RPC 2.0 on stdin/stdout. Unlike
 `run`/`resume`, it keeps agents alive between turns -- subsequent turns reuse
 the same agent without reconstruction overhead.
 
-See the [RPC reference](./rpc.md) for the full protocol specification.
+See the [RPC reference](/surfaces/rpc) for the full protocol specification.
 
 ---
 
 ## Configuration
 
-### Environment Variables
+### Environment variables
 
 Required API keys (at least one):
 
@@ -415,9 +458,9 @@ Required API keys (at least one):
 | `OPENAI_API_KEY` | OpenAI | API key for GPT models |
 | `GOOGLE_API_KEY` | Gemini | API key for Gemini models |
 
-### Config Files
+### Config files
 
-#### CLI Configuration
+#### CLI configuration
 
 CLI configuration is stored in TOML format:
 
@@ -428,8 +471,7 @@ CLI configuration is stored in TOML format:
 
 Project config overrides user config. CLI flags override both.
 
-##### Example config.toml
-
+<Accordion title="Example config.toml">
 ```toml
 [comms]
 enabled = true
@@ -441,8 +483,9 @@ trusted_peers_path = ".rkat/peers.json"
 ack_timeout_secs = 30
 max_message_bytes = 1000000
 ```
+</Accordion>
 
-#### MCP Configuration
+#### MCP configuration
 
 MCP servers are configured in TOML format:
 
@@ -453,8 +496,7 @@ MCP servers are configured in TOML format:
 
 Project servers take precedence over user servers with the same name.
 
-##### Example mcp.toml
-
+<Accordion title="Example mcp.toml">
 ```toml
 # Stdio server (local process)
 [[servers]]
@@ -483,15 +525,16 @@ transport = "sse"
 ```
 
 Environment variable expansion is supported using `${VAR_NAME}` syntax.
+</Accordion>
 
-### Configuration Precedence
+### Configuration precedence
 
 1. CLI flags (highest priority)
 2. Project config (`.rkat/`)
 3. User config (`~/.config/rkat/` or `~/.rkat/`)
 4. Default values (lowest priority)
 
-### Session Storage
+### Session storage
 
 Sessions are stored in the user's data directory:
 
@@ -503,54 +546,54 @@ Sessions are stored in the user's data directory:
 
 ---
 
-## Provider Parameters
+## Provider parameters
 
 The `--param` flag allows passing provider-specific parameters. Parameters are passed as `KEY=VALUE` pairs and can be repeated.
 
-### Anthropic Parameters
+<Tabs>
+  <Tab title="Anthropic">
+    | Parameter | Description |
+    |-----------|-------------|
+    | `thinking_budget` | Token budget for extended thinking (integer) |
+    | `top_k` | Top-k sampling parameter (integer) |
 
-| Parameter | Description |
-|-----------|-------------|
-| `thinking_budget` | Token budget for extended thinking (integer) |
-| `top_k` | Top-k sampling parameter (integer) |
+    ```bash
+    # Enable extended thinking with 10k token budget
+    rkat run --model claude-sonnet-4 --param thinking_budget=10000 "Solve this complex problem"
+    ```
+  </Tab>
+  <Tab title="OpenAI">
+    | Parameter | Values | Description |
+    |-----------|--------|-------------|
+    | `reasoning_effort` | `low`, `medium`, `high` | Reasoning effort for o-series models |
+    | `seed` | Integer | Seed for deterministic outputs |
+    | `frequency_penalty` | -2.0 to 2.0 | Penalty for token frequency |
+    | `presence_penalty` | -2.0 to 2.0 | Penalty for token presence |
 
-```bash
-# Enable extended thinking with 10k token budget
-rkat run --model claude-sonnet-4 --param thinking_budget=10000 "Solve this complex problem"
-```
+    ```bash
+    # Use high reasoning effort with o3-mini
+    rkat run --model o3-mini --param reasoning_effort=high "Prove this theorem"
 
-### OpenAI Parameters
+    # Deterministic output with seed
+    rkat run --model gpt-5.2 --param seed=42 "Generate a random number"
+    ```
+  </Tab>
+  <Tab title="Gemini">
+    | Parameter | Description |
+    |-----------|-------------|
+    | `thinking_budget` | Token budget for extended thinking (integer) |
+    | `top_k` | Top-k sampling parameter (integer) |
 
-| Parameter | Values | Description |
-|-----------|--------|-------------|
-| `reasoning_effort` | `low`, `medium`, `high` | Reasoning effort for o-series models |
-| `seed` | Integer | Seed for deterministic outputs |
-| `frequency_penalty` | -2.0 to 2.0 | Penalty for token frequency |
-| `presence_penalty` | -2.0 to 2.0 | Penalty for token presence |
-
-```bash
-# Use high reasoning effort with o3-mini
-rkat run --model o3-mini --param reasoning_effort=high "Prove this theorem"
-
-# Deterministic output with seed
-rkat run --model gpt-5.2 --param seed=42 "Generate a random number"
-```
-
-### Gemini Parameters
-
-| Parameter | Description |
-|-----------|-------------|
-| `thinking_budget` | Token budget for extended thinking (integer) |
-| `top_k` | Top-k sampling parameter (integer) |
-
-```bash
-# Gemini with thinking budget
-rkat run --model gemini-3-flash-preview --param thinking_budget=5000 "Analyze this data"
-```
+    ```bash
+    # Gemini with thinking budget
+    rkat run --model gemini-3-flash-preview --param thinking_budget=5000 "Analyze this data"
+    ```
+  </Tab>
+</Tabs>
 
 ---
 
-## Exit Codes
+## Exit codes
 
 | Code | Meaning |
 |------|---------|
@@ -562,7 +605,7 @@ rkat run --model gemini-3-flash-preview --param thinking_budget=5000 "Analyze th
 
 ## Examples
 
-### Basic Chat
+### Basic chat
 
 ```bash
 # Simple question
@@ -576,7 +619,7 @@ result=$(rkat run --output json "What is 2+2?")
 echo "$result" | jq -r '.text'
 ```
 
-### Multi-Provider Comparison
+### Multi-provider comparison
 
 ```bash
 # Same prompt to different providers
@@ -585,36 +628,50 @@ rkat run --model gpt-5.2 "Explain monads in one sentence"
 rkat run --model gemini-3-flash-preview "Explain monads in one sentence"
 ```
 
-### Using MCP Tools
+### Using MCP tools
 
-```bash
-# Set up a filesystem tool
-rkat mcp add fs -- npx -y @modelcontextprotocol/server-filesystem /home/user/projects
+<Steps>
+  <Step title="Set up a filesystem tool">
+    ```bash
+    rkat mcp add fs -- npx -y @modelcontextprotocol/server-filesystem /home/user/projects
+    ```
+  </Step>
+  <Step title="Run with tools available">
+    ```bash
+    rkat run "List all Rust files in the projects directory"
+    ```
 
-# Run with tools available
-rkat run "List all Rust files in the projects directory"
+    The agent will use the filesystem tool to list files.
+  </Step>
+</Steps>
 
-# The agent will use the filesystem tool to list files
-```
+### Session workflow
 
-### Session Workflow
+<Steps>
+  <Step title="Start a conversation">
+    ```bash
+    rkat run "I want to learn about Rust iterators"
+    # Output: [Session: 01936f8a-7b2c-7000-8000-000000000001 | Turns: 1 | ...]
+    ```
+  </Step>
+  <Step title="Continue the conversation">
+    ```bash
+    rkat resume 01936f8a-7b2c-7000-8000-000000000001 "What about the collect() method?"
+    ```
+  </Step>
+  <Step title="Review the session">
+    ```bash
+    rkat sessions show 01936f8a-7b2c-7000-8000-000000000001
+    ```
+  </Step>
+  <Step title="Clean up when done">
+    ```bash
+    rkat sessions delete 01936f8a-7b2c-7000-8000-000000000001
+    ```
+  </Step>
+</Steps>
 
-```bash
-# Start a conversation
-rkat run "I want to learn about Rust iterators"
-# Output: [Session: 01936f8a-7b2c-7000-8000-000000000001 | Turns: 1 | ...]
-
-# Continue the conversation
-rkat resume 01936f8a-7b2c-7000-8000-000000000001 "What about the collect() method?"
-
-# Review the session
-rkat sessions show 01936f8a-7b2c-7000-8000-000000000001
-
-# Clean up when done
-rkat sessions delete 01936f8a-7b2c-7000-8000-000000000001
-```
-
-### Budget-Constrained Runs
+### Budget-constrained runs
 
 ```bash
 # Time-limited task
@@ -627,7 +684,7 @@ rkat run --max-total-tokens 5000 "Explain all Rust collection types"
 rkat run --max-tool-calls 3 "Find and read the most relevant file"
 ```
 
-### Scripting with JSON Output
+### Scripting with JSON output
 
 ```bash
 #!/bin/bash
@@ -648,9 +705,9 @@ done
 
 ---
 
-## See Also
+## See also
 
-- [RPC Reference](./rpc.md) - JSON-RPC stdio server protocol
-- [Configuration Guide](./configuration.md) - Detailed configuration options
-- [Architecture](./architecture.md) - How Meerkat works
-- [Examples](./examples.md) - More usage examples
+- [RPC reference](/surfaces/rpc) - JSON-RPC stdio server protocol
+- [Configuration guide](/configuration) - Detailed configuration options
+- [Architecture](/reference/architecture) - How Meerkat works
+- [Examples](/examples) - More usage examples

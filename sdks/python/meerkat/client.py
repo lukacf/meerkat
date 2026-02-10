@@ -97,8 +97,32 @@ class MeerkatClient:
         provider: Optional[str] = None,
         system_prompt: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        output_schema: Optional[dict] = None,
+        structured_output_retries: int = 2,
+        hooks_override: Optional[dict] = None,
+        enable_builtins: bool = False,
+        enable_shell: bool = False,
+        host_mode: bool = False,
+        comms_name: Optional[str] = None,
+        provider_params: Optional[dict] = None,
     ) -> WireRunResult:
-        """Create a new session and run the first turn."""
+        """Create a new session and run the first turn.
+
+        Args:
+            prompt: Initial user prompt.
+            model: Model name (e.g. "claude-sonnet-4-5").
+            provider: Provider name ("anthropic", "openai", "gemini").
+            system_prompt: Custom system prompt override.
+            max_tokens: Max tokens per turn.
+            output_schema: JSON schema for structured output extraction.
+            structured_output_retries: Retries for structured output validation.
+            hooks_override: Run-scoped hook overrides.
+            enable_builtins: Enable built-in tools (task management, etc.).
+            enable_shell: Enable shell tool (requires enable_builtins).
+            host_mode: Run in host mode for inter-agent comms.
+            comms_name: Agent name for comms (required when host_mode is True).
+            provider_params: Provider-specific parameters.
+        """
         params: dict = {"prompt": prompt}
         if model:
             params["model"] = model
@@ -108,6 +132,22 @@ class MeerkatClient:
             params["system_prompt"] = system_prompt
         if max_tokens:
             params["max_tokens"] = max_tokens
+        if output_schema:
+            params["output_schema"] = output_schema
+        if structured_output_retries != 2:
+            params["structured_output_retries"] = structured_output_retries
+        if hooks_override:
+            params["hooks_override"] = hooks_override
+        if enable_builtins:
+            params["enable_builtins"] = True
+        if enable_shell:
+            params["enable_shell"] = True
+        if host_mode:
+            params["host_mode"] = True
+        if comms_name:
+            params["comms_name"] = comms_name
+        if provider_params:
+            params["provider_params"] = provider_params
 
         result = await self._request("session/create", params)
         return self._parse_run_result(result)

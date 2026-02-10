@@ -5,8 +5,8 @@ use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 
 use meerkat::AgentBuildConfig;
-use meerkat_core::Provider;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::{HookRunOverrides, OutputSchema, Provider};
 
 use super::{RpcResponseExt, parse_params};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
@@ -20,6 +20,10 @@ use crate::session_runtime::SessionRuntime;
 // ---------------------------------------------------------------------------
 
 /// Parameters for `session/create`.
+///
+/// Mirrors the fields of [`AgentBuildConfig`] that are relevant for session
+/// creation via the JSON-RPC surface. Optional fields default to `None`/`false`
+/// so callers only need to provide `prompt`.
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionParams {
     pub prompt: String,
@@ -31,6 +35,34 @@ pub struct CreateSessionParams {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// JSON schema for structured output extraction (wrapper or raw schema).
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+    /// Max retries for structured output validation (default: 2).
+    #[serde(default = "default_structured_output_retries")]
+    pub structured_output_retries: u32,
+    /// Run-scoped hook overrides.
+    #[serde(default)]
+    pub hooks_override: Option<HookRunOverrides>,
+    /// Enable built-in tools (task management, etc.)
+    #[serde(default)]
+    pub enable_builtins: bool,
+    /// Enable shell tool (requires enable_builtins).
+    #[serde(default)]
+    pub enable_shell: bool,
+    /// Run in host mode for inter-agent comms.
+    #[serde(default)]
+    pub host_mode: bool,
+    /// Agent name for comms (required when host_mode is true).
+    #[serde(default)]
+    pub comms_name: Option<String>,
+    /// Provider-specific parameters (e.g., thinking config).
+    #[serde(default)]
+    pub provider_params: Option<serde_json::Value>,
+}
+
+fn default_structured_output_retries() -> u32 {
+    2
 }
 
 /// Parameters for `session/read`.
@@ -94,10 +126,33 @@ pub async fn handle_create(
         .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
     let provider = params.provider.as_deref().map(Provider::from_name);
 
+    // Parse output schema if provided
+    let output_schema = match params.output_schema {
+        Some(schema) => match OutputSchema::from_json_value(schema) {
+            Ok(os) => Some(os),
+            Err(e) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Invalid output_schema: {e}"),
+                );
+            }
+        },
+        None => None,
+    };
+
     let mut build_config = AgentBuildConfig::new(model_name);
     build_config.provider = provider;
     build_config.max_tokens = params.max_tokens;
     build_config.system_prompt = params.system_prompt;
+    build_config.output_schema = output_schema;
+    build_config.structured_output_retries = params.structured_output_retries;
+    build_config.hooks_override = params.hooks_override.unwrap_or_default();
+    build_config.override_builtins = Some(params.enable_builtins);
+    build_config.override_shell = Some(params.enable_builtins && params.enable_shell);
+    build_config.host_mode = params.host_mode;
+    build_config.comms_name = params.comms_name;
+    build_config.provider_params = params.provider_params;
 
     // Create the session
     let session_id = match runtime.create_session(build_config).await {

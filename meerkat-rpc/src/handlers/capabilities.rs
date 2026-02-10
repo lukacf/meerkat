@@ -1,27 +1,12 @@
 //! Handler for `capabilities/get`.
 
-use meerkat_contracts::{
-    CapabilitiesResponse, CapabilityEntry, CapabilityStatus, ContractVersion, build_capabilities,
-};
+use meerkat_core::Config;
 
 use crate::protocol::{RpcId, RpcResponse};
 
-/// Handle `capabilities/get` — returns the runtime's capability set.
-pub fn handle_get(id: Option<RpcId>) -> RpcResponse {
-    let registrations = build_capabilities();
-    let capabilities = registrations
-        .into_iter()
-        .map(|reg| CapabilityEntry {
-            id: reg.id,
-            description: reg.description.to_string(),
-            status: CapabilityStatus::Available,
-        })
-        .collect();
-
-    let response = CapabilitiesResponse {
-        contract_version: ContractVersion::CURRENT,
-        capabilities,
-    };
-
+/// Handle `capabilities/get` — returns the runtime's capability set with
+/// status resolved against config.
+pub fn handle_get(id: Option<RpcId>, config: &Config) -> RpcResponse {
+    let response = meerkat::surface::build_capabilities_response(config);
     RpcResponse::success(id, &response)
 }

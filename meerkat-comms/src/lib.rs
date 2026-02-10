@@ -47,6 +47,7 @@ inventory::submit! {
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: Some("comms"),
         prerequisites: &[],
+        status_resolver: None,
     }
 }
 
@@ -63,13 +64,17 @@ inventory::submit! {
     }
 }
 
-/// Validate whether host mode can be enabled.
+/// Confirm host mode availability when the comms crate is compiled in.
 ///
-/// Returns `Ok(true)` if `requested` is true, `Ok(false)` if not.
-/// This function existing in `meerkat-comms` means comms is compiled.
-/// Surfaces that don't have comms feature-gated simply cannot call this.
+/// This function is intentionally a passthrough — its existence in the
+/// dependency graph *is* the validation. When `meerkat-comms` is linked,
+/// comms is available and host mode can be enabled. The feature-gate check
+/// lives in `meerkat::surface::resolve_host_mode()`, which calls this
+/// function under `#[cfg(feature = "comms")]` and returns an error under
+/// `#[cfg(not(feature = "comms"))]`.
 ///
-/// This is the canonical validation point — all surfaces delegate here.
+/// This two-layer design avoids duplicating the `cfg` check in every
+/// surface crate.
 pub fn validate_host_mode(requested: bool) -> Result<bool, String> {
     Ok(requested)
 }

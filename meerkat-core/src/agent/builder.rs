@@ -29,7 +29,6 @@ pub struct AgentBuilder {
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
     pub(super) hook_run_overrides: HookRunOverrides,
     pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
-    pub(super) skill_engine: Option<Arc<dyn crate::skills::SkillEngine>>,
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
 }
 
@@ -48,7 +47,6 @@ impl AgentBuilder {
             hook_engine: None,
             hook_run_overrides: HookRunOverrides::default(),
             compactor: None,
-            skill_engine: None,
             memory_store: None,
         }
     }
@@ -110,12 +108,6 @@ impl AgentBuilder {
     /// Set output schema for structured output extraction
     pub fn output_schema(mut self, schema: OutputSchema) -> Self {
         self.config.output_schema = Some(schema);
-        self
-    }
-
-    /// Set the skill engine for skill resolution and injection.
-    pub fn skill_engine(mut self, engine: Arc<dyn crate::skills::SkillEngine>) -> Self {
-        self.skill_engine = Some(engine);
         self
     }
 
@@ -205,7 +197,6 @@ impl AgentBuilder {
             last_input_tokens: 0,
             last_compaction_turn: None,
             memory_store: self.memory_store,
-            skill_engine: self.skill_engine,
         }
     }
 }

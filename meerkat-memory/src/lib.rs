@@ -33,5 +33,6 @@ inventory::submit! {
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: Some("memory-store"),
         prerequisites: &[],
+        status_resolver: None,
     }
 }

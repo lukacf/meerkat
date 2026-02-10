@@ -65,7 +65,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     )?;
 
     // Events — WireEvent embeds AgentEvent which lacks JsonSchema.
-    // Emit a structural description instead of a full JSON Schema.
+    // Emit a structural description, NOT a consumable JSON Schema.
+    // Codegen should not parse these for type generation.
     let events = serde_json::json!({
         "WireEvent": {
             "description": "Event envelope: session_id, sequence, event (AgentEvent), contract_version",
@@ -77,7 +78,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         serde_json::to_string_pretty(&events)?,
     )?;
 
-    // RPC methods — describes the JSON-RPC method surface
+    // RPC methods — structural description of the method surface.
+    // This is documentation, not a consumable schema for codegen.
     let rpc_methods = serde_json::json!({
         "methods": [
             {"name": "initialize", "description": "Handshake, returns server capabilities"},
@@ -101,7 +103,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         serde_json::to_string_pretty(&rpc_methods)?,
     )?;
 
-    // REST OpenAPI — describes REST endpoint surface
+    // REST OpenAPI — stub endpoint listing, not a full OpenAPI spec.
+    // No request/response body schemas included.
     let rest_openapi = serde_json::json!({
         "openapi": "3.0.0",
         "info": {

@@ -888,18 +888,8 @@ async fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> any
 }
 
 fn handle_capabilities() {
-    let registrations = meerkat::build_capabilities();
-    let response = meerkat::CapabilitiesResponse {
-        contract_version: meerkat::ContractVersion::CURRENT,
-        capabilities: registrations
-            .into_iter()
-            .map(|reg| meerkat::contracts::CapabilityEntry {
-                id: reg.id,
-                description: reg.description.to_string(),
-                status: meerkat::CapabilityStatus::Available,
-            })
-            .collect(),
-    };
+    let config = meerkat_core::Config::default();
+    let response = meerkat::surface::build_capabilities_response(&config);
     println!(
         "{}",
         serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string())

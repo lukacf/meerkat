@@ -1,6 +1,6 @@
 //! SKILL.md frontmatter parser.
 //!
-//! Uses `serde_yaml` for robust YAML parsing of the frontmatter block.
+//! Uses `serde_yml` for robust YAML parsing of the frontmatter block.
 
 use indexmap::IndexMap;
 use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillError, SkillId, SkillScope};
@@ -33,7 +33,7 @@ pub fn parse_skill_md(
     content: &str,
 ) -> Result<SkillDocument, SkillError> {
     let (frontmatter_str, body) = split_frontmatter(content)?;
-    let fm: Frontmatter = serde_yaml::from_str(&frontmatter_str)
+    let fm: Frontmatter = serde_yml::from_str(&frontmatter_str)
         .map_err(|e| SkillError::Parse(format!("frontmatter parse error: {e}").into()))?;
 
     Ok(SkillDocument {

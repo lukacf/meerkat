@@ -65,7 +65,7 @@ jsonschema = "0.26"
 schemars = { version = "1", features = ["derive"] }
 
 # YAML
-serde_yaml = "0.9"
+serde_yml = "0.0.12"
 
 # Enum utilities
 strum = { version = "0.27", features = ["derive"] }

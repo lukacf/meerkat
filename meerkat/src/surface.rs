@@ -2,8 +2,39 @@
 //!
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
-use meerkat_core::AgentEvent;
+use meerkat_contracts::{
+    CapabilitiesResponse, CapabilityEntry, CapabilityStatus, ContractVersion, build_capabilities,
+};
+use meerkat_core::{AgentEvent, Config};
 use tokio::sync::mpsc;
+
+/// Build a [`CapabilitiesResponse`] with status resolved against config.
+///
+/// For each registered capability, calls its `status_resolver` (if provided)
+/// to determine runtime status. Capabilities without a resolver are reported
+/// as `Available`. This keeps policy knowledge in the owning crate.
+pub fn build_capabilities_response(config: &Config) -> CapabilitiesResponse {
+    let registrations = build_capabilities();
+    let capabilities = registrations
+        .into_iter()
+        .map(|reg| {
+            let status = match reg.status_resolver {
+                Some(resolver) => resolver(config),
+                None => CapabilityStatus::Available,
+            };
+            CapabilityEntry {
+                id: reg.id,
+                description: reg.description.to_string(),
+                status,
+            }
+        })
+        .collect();
+
+    CapabilitiesResponse {
+        contract_version: ContractVersion::CURRENT,
+        capabilities,
+    }
+}
 
 /// Validate whether host mode can be enabled in the current build.
 ///

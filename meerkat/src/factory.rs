@@ -633,7 +633,15 @@ impl AgentFactory {
             }
 
             // Embedded skills (lowest precedence)
-            sources.push(Box::new(EmbeddedSkillSource::new()));
+            let embedded = EmbeddedSkillSource::new();
+
+            // Collect active skill IDs before moving source into composite
+            let skill_ids: Vec<meerkat_core::skills::SkillId> = match embedded.list().await {
+                Ok(descriptors) => descriptors.into_iter().map(|d| d.id).collect(),
+                Err(_) => Vec::new(),
+            };
+
+            sources.push(Box::new(embedded));
 
             let composite = CompositeSkillSource::new(sources);
 
@@ -645,7 +653,7 @@ impl AgentFactory {
 
             let engine = DefaultSkillEngine::new(Box::new(composite), available_caps);
 
-            // Generate inventory section for system prompt and collect skill IDs
+            // Generate inventory section for system prompt
             let section = match engine.inventory_section().await {
                 Ok(s) => s,
                 Err(e) => {
@@ -654,19 +662,11 @@ impl AgentFactory {
                 }
             };
 
-            // Collect active skill IDs for session metadata
-            let source = EmbeddedSkillSource::new();
-            let skill_ids: Vec<meerkat_core::skills::SkillId> = match source.list().await {
-                Ok(descriptors) => descriptors.into_iter().map(|d| d.id).collect(),
-                Err(_) => Vec::new(),
-            };
-
-            (Some(Arc::new(engine) as Arc<dyn SkillEngine>), section, Some(skill_ids))
+            (section, Some(skill_ids))
         };
         #[cfg(not(feature = "skills"))]
-        let skill_inventory_section: (Option<Arc<dyn meerkat_core::skills::SkillEngine>>, String, Option<Vec<meerkat_core::skills::SkillId>>) = (None, String::new(), None);
-        let (skill_engine, inventory_section, active_skill_ids) = skill_inventory_section;
-        let _ = &skill_engine; // used below when skills feature is enabled
+        let skill_inventory_section: (String, Option<Vec<meerkat_core::skills::SkillId>>) = (String::new(), None);
+        let (inventory_section, active_skill_ids) = skill_inventory_section;
 
         // 12. Build system prompt (single canonical path)
         let extra_sections: Vec<&str> = if inventory_section.is_empty() {
@@ -700,9 +700,6 @@ impl AgentFactory {
         }
         if let Some(session) = build_config.resume_session {
             builder = builder.resume_session(session);
-        }
-        if let Some(engine) = skill_engine {
-            builder = builder.skill_engine(engine);
         }
         #[cfg(feature = "comms")]
         if let Some(runtime) = comms_runtime {

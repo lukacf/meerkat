@@ -51,19 +51,11 @@ impl FromStr for ContractVersion {
     type Err = ParseVersionError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() != 3 {
-            return Err(ParseVersionError(s.to_string()));
-        }
-        let major = parts[0]
-            .parse()
-            .map_err(|_| ParseVersionError(s.to_string()))?;
-        let minor = parts[1]
-            .parse()
-            .map_err(|_| ParseVersionError(s.to_string()))?;
-        let patch = parts[2]
-            .parse()
-            .map_err(|_| ParseVersionError(s.to_string()))?;
+        let err = || ParseVersionError(s.to_string());
+        let mut parts = s.splitn(3, '.');
+        let major: u32 = parts.next().ok_or_else(err)?.parse().map_err(|_| err())?;
+        let minor: u32 = parts.next().ok_or_else(err)?.parse().map_err(|_| err())?;
+        let patch: u32 = parts.next().ok_or_else(err)?.parse().map_err(|_| err())?;
         Ok(Self {
             major,
             minor,

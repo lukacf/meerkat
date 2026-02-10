@@ -57,6 +57,7 @@ inventory::submit! {
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: Some("session-store"),
         prerequisites: &[],
+        status_resolver: None,
     }
 }
 
@@ -68,5 +69,6 @@ inventory::submit! {
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: Some("session-compaction"),
         prerequisites: &[],
+        status_resolver: None,
     }
 }

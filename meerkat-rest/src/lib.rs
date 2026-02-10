@@ -315,22 +315,12 @@ async fn health_check() -> &'static str {
     "ok"
 }
 
-/// Get runtime capabilities
-async fn get_capabilities() -> Json<meerkat_contracts::CapabilitiesResponse> {
-    let registrations = meerkat_contracts::build_capabilities();
-    let capabilities = registrations
-        .into_iter()
-        .map(|reg| meerkat_contracts::CapabilityEntry {
-            id: reg.id,
-            description: reg.description.to_string(),
-            status: meerkat_contracts::CapabilityStatus::Available,
-        })
-        .collect();
-
-    Json(meerkat_contracts::CapabilitiesResponse {
-        contract_version: meerkat_contracts::ContractVersion::CURRENT,
-        capabilities,
-    })
+/// Get runtime capabilities with status resolved against config.
+async fn get_capabilities(
+    State(state): State<AppState>,
+) -> Json<meerkat_contracts::CapabilitiesResponse> {
+    let config = state.config_store.get().await.unwrap_or_default();
+    Json(meerkat::surface::build_capabilities_response(&config))
 }
 
 /// Get the current config

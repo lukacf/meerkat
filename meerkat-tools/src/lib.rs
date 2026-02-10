@@ -58,6 +58,15 @@ inventory::submit! {
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: None,
         prerequisites: &[],
+        status_resolver: Some(|config| {
+            if config.tools.builtins_enabled {
+                meerkat_contracts::CapabilityStatus::Available
+            } else {
+                meerkat_contracts::CapabilityStatus::DisabledByPolicy {
+                    description: std::borrow::Cow::Borrowed("tools.builtins_enabled = false"),
+                }
+            }
+        }),
     }
 }
 
@@ -68,6 +77,15 @@ inventory::submit! {
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: None,
         prerequisites: &[],
+        status_resolver: Some(|config| {
+            if config.tools.shell_enabled {
+                meerkat_contracts::CapabilityStatus::Available
+            } else {
+                meerkat_contracts::CapabilityStatus::DisabledByPolicy {
+                    description: std::borrow::Cow::Borrowed("tools.shell_enabled = false"),
+                }
+            }
+        }),
     }
 }
 
@@ -79,6 +97,7 @@ inventory::submit! {
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: Some("sub-agents"),
         prerequisites: &[],
+        status_resolver: None,
     }
 }
 

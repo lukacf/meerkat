@@ -21,14 +21,12 @@ class MeerkatClient:
     """Async client that communicates with a Meerkat runtime via rkat rpc."""
 
     def __init__(self, rkat_path: str = "rkat"):
+        import shutil
+
         self._rkat_path = rkat_path
         self._process: Optional[subprocess.Popen] = None
         self._request_id = 0
         self._capabilities: Optional[CapabilitiesResponse] = None
-
-    async def connect(self) -> "MeerkatClient":
-        """Start the rkat rpc subprocess and perform handshake."""
-        import shutil
 
         if not shutil.which(self._rkat_path):
             raise MeerkatError(
@@ -37,6 +35,8 @@ class MeerkatClient:
                 "Ensure it is installed and on your PATH.",
             )
 
+    async def connect(self) -> "MeerkatClient":
+        """Start the rkat rpc subprocess and perform handshake."""
         self._process = subprocess.Popen(
             [self._rkat_path, "rpc"],
             stdin=subprocess.PIPE,

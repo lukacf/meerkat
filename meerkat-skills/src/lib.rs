@@ -26,5 +26,6 @@ inventory::submit! {
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: Some("skills"),
         prerequisites: &[],
+        status_resolver: None,
     }
 }

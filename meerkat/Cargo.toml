@@ -89,3 +89,8 @@ required-features = ["integration-real-tests"]
 name = "e2e_shell"
 path = "tests/e2e_shell.rs"
 required-features = ["integration-real-tests"]
+
+[[test]]
+name = "e2e_smoke"
+path = "tests/e2e_smoke.rs"
+required-features = ["integration-real-tests"]

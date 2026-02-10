@@ -2,29 +2,37 @@
 
 import asyncio
 import json
-import subprocess
-import sys
-from typing import AsyncIterator, Optional
+from typing import Optional
 
 from .errors import CapabilityUnavailableError, MeerkatError
 from .generated.types import (
     CONTRACT_VERSION,
     CapabilitiesResponse,
     CapabilityEntry,
-    WireEvent,
     WireRunResult,
     WireUsage,
 )
 
 
 class MeerkatClient:
-    """Async client that communicates with a Meerkat runtime via rkat rpc."""
+    """Async client that communicates with a Meerkat runtime via rkat rpc.
+
+    Uses ``asyncio.create_subprocess_exec`` for non-blocking I/O.
+
+    Usage::
+
+        client = MeerkatClient()
+        await client.connect()
+        result = await client.create_session("Hello!")
+        print(result.text)
+        await client.close()
+    """
 
     def __init__(self, rkat_path: str = "rkat"):
         import shutil
 
         self._rkat_path = rkat_path
-        self._process: Optional[subprocess.Popen] = None
+        self._process: Optional[asyncio.subprocess.Process] = None
         self._request_id = 0
         self._capabilities: Optional[CapabilitiesResponse] = None
 
@@ -37,11 +45,12 @@ class MeerkatClient:
 
     async def connect(self) -> "MeerkatClient":
         """Start the rkat rpc subprocess and perform handshake."""
-        self._process = subprocess.Popen(
-            [self._rkat_path, "rpc"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        self._process = await asyncio.create_subprocess_exec(
+            self._rkat_path,
+            "rpc",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
 
         # Initialize handshake
@@ -61,7 +70,7 @@ class MeerkatClient:
                 CapabilityEntry(
                     id=c.get("id", ""),
                     description=c.get("description", ""),
-                    status=c.get("status", "available"),
+                    status=c.get("status", "Available"),
                 )
                 for c in caps_result.get("capabilities", [])
             ],
@@ -75,7 +84,10 @@ class MeerkatClient:
             if self._process.stdin:
                 self._process.stdin.close()
             self._process.terminate()
-            self._process.wait(timeout=5)
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                self._process.kill()
             self._process = None
 
     async def create_session(
@@ -86,7 +98,7 @@ class MeerkatClient:
         max_tokens: Optional[int] = None,
     ) -> WireRunResult:
         """Create a new session and run the first turn."""
-        params = {"prompt": prompt}
+        params: dict = {"prompt": prompt}
         if model:
             params["model"] = model
         if system_prompt:
@@ -160,25 +172,26 @@ class MeerkatClient:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
 
         self._request_id += 1
+        request_id = self._request_id
         request = {
             "jsonrpc": "2.0",
-            "id": self._request_id,
+            "id": request_id,
             "method": method,
             "params": params,
         }
 
         line = json.dumps(request) + "\n"
         self._process.stdin.write(line.encode())
-        self._process.stdin.flush()
+        await self._process.stdin.drain()
 
-        # Read response (skip notifications)
+        # Read response lines asynchronously (skip notifications)
         while True:
-            response_line = self._process.stdout.readline()
+            response_line = await self._process.stdout.readline()
             if not response_line:
                 raise MeerkatError("CONNECTION_CLOSED", "rkat rpc process closed")
 
             response = json.loads(response_line)
-            if "id" in response and response["id"] == self._request_id:
+            if "id" in response and response["id"] == request_id:
                 if "error" in response and response["error"]:
                     err = response["error"]
                     raise MeerkatError(

@@ -2,16 +2,15 @@
  * Meerkat client — spawns rkat rpc subprocess and communicates via JSON-RPC.
  */
 
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
-import { MeerkatError } from "./generated/errors";
+import { MeerkatError } from "./generated/errors.js";
 import type {
   WireRunResult,
-  WireUsage,
   CapabilitiesResponse,
   CapabilityEntry,
-} from "./generated/types";
-import { CONTRACT_VERSION } from "./generated/types";
+} from "./generated/types.js";
+import { CONTRACT_VERSION } from "./generated/types.js";
 
 export class MeerkatClient {
   private process: ChildProcess | null = null;
@@ -33,17 +32,25 @@ export class MeerkatClient {
     });
 
     const rl = createInterface({ input: this.process.stdout! });
-    rl.on("line", (line) => {
+    rl.on("line", (line: string) => {
       try {
-        const response = JSON.parse(line);
-        if ("id" in response && this.pendingRequests.has(response.id)) {
+        const response = JSON.parse(line) as Record<string, unknown>;
+        if (
+          "id" in response &&
+          typeof response.id === "number" &&
+          this.pendingRequests.has(response.id)
+        ) {
           const pending = this.pendingRequests.get(response.id)!;
           this.pendingRequests.delete(response.id);
-          if (response.error) {
+          const error = response.error as
+            | Record<string, unknown>
+            | null
+            | undefined;
+          if (error) {
             pending.reject(
               new MeerkatError(
-                String(response.error.code),
-                response.error.message,
+                String(error.code ?? "UNKNOWN"),
+                String(error.message ?? "Unknown error"),
               ),
             );
           } else {
@@ -75,15 +82,14 @@ export class MeerkatClient {
     >;
     this.capabilities = {
       contract_version: String(capsResult.contract_version ?? ""),
-      capabilities: ((capsResult.capabilities as unknown[]) ?? []).map(
-        (c: unknown) => {
-          const cap = c as Record<string, unknown>;
-          return {
-            id: String(cap.id ?? ""),
-            description: String(cap.description ?? ""),
-            status: String(cap.status ?? "available"),
-          };
-        },
+      capabilities: (
+        (capsResult.capabilities as Array<Record<string, unknown>>) ?? []
+      ).map(
+        (cap): CapabilityEntry => ({
+          id: String(cap.id ?? ""),
+          description: String(cap.description ?? ""),
+          status: String(cap.status ?? "Available"),
+        }),
       ),
     };
 
@@ -110,10 +116,7 @@ export class MeerkatClient {
     return this.parseRunResult(result);
   }
 
-  async startTurn(
-    sessionId: string,
-    prompt: string,
-  ): Promise<WireRunResult> {
+  async startTurn(sessionId: string, prompt: string): Promise<WireRunResult> {
     const result = (await this.request("turn/start", {
       session_id: sessionId,
       prompt,
@@ -133,6 +136,16 @@ export class MeerkatClient {
     return (result.sessions as unknown[]) ?? [];
   }
 
+  async readSession(sessionId: string): Promise<Record<string, unknown>> {
+    return (await this.request("session/read", {
+      session_id: sessionId,
+    })) as Record<string, unknown>;
+  }
+
+  async archiveSession(sessionId: string): Promise<void> {
+    await this.request("session/archive", { session_id: sessionId });
+  }
+
   async getCapabilities(): Promise<CapabilitiesResponse> {
     if (this.capabilities) return this.capabilities;
     const result = (await this.request("capabilities/get", {})) as Record<
@@ -150,6 +163,15 @@ export class MeerkatClient {
     return this.capabilities.capabilities.some(
       (c) => c.id === capabilityId && c.status === "Available",
     );
+  }
+
+  requireCapability(capabilityId: string): void {
+    if (!this.hasCapability(capabilityId)) {
+      throw new MeerkatError(
+        "CAPABILITY_UNAVAILABLE",
+        `Capability '${capabilityId}' is not available`,
+      );
+    }
   }
 
   // --- Internal ---

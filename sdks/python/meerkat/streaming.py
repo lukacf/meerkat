@@ -1,7 +1,7 @@
 """Async iterator over WireEvent from the rkat rpc event stream."""
 
+import asyncio
 import json
-from typing import AsyncIterator
 
 from .generated.types import WireEvent
 
@@ -9,12 +9,17 @@ from .generated.types import WireEvent
 class EventStream:
     """Async iterator that yields WireEvent objects from a JSON-RPC notification stream.
 
-    Usage:
+    Reads from an ``asyncio.StreamReader`` (the stdout of the rkat rpc process).
+    Skips JSON-RPC response messages (which have an ``id`` field) and only
+    yields notification payloads parsed as ``WireEvent``.
+
+    Usage::
+
         async for event in EventStream(process.stdout):
             print(event.event)
     """
 
-    def __init__(self, stream):
+    def __init__(self, stream: asyncio.StreamReader):
         self._stream = stream
         self._closed = False
 
@@ -23,7 +28,7 @@ class EventStream:
 
     async def __anext__(self) -> WireEvent:
         while not self._closed:
-            line = self._stream.readline()
+            line = await self._stream.readline()
             if not line:
                 self._closed = True
                 raise StopAsyncIteration

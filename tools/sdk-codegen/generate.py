@@ -220,7 +220,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     (output_dir / "errors.ts").write_text(errors_content)
 
     # Index file
-    index_content = "// Generated exports\nexport * from './types';\nexport * from './errors';\n"
+    index_content = "// Generated exports\nexport * from './types.js';\nexport * from './errors.js';\n"
     (output_dir / "index.ts").write_text(index_content)
 
 

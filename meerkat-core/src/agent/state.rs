@@ -140,21 +140,26 @@ where
                             self.last_input_tokens = 0;
                             self.last_compaction_turn = Some(turn_count);
 
-                            // Index discarded messages into memory store
+                            // Index discarded messages into memory store (fire-and-forget)
                             if let Some(ref memory_store) = self.memory_store {
-                                for message in &outcome.discarded {
-                                    let content = message.as_indexable_text();
-                                    if !content.is_empty() {
-                                        let metadata = crate::memory::MemoryMetadata {
-                                            session_id: self.session.id().clone(),
-                                            turn: Some(turn_count),
-                                            indexed_at: std::time::SystemTime::now(),
-                                        };
-                                        if let Err(e) = memory_store.index(&content, metadata).await {
-                                            tracing::warn!("failed to index compaction discard into memory: {e}");
+                                let store = Arc::clone(memory_store);
+                                let session_id = self.session.id().clone();
+                                let discarded = outcome.discarded;
+                                tokio::spawn(async move {
+                                    for message in &discarded {
+                                        let content = message.as_indexable_text();
+                                        if !content.is_empty() {
+                                            let metadata = crate::memory::MemoryMetadata {
+                                                session_id: session_id.clone(),
+                                                turn: Some(turn_count),
+                                                indexed_at: std::time::SystemTime::now(),
+                                            };
+                                            if let Err(e) = store.index(&content, metadata).await {
+                                                tracing::warn!("failed to index compaction discard into memory: {e}");
+                                            }
                                         }
                                     }
-                                }
+                                });
                             }
                         }
                         // On failure: non-fatal, continue with uncompacted history

@@ -646,7 +646,13 @@ impl AgentFactory {
             let engine = DefaultSkillEngine::new(Box::new(composite), available_caps);
 
             // Generate inventory section for system prompt and collect skill IDs
-            let section = engine.inventory_section().await.unwrap_or_default();
+            let section = match engine.inventory_section().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to generate skill inventory section: {e}");
+                    String::new()
+                }
+            };
 
             // Collect active skill IDs for session metadata
             let source = EmbeddedSkillSource::new();

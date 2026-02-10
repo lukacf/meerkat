@@ -1,7 +1,9 @@
 //! SKILL.md frontmatter parser.
+//!
+//! Uses `serde_yaml` for robust YAML parsing of the frontmatter block.
 
-use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillError, SkillId, SkillScope};
 use indexmap::IndexMap;
+use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillError, SkillId, SkillScope};
 
 /// Parsed frontmatter from a SKILL.md file.
 #[derive(Debug, serde::Deserialize)]
@@ -18,7 +20,7 @@ struct Frontmatter {
 /// ```text
 /// ---
 /// name: Shell Patterns
-/// description: Background job workflows
+/// description: "Background job workflows: patterns and tips"
 /// requires_capabilities: [builtins, shell]
 /// ---
 ///
@@ -31,10 +33,8 @@ pub fn parse_skill_md(
     content: &str,
 ) -> Result<SkillDocument, SkillError> {
     let (frontmatter_str, body) = split_frontmatter(content)?;
-    let fm: Frontmatter = serde_json::from_str(
-        &frontmatter_to_json(&frontmatter_str),
-    )
-    .map_err(|e| SkillError::Parse(format!("frontmatter parse error: {e}").into()))?;
+    let fm: Frontmatter = serde_yaml::from_str(&frontmatter_str)
+        .map_err(|e| SkillError::Parse(format!("frontmatter parse error: {e}").into()))?;
 
     Ok(SkillDocument {
         descriptor: SkillDescriptor {
@@ -67,33 +67,6 @@ fn split_frontmatter(content: &str) -> Result<(String, &str), SkillError> {
     Ok((frontmatter.to_string(), body.trim_start_matches('\n')))
 }
 
-/// Convert YAML-like frontmatter to JSON for serde_json parsing.
-/// Handles simple key: value and key: [list] formats.
-fn frontmatter_to_json(fm: &str) -> String {
-    let mut pairs = Vec::new();
-    for line in fm.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once(':') {
-            let key = key.trim();
-            let value = value.trim();
-            if value.starts_with('[') && value.ends_with(']') {
-                // Array value
-                let items: Vec<String> = value[1..value.len() - 1]
-                    .split(',')
-                    .map(|s| format!("\"{}\"", s.trim()))
-                    .collect();
-                pairs.push(format!("\"{key}\": [{}]", items.join(", ")));
-            } else {
-                pairs.push(format!("\"{key}\": \"{}\"", value));
-            }
-        }
-    }
-    format!("{{{}}}", pairs.join(", "))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -120,27 +93,35 @@ When running background jobs..."#;
 
         assert_eq!(doc.descriptor.name, "Shell Patterns");
         assert_eq!(doc.descriptor.description, "Background job workflows");
-        assert_eq!(doc.descriptor.requires_capabilities, vec!["builtins", "shell"]);
+        assert_eq!(
+            doc.descriptor.requires_capabilities,
+            vec!["builtins", "shell"]
+        );
         assert!(doc.body.contains("# Shell Patterns"));
     }
 
     #[test]
     fn test_parse_no_capabilities() {
-        let content = r#"---
-name: MCP Setup
-description: Configure MCP servers
----
-
-Content here"#;
-
+        let content = "---\nname: MCP Setup\ndescription: Configure MCP servers\n---\n\nContent here";
         let doc = parse_skill_md(
             SkillId("mcp-setup".to_string()),
             SkillScope::Project,
             content,
         )
         .unwrap();
-
         assert!(doc.descriptor.requires_capabilities.is_empty());
+    }
+
+    #[test]
+    fn test_parse_description_with_colon() {
+        let content = "---\nname: Test\ndescription: \"Use: this tool carefully\"\n---\n\nBody";
+        let doc = parse_skill_md(
+            SkillId("test".to_string()),
+            SkillScope::Builtin,
+            content,
+        )
+        .unwrap();
+        assert_eq!(doc.descriptor.description, "Use: this tool carefully");
     }
 
     #[test]

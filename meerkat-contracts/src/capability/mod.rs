@@ -48,6 +48,10 @@ pub enum CapabilityScope {
     /// Available on all protocol surfaces.
     Universal,
     /// Available only on specific protocols.
+    ///
+    /// Note: Uses `Vec<Protocol>` for serde compatibility. All current
+    /// registrations use `Universal`. If `Extension` is used in hot paths,
+    /// consider `Cow<'static, [Protocol]>` to avoid clone allocations.
     Extension { protocols: Vec<Protocol> },
 }
 

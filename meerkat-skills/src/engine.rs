@@ -1,7 +1,9 @@
 //! Default skill engine implementation.
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
-use meerkat_core::skills::{SkillEngine, SkillError, SkillSource};
+use meerkat_core::skills::{SkillDescriptor, SkillEngine, SkillError, SkillSource};
 
 use crate::renderer;
 use crate::resolver;
@@ -9,32 +11,38 @@ use crate::resolver;
 /// Default implementation of [`SkillEngine`].
 pub struct DefaultSkillEngine {
     source: Box<dyn SkillSource>,
-    available_capabilities: Vec<String>,
+    available_capabilities: HashSet<String>,
 }
 
 impl DefaultSkillEngine {
     pub fn new(source: Box<dyn SkillSource>, available_capabilities: Vec<String>) -> Self {
         Self {
             source,
-            available_capabilities,
+            available_capabilities: available_capabilities.into_iter().collect(),
         }
     }
+}
+
+/// Filter skills to those whose required capabilities are all available.
+fn filter_by_capabilities(
+    skills: Vec<SkillDescriptor>,
+    available: &HashSet<String>,
+) -> Vec<SkillDescriptor> {
+    skills
+        .into_iter()
+        .filter(|s| {
+            s.requires_capabilities
+                .iter()
+                .all(|cap| available.contains(cap))
+        })
+        .collect()
 }
 
 #[async_trait]
 impl SkillEngine for DefaultSkillEngine {
     async fn inventory_section(&self) -> Result<String, SkillError> {
         let all_skills = self.source.list().await?;
-        // Filter by available capabilities
-        let available: Vec<_> = all_skills
-            .into_iter()
-            .filter(|s| {
-                s.requires_capabilities.iter().all(|cap| {
-                    self.available_capabilities.iter().any(|a| a == cap)
-                })
-            })
-            .collect();
-
+        let available = filter_by_capabilities(all_skills, &self.available_capabilities);
         Ok(renderer::render_inventory(&available))
     }
 
@@ -44,15 +52,8 @@ impl SkillEngine for DefaultSkillEngine {
         available_capabilities: &[String],
     ) -> Result<String, SkillError> {
         let all_skills = self.source.list().await?;
-        // Filter by available capabilities
-        let available: Vec<_> = all_skills
-            .into_iter()
-            .filter(|s| {
-                s.requires_capabilities.iter().all(|cap| {
-                    available_capabilities.iter().any(|a| a == cap)
-                })
-            })
-            .collect();
+        let caps: HashSet<String> = available_capabilities.iter().cloned().collect();
+        let available = filter_by_capabilities(all_skills, &caps);
 
         let mut blocks = Vec::new();
         for reference in references {

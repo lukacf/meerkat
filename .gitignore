@@ -27,3 +27,11 @@ test-project/
 
 # Vendored deps (local symlink, not portable)
 vendor
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/

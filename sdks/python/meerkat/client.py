@@ -28,6 +28,15 @@ class MeerkatClient:
 
     async def connect(self) -> "MeerkatClient":
         """Start the rkat rpc subprocess and perform handshake."""
+        import shutil
+
+        if not shutil.which(self._rkat_path):
+            raise MeerkatError(
+                "BINARY_NOT_FOUND",
+                f"rkat binary not found at '{self._rkat_path}'. "
+                "Ensure it is installed and on your PATH.",
+            )
+
         self._process = subprocess.Popen(
             [self._rkat_path, "rpc"],
             stdin=subprocess.PIPE,

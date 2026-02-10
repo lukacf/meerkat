@@ -16,6 +16,7 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 strum = { workspace = true }
+serde_yaml = { workspace = true }
 indexmap = "2"
 
 [dev-dependencies]

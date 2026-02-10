@@ -1,221 +1,126 @@
 ---
 title: "Configuration"
-description: "Configure Meerkat through environment variables, config files, CLI options, and programmatic settings."
+description: "Environment variables, config files, provider setup, and tuning options for Meerkat."
 icon: "sliders"
 ---
 
-Meerkat supports configuration through configuration files and programmatic settings. Environment variables are used only for secrets (API keys).
+Meerkat uses layered configuration: defaults, then config file, then environment variables (secrets only). CLI flags and programmatic settings override everything else.
 
 ## Environment variables
 
-### API keys
+Environment variables are used **only for API key secrets**. All other settings go in config files.
 
-| Variable | Provider | Required |
+| Variable | Fallback | Provider |
 |----------|----------|----------|
-| `ANTHROPIC_API_KEY` | Anthropic Claude | For Anthropic models |
-| `OPENAI_API_KEY` | OpenAI GPT | For OpenAI models |
-| `GOOGLE_API_KEY` | Google Gemini | For Gemini models |
+| `RKAT_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` | Anthropic Claude |
+| `RKAT_OPENAI_API_KEY` | `OPENAI_API_KEY` | OpenAI GPT |
+| `RKAT_GEMINI_API_KEY` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` | Google Gemini |
 
-### Testing variables
+<Note>
+The `RKAT_*` variants take precedence over provider-native names, so you can run Meerkat with dedicated keys separate from other tools.
+</Note>
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ANTHROPIC_MODEL` | Model for Anthropic E2E tests | `claude-opus-4-6` |
-| `OPENAI_MODEL` | Model for OpenAI E2E tests | `gpt-5.2` |
-| `GEMINI_MODEL` | Model for Gemini E2E tests | `gemini-3-flash-preview` |
-
-## Configuration files
-
-Edit `~/.rkat/config.toml` (global) or `.rkat/config.toml` (project) for non-secret settings.
-
-## CLI options
-
-### rkat run
+You only need a key for the provider you plan to use. Set at least one:
 
 ```bash
-rkat run [OPTIONS] <PROMPT>
+export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-<ParamField path="--model, -m" type="string" default="claude-sonnet-4">
-  Model to use.
-</ParamField>
+## Config file
 
-<ParamField path="--max-tokens, -t" type="integer" default="4096">
-  Maximum tokens per turn.
-</ParamField>
+Meerkat loads config from TOML files in two locations:
 
-<ParamField path="--max-duration" type="string">
-  Maximum runtime (e.g., `"30s"`, `"5m"`).
-</ParamField>
+| Location | Scope | Example path |
+|----------|-------|--------------|
+| `.rkat/config.toml` | Project (checked into repo or gitignored) | `./my-project/.rkat/config.toml` |
+| `~/.rkat/config.toml` | Global (user-wide defaults) | `~/.rkat/config.toml` |
 
-<ParamField path="--max-tool-calls" type="integer">
-  Maximum tool invocations.
-</ParamField>
+**Precedence:** defaults &rarr; global config &rarr; project config &rarr; env vars &rarr; CLI flags.
 
-<ParamField path="--system-prompt, -s" type="string">
-  System prompt.
-</ParamField>
+Project config wins over global config. If neither exists, built-in defaults apply.
 
-<ParamField path="--output, -o" type="string" default="text">
-  Output format (`text`, `json`).
-</ParamField>
+### Minimal example
 
-<ParamField path="--stream" type="boolean" default="false">
-  Stream output as it arrives.
-</ParamField>
+```toml .rkat/config.toml
+[agent]
+model = "claude-opus-4-6"
+max_tokens_per_turn = 16384
 
-<ParamField path="--hooks-override-json" type="string">
-  Inline JSON for run-scoped hook overrides.
-</ParamField>
+[shell]
+program = "bash"
+timeout_secs = 30
+```
 
-<ParamField path="--hooks-override-file" type="string">
-  Path to JSON file for run-scoped hook overrides.
-</ParamField>
-
-### rkat resume
+### Generating a config file
 
 ```bash
-rkat resume [OPTIONS] <SESSION_ID> <PROMPT>
+rkat config init          # Creates .rkat/config.toml with defaults
+rkat config init --global # Creates ~/.rkat/config.toml
 ```
 
-<ParamField path="--model, -m" type="string" default="claude-sonnet-4">
-  Model to use.
-</ParamField>
+## Providers
 
-<ParamField path="--max-tokens, -t" type="integer" default="4096">
-  Maximum tokens.
-</ParamField>
+<div id="providers" />
 
-<ParamField path="--output, -o" type="string" default="text">
-  Output format.
-</ParamField>
+Each provider needs its API key set as an environment variable and a model selected.
 
-<ParamField path="--hooks-override-json" type="string">
-  Inline JSON for run-scoped hook overrides.
-</ParamField>
+<Tabs>
+  <Tab title="Anthropic">
+    ```bash
+    export ANTHROPIC_API_KEY="sk-ant-..."
+    ```
 
-<ParamField path="--hooks-override-file" type="string">
-  Path to JSON file for run-scoped hook overrides.
-</ParamField>
+    | Model | Context | Max output | Best for |
+    |-------|---------|------------|----------|
+    | `claude-opus-4-6` | 200K / 1M (beta) | 128K | Complex reasoning, highest quality |
+    | `claude-sonnet-4-5` | 200K / 1M (beta) | 64K | Balanced performance and cost |
+    | `claude-opus-4-5` | 200K | 64K | Legacy Opus (still supported) |
+    | `claude-haiku-4-5` | 200K | 64K | Fast, simple tasks |
 
-## Hook configuration
+    ```toml .rkat/config.toml
+    [agent]
+    model = "claude-opus-4-6"
+    max_tokens_per_turn = 16384
+    ```
+  </Tab>
+  <Tab title="OpenAI">
+    ```bash
+    export OPENAI_API_KEY="sk-..."
+    ```
 
-Meerkat supports first-class hooks in config and per-run overrides. See the [hooks guide](/guides/hooks) for full details.
+    | Model | Context | Best for |
+    |-------|---------|----------|
+    | `gpt-5.2` | 1M | General purpose, advanced reasoning |
+    | `gpt-5.2-pro` | 1M | Highest quality reasoning |
+    | `gpt-5.1-codex-max` | 1M | Code generation, agentic coding |
 
-### Global and project config
+    ```toml .rkat/config.toml
+    [agent]
+    model = "gpt-5.2"
+    max_tokens_per_turn = 8192
+    ```
+  </Tab>
+  <Tab title="Gemini">
+    ```bash
+    export GOOGLE_API_KEY="AIza..."
+    ```
 
-Hook entries live under `[hooks]`:
+    | Model | Context | Best for |
+    |-------|---------|----------|
+    | `gemini-3-pro-preview` | 1M | Advanced reasoning, complex tasks |
+    | `gemini-3-flash-preview` | 1M | Fast, balanced performance |
 
-```toml
-[hooks]
-default_timeout_ms = 5000
-payload_max_bytes = 131072
-background_max_concurrency = 32
+    ```toml .rkat/config.toml
+    [agent]
+    model = "gemini-3-pro-preview"
+    max_tokens_per_turn = 8192
+    ```
+  </Tab>
+</Tabs>
 
-[[hooks.entries]]
-id = "pre_tool_guard"
-enabled = true
-point = "pre_tool_execution"
-mode = "foreground"
-capability = "guardrail"
-priority = 10
-failure_policy = "fail_closed"
-timeout_ms = 800
+### SDK feature flags
 
-[hooks.entries.runtime]
-type = "in_process"
-name = "pre_tool_guard"
-```
-
-**Supported points:**
-
-| Point | Description |
-|-------|-------------|
-| `run_started` | Fires when a run begins |
-| `run_completed` | Fires when a run completes successfully |
-| `run_failed` | Fires when a run fails |
-| `pre_llm_request` | Before each LLM API call |
-| `post_llm_response` | After each LLM API response |
-| `pre_tool_execution` | Before a tool is executed |
-| `post_tool_execution` | After a tool is executed |
-| `turn_boundary` | At the boundary between turns |
-
-**Supported runtimes:**
-
-| Runtime | Description |
-|---------|-------------|
-| `in_process` | Runs in the agent process |
-| `command` | Runs as an external command |
-| `http` | Calls an HTTP endpoint |
-
-<Warning>
-`command` and `http` hooks are treated as trusted code for the project where they are configured. Do not run hook-enabled projects from untrusted sources without reviewing `.rkat/config.toml`.
-</Warning>
-
-### Layering and precedence
-
-Hook entries are merged with deterministic registration order:
-
-<Steps>
-  <Step title="Global config">
-    Hooks from `~/.rkat/config.toml` are loaded first.
-  </Step>
-  <Step title="Project config">
-    Hooks from `.rkat/config.toml` are merged next.
-  </Step>
-  <Step title="Run overrides">
-    Per-run override entries are applied last.
-  </Step>
-</Steps>
-
-Run overrides can also disable configured hooks by id.
-
-### Run override JSON schema
-
-All control surfaces accept `HookRunOverrides`:
-
-```json
-{
-  "disable": ["global_observer"],
-  "entries": [
-    {
-      "id": "run_pre_tool_rewrite",
-      "enabled": true,
-      "point": "pre_tool_execution",
-      "mode": "foreground",
-      "capability": "rewrite",
-      "priority": 10,
-      "runtime": {
-        "type": "in_process",
-        "name": "run_pre_tool_rewrite"
-      }
-    }
-  ]
-}
-```
-
-The same payload shape is used by:
-- **CLI:** `--hooks-override-json` / `--hooks-override-file`
-- **REST:** `CreateSessionRequest.hooks_override` / `ContinueSessionRequest.hooks_override`
-- **MCP server:** `MeerkatRunInput.hooks_override` / `MeerkatResumeInput.hooks_override`
-
-### rkat sessions
-
-```bash
-rkat sessions list [--limit N]
-rkat sessions show <SESSION_ID>
-```
-
-## Feature flags
-
-Configure features in your `Cargo.toml`:
-
-```toml
-[dependencies]
-meerkat = { version = "0.1", default-features = false, features = ["anthropic"] }
-```
-
-### Provider features
+When using Meerkat as a Rust library, enable only the providers you need:
 
 | Feature | Description | Default |
 |---------|-------------|---------|
@@ -223,15 +128,6 @@ meerkat = { version = "0.1", default-features = false, features = ["anthropic"] 
 | `openai` | OpenAI GPT support | No |
 | `gemini` | Google Gemini support | No |
 | `all-providers` | All LLM providers | No |
-
-### Storage features
-
-| Feature | Description | Default |
-|---------|-------------|---------|
-| `jsonl-store` | JSONL file storage | Yes |
-| `memory-store` | In-memory storage | No |
-
-### Common configurations
 
 <CodeGroup>
 
@@ -249,151 +145,71 @@ meerkat = { version = "0.1", features = ["anthropic", "memory-store"] }
 
 </CodeGroup>
 
-## Programmatic configuration
+## Budget controls
 
-### Quick builder (SDK helpers)
+Budget limits cap resource usage per agent run. When a limit is reached the agent completes its current turn, then stops.
+
+<ParamField path="max_tokens" type="integer">
+  Total input + output tokens across all turns. When exceeded the agent finishes its current turn and returns partial results.
+</ParamField>
+
+<ParamField path="max_duration" type="string">
+  Maximum wall-clock runtime. Accepts human-readable durations like `"30s"`, `"5m"`, `"2h"`. When exceeded the agent completes the current turn, then stops.
+</ParamField>
+
+<ParamField path="max_tool_calls" type="integer">
+  Maximum total tool invocations. When exceeded, further tool calls are rejected and the agent continues without tools.
+</ParamField>
+
+### Config file
+
+```toml .rkat/config.toml
+[budget]
+max_tokens = 50000
+max_duration = "5m"
+max_tool_calls = 50
+```
+
+### CLI flags
+
+```bash
+rkat run --max-tokens 50000 --max-duration "5m" --max-tool-calls 50 "Your prompt"
+```
+
+### Programmatic (SDK)
 
 ```rust
 use meerkat::BudgetLimits;
 use std::time::Duration;
 
 let result = meerkat::with_anthropic(api_key)
-    .model("claude-opus-4-6")           // Model selection
-    .system_prompt("You are helpful.")   // System prompt
-    .max_tokens(2048)                    // Tokens per turn
-    .with_budget(BudgetLimits {          // Resource limits
+    .model("claude-opus-4-6")
+    .with_budget(BudgetLimits {
         max_tokens: Some(50_000),
-        max_duration: Some(Duration::from_secs(120)),
+        max_duration: Some(Duration::from_secs(300)),
         max_tool_calls: Some(50),
-    })
-    .with_retry_policy(RetryPolicy {     // Error handling
-        max_retries: 5,
-        initial_delay: Duration::from_millis(500),
-        max_delay: Duration::from_secs(30),
-        multiplier: 2.0,
     })
     .run("Your prompt")
     .await?;
 ```
 
-### Full AgentBuilder
+### Retry policy
 
-For complete control:
+Failed LLM calls are retried automatically with exponential backoff and jitter.
 
-```rust
-use meerkat::{AgentBuilder, BudgetLimits, RetryPolicy};
-
-let mut agent = AgentBuilder::new()
-    // Model settings
-    .model("claude-opus-4-6")
-    .system_prompt("You are a helpful assistant.")
-    .max_tokens_per_turn(4096)
-
-    // Resource limits
-    .budget(BudgetLimits {
-        max_tokens: Some(100_000),
-        max_duration: Some(Duration::from_secs(300)),
-        max_tool_calls: Some(100),
-    })
-
-    // Retry configuration
-    .retry_policy(RetryPolicy {
-        max_retries: 3,
-        initial_delay: Duration::from_millis(500),
-        max_delay: Duration::from_secs(10),
-        multiplier: 2.0,
-    })
-
-    // Resume existing session
-    .resume_session(existing_session)
-
-    // Build with dependencies
-    .build(llm_client, tool_dispatcher, session_store);
+```toml .rkat/config.toml
+[retry]
+max_retries = 3
+initial_delay_ms = 500
+max_delay_ms = 10000
+multiplier = 2.0
 ```
 
-<Tip>
-Use the quick builder for simple use cases and the full `AgentBuilder` when you need control over individual components like the LLM client, tool dispatcher, or session store.
-</Tip>
+Delay formula: `min(initial_delay * multiplier^attempt, max_delay) * jitter` where jitter is between 0.9 and 1.1.
 
-## Models
-
-<Tabs>
-  <Tab title="Anthropic">
-    | Model | Context | Max Output | Best for |
-    |-------|---------|------------|----------|
-    | `claude-opus-4-6` | 200K / 1M (beta) | 128K | Complex reasoning, highest quality (default) |
-    | `claude-sonnet-4-5` | 200K / 1M (beta) | 64K | Balanced performance and cost |
-    | `claude-opus-4-5` | 200K | 64K | Legacy Opus (still supported) |
-    | `claude-haiku-4-5` | 200K | 64K | Fast, simple tasks |
-  </Tab>
-  <Tab title="OpenAI">
-    | Model | Context | Best for |
-    |-------|---------|----------|
-    | `gpt-5.2` | 1M | General purpose, advanced reasoning (default) |
-    | `gpt-5.2-pro` | 1M | Highest quality reasoning |
-    | `gpt-5.1-codex-max` | 1M | Code generation, agentic coding |
-  </Tab>
-  <Tab title="Gemini">
-    | Model | Context | Best for |
-    |-------|---------|----------|
-    | `gemini-3-pro-preview` | 1M | Advanced reasoning, complex tasks |
-    | `gemini-3-flash-preview` | 1M | Fast, balanced performance |
-  </Tab>
-</Tabs>
-
-## Budget configuration
-
-<Accordion title="Token limits">
-```rust
-BudgetLimits {
-    max_tokens: Some(10_000),  // Total input + output tokens
-    ..Default::default()
-}
-```
-
-When exceeded: Agent completes current turn, then stops with partial results.
-</Accordion>
-
-<Accordion title="Duration limits">
-```rust
-BudgetLimits {
-    max_duration: Some(Duration::from_secs(60)),
-    ..Default::default()
-}
-```
-
-When exceeded: Agent completes current turn, then stops.
-</Accordion>
-
-<Accordion title="Tool call limits">
-```rust
-BudgetLimits {
-    max_tool_calls: Some(20),
-    ..Default::default()
-}
-```
-
-When exceeded: Tool calls are rejected, agent continues without tools.
-</Accordion>
-
-## Retry configuration
-
-### Default policy
-
-```rust
-RetryPolicy {
-    max_retries: 3,
-    initial_delay: Duration::from_millis(500),
-    max_delay: Duration::from_secs(10),
-    multiplier: 2.0,
-}
-```
-
-### Retryable errors
-
-| Error | Retried |
-|-------|---------|
-| `RateLimited` | Yes (with retry-after if provided) |
+| Error | Retried? |
+|-------|----------|
+| `RateLimited` | Yes (uses retry-after header when available) |
 | `ServerOverloaded` | Yes |
 | `NetworkTimeout` | Yes |
 | `ConnectionReset` | Yes |
@@ -403,271 +219,432 @@ RetryPolicy {
 | `ContentFiltered` | No |
 | `ContextLengthExceeded` | No |
 
-### Delay calculation
+## Session persistence
 
-```text
-delay = min(initial_delay * multiplier^attempt, max_delay) * jitter
+Sessions record conversation history so agents can resume where they left off.
+
+<Tabs>
+  <Tab title="JSONL (default)">
+    Sessions are stored as JSONL files, one per session. Each file contains the complete session state updated after each turn.
+
+    ```text
+    ~/.local/share/meerkat/sessions/
+    ├── 01936f8a-7b2c-7000-8000-000000000001.jsonl
+    ├── 01936f8a-7b2c-7000-8000-000000000002.jsonl
+    └── ...
+    ```
+
+    Requires the `jsonl-store` feature flag (enabled by default).
+
+    ```toml .rkat/config.toml
+    [store]
+    sessions_path = "/custom/path/to/sessions"
+    ```
+
+    ```rust
+    use meerkat::JsonlStore;
+    let store = JsonlStore::new("/custom/path/to/sessions");
+    store.init().await?;
+    ```
+  </Tab>
+  <Tab title="redb (embedded database)">
+    Durable embedded storage using [redb](https://github.com/cberner/redb). Stores sessions and events in a single database file.
+
+    Requires the `session-store` feature flag.
+
+    ```rust
+    use meerkat_store::RedbSessionStore;
+    let store = RedbSessionStore::open("/path/to/meerkat.redb")?;
+    ```
+  </Tab>
+  <Tab title="In-memory (testing)">
+    Ephemeral storage that lives only in process memory. Useful for tests.
+
+    Requires the `memory-store` feature flag.
+
+    ```rust
+    use meerkat::MemoryStore;
+    let store = MemoryStore::new();
+    ```
+  </Tab>
+</Tabs>
+
+### Managing sessions
+
+```bash
+rkat sessions list [--limit N]
+rkat sessions show <SESSION_ID>
 ```
 
-Where `jitter` is a random factor between 0.9 and 1.1.
+## Advanced
 
-## MCP server configuration
+<Accordion title="Hooks configuration">
+  Hooks let you run custom logic at defined points in the agent lifecycle. See the [hooks guide](/hooks) for the full walkthrough.
 
-See the [MCP surface documentation](/surfaces/mcp) for full details.
+  ### Config file setup
 
-<CodeGroup>
+  ```toml .rkat/config.toml
+  [hooks]
+  default_timeout_ms = 5000
+  payload_max_bytes = 131072
+  background_max_concurrency = 32
 
-```json JSON config
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@anthropic/mcp-server-filesystem", "/tmp"],
-      "env": {
-        "DEBUG": "true"
+  [[hooks.entries]]
+  id = "pre_tool_guard"
+  enabled = true
+  point = "pre_tool_execution"
+  mode = "foreground"
+  capability = "guardrail"
+  priority = 10
+  failure_policy = "fail_closed"
+  timeout_ms = 800
+
+  [hooks.entries.runtime]
+  type = "in_process"
+  name = "pre_tool_guard"
+  ```
+
+  ### Hook points
+
+  | Point | Description |
+  |-------|-------------|
+  | `run_started` | Fires when a run begins |
+  | `run_completed` | Fires when a run completes successfully |
+  | `run_failed` | Fires when a run fails |
+  | `pre_llm_request` | Before each LLM API call |
+  | `post_llm_response` | After each LLM API response |
+  | `pre_tool_execution` | Before a tool is executed |
+  | `post_tool_execution` | After a tool is executed |
+  | `turn_boundary` | At the boundary between turns |
+
+  ### Runtimes
+
+  | Runtime | Description |
+  |---------|-------------|
+  | `in_process` | Runs in the agent process |
+  | `command` | Runs as an external command |
+  | `http` | Calls an HTTP endpoint |
+
+  <Warning>
+  `command` and `http` hooks are treated as trusted code for the project where they are configured. Do not run hook-enabled projects from untrusted sources without reviewing `.rkat/config.toml`.
+  </Warning>
+
+  ### Layering and precedence
+
+  Hook entries are merged in a deterministic order:
+
+  <Steps>
+    <Step title="Global config">
+      Hooks from `~/.rkat/config.toml` are loaded first.
+    </Step>
+    <Step title="Project config">
+      Hooks from `.rkat/config.toml` are merged next.
+    </Step>
+    <Step title="Run overrides">
+      Per-run override entries are applied last.
+    </Step>
+  </Steps>
+
+  Run overrides can also disable configured hooks by id.
+
+  ### Run override JSON schema
+
+  All control surfaces accept `HookRunOverrides`:
+
+  ```json
+  {
+    "disable": ["global_observer"],
+    "entries": [
+      {
+        "id": "run_pre_tool_rewrite",
+        "enabled": true,
+        "point": "pre_tool_execution",
+        "mode": "foreground",
+        "capability": "rewrite",
+        "priority": 10,
+        "runtime": {
+          "type": "in_process",
+          "name": "run_pre_tool_rewrite"
+        }
+      }
+    ]
+  }
+  ```
+
+  This same payload is used by:
+  - **CLI:** `--hooks-override-json` / `--hooks-override-file`
+  - **REST:** `CreateSessionRequest.hooks_override` / `ContinueSessionRequest.hooks_override`
+  - **MCP server:** `MeerkatRunInput.hooks_override` / `MeerkatResumeInput.hooks_override`
+</Accordion>
+
+<Accordion title="Memory and compaction">
+  See the [memory guide](/memory) for a full walkthrough.
+
+  ### Semantic memory
+
+  When the `memory-store-session` feature is enabled and memory is activated (`enable_memory` on `AgentFactory` or `override_memory` on `AgentBuildConfig`), the agent gains a `memory_search` tool backed by `HnswMemoryStore` (hnsw_rs + redb). Compacted conversation turns are automatically indexed for later recall.
+
+  Memory data is stored under `<store_path>/memory/`.
+
+  ### Compaction config
+
+  Compaction summarizes older conversation turns to keep context windows manageable. Controlled by `CompactionConfig`:
+
+  | Parameter | Default | Description |
+  |-----------|---------|-------------|
+  | `auto_compact_threshold` | `100000` | Trigger when `last_input_tokens` reaches this value |
+  | `recent_turn_budget` | `4` | Number of recent complete turns to retain verbatim |
+  | `max_summary_tokens` | `4096` | Max tokens for the compaction summary |
+  | `min_turns_between_compactions` | `3` | Minimum turns between consecutive compactions |
+
+  <Note>
+  Compaction requires the `session-compaction` feature flag. When disabled, `SessionService` returns `SessionError::CompactionDisabled`.
+  </Note>
+</Accordion>
+
+<Accordion title="Sub-agent configuration">
+  See the [sub-agents guide](/sub-agents) for full details.
+
+  Sub-agent policy is configured under `[sub_agents]`:
+
+  ```toml .rkat/config.toml
+  [sub_agents]
+  default_provider = "inherit"   # "inherit" = use parent's provider
+  default_model = "inherit"      # "inherit" = use parent's model
+
+  [sub_agents.allowed_models]
+  anthropic = ["claude-opus-4-6", "claude-sonnet-4-5"]
+  openai = ["gpt-5.2"]
+  gemini = ["gemini-3-flash-preview", "gemini-3-pro-preview"]
+  ```
+
+  ### Concurrency limits
+
+  | Parameter | Default | Description |
+  |-----------|---------|-------------|
+  | `max_depth` | `3` | Maximum sub-agent nesting depth |
+  | `max_concurrent_ops` | `32` | Maximum concurrent operations (all types) |
+  | `max_concurrent_agents` | `8` | Maximum concurrent sub-agents |
+  | `max_children_per_agent` | `5` | Maximum children per parent agent |
+
+  <Note>
+  Sub-agents require the `sub-agents` feature flag. Enable per-request via `override_subagents` on `AgentBuildConfig` or `enable_subagents` on `AgentFactory`.
+  </Note>
+</Accordion>
+
+<Accordion title="Comms configuration">
+  See the [comms guide](/comms) for full details.
+
+  Agent-to-agent communication is configured under `[comms]`:
+
+  ```toml .rkat/config.toml
+  [comms]
+  mode = "inproc"                    # Transport: "inproc", "tcp", or "uds"
+  address = "127.0.0.1:4200"        # Listen address (tcp/uds only)
+  auto_enable_for_subagents = false  # Auto-enable comms for spawned sub-agents
+  ```
+
+  <Note>
+  Comms requires the `comms` feature flag. Enable at the factory level with `AgentFactory::comms(true)` and per-request with `host_mode` + `comms_name` on `AgentBuildConfig`.
+  </Note>
+</Accordion>
+
+<Accordion title="Shell security">
+  The built-in shell tool can be restricted using allow/deny lists. Configured under `[shell]`:
+
+  ```toml .rkat/config.toml
+  [shell]
+  program = "bash"
+  timeout_secs = 30
+  security_mode = "unrestricted"  # "unrestricted", "allow_list", or "deny_list"
+  security_patterns = []
+  ```
+
+  | Mode | Behavior |
+  |------|----------|
+  | `unrestricted` | No restrictions (default) |
+  | `allow_list` | Only commands matching `security_patterns` globs are permitted |
+  | `deny_list` | Commands matching `security_patterns` globs are blocked |
+
+  Example with an allow list:
+
+  ```toml .rkat/config.toml
+  [shell]
+  program = "bash"
+  timeout_secs = 30
+  security_mode = "allow_list"
+  security_patterns = ["ls *", "cat *", "grep *", "find *"]
+  ```
+</Accordion>
+
+<Accordion title="Logging">
+  Meerkat uses the `tracing` crate. Configure via `RUST_LOG`:
+
+  <CodeGroup>
+
+  ```bash Basic info logging
+  export RUST_LOG=info
+  ```
+
+  ```bash Debug Meerkat, info for dependencies
+  export RUST_LOG=meerkat=debug,info
+  ```
+
+  ```bash Full trace logging
+  export RUST_LOG=trace
+  ```
+
+  </CodeGroup>
+
+  | Level | What gets logged |
+  |-------|------------------|
+  | `error` | Failures only |
+  | `warn` | Warnings and above |
+  | `info` | Session lifecycle, turns, completions |
+  | `debug` | Tool calls, responses, retries |
+  | `trace` | Wire-level protocol details |
+</Accordion>
+
+<Accordion title="MCP server configuration">
+  See the [MCP guide](/mcp) for full details.
+
+  <CodeGroup>
+
+  ```json JSON config
+  {
+    "mcpServers": {
+      "filesystem": {
+        "command": "npx",
+        "args": ["-y", "@anthropic/mcp-server-filesystem", "/tmp"],
+        "env": {
+          "DEBUG": "true"
+        }
       }
     }
   }
-}
-```
-
-```rust Programmatic
-use meerkat::{McpRouter, McpServerConfig};
-use std::collections::HashMap;
-
-let config = McpServerConfig {
-    name: "filesystem".to_string(),
-    command: "npx".to_string(),
-    args: vec![
-        "-y".to_string(),
-        "@anthropic/mcp-server-filesystem".to_string(),
-        "/tmp".to_string(),
-    ],
-    env: HashMap::new(),
-};
-
-let router = McpRouter::new();
-router.add_server(config).await?;
-```
-
-</CodeGroup>
-
-## REST API configuration
-
-See the [REST surface documentation](/surfaces/rest) for full details.
-
-### Config file
-
-```toml
-[rest]
-host = "0.0.0.0"
-port = 3000
-
-[agent]
-model = "claude-opus-4-6"
-max_tokens_per_turn = 8192
-```
-
-### Running the server
-
-<CodeGroup>
-
-```bash Development
-cargo run --package meerkat-rest
-```
-
-```bash Production
-cargo build --release --package meerkat-rest
-./target/release/meerkat-rest
-```
-
-</CodeGroup>
-
-## Session storage
-
-### JSONL store (default)
-
-Sessions are stored as JSONL files:
-
-```text
-~/.local/share/meerkat/sessions/
-├── 01936f8a-7b2c-7000-8000-000000000001.jsonl
-├── 01936f8a-7b2c-7000-8000-000000000002.jsonl
-└── ...
-```
-
-Each file contains the complete session state, updated after each turn.
-
-### Custom storage path
-
-<CodeGroup>
-
-```toml Config file
-[store]
-sessions_path = "/custom/path/to/sessions"
-```
-
-```rust Programmatic
-use meerkat::JsonlStore;
-
-let store = JsonlStore::new("/custom/path/to/sessions");
-store.init().await?;
-```
-
-</CodeGroup>
-
-### Memory store (testing)
-
-For tests or ephemeral usage:
-
-```rust
-use meerkat::MemoryStore;
-
-let store = MemoryStore::new();
-// Sessions exist only in memory
-```
-
-## Logging
-
-Meerkat uses the `tracing` crate. Configure via `RUST_LOG`:
-
-<CodeGroup>
-
-```bash Basic info logging
-export RUST_LOG=info
-```
-
-```bash Debug for Meerkat, info for dependencies
-export RUST_LOG=meerkat=debug,info
-```
-
-```bash Full trace logging
-export RUST_LOG=trace
-```
-
-</CodeGroup>
-
-### Log levels
-
-| Level | What's logged |
-|-------|---------------|
-| `error` | Failures only |
-| `warn` | Warnings and above |
-| `info` | Session lifecycle, turns, completions |
-| `debug` | Tool calls, responses, retries |
-| `trace` | Wire-level protocol details |
-
-## Memory and compaction configuration
-
-See the [memory guide](/guides/memory) for a full walkthrough.
-
-### Semantic memory
-
-When the `memory-store-session` feature is enabled and memory is activated
-(`enable_memory` on `AgentFactory` or `override_memory` on `AgentBuildConfig`),
-the agent gains a `memory_search` tool backed by `HnswMemoryStore` (hnsw_rs + redb).
-Compacted conversation turns are automatically indexed into memory for later recall.
-
-Memory data is stored under `<store_path>/memory/`.
-
-### Compaction config
-
-Compaction is controlled by `CompactionConfig` (defined in `meerkat-core/src/compact.rs`).
-The `DefaultCompactor` in `meerkat-session` uses these defaults:
-
-```toml
-# These values are compiled defaults; override programmatically via CompactionConfig.
-auto_compact_threshold = 100000   # Trigger when last_input_tokens >= this value
-recent_turn_budget = 4            # Number of recent complete turns to retain
-max_summary_tokens = 4096         # Max tokens for the compaction summary
-min_turns_between_compactions = 3 # Minimum turns between consecutive compactions
-```
-
-<Note>
-Compaction requires the `session-compaction` feature flag. When disabled,
-`SessionService` returns `SessionError::CompactionDisabled`.
-</Note>
-
-## Sub-agent configuration
-
-See the [sub-agents guide](/guides/sub-agents) for full details.
-
-Sub-agent policy is configured under `[sub_agents]` in config files:
-
-```toml
-[sub_agents]
-default_provider = "inherit"   # "inherit" = use parent's provider
-default_model = "inherit"      # "inherit" = use parent's model
-
-[sub_agents.allowed_models]
-anthropic = ["claude-opus-4-6", "claude-sonnet-4-5"]
-openai = ["gpt-5.2"]
-gemini = ["gemini-3-flash-preview", "gemini-3-pro-preview"]
-```
-
-### Concurrency limits
-
-`ConcurrencyLimits` (defined in `meerkat-core/src/ops.rs`) controls sub-agent
-resource usage. Defaults:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `max_depth` | `3` | Maximum sub-agent nesting depth |
-| `max_concurrent_ops` | `32` | Maximum concurrent operations (all types) |
-| `max_concurrent_agents` | `8` | Maximum concurrent sub-agents |
-| `max_children_per_agent` | `5` | Maximum children per parent agent |
-
-<Note>
-Sub-agents require the `sub-agents` feature flag. Enable per-request via
-`override_subagents` on `AgentBuildConfig` or `enable_subagents` on `AgentFactory`.
-</Note>
-
-## Comms configuration
-
-See the [comms guide](/guides/comms) for full details.
-
-Agent-to-agent communication is configured under `[comms]`:
-
-```toml
-[comms]
-mode = "inproc"                    # Transport: "inproc", "tcp", or "uds"
-address = "127.0.0.1:4200"        # Listen address (tcp/uds only)
-auto_enable_for_subagents = false  # Auto-enable comms for spawned sub-agents
-```
-
-<Note>
-Comms requires the `comms` feature flag. Enable at the factory level with
-`AgentFactory::comms(true)` and per-request with `host_mode` + `comms_name`
-on `AgentBuildConfig`.
-</Note>
-
-## Environment variables (complete reference)
-
-### API keys (RKAT_* takes precedence)
-
-| Variable | Fallback | Provider |
-|----------|----------|----------|
-| `RKAT_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` | Anthropic Claude |
-| `RKAT_OPENAI_API_KEY` | `OPENAI_API_KEY` | OpenAI GPT |
-| `RKAT_GEMINI_API_KEY` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` | Google Gemini |
-
-<Info>
-The `RKAT_*` variants take precedence over the provider-native names. This allows
-running Meerkat with dedicated keys separate from other tools.
-</Info>
-
-### Testing variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `RKAT_TEST_CLIENT` | Set to `1` to enable test client mode | unset |
-| `ANTHROPIC_MODEL` | Model for Anthropic E2E tests | `claude-opus-4-6` |
-| `OPENAI_MODEL` | Model for OpenAI E2E tests | `gpt-5.2` |
-| `GEMINI_MODEL` | Model for Gemini E2E tests | `gemini-3-flash-preview` |
-
-### Runtime variables
-
-| Variable | Description |
-|----------|-------------|
-| `RUST_LOG` | Logging level filter (see [Logging](#logging) above) |
-| `HOME` | Used to locate user-level config and skills (`~/.rkat/`) |
+  ```
+
+  ```rust Programmatic
+  use meerkat::{McpRouter, McpServerConfig};
+  use std::collections::HashMap;
+
+  let config = McpServerConfig {
+      name: "filesystem".to_string(),
+      command: "npx".to_string(),
+      args: vec![
+          "-y".to_string(),
+          "@anthropic/mcp-server-filesystem".to_string(),
+          "/tmp".to_string(),
+      ],
+      env: HashMap::new(),
+  };
+
+  let router = McpRouter::new();
+  router.add_server(config).await?;
+  ```
+
+  </CodeGroup>
+
+  CLI management:
+
+  ```bash
+  rkat mcp add <name> -- <command> [args...]   # Add stdio server
+  rkat mcp add <name> --url <url>              # Add HTTP/SSE server
+  rkat mcp list                                # List servers
+  rkat mcp remove <name>                       # Remove server
+  ```
+</Accordion>
+
+<Accordion title="REST API configuration">
+  See the [REST guide](/rest) for full details.
+
+  ```toml .rkat/config.toml
+  [rest]
+  host = "0.0.0.0"
+  port = 3000
+
+  [agent]
+  model = "claude-opus-4-6"
+  max_tokens_per_turn = 8192
+  ```
+
+  <CodeGroup>
+
+  ```bash Development
+  cargo run --package meerkat-rest
+  ```
+
+  ```bash Production
+  cargo build --release --package meerkat-rest
+  ./target/release/meerkat-rest
+  ```
+
+  </CodeGroup>
+</Accordion>
+
+<Accordion title="Programmatic configuration (SDK)">
+  ### Quick builder
+
+  ```rust
+  use meerkat::BudgetLimits;
+  use std::time::Duration;
+
+  let result = meerkat::with_anthropic(api_key)
+      .model("claude-opus-4-6")
+      .system_prompt("You are helpful.")
+      .max_tokens(2048)
+      .with_budget(BudgetLimits {
+          max_tokens: Some(50_000),
+          max_duration: Some(Duration::from_secs(120)),
+          max_tool_calls: Some(50),
+      })
+      .with_retry_policy(RetryPolicy {
+          max_retries: 5,
+          initial_delay: Duration::from_millis(500),
+          max_delay: Duration::from_secs(30),
+          multiplier: 2.0,
+      })
+      .run("Your prompt")
+      .await?;
+  ```
+
+  ### Full AgentBuilder
+
+  For complete control over individual components:
+
+  ```rust
+  use meerkat::{AgentBuilder, BudgetLimits, RetryPolicy};
+
+  let mut agent = AgentBuilder::new()
+      .model("claude-opus-4-6")
+      .system_prompt("You are a helpful assistant.")
+      .max_tokens_per_turn(4096)
+      .budget(BudgetLimits {
+          max_tokens: Some(100_000),
+          max_duration: Some(Duration::from_secs(300)),
+          max_tool_calls: Some(100),
+      })
+      .retry_policy(RetryPolicy {
+          max_retries: 3,
+          initial_delay: Duration::from_millis(500),
+          max_delay: Duration::from_secs(10),
+          multiplier: 2.0,
+      })
+      .resume_session(existing_session)
+      .build(llm_client, tool_dispatcher, session_store);
+  ```
+
+  Use the quick builder for simple use cases and `AgentBuilder` when you need control over the LLM client, tool dispatcher, or session store.
+</Accordion>
+
+<Accordion title="Testing variables">
+  These environment variables are used only when running the Meerkat test suite.
+
+  | Variable | Description | Default |
+  |----------|-------------|---------|
+  | `RKAT_TEST_CLIENT` | Set to `1` to enable test client mode | unset |
+  | `ANTHROPIC_MODEL` | Model for Anthropic E2E tests | `claude-opus-4-6` |
+  | `OPENAI_MODEL` | Model for OpenAI E2E tests | `gpt-5.2` |
+  | `GEMINI_MODEL` | Model for Gemini E2E tests | `gemini-3-flash-preview` |
+  | `RUST_LOG` | Logging level filter (see logging section) | unset |
+</Accordion>

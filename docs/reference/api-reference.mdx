@@ -4,13 +4,40 @@ description: "Comprehensive reference for all public types, traits, and function
 icon: "book"
 ---
 
-## Module: `meerkat`
+## Type overview
 
-The main entry point. Re-exports types from all sub-crates.
+| Type | Module | Purpose |
+|------|--------|---------|
+| `AgentFactory` | `meerkat` | Shared entry point for SDK construction |
+| `Agent` | `meerkat_core` | Main agent execution engine |
+| `AgentBuilder` | `meerkat_core` | Builder pattern for agent construction |
+| `Session` | `meerkat_core` | Conversation state container |
+| `SessionId` | `meerkat_core` | Unique session identifier (UUIDv7) |
+| `Message` | `meerkat_core` | Conversation message types |
+| `ToolDef` | `meerkat_core` | Tool definition for LLM |
+| `ToolCall` | `meerkat_core` | Tool invocation request |
+| `ToolResult` | `meerkat_core` | Tool execution result |
+| `Usage` | `meerkat_core` | Token usage tracking |
+| `StopReason` | `meerkat_core` | Why the LLM stopped generating |
+| `BudgetLimits` | `meerkat_core` | Resource constraints |
+| `RetryPolicy` | `meerkat_core` | Error retry configuration |
+| `RunResult` | `meerkat_core` | Agent execution result |
+| `AgentEvent` | `meerkat_core` | Streaming events during execution |
+| `AgentError` | `meerkat_core` | Error types |
+| `HookPoint` | `meerkat_core` | Hook extension point identifiers |
+| `OutputSchema` | `meerkat_core` | Structured output schema |
+| `CapabilityId` | `meerkat_contracts` | Capability identifiers |
+| `ErrorCode` | `meerkat_contracts` | Stable wire error codes |
+| `WireError` | `meerkat_contracts` | Canonical error envelope |
+| `ContractVersion` | `meerkat_contracts` | Semver-style version |
+| `SkillId` | `meerkat_core::skills` | Skill identifier |
+
+## Core types
 
 ### SDK helpers
 
-AgentFactory is the shared entry point for SDK construction:
+<Accordion title="AgentFactory">
+Shared entry point for SDK construction:
 
 ```rust
 // Shared wiring for SDK, CLI, MCP, REST, and tests.
@@ -43,9 +70,9 @@ impl AgentFactory {
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError>
 }
 ```
+</Accordion>
 
-### Prelude
-
+<Accordion title="Prelude">
 Import common types:
 
 ```rust
@@ -59,13 +86,11 @@ pub use meerkat::prelude::*;
 // - RunResult, AgentEvent, AgentError
 // - SessionId, Usage
 ```
-
-## Module: `meerkat_core`
-
-Core agent implementation and types.
+</Accordion>
 
 ### Agent
 
+<Accordion title="Agent">
 The main agent execution engine:
 
 ```rust
@@ -94,9 +119,9 @@ impl Agent {
     pub fn session_id(&self) -> &SessionId
 }
 ```
+</Accordion>
 
-### AgentBuilder
-
+<Accordion title="AgentBuilder">
 Builder pattern for agent construction:
 
 ```rust
@@ -141,67 +166,11 @@ impl AgentBuilder {
     ) -> Agent
 }
 ```
+</Accordion>
 
-### Hook contracts
+### Session types
 
-Core hook interfaces are exposed from `meerkat_core` and re-exported by `meerkat`. Hooks execute at defined points in the agent loop. Each hook entry specifies a point, execution mode (foreground/background), capability (observe/guardrail/rewrite), and a runtime adapter (in-process, command, or HTTP). See `meerkat-hooks` for the `DefaultHookEngine` implementation.
-
-```rust
-pub enum HookPoint {
-    RunStarted,
-    RunCompleted,
-    RunFailed,
-    PreLlmRequest,
-    PostLlmResponse,
-    PreToolExecution,
-    PostToolExecution,
-    TurnBoundary,
-}
-
-pub enum HookExecutionMode {
-    Foreground,
-    Background,
-}
-
-pub enum HookCapability {
-    Observe,
-    Guardrail,
-    Rewrite,
-}
-
-pub struct HookRunOverrides {
-    /// Additional hook entries to register for this run only.
-    pub entries: Vec<HookEntryConfig>,
-    /// Hook IDs to disable for this run.
-    pub disable: Vec<HookId>,
-}
-
-/// Newtype wrapper for hook identifiers.
-pub struct HookId(pub String);
-
-/// Configuration for a single hook entry.
-pub struct HookEntryConfig {
-    pub id: HookId,
-    pub point: HookPoint,
-    pub priority: i32,
-    pub mode: HookExecutionMode,
-    pub capability: HookCapability,
-    pub enabled: bool,
-    pub runtime: HookRuntimeConfig,
-    pub failure_policy: Option<HookFailurePolicy>,
-    pub timeout_ms: Option<u64>,
-}
-
-pub enum HookFailurePolicy {
-    /// Continue execution on hook failure. Default for `Observe` capability.
-    FailOpen,
-    /// Deny execution on hook failure. Default for `Guardrail` and `Rewrite`.
-    FailClosed,
-}
-```
-
-### Session
-
+<Accordion title="Session">
 Conversation state container:
 
 ```rust
@@ -242,9 +211,9 @@ impl Session {
     pub fn last_assistant_message(&self) -> Option<&AssistantMessage>
 }
 ```
+</Accordion>
 
-### SessionId
-
+<Accordion title="SessionId">
 Unique session identifier (UUIDv7):
 
 ```rust
@@ -265,9 +234,9 @@ impl SessionId {
 impl Display for SessionId { ... }
 impl FromStr for SessionId { ... }
 ```
+</Accordion>
 
-### Message
-
+<Accordion title="Message">
 Conversation message types:
 
 ```rust
@@ -304,56 +273,38 @@ pub struct AssistantMessage {
     pub usage: Usage,
 }
 ```
+</Accordion>
 
-### ToolDef
-
-Tool definition for LLM:
+<Accordion title="ToolDef / ToolCall / ToolResult">
+Tool definition, invocation, and result types:
 
 ```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolDef {
     /// Tool name (must be unique)
     pub name: String,
-
     /// Human-readable description
     pub description: String,
-
     /// JSON Schema for input parameters
     pub input_schema: Value,
 }
-```
 
-### ToolCall
-
-Tool invocation request:
-
-```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Unique call identifier
     pub id: String,
-
     /// Tool name
     pub name: String,
-
     /// Arguments as JSON
     pub args: Value,
 }
-```
 
-### ToolResult
-
-Tool execution result:
-
-```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolResult {
     /// Corresponding tool call ID
     pub tool_call_id: String,
-
     /// Result content (success or error message)
     pub content: String,
-
     /// Whether the tool execution failed
     pub is_error: bool,
 }
@@ -361,22 +312,20 @@ pub struct ToolResult {
 impl ToolResult {
     /// Create a success result
     pub fn success(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self
-
     /// Create an error result
     pub fn error(tool_call_id: impl Into<String>, message: impl Into<String>) -> Self
 }
 ```
+</Accordion>
 
-### Usage
-
-Token usage tracking:
+<Accordion title="Usage / StopReason">
+Token usage tracking and stop reasons:
 
 ```rust
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Usage {
     /// Input tokens consumed
     pub input_tokens: u64,
-
     /// Output tokens generated
     pub output_tokens: u64,
 }
@@ -384,76 +333,47 @@ pub struct Usage {
 impl Usage {
     /// Total tokens (input + output)
     pub fn total_tokens(&self) -> u64
-
     /// Add another usage to this one
     pub fn add(&mut self, other: &Usage)
 }
 
 impl std::ops::Add for Usage { ... }
 impl std::ops::AddAssign for Usage { ... }
-```
 
-### StopReason
-
-Why the LLM stopped generating:
-
-```rust
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StopReason {
-    /// Natural end of response
-    EndTurn,
-
-    /// Wants to call tools
-    ToolUse,
-
-    /// Hit token limit
-    MaxTokens,
-
-    /// Hit a stop sequence
-    StopSequence,
-
-    /// Content was filtered
-    ContentFilter,
-
-    /// User cancelled
-    Cancelled,
+    EndTurn,        // Natural end of response
+    ToolUse,        // Wants to call tools
+    MaxTokens,      // Hit token limit
+    StopSequence,   // Hit a stop sequence
+    ContentFilter,  // Content was filtered
+    Cancelled,      // User cancelled
 }
 ```
+</Accordion>
 
-### BudgetLimits
-
-Resource constraints:
+<Accordion title="BudgetLimits / RetryPolicy">
+Resource constraints and error retry configuration:
 
 ```rust
 #[derive(Clone, Debug, Default)]
 pub struct BudgetLimits {
     /// Maximum total tokens (input + output)
     pub max_tokens: Option<u64>,
-
     /// Maximum wall-clock duration
     pub max_duration: Option<Duration>,
-
     /// Maximum tool invocations
     pub max_tool_calls: Option<u32>,
 }
-```
 
-### RetryPolicy
-
-Error retry configuration:
-
-```rust
 #[derive(Clone, Debug)]
 pub struct RetryPolicy {
     /// Maximum retry attempts
     pub max_retries: u32,
-
     /// Initial delay before first retry
     pub initial_delay: Duration,
-
     /// Maximum delay between retries
     pub max_delay: Duration,
-
     /// Exponential backoff multiplier
     pub multiplier: f64,
 }
@@ -469,9 +389,9 @@ impl Default for RetryPolicy {
     }
 }
 ```
+</Accordion>
 
-### RunResult
-
+<Accordion title="RunResult">
 Agent execution result:
 
 ```rust
@@ -479,62 +399,39 @@ Agent execution result:
 pub struct RunResult {
     /// Final text response
     pub text: String,
-
     /// Session identifier
     pub session_id: SessionId,
-
     /// Number of turns executed
     pub turns: u32,
-
     /// Number of tool calls made
     pub tool_calls: u32,
-
     /// Total token usage
     pub usage: Usage,
-
     /// Structured output (if output_schema was provided)
     pub structured_output: Option<serde_json::Value>,
-
     /// Warnings from schema compilation (if any)
     pub schema_warnings: Option<Vec<SchemaWarning>>,
 }
 ```
+</Accordion>
 
-### AgentEvent
-
+<Accordion title="AgentEvent">
 Streaming events during execution:
 
 ```rust
 #[derive(Clone, Debug)]
 pub enum AgentEvent {
-    /// Agent run started
     RunStarted { session_id: SessionId },
-
-    /// New turn started
     TurnStarted { turn: u32 },
-
-    /// Text chunk received
     TextDelta { delta: String },
-
-    /// Tool call requested by LLM
     ToolCallRequested { id: String, name: String },
-
-    /// Tool result received
     ToolResultReceived { id: String, result: String },
-
-    /// Turn completed
     TurnCompleted { turn: u32, usage: Usage },
-
-    /// Run completed successfully
     RunCompleted { result: RunResult },
-
-    /// Run failed with error
     RunFailed { error: String },
-
-    /// Session checkpoint saved
     CheckpointSaved { session_id: SessionId },
 
-    /// Hook lifecycle and audit events
+    // Hook lifecycle events
     HookStarted { hook_id: String, point: HookPoint },
     HookCompleted { hook_id: String, point: HookPoint, duration_ms: u64 },
     HookFailed { hook_id: String, point: HookPoint, error: String },
@@ -548,14 +445,14 @@ pub enum AgentEvent {
     HookRewriteApplied { hook_id: String, point: HookPoint, patch: HookPatch },
     HookPatchPublished { hook_id: String, point: HookPoint, envelope: HookPatchEnvelope },
 
-    /// Skill lifecycle events (emitted when skills feature is enabled)
+    // Skill lifecycle events
     SkillsResolved { skills: Vec<SkillId>, injection_bytes: usize },
     SkillResolutionFailed { reference: String, error: String },
 }
 ```
+</Accordion>
 
-### AgentError
-
+<Accordion title="AgentError">
 Error types:
 
 ```rust
@@ -604,11 +501,204 @@ pub enum BudgetType {
     ToolCalls,
 }
 ```
+</Accordion>
+
+### Hook types
+
+<Accordion title="HookPoint / HookExecutionMode / HookCapability">
+Core hook interfaces:
+
+```rust
+pub enum HookPoint {
+    RunStarted,
+    RunCompleted,
+    RunFailed,
+    PreLlmRequest,
+    PostLlmResponse,
+    PreToolExecution,
+    PostToolExecution,
+    TurnBoundary,
+}
+
+pub enum HookExecutionMode {
+    Foreground,
+    Background,
+}
+
+pub enum HookCapability {
+    Observe,
+    Guardrail,
+    Rewrite,
+}
+```
+</Accordion>
+
+<Accordion title="HookEntryConfig / HookRunOverrides">
+Hook configuration types:
+
+```rust
+pub struct HookRunOverrides {
+    /// Additional hook entries to register for this run only.
+    pub entries: Vec<HookEntryConfig>,
+    /// Hook IDs to disable for this run.
+    pub disable: Vec<HookId>,
+}
+
+/// Newtype wrapper for hook identifiers.
+pub struct HookId(pub String);
+
+/// Configuration for a single hook entry.
+pub struct HookEntryConfig {
+    pub id: HookId,
+    pub point: HookPoint,
+    pub priority: i32,
+    pub mode: HookExecutionMode,
+    pub capability: HookCapability,
+    pub enabled: bool,
+    pub runtime: HookRuntimeConfig,
+    pub failure_policy: Option<HookFailurePolicy>,
+    pub timeout_ms: Option<u64>,
+}
+
+pub enum HookFailurePolicy {
+    /// Continue execution on hook failure. Default for `Observe` capability.
+    FailOpen,
+    /// Deny execution on hook failure. Default for `Guardrail` and `Rewrite`.
+    FailClosed,
+}
+```
+</Accordion>
+
+### Structured output types
+
+<Accordion title="OutputSchema / MeerkatSchema">
+Schema definition for structured output:
+
+```rust
+pub struct OutputSchema {
+    /// The JSON schema that the output must conform to.
+    pub schema: MeerkatSchema,
+    /// Optional name for the schema.
+    pub name: Option<String>,
+    /// Strict mode: when true, the agent retries if the LLM output fails validation.
+    pub strict: bool,
+    /// Provider compatibility mode for schema lowering.
+    pub compat: SchemaCompat,
+    /// Schema format version.
+    pub format: SchemaFormat,
+}
+
+impl OutputSchema {
+    pub fn new(schema: Value) -> Result<Self, SchemaError>;
+    pub fn with_name(self, name: impl Into<String>) -> Self;
+    pub fn strict(self) -> Self;
+    pub fn with_compat(self, compat: SchemaCompat) -> Self;
+    pub fn from_json_str(raw: &str) -> Result<Self, SchemaError>;
+    pub fn from_json_value(value: Value) -> Result<Self, SchemaError>;
+    /// Create from a Rust type via schemars (compile-time schema generation).
+    pub fn from_type<T: schemars::JsonSchema>() -> Result<Self, SchemaError>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MeerkatSchema(Value);
+
+impl MeerkatSchema {
+    pub fn new(schema: Value) -> Result<Self, SchemaError>;
+    pub fn as_value(&self) -> &Value;
+}
+
+pub enum SchemaCompat {
+    Lossy,   // Allow lossy lowering (default)
+    Strict,  // Reject unsupported features
+}
+
+pub enum SchemaFormat {
+    MeerkatV1, // Default
+}
+
+pub struct SchemaWarning {
+    pub provider: Provider,
+    pub path: String,
+    pub message: String,
+}
+```
+</Accordion>
+
+### Skill types
+
+<Accordion title="SkillId / SkillScope / SkillDescriptor">
+Skill system contracts:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SkillId(pub String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillScope {
+    Builtin,   // Embedded in a component crate via inventory
+    Project,   // .rkat/skills/
+    User,      // ~/.rkat/skills/
+}
+
+pub struct SkillDescriptor {
+    pub id: SkillId,
+    pub name: String,
+    pub description: String,
+    pub scope: SkillScope,
+    pub requires_capabilities: Vec<String>,
+}
+```
+</Accordion>
+
+<Accordion title="SkillDocument / SkillError">
+Loaded skills and errors:
+
+```rust
+pub struct SkillDocument {
+    pub descriptor: SkillDescriptor,
+    pub body: String,
+    pub extensions: IndexMap<String, String>,
+}
+
+pub enum SkillError {
+    NotFound { id: SkillId },
+    CapabilityUnavailable { id: SkillId, capability: String },
+    Ambiguous { reference: String, matches: Vec<SkillId> },
+    Load(Cow<'static, str>),
+    Parse(Cow<'static, str>),
+}
+```
+</Accordion>
+
+<Accordion title="SkillSource / SkillEngine traits">
+Skill system traits:
+
+```rust
+#[async_trait]
+pub trait SkillSource: Send + Sync {
+    async fn list(&self) -> Result<Vec<SkillDescriptor>, SkillError>;
+    async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError>;
+}
+
+#[async_trait]
+pub trait SkillEngine: Send + Sync {
+    /// Generate the skill inventory section for the system prompt.
+    async fn inventory_section(&self) -> Result<String, SkillError>;
+    /// Resolve skill references and render injection content.
+    async fn resolve_and_render(
+        &self,
+        references: &[String],
+        available_capabilities: &[String],
+    ) -> Result<String, SkillError>;
+}
+```
+</Accordion>
 
 ## Traits
 
-### AgentLlmClient
-
+<Accordion title="AgentLlmClient">
 LLM provider abstraction:
 
 ```rust
@@ -630,9 +720,9 @@ pub struct LlmStreamResult {
     pub stream: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send>>,
 }
 ```
+</Accordion>
 
-### AgentToolDispatcher
-
+<Accordion title="AgentToolDispatcher">
 Tool execution abstraction:
 
 ```rust
@@ -649,9 +739,9 @@ pub trait AgentToolDispatcher: Send + Sync {
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError>;
 }
 ```
+</Accordion>
 
-### AgentSessionStore
-
+<Accordion title="AgentSessionStore">
 Session persistence abstraction:
 
 ```rust
@@ -667,14 +757,14 @@ pub trait AgentSessionStore: Send + Sync {
     async fn list(&self) -> Result<Vec<SessionId>, AgentError>;
 }
 ```
+</Accordion>
 
-## Module: `meerkat_contracts`
+## Wire types
 
-Wire types, capability model, and error contracts shared across all protocol surfaces.
+### Capability model
 
-### CapabilityId
-
-Every capability known to Meerkat. Adding a variant forces updates to the registry, error mappings, and codegen templates:
+<Accordion title="CapabilityId">
+Every capability known to Meerkat:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -684,9 +774,9 @@ pub enum CapabilityId {
     Sessions,           // Core agent loop, session lifecycle
     Streaming,          // Event streaming during turns
     StructuredOutput,   // Schema-validated JSON output
-    Hooks,              // Hook pipeline (always compiled, policy-controlled)
-    Builtins,           // Task, wait, datetime tools (always compiled, policy-controlled)
-    Shell,              // Shell execution tool (always compiled, policy-controlled)
+    Hooks,              // Hook pipeline
+    Builtins,           // Task, wait, datetime tools
+    Shell,              // Shell execution tool
     Comms,              // Inter-agent communication (feature: "comms")
     SubAgents,          // Sub-agent spawn/fork (feature: "sub-agents")
     MemoryStore,        // Semantic memory indexing (feature: "memory-store")
@@ -695,10 +785,10 @@ pub enum CapabilityId {
     Skills,             // Skill loading and injection (feature: "skills")
 }
 ```
+</Accordion>
 
-### CapabilityRegistration
-
-Self-registration entry for capabilities. Feature-gated crates submit these via `inventory::submit!`. The `status_resolver` allows crates to check runtime config/policy to determine whether a capability is actually available (versus merely compiled in):
+<Accordion title="CapabilityRegistration / CapabilityScope / CapabilityStatus">
+Capability registration and status:
 
 ```rust
 pub struct CapabilityRegistration {
@@ -709,59 +799,34 @@ pub struct CapabilityRegistration {
     pub prerequisites: &'static [CapabilityId],
     pub status_resolver: Option<fn(&Config) -> CapabilityStatus>,
 }
-```
 
-### CapabilityScope
-
-Where a capability applies. Used in capability registrations to indicate whether a capability is available on all protocol surfaces or only specific ones:
-
-```rust
 pub enum CapabilityScope {
-    /// Available on all protocol surfaces (CLI, REST, MCP Server, JSON-RPC).
+    /// Available on all protocol surfaces.
     Universal,
     /// Available only on specific protocols.
     Extension { protocols: Cow<'static, [Protocol]> },
 }
-```
 
-### Protocol
-
-Protocol surface identifiers used in capability scoping and error projections:
-
-```rust
 pub enum Protocol {
     Rpc,
     Rest,
     Mcp,
     Cli,
 }
-```
 
-### CapabilityStatus
-
-Runtime status of a capability after build, config, and protocol resolution:
-
-```rust
 pub enum CapabilityStatus {
-    /// Compiled in, config-enabled, protocol supports it.
     Available,
-
-    /// Compiled in but disabled by policy. The description is human-readable
-    /// because the resolution chain (factory flags -> build config -> tool policy)
-    /// cannot be captured by a single config path.
     DisabledByPolicy { description: Cow<'static, str> },
-
-    /// Not compiled into this build (feature flag absent).
     NotCompiled { feature: Cow<'static, str> },
-
-    /// This protocol surface doesn't support it.
     NotSupportedByProtocol { reason: Cow<'static, str> },
 }
 ```
+</Accordion>
 
-### ErrorCode
+### Error contracts
 
-Stable error codes for wire protocol, with projections to JSON-RPC codes, HTTP status, and CLI exit codes:
+<Accordion title="ErrorCode">
+Stable error codes with projections to JSON-RPC codes, HTTP status, and CLI exit codes:
 
 ```rust
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -787,10 +852,10 @@ impl ErrorCode {
     pub fn category(self) -> ErrorCategory;
 }
 ```
+</Accordion>
 
-### WireError
-
-Canonical error envelope used by all surfaces:
+<Accordion title="WireError / CapabilityHint">
+Canonical error envelope:
 
 ```rust
 pub struct WireError {
@@ -808,20 +873,16 @@ impl WireError {
 }
 
 impl From<SessionError> for WireError { ... }
-```
 
-`CapabilityHint` points the caller to the missing capability when `CapabilityUnavailable` is returned:
-
-```rust
 pub struct CapabilityHint {
     pub capability_id: CapabilityId,
     pub message: Cow<'static, str>,
 }
 ```
+</Accordion>
 
-### ContractVersion
-
-Semver-style version embedded in events, capabilities response, SDK packages, and RPC handshake:
+<Accordion title="ContractVersion">
+Semver-style version:
 
 ```rust
 pub struct ContractVersion { major: u32, minor: u32, patch: u32 }
@@ -832,10 +893,12 @@ impl ContractVersion {
 }
 // + Display, FromStr, Copy, Ord
 ```
+</Accordion>
 
 ### Wire request fragments
 
-Composable request parameter groups. Protocol crates inline the fields they support and provide accessor methods returning the fragment type. No `#[serde(flatten)]`:
+<Accordion title="CoreCreateParams / StructuredOutputParams / CommsParams / HookParams / SkillsParams">
+Composable request parameter groups. Protocol crates inline the fields they support and provide accessor methods returning the fragment type:
 
 ```rust
 /// Core session creation parameters.
@@ -870,209 +933,19 @@ pub struct SkillsParams {
     pub skill_references: Vec<String>,
 }
 ```
+</Accordion>
 
-### OutputSchema
+## Provider implementations
 
-Schema definition for structured output. Defined in `meerkat_core::types` and re-exported by the facade. Used in `StructuredOutputParams` and `RunResult`. Accepts both raw JSON schemas and wrapped schemas (with `name`, `strict`, `compat`, `format` fields). Providers receive a lowered schema suited to their API (Anthropic, OpenAI, Gemini).
-
-```rust
-pub struct OutputSchema {
-    /// The JSON schema that the output must conform to.
-    /// Normalized on construction (object types get `properties` and `required` keys).
-    pub schema: MeerkatSchema,
-    /// Optional name for the schema (used by some providers, e.g., OpenAI function calling).
-    pub name: Option<String>,
-    /// Strict mode: when true, the agent retries if the LLM output fails validation
-    /// against the schema. The number of retries is controlled by `structured_output_retries`.
-    pub strict: bool,
-    /// Provider compatibility mode for schema lowering.
-    pub compat: SchemaCompat,
-    /// Schema format version.
-    pub format: SchemaFormat,
-}
-
-impl OutputSchema {
-    pub fn new(schema: Value) -> Result<Self, SchemaError>;
-    pub fn with_name(self, name: impl Into<String>) -> Self;
-    pub fn strict(self) -> Self;
-    pub fn with_compat(self, compat: SchemaCompat) -> Self;
-    pub fn from_json_str(raw: &str) -> Result<Self, SchemaError>;
-    pub fn from_json_value(value: Value) -> Result<Self, SchemaError>;
-    /// Create from a Rust type via schemars (compile-time schema generation).
-    pub fn from_type<T: schemars::JsonSchema>() -> Result<Self, SchemaError>;
-}
-```
-
-### MeerkatSchema
-
-Wrapper around a JSON `Value` that enforces normalization (object types always have `properties` and `required` keys). Created via `MeerkatSchema::new(value)` which returns `Err(SchemaError::InvalidRoot)` if the root is not a JSON object.
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct MeerkatSchema(Value);
-
-impl MeerkatSchema {
-    pub fn new(schema: Value) -> Result<Self, SchemaError>;
-    pub fn as_value(&self) -> &Value;
-}
-```
-
-### SchemaCompat
-
-Controls how the schema is lowered for providers that have schema restrictions:
-
-```rust
-pub enum SchemaCompat {
-    /// Allow lossy lowering (drop unsupported features silently). Default.
-    Lossy,
-    /// Reject schemas that cannot be represented exactly by the provider.
-    Strict,
-}
-```
-
-### SchemaFormat
-
-Schema format version. Currently only one version exists:
-
-```rust
-pub enum SchemaFormat {
-    /// Meerkat V1 format. Default.
-    MeerkatV1,
-}
-```
-
-### SchemaWarning
-
-Emitted during provider-specific schema lowering when features are dropped or adapted:
-
-```rust
-pub struct SchemaWarning {
-    pub provider: Provider,
-    pub path: String,
-    pub message: String,
-}
-```
-
-## Module: `meerkat_core::skills`
-
-Skill system contracts. The `meerkat-skills` crate provides implementations.
-
-### SkillId
-
-Newtype identifier for type safety:
-
-```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SkillId(pub String);
-
-impl Display for SkillId { ... }
-```
-
-### SkillScope
-
-Where a skill was discovered:
-
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillScope {
-    Builtin,   // Embedded in a component crate via inventory
-    Project,   // .rkat/skills/
-    User,      // ~/.rkat/skills/
-}
-```
-
-### SkillDescriptor
-
-Metadata describing a skill:
-
-```rust
-pub struct SkillDescriptor {
-    pub id: SkillId,
-    pub name: String,
-    pub description: String,
-    pub scope: SkillScope,
-    /// Capability IDs required for this skill (as string forms of CapabilityId).
-    /// Using strings avoids circular dependency between meerkat-core and
-    /// meerkat-contracts. Resolved to typed IDs at runtime by meerkat-skills.
-    pub requires_capabilities: Vec<String>,
-}
-```
-
-### SkillDocument
-
-A loaded skill with its full content:
-
-```rust
-pub struct SkillDocument {
-    pub descriptor: SkillDescriptor,
-    pub body: String,
-    pub extensions: IndexMap<String, String>,
-}
-```
-
-### SkillError
-
-```rust
-pub enum SkillError {
-    NotFound { id: SkillId },
-    CapabilityUnavailable { id: SkillId, capability: String },
-    Ambiguous { reference: String, matches: Vec<SkillId> },
-    Load(Cow<'static, str>),
-    Parse(Cow<'static, str>),
-}
-```
-
-### SkillSource (trait)
-
-```rust
-#[async_trait]
-pub trait SkillSource: Send + Sync {
-    async fn list(&self) -> Result<Vec<SkillDescriptor>, SkillError>;
-    async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError>;
-}
-```
-
-### SkillEngine (trait)
-
-```rust
-#[async_trait]
-pub trait SkillEngine: Send + Sync {
-    /// Generate the skill inventory section for the system prompt.
-    async fn inventory_section(&self) -> Result<String, SkillError>;
-    /// Resolve skill references and render injection content.
-    async fn resolve_and_render(
-        &self,
-        references: &[String],
-        available_capabilities: &[String],
-    ) -> Result<String, SkillError>;
-}
-```
-
-## Module: `meerkat_client`
-
-LLM provider implementations.
-
-### LlmClient
-
-Low-level client trait:
+<Accordion title="LlmClient / LlmRequest / LlmEvent">
+Low-level client trait and types:
 
 ```rust
 pub trait LlmClient: Send + Sync {
-    /// Stream response events
     fn stream(&self, request: &LlmRequest) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send>>;
-
-    /// Get provider name
     fn provider(&self) -> &'static str;
 }
-```
 
-### LlmRequest
-
-Request to LLM:
-
-```rust
 pub struct LlmRequest {
     pub model: String,
     pub messages: Vec<Message>,
@@ -1080,33 +953,18 @@ pub struct LlmRequest {
     pub max_tokens: u32,
     pub system: Option<String>,
 }
-```
 
-### LlmEvent
-
-Streaming events from LLM:
-
-```rust
 pub enum LlmEvent {
-    /// Text chunk
     TextDelta { delta: String },
-
-    /// Partial tool call
     ToolCallDelta { id: String, name: Option<String>, args_delta: String },
-
-    /// Complete tool call
     ToolCallComplete { id: String, name: String, args: Value },
-
-    /// Usage update
     UsageUpdate { usage: Usage },
-
-    /// Stream complete
     Done { stop_reason: StopReason },
 }
 ```
+</Accordion>
 
-### LlmError
-
+<Accordion title="LlmError">
 LLM-specific errors:
 
 ```rust
@@ -1154,182 +1012,94 @@ impl LlmError {
     pub fn is_retryable(&self) -> bool
 }
 ```
+</Accordion>
 
-### AnthropicClient
-
-Anthropic Claude implementation:
+<Accordion title="AnthropicClient / OpenAiClient / GeminiClient">
+Provider client constructors:
 
 ```rust
-pub struct AnthropicClient {
-    // Private fields
-}
-
+// Anthropic Claude
+pub struct AnthropicClient { /* ... */ }
 impl AnthropicClient {
-    /// Create with API key
     pub fn new(api_key: impl Into<String>) -> Self
-
-    /// Create with custom base URL
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self
 }
-
 impl LlmClient for AnthropicClient { ... }
-```
 
-### OpenAiClient
-
-OpenAI GPT implementation:
-
-```rust
-pub struct OpenAiClient {
-    // Private fields
-}
-
+// OpenAI GPT
+pub struct OpenAiClient { /* ... */ }
 impl OpenAiClient {
-    /// Create with API key
     pub fn new(api_key: impl Into<String>) -> Self
-
-    /// Create with custom base URL (for Azure, etc.)
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self
 }
-
 impl LlmClient for OpenAiClient { ... }
-```
 
-### GeminiClient
-
-Google Gemini implementation:
-
-```rust
-pub struct GeminiClient {
-    // Private fields
-}
-
+// Google Gemini
+pub struct GeminiClient { /* ... */ }
 impl GeminiClient {
-    /// Create with API key
     pub fn new(api_key: impl Into<String>) -> Self
 }
-
 impl LlmClient for GeminiClient { ... }
 ```
+</Accordion>
 
-## Module: `meerkat_store`
+## Storage implementations
 
-Session persistence implementations.
-
-### JsonlStore
-
-JSONL file-based storage:
+<Accordion title="JsonlStore / MemoryStore">
+Session persistence implementations:
 
 ```rust
-pub struct JsonlStore {
-    // Private fields
-}
-
+// JSONL file-based storage
+pub struct JsonlStore { /* ... */ }
 impl JsonlStore {
-    /// Create with storage directory
     pub fn new(path: impl Into<PathBuf>) -> Self
-
-    /// Initialize the store (create directory if needed)
     pub async fn init(&self) -> Result<(), AgentError>
 }
-
 impl AgentSessionStore for JsonlStore { ... }
-```
 
-### MemoryStore
-
-In-memory storage (for testing):
-
-```rust
-pub struct MemoryStore {
-    // Private fields
-}
-
+// In-memory storage (for testing)
+pub struct MemoryStore { /* ... */ }
 impl MemoryStore {
-    /// Create empty store
     pub fn new() -> Self
 }
-
 impl AgentSessionStore for MemoryStore { ... }
 ```
+</Accordion>
 
-## Module: `meerkat_mcp_client`
+## MCP client
 
-MCP protocol client.
-
-### McpConnection
-
-Connection to an MCP server:
+<Accordion title="McpConnection / McpRouter / McpServerConfig">
+MCP protocol client:
 
 ```rust
-pub struct McpConnection {
-    // Private fields
-}
-
+pub struct McpConnection { /* ... */ }
 impl McpConnection {
-    /// Connect to an MCP server
     pub async fn connect(config: &McpServerConfig) -> Result<Self, McpError>
-
-    /// List available tools
     pub async fn list_tools(&self) -> Result<Vec<ToolDef>, McpError>
-
-    /// Call a tool
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<String, McpError>
-
-    /// Close the connection
     pub async fn close(&self) -> Result<(), McpError>
 }
-```
 
-### McpRouter
-
-Routes tool calls to multiple MCP servers:
-
-```rust
-pub struct McpRouter {
-    // Private fields
-}
-
+pub struct McpRouter { /* ... */ }
 impl McpRouter {
-    /// Create empty router
     pub fn new() -> Self
-
-    /// Add an MCP server
     pub async fn add_server(&self, config: McpServerConfig) -> Result<(), McpError>
-
-    /// Remove an MCP server
     pub async fn remove_server(&self, name: &str) -> Result<(), McpError>
-
-    /// List all tools from all servers
     pub async fn list_tools(&self) -> Result<Vec<ToolDef>, McpError>
 }
-
 impl AgentToolDispatcher for McpRouter { ... }
-```
 
-### McpServerConfig
-
-MCP server configuration:
-
-```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpServerConfig {
-    /// Server name (for routing)
     pub name: String,
-
-    /// Command to execute
     pub command: String,
-
-    /// Command arguments
     pub args: Vec<String>,
-
-    /// Environment variables
     pub env: HashMap<String, String>,
 }
 ```
+</Accordion>
 
-### McpError
-
+<Accordion title="McpError">
 MCP-specific errors:
 
 ```rust
@@ -1354,156 +1124,88 @@ pub enum McpError {
     Io(#[from] std::io::Error),
 }
 ```
+</Accordion>
 
-## Module: `meerkat_tools`
+## Tool registry
 
-Tool registry and validation.
-
-### ToolRegistry
-
-Manage tool definitions:
+<Accordion title="ToolRegistry / ToolDispatcher">
+Tool management:
 
 ```rust
-pub struct ToolRegistry {
-    // Private fields
-}
-
+pub struct ToolRegistry { /* ... */ }
 impl ToolRegistry {
-    /// Create empty registry
     pub fn new() -> Self
-
-    /// Register a tool
     pub fn register(&mut self, tool: ToolDef) -> Result<(), ToolError>
-
-    /// Unregister a tool
     pub fn unregister(&mut self, name: &str) -> bool
-
-    /// Get a tool by name
     pub fn get(&self, name: &str) -> Option<&ToolDef>
-
-    /// Get all tools
     pub fn tools(&self) -> Vec<ToolDef>
-
-    /// Validate arguments against schema
     pub fn validate(&self, name: &str, args: &Value) -> Result<(), ToolError>
 }
-```
 
-### ToolDispatcher
-
-Execute registered tools:
-
-```rust
-pub struct ToolDispatcher<F> {
-    // Private fields
-}
-
+pub struct ToolDispatcher<F> { /* ... */ }
 impl<F> ToolDispatcher<F>
 where
     F: Fn(&str, &Value) -> BoxFuture<'static, Result<String, String>> + Send + Sync,
 {
-    /// Create with handler function
     pub fn new(handler: F) -> Self
-
-    /// Add tool definitions
     pub fn with_tools(self, tools: Vec<ToolDef>) -> Self
 }
-
 impl<F> AgentToolDispatcher for ToolDispatcher<F> { ... }
 ```
+</Accordion>
 
 ## Sub-agent operations
 
-### Fork
-
-Create parallel branches with full context:
+<Accordion title="Fork / Spawn / ContextStrategy / ToolAccessPolicy">
+Sub-agent types:
 
 ```rust
 pub struct ForkBranch {
-    /// Branch identifier
     pub id: String,
-
-    /// Prompt for this branch
     pub prompt: String,
 }
 
 impl Agent {
-    /// Fork into parallel branches
     pub async fn fork(&mut self, branches: Vec<ForkBranch>) -> Result<Vec<RunResult>, AgentError>
 }
-```
 
-### Spawn
-
-Create child agents with limited context:
-
-```rust
 pub struct SpawnSpec {
-    /// Child identifier
     pub id: String,
-
-    /// Prompt for the child
     pub prompt: String,
-
-    /// How much context to provide
     pub context_strategy: ContextStrategy,
-
-    /// Which tools the child can use
     pub tool_access: ToolAccessPolicy,
-
-    /// Budget allocation
     pub budget_policy: ForkBudgetPolicy,
 }
 
 pub enum ContextStrategy {
-    /// Copy entire conversation
     FullHistory,
-
-    /// Copy last N turns
     LastTurns(usize),
-
-    /// Summarize to fit token budget
     Summary { max_tokens: u32 },
-
-    /// Provide explicit messages
     Custom { messages: Vec<Message> },
 }
 
 pub enum ToolAccessPolicy {
-    /// Access all tools
     All,
-
-    /// Only these tools
     AllowList(Vec<String>),
-
-    /// All except these
     DenyList(Vec<String>),
-
-    /// No tool access
     None,
 }
 
 pub enum ForkBudgetPolicy {
-    /// Share parent's remaining budget
     Shared,
-
-    /// Fixed token allocation
     Fixed(u64),
-
-    /// Percentage of parent's budget
     Percentage(f64),
 }
 
 impl Agent {
-    /// Spawn a child agent
     pub async fn spawn(&mut self, spec: SpawnSpec) -> Result<RunResult, AgentError>
 }
 ```
+</Accordion>
 
 ## CLI commands
 
-### rkat run
-
+<Accordion title="rkat run">
 ```text
 rkat run [OPTIONS] <PROMPT>
 
@@ -1520,9 +1222,9 @@ Options:
       --stream                 Stream output as it arrives
   -h, --help                   Print help
 ```
+</Accordion>
 
-### rkat resume
-
+<Accordion title="rkat resume">
 ```text
 rkat resume [OPTIONS] <SESSION_ID> <PROMPT>
 
@@ -1536,9 +1238,9 @@ Options:
   -o, --output <FORMAT>    Output format [default: text]
   -h, --help               Print help
 ```
+</Accordion>
 
-### rkat sessions
-
+<Accordion title="rkat sessions">
 ```text
 rkat sessions <COMMAND>
 
@@ -1552,11 +1254,11 @@ Options:
 
 rkat sessions show <SESSION_ID>
 ```
+</Accordion>
 
 ## REST API endpoints
 
-### POST /sessions
-
+<Accordion title="POST /sessions">
 Create and run a new session.
 
 <CodeGroup>
@@ -1583,9 +1285,9 @@ Create and run a new session.
 }
 ```
 </CodeGroup>
+</Accordion>
 
-### POST /sessions/\{id\}/messages
-
+<Accordion title="POST /sessions/{id}/messages">
 Continue an existing session.
 
 ```json
@@ -1595,9 +1297,9 @@ Continue an existing session.
 ```
 
 Response: Same as POST /sessions
+</Accordion>
 
-### GET /sessions/\{id\}
-
+<Accordion title="GET /sessions/{id}">
 Get session details.
 
 ```json
@@ -1613,28 +1315,20 @@ Get session details.
   "updated_at": "2024-01-15T10:35:00Z"
 }
 ```
+</Accordion>
 
-### GET /sessions/\{id\}/events
-
+<Accordion title="GET /sessions/{id}/events">
 Server-Sent Events stream for real-time updates.
 
-Event types:
-- `run_started`
-- `turn_started`
-- `text_delta`
-- `tool_call_requested`
-- `tool_result_received`
-- `turn_completed`
-- `run_completed`
-- `run_failed`
+Event types: `run_started`, `turn_started`, `text_delta`, `tool_call_requested`, `tool_result_received`, `turn_completed`, `run_completed`, `run_failed`.
+</Accordion>
 
 ## MCP server tools
 
+<Accordion title="meerkat_run / meerkat_resume">
 When running as an MCP server, Meerkat exposes these tools:
 
-### meerkat_run
-
-Run a new agent with a prompt.
+**meerkat_run** -- Run a new agent with a prompt:
 
 ```json
 {
@@ -1645,9 +1339,7 @@ Run a new agent with a prompt.
 }
 ```
 
-### meerkat_resume
-
-Resume an existing session.
+**meerkat_resume** -- Resume an existing session:
 
 ```json
 {
@@ -1655,3 +1347,4 @@ Resume an existing session.
   "prompt": "Continue with this"
 }
 ```
+</Accordion>

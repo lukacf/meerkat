@@ -25,10 +25,8 @@ let factory = AgentFactory::new(store_path)
 
 ## Available tools
 
-Sub-agents provide five tools, all disabled by default and gated behind the `sub-agents` feature and factory configuration:
-
 | Tool | Description |
-|---|---|
+|------|-------------|
 | `agent_spawn` | Create a sub-agent with clean context (just the prompt) |
 | `agent_fork` | Create a sub-agent that inherits the full conversation history |
 | `agent_status` | Get the status and output of a sub-agent by ID |
@@ -43,8 +41,7 @@ Sub-agents provide five tools, all disabled by default and gated behind the `sub
 
     **Use for**: Independent tasks that do not need the parent's context.
 
-    **Parameters**:
-
+    <Accordion title="Parameters">
     <ParamField path="prompt" type="string" required>
       Initial prompt/task for the sub-agent.
     </ParamField>
@@ -72,6 +69,7 @@ Sub-agents provide five tools, all disabled by default and gated behind the `sub
     <ParamField path="host_mode" type="boolean" default="false">
       Keep agent alive processing comms messages after initial prompt. Requires `comms` feature.
     </ParamField>
+    </Accordion>
 
     **Response**:
 
@@ -91,8 +89,7 @@ Sub-agents provide five tools, all disabled by default and gated behind the `sub
 
     **Use for**: Parallel exploration of alternatives, or delegating subtasks that need the parent's context.
 
-    **Parameters**:
-
+    <Accordion title="Parameters">
     <ParamField path="prompt" type="string" required>
       Additional prompt appended to the inherited conversation history.
     </ParamField>
@@ -112,6 +109,7 @@ Sub-agents provide five tools, all disabled by default and gated behind the `sub
     <ParamField path="budget_policy" type="string" default="equal">
       Budget allocation: `equal`, `remaining`, `proportional`, or `fixed:<tokens>`.
     </ParamField>
+    </Accordion>
 
     **Response** includes `messages_inherited` count showing how many messages were copied from the parent.
 
@@ -123,10 +121,10 @@ Sub-agents provide five tools, all disabled by default and gated behind the `sub
 
 ## Tool access policies
 
-Both `agent_spawn` and `agent_fork` accept a `tool_access` parameter that controls which tools the sub-agent can use:
+Both `agent_spawn` and `agent_fork` accept a `tool_access` parameter:
 
 | Policy | Description |
-|---|---|
+|--------|-------------|
 | `{"policy": "inherit"}` | Inherit all tools from the parent (default). |
 | `{"policy": "allow_list", "tools": ["shell", "task_list"]}` | Only allow the specified tools. |
 | `{"policy": "deny_list", "tools": ["shell"]}` | Block the specified tools, allow everything else. |
@@ -139,13 +137,10 @@ Sub-agents do NOT receive sub-agent tools (`agent_spawn`, `agent_fork`, etc.) in
 
 ## Monitoring sub-agents
 
-### `agent_status`
-
+<Accordion title="agent_status">
 Query a single sub-agent by its UUID.
 
 **Parameters**: `{ "agent_id": "<UUID>" }`
-
-**Response**:
 
 ```json
 {
@@ -161,14 +156,12 @@ Query a single sub-agent by its UUID.
 States: `running`, `completed`, `failed`, `cancelled`.
 
 When `is_final: true`, the sub-agent is done. The `output` field contains the result text (or `error` field for failures).
+</Accordion>
 
-### `agent_list`
-
+<Accordion title="agent_list">
 List all sub-agents with summary counts.
 
 **Parameters**: None (empty object).
-
-**Response**:
 
 ```json
 {
@@ -187,42 +180,43 @@ List all sub-agents with summary counts.
   "total_count": 1
 }
 ```
+</Accordion>
 
-### `agent_cancel`
-
+<Accordion title="agent_cancel">
 Cancel a running sub-agent. Only agents in the `running` state can be cancelled.
 
 **Parameters**: `{ "agent_id": "<UUID>" }`
 
 **Response**: `{ "success": true, "previous_state": "running", "message": "Sub-agent cancelled successfully" }`
+</Accordion>
 
 ## Concurrency limits
 
 Defined in `meerkat-core/src/ops.rs` as `ConcurrencyLimits`:
 
 | Field | Type | Default | Description |
-|---|---|---|---|
-| `max_depth` | `u32` | `3` | Maximum nesting depth for sub-agents. |
-| `max_concurrent_ops` | `usize` | `32` | Maximum concurrent operations (across all types). |
-| `max_concurrent_agents` | `usize` | `8` | Maximum concurrently running sub-agents. |
-| `max_children_per_agent` | `usize` | `5` | Maximum children a single agent can spawn. |
+|-------|------|---------|-------------|
+| `max_depth` | `u32` | `3` | Maximum nesting depth for sub-agents |
+| `max_concurrent_ops` | `usize` | `32` | Maximum concurrent operations (across all types) |
+| `max_concurrent_agents` | `usize` | `8` | Maximum concurrently running sub-agents |
+| `max_children_per_agent` | `usize` | `5` | Maximum children a single agent can spawn |
 
 The `SubAgentManager` enforces these limits. Attempting to spawn beyond the limits returns an error.
 
-## SubAgentConfig
-
+<Accordion title="SubAgentConfig">
 Defined in `meerkat-tools/src/builtin/sub_agent/config.rs`:
 
 | Field | Type | Default | Description |
-|---|---|---|---|
-| `default_provider` | `String` | `"anthropic"` | Default provider when not specified in spawn/fork calls. |
-| `default_model` | `Option<String>` | `None` | Default model. If `None`, uses the first model in the provider's allowlist. |
-| `concurrency_limits` | `ConcurrencyLimits` | See above | Limits for this agent's sub-agents. |
-| `allow_nested_spawn` | `bool` | `true` | Whether sub-agents can spawn further sub-agents. |
-| `max_budget_per_agent` | `Option<u64>` | `None` | Cap on tokens for any single sub-agent. Requested budgets are clamped to this value. |
-| `default_budget` | `Option<u64>` | `Some(50_000)` | Default token budget when not specified. |
-| `inherit_system_prompt` | `bool` | `true` | Whether spawned agents inherit the parent's tool usage instructions as their system prompt. |
-| `enable_comms` | `bool` | `false` | Whether to enable parent-child communication via comms. |
+|-------|------|---------|-------------|
+| `default_provider` | `String` | `"anthropic"` | Default provider when not specified |
+| `default_model` | `Option<String>` | `None` | Default model (uses first in allowlist if `None`) |
+| `concurrency_limits` | `ConcurrencyLimits` | See above | Limits for this agent's sub-agents |
+| `allow_nested_spawn` | `bool` | `true` | Whether sub-agents can spawn further sub-agents |
+| `max_budget_per_agent` | `Option<u64>` | `None` | Cap on tokens for any single sub-agent |
+| `default_budget` | `Option<u64>` | `Some(50_000)` | Default token budget when not specified |
+| `inherit_system_prompt` | `bool` | `true` | Whether spawned agents inherit the parent's tool usage instructions |
+| `enable_comms` | `bool` | `false` | Whether to enable parent-child communication |
+</Accordion>
 
 ## Budget allocation
 
@@ -236,11 +230,11 @@ Defined in `meerkat-tools/src/builtin/sub_agent/config.rs`:
     For `agent_fork`, the `budget_policy` parameter controls allocation:
 
     | Policy | Behavior |
-    |---|---|
-    | `equal` (default) | Each fork gets `default_budget` tokens. |
-    | `remaining` | Fork gets the parent's remaining budget (currently falls back to `equal`). |
-    | `proportional` | Proportional allocation (currently falls back to `equal`). |
-    | `fixed:<N>` | Fixed budget of N tokens (capped by `max_budget_per_agent`). |
+    |--------|----------|
+    | `equal` (default) | Each fork gets `default_budget` tokens |
+    | `remaining` | Fork gets the parent's remaining budget (currently falls back to `equal`) |
+    | `proportional` | Proportional allocation (currently falls back to `equal`) |
+    | `fixed:<N>` | Fixed budget of N tokens (capped by `max_budget_per_agent`) |
   </Tab>
 </Tabs>
 
@@ -327,18 +321,20 @@ Do NOT poll `agent_status` repeatedly -- this wastes tokens. Use `agent_list` to
 
 ## Architecture summary
 
-```text
-meerkat-core/src/sub_agent.rs                         -- SubAgentManager, SubAgentInfo, ConcurrencyLimits enforcement
-meerkat-core/src/ops.rs                                -- ConcurrencyLimits, SpawnSpec, ToolAccessPolicy, ForkBudgetPolicy
-meerkat-tools/src/builtin/sub_agent/mod.rs             -- Module root, re-exports
-meerkat-tools/src/builtin/sub_agent/spawn.rs           -- AgentSpawnTool (agent_spawn)
-meerkat-tools/src/builtin/sub_agent/fork.rs            -- AgentForkTool (agent_fork)
-meerkat-tools/src/builtin/sub_agent/status.rs          -- AgentStatusTool (agent_status)
-meerkat-tools/src/builtin/sub_agent/cancel.rs          -- AgentCancelTool (agent_cancel)
-meerkat-tools/src/builtin/sub_agent/list.rs            -- AgentListTool (agent_list)
-meerkat-tools/src/builtin/sub_agent/runner.rs          -- spawn_sub_agent(), spawn_sub_agent_dyn(), session creation
-meerkat-tools/src/builtin/sub_agent/state.rs           -- SubAgentToolState (shared state for all tools)
-meerkat-tools/src/builtin/sub_agent/config.rs          -- SubAgentConfig, SubAgentError
-meerkat-tools/src/builtin/sub_agent/tool_set.rs        -- SubAgentToolSet (bundles all five tools)
-meerkat/src/factory.rs                                 -- Factory wiring (build_builtin_dispatcher)
-```
+<Accordion title="Source file index">
+| File | Description |
+|------|-------------|
+| `meerkat-core/src/sub_agent.rs` | SubAgentManager, SubAgentInfo, ConcurrencyLimits enforcement |
+| `meerkat-core/src/ops.rs` | ConcurrencyLimits, SpawnSpec, ToolAccessPolicy, ForkBudgetPolicy |
+| `meerkat-tools/src/builtin/sub_agent/mod.rs` | Module root, re-exports |
+| `meerkat-tools/src/builtin/sub_agent/spawn.rs` | AgentSpawnTool (agent_spawn) |
+| `meerkat-tools/src/builtin/sub_agent/fork.rs` | AgentForkTool (agent_fork) |
+| `meerkat-tools/src/builtin/sub_agent/status.rs` | AgentStatusTool (agent_status) |
+| `meerkat-tools/src/builtin/sub_agent/cancel.rs` | AgentCancelTool (agent_cancel) |
+| `meerkat-tools/src/builtin/sub_agent/list.rs` | AgentListTool (agent_list) |
+| `meerkat-tools/src/builtin/sub_agent/runner.rs` | spawn_sub_agent(), session creation |
+| `meerkat-tools/src/builtin/sub_agent/state.rs` | SubAgentToolState (shared state) |
+| `meerkat-tools/src/builtin/sub_agent/config.rs` | SubAgentConfig, SubAgentError |
+| `meerkat-tools/src/builtin/sub_agent/tool_set.rs` | SubAgentToolSet (bundles all five tools) |
+| `meerkat/src/factory.rs` | Factory wiring (build_builtin_dispatcher) |
+</Accordion>

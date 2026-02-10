@@ -4,53 +4,85 @@ description: "HTTP server for running and managing agent sessions over REST endp
 icon: "globe"
 ---
 
-Meerkat ships a REST server for running and managing agent sessions over HTTP.
-This is the best fit if you want a simple, language-agnostic API for the
-Meerkat core.
+Meerkat ships a REST server for running and managing agent sessions over HTTP. This is the best fit if you want a simple, language-agnostic API for the Meerkat core.
 
-## Running the server
+## Getting started
 
-<CodeGroup>
-```bash Development
-cargo run --package meerkat-rest
-```
+<Steps>
+  <Step title="Build the server">
+    <CodeGroup>
+    ```bash Development
+    cargo run --package meerkat-rest
+    ```
 
-```bash Production
-cargo build --release --package meerkat-rest
-./target/release/meerkat-rest
-```
-</CodeGroup>
+    ```bash Production
+    cargo build --release --package meerkat-rest
+    ./target/release/meerkat-rest
+    ```
+    </CodeGroup>
+  </Step>
+  <Step title="Set API keys">
+    Export the key for your chosen provider:
+
+    ```bash
+    export ANTHROPIC_API_KEY="sk-..."
+    # or OPENAI_API_KEY, GOOGLE_API_KEY
+    ```
+  </Step>
+  <Step title="Send a request">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{"prompt": "Hello, Meerkat!"}'
+    ```
+  </Step>
+</Steps>
+
+## Endpoint overview
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/sessions` | Create and run a new session |
+| `POST` | `/sessions/{id}/messages` | Continue an existing session |
+| `GET` | `/sessions/{id}` | Fetch session metadata and usage |
+| `GET` | `/sessions/{id}/events` | SSE stream for real-time updates |
+| `GET` | `/health` | Liveness check |
+| `GET` | `/capabilities` | Runtime capabilities |
+| `GET` | `/config` | Read config |
+| `PUT` | `/config` | Replace config |
+| `PATCH` | `/config` | Merge-patch config (RFC 7396) |
 
 ## Configuration
 
-The REST server reads config from its instance data directory. The config file
-is located at:
+<Accordion title="Server configuration details">
+  The REST server reads config from its instance data directory:
 
-- macOS: `~/Library/Application Support/meerkat/rest/config.toml`
-- Linux: `~/.local/share/meerkat/rest/config.toml`
-- Windows: `%APPDATA%\meerkat\rest\config.toml`
+  - macOS: `~/Library/Application Support/meerkat/rest/config.toml`
+  - Linux: `~/.local/share/meerkat/rest/config.toml`
+  - Windows: `%APPDATA%\meerkat\rest\config.toml`
 
-Key sections:
+  Key sections:
 
-```toml
-[rest]
-host = "127.0.0.1"
-port = 8080
+  ```toml
+  [rest]
+  host = "127.0.0.1"
+  port = 8080
 
-[agent]
-model = "claude-opus-4-6"
-max_tokens_per_turn = 8192
+  [agent]
+  model = "claude-opus-4-6"
+  max_tokens_per_turn = 8192
 
-[tools]
-builtins_enabled = false
-shell_enabled = false
-```
+  [tools]
+  builtins_enabled = false
+  shell_enabled = false
+  ```
 
-API keys are still provided via environment variables:
+  API keys are provided via environment variables:
 
-- `ANTHROPIC_API_KEY`
-- `OPENAI_API_KEY`
-- `GOOGLE_API_KEY`
+  - `ANTHROPIC_API_KEY`
+  - `OPENAI_API_KEY`
+  - `GOOGLE_API_KEY`
+</Accordion>
 
 ## Endpoints
 
@@ -84,6 +116,22 @@ Create and run a new session.
   "host_mode": false,
   "comms_name": null,
   "hooks_override": null
+}
+```
+
+```json Response
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "text": "Response text",
+  "turns": 1,
+  "tool_calls": 0,
+  "usage": {
+    "input_tokens": 50,
+    "output_tokens": 200,
+    "total_tokens": 250
+  },
+  "structured_output": null,
+  "schema_warnings": null
 }
 ```
 </CodeGroup>
@@ -184,92 +232,92 @@ Create and run a new session.
   Schema compatibility warnings per provider.
 </ResponseField>
 
-Response example:
+<Accordion title="Structured output example">
+  <CodeGroup>
+  ```json Request
+  {
+    "prompt": "Extract the capital of France",
+    "model": "claude-opus-4-6",
+    "output_schema": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "country": {"type": "string"},
+          "capital": {"type": "string"}
+        },
+        "required": ["country", "capital"]
+      },
+      "name": "capital_extraction",
+      "strict": false,
+      "compat": "lossy",
+      "format": "meerkat_v1"
+    },
+    "structured_output_retries": 2
+  }
+  ```
 
-```json
+  ```json Response
+  {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000002",
+    "text": "{\"country\":\"France\",\"capital\":\"Paris\"}",
+    "turns": 1,
+    "tool_calls": 0,
+    "usage": {
+      "input_tokens": 80,
+      "output_tokens": 30,
+      "total_tokens": 110
+    },
+    "structured_output": {
+      "country": "France",
+      "capital": "Paris"
+    },
+    "schema_warnings": [
+      {
+        "provider": "gemini",
+        "path": "/properties/choice/oneOf",
+        "message": "Removed unsupported keyword 'oneOf'"
+      }
+    ]
+  }
+  ```
+  </CodeGroup>
+
+  When `output_schema` is provided, the `text` field contains the schema-only JSON
+  string produced by the extraction turn (no extra prose). The `structured_output`
+  field contains the parsed JSON value for convenience.
+
+  `output_schema` may be provided as a wrapper object (shown above) or as a raw
+  JSON Schema object. The wrapper enables explicit `compat`/`format` settings.
+</Accordion>
+
+### POST /sessions/\{id\}/messages
+
+Continue an existing session.
+
+<CodeGroup>
+```json Request
 {
   "session_id": "01936f8a-7b2c-7000-8000-000000000001",
-  "text": "Response text",
+  "prompt": "Follow-up message"
+}
+```
+
+```json Response
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "text": "Response to follow-up",
   "turns": 1,
   "tool_calls": 0,
   "usage": {
-    "input_tokens": 50,
-    "output_tokens": 200,
+    "input_tokens": 100,
+    "output_tokens": 150,
     "total_tokens": 250
   },
   "structured_output": null,
   "schema_warnings": null
 }
 ```
-
-#### Structured output example
-
-<CodeGroup>
-```json Request
-{
-  "prompt": "Extract the capital of France",
-  "model": "claude-opus-4-6",
-  "output_schema": {
-    "schema": {
-      "type": "object",
-      "properties": {
-        "country": {"type": "string"},
-        "capital": {"type": "string"}
-      },
-      "required": ["country", "capital"]
-    },
-    "name": "capital_extraction",
-    "strict": false,
-    "compat": "lossy",
-    "format": "meerkat_v1"
-  },
-  "structured_output_retries": 2
-}
-```
-
-```json Response
-{
-  "session_id": "01936f8a-7b2c-7000-8000-000000000002",
-  "text": "{\"country\":\"France\",\"capital\":\"Paris\"}",
-  "turns": 1,
-  "tool_calls": 0,
-  "usage": {
-    "input_tokens": 80,
-    "output_tokens": 30,
-    "total_tokens": 110
-  },
-  "structured_output": {
-    "country": "France",
-    "capital": "Paris"
-  },
-  "schema_warnings": [
-    {
-      "provider": "gemini",
-      "path": "/properties/choice/oneOf",
-      "message": "Removed unsupported keyword 'oneOf'"
-    }
-  ]
-}
-```
 </CodeGroup>
-
-When `output_schema` is provided, the `text` field contains the schema-only JSON
-string produced by the extraction turn (no extra prose). The `structured_output`
-field contains the parsed JSON value for convenience.
-
-`output_schema` may be provided as a wrapper object (shown above) or as a raw
-JSON Schema object. The wrapper enables explicit `compat`/`format` settings.
-
-### POST /sessions/\{id\}/messages
-
-Continue an existing session.
-
-```json
-{
-  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
-  "prompt": "Follow-up message"
-}
-```
 
 #### Request fields
 
@@ -321,13 +369,15 @@ Continue an existing session.
   Run-scoped hook overrides.
 </ParamField>
 
-Response: same shape as `POST /sessions`.
+#### Response fields
+
+Same shape as `POST /sessions`.
 
 ### GET /sessions/\{id\}
 
 Fetch session metadata and usage.
 
-```json
+```json Response
 {
   "session_id": "01936f8a-7b2c-7000-8000-000000000001",
   "created_at": "2025-01-15T10:30:00Z",
@@ -339,21 +389,25 @@ Fetch session metadata and usage.
 
 ### GET /sessions/\{id\}/events
 
-Server-Sent Events (SSE) stream for real-time updates. Event types include:
+Server-Sent Events (SSE) stream for real-time updates.
 
-- `session_loaded` -- emitted on connect with session metadata
-- `run_started`
-- `turn_started`
-- `text_delta`
-- `tool_call_requested`
-- `tool_execution_started`
-- `tool_execution_completed`
-- `turn_completed`
-- `run_completed`
-- `run_failed`
-- `budget_warning`
-- `retrying`
-- `done` -- emitted when the broadcast channel closes
+Event types:
+
+| Event | Description |
+|-------|-------------|
+| `session_loaded` | Emitted on connect with session metadata |
+| `run_started` | Turn execution began |
+| `turn_started` | New LLM call within the turn |
+| `text_delta` | Streaming text chunk from LLM |
+| `tool_call_requested` | LLM wants to call a tool |
+| `tool_execution_started` | Tool dispatch began |
+| `tool_execution_completed` | Tool returned a result |
+| `turn_completed` | LLM call finished |
+| `run_completed` | Turn execution finished successfully |
+| `run_failed` | Turn execution failed |
+| `budget_warning` | Approaching resource limits |
+| `retrying` | Retrying after transient error |
+| `done` | Emitted when the broadcast channel closes |
 
 ### GET /health
 
@@ -363,7 +417,7 @@ Returns `"ok"` (HTTP 200). Use for liveness checks.
 
 Returns runtime capabilities with status resolved against config.
 
-```json
+```json Response
 {
   "contract_version": {"major": 0, "minor": 1, "patch": 0},
   "capabilities": [
@@ -381,13 +435,17 @@ Returns runtime capabilities with status resolved against config.
 }
 ```
 
-### Config endpoints
+### GET /config
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET /config` | Read | Returns the current `Config` object |
-| `PUT /config` | Replace | Sets the entire config (body: full `Config` JSON) |
-| `PATCH /config` | Merge-patch | RFC 7396 merge patch on the config (body: partial JSON) |
+Returns the current `Config` object.
+
+### PUT /config
+
+Sets the entire config. Body: full `Config` JSON.
+
+### PATCH /config
+
+RFC 7396 merge patch on the config. Body: partial JSON.
 
 ## Error responses
 

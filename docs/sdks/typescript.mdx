@@ -4,72 +4,94 @@ description: "TypeScript client for the Meerkat agent runtime, communicating ove
 icon: "js"
 ---
 
-The TypeScript SDK (`@meerkat/sdk`) communicates with a local `rkat rpc` subprocess over JSON-RPC 2.0 (newline-delimited JSON on stdin/stdout).
+The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, stream events, and query capabilities from TypeScript or JavaScript. It communicates with a local `rkat rpc` subprocess over JSON-RPC 2.0.
 
-## Installation
+## Getting started
 
-```bash
-npm install @meerkat/sdk
-```
+<Steps>
+  <Step title="Install the SDK">
+    ```bash
+    npm install @meerkat/sdk
+    ```
+  </Step>
+  <Step title="Install the rkat binary">
+    Build from the Meerkat repo:
 
-## Prerequisites
+    ```bash
+    cargo build -p meerkat-cli --release
+    # Ensure target/release/rkat is on your $PATH
+    ```
 
-- **`rkat` binary on PATH** -- build it from the Meerkat repo with `cargo build -p meerkat-cli`, then ensure the resulting `rkat` binary is in your `$PATH`.
-- **Node.js >= 18** (uses `node:child_process`, `node:readline`, `node:test`).
-- **API key** for at least one LLM provider set in your environment (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY`).
+    You also need an API key for at least one LLM provider set in your environment (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY`).
+  </Step>
+  <Step title="Configure tsconfig">
+    The SDK is published as ESM. Your `tsconfig.json` must use Node16 module resolution:
 
-### tsconfig requirements
+    ```json
+    {
+      "compilerOptions": {
+        "target": "ES2022",
+        "module": "Node16",
+        "moduleResolution": "Node16",
+        "lib": ["ES2022"],
+        "strict": true,
+        "esModuleInterop": true
+      }
+    }
+    ```
+  </Step>
+  <Step title="Connect and run">
+    ```typescript
+    import { MeerkatClient } from "@meerkat/sdk";
 
-The SDK is published as ESM (`"type": "module"` in package.json). Your project's `tsconfig.json` must use Node16 module resolution:
+    const client = new MeerkatClient();
+    await client.connect();
 
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "Node16",
-    "moduleResolution": "Node16",
-    "lib": ["ES2022"],
-    "strict": true,
-    "esModuleInterop": true
-  }
-}
-```
+    const result = await client.createSession({
+      prompt: "What is the capital of Sweden?",
+    });
 
-## Quick start
+    console.log(result.text);         // "Stockholm..."
+    console.log(result.session_id);   // UUID of the new session
+    console.log(result.usage);        // { input_tokens, output_tokens, total_tokens, ... }
 
-```typescript
-import { MeerkatClient } from "@meerkat/sdk";
+    // Multi-turn: send a follow-up in the same session.
+    const followUp = await client.startTurn(
+      result.session_id,
+      "And what is its population?",
+    );
+    console.log(followUp.text);
 
-const client = new MeerkatClient();
-
-// Connect spawns `rkat rpc`, performs the initialize handshake,
-// and fetches runtime capabilities.
-await client.connect();
-
-// Create a session (runs the first turn immediately).
-const result = await client.createSession({
-  prompt: "What is the capital of Sweden?",
-});
-
-console.log(result.text);         // "Stockholm..."
-console.log(result.session_id);   // UUID of the new session
-console.log(result.usage);        // { input_tokens, output_tokens, total_tokens, ... }
-
-// Multi-turn: send a follow-up in the same session.
-const followUp = await client.startTurn(
-  result.session_id,
-  "And what is its population?",
-);
-console.log(followUp.text);
-
-// Clean up.
-await client.archiveSession(result.session_id);
-await client.close();
-```
+    await client.archiveSession(result.session_id);
+    await client.close();
+    ```
+  </Step>
+</Steps>
 
 ---
 
-## API reference: MeerkatClient
+## Method overview
+
+| Method | Description |
+|--------|-------------|
+| `connect()` | Spawn `rkat rpc`, handshake, fetch capabilities |
+| `close()` | Kill the subprocess |
+| `createSession(params)` | Create a session and run the first turn |
+| `startTurn(sessionId, prompt)` | Continue an existing session |
+| `interrupt(sessionId)` | Cancel an in-flight turn |
+| `listSessions()` | List active sessions |
+| `readSession(sessionId)` | Read session state |
+| `archiveSession(sessionId)` | Remove a session |
+| `getCapabilities()` | Get runtime capabilities |
+| `hasCapability(id)` | Check if a capability is available |
+| `requireCapability(id)` | Guard a code path by capability |
+| `getConfig()` | Read runtime configuration |
+| `setConfig(config)` | Replace runtime configuration |
+| `patchConfig(patch)` | Merge-patch runtime configuration |
+
+---
+
+## MeerkatClient
 
 ### Constructor
 
@@ -135,6 +157,7 @@ Creates a new session and immediately runs the first turn with the given prompt.
   Force a specific provider (`"anthropic"`, `"openai"`, `"gemini"`). Auto-detected from model if omitted.
 </ParamField>
 
+<Accordion title="All optional parameters">
 <ParamField path="system_prompt" type="string">
   Override the default system prompt.
 </ParamField>
@@ -182,6 +205,7 @@ Creates a new session and immediately runs the first turn with the given prompt.
 <ParamField path="provider_params" type="Record<string, unknown>">
   Provider-specific parameters (e.g. thinking config).
 </ParamField>
+</Accordion>
 
 ### startTurn(sessionId, prompt)
 
@@ -272,36 +296,31 @@ requireCapability(capabilityId: string): void
 
 Throws `MeerkatError` with code `"CAPABILITY_UNAVAILABLE"` if the capability is not available.
 
-### getConfig()
+### Config management
 
 ```typescript
-async getConfig(): Promise<Record<string, unknown>>
+// Read the current config.
+const config = await client.getConfig();
+
+// Replace the entire config.
+await client.setConfig({ ...config, max_tokens: 4096 });
+
+// Or merge-patch specific fields.
+const updated = await client.patchConfig({ max_tokens: 8192 });
+console.log(updated.max_tokens);  // 8192
 ```
 
-Returns the current Meerkat configuration as a JSON object.
-
-### setConfig(config)
-
-```typescript
-async setConfig(config: Record<string, unknown>): Promise<void>
-```
-
-Replaces the entire runtime configuration.
-
-### patchConfig(patch)
-
-```typescript
-async patchConfig(patch: Record<string, unknown>): Promise<Record<string, unknown>>
-```
-
-Merge-patches the runtime configuration and returns the resulting config.
+| Method | Maps to | Returns |
+|--------|---------|---------|
+| `getConfig()` | `config/get` | `Record<string, unknown>` |
+| `setConfig(config)` | `config/set` | `void` |
+| `patchConfig(patch)` | `config/patch` | `Record<string, unknown>` (updated config) |
 
 ---
 
 ## Wire types
 
-### WireRunResult
-
+<Accordion title="WireRunResult">
 Returned by `createSession()` and `startTurn()`.
 
 ```typescript
@@ -319,9 +338,9 @@ interface WireRunResult {
   }>;
 }
 ```
+</Accordion>
 
-### WireUsage
-
+<Accordion title="WireUsage">
 Token usage statistics.
 
 ```typescript
@@ -333,9 +352,9 @@ interface WireUsage {
   cache_read_tokens?: number;
 }
 ```
+</Accordion>
 
-### WireEvent
-
+<Accordion title="WireEvent">
 Event emitted as a JSON-RPC notification during a turn.
 
 ```typescript
@@ -346,25 +365,22 @@ interface WireEvent {
   contract_version: string;
 }
 ```
+</Accordion>
 
-### CapabilitiesResponse
-
+<Accordion title="CapabilitiesResponse and CapabilityEntry">
 ```typescript
 interface CapabilitiesResponse {
   contract_version: string;
   capabilities: CapabilityEntry[];
 }
-```
 
-### CapabilityEntry
-
-```typescript
 interface CapabilityEntry {
   id: string;
   description: string;
   status: string;  // "Available", "DisabledByPolicy", "NotCompiled", etc.
 }
 ```
+</Accordion>
 
 ---
 
@@ -451,7 +467,6 @@ import { EventStream } from "@meerkat/sdk";
 import type { Interface } from "node:readline";
 
 // The EventStream wraps a readline interface attached to rkat's stdout.
-// In practice you would get the readline from the child process:
 const rl: Interface = createInterface({ input: process.stdin });
 const stream = new EventStream(rl);
 
@@ -472,8 +487,14 @@ The `EventStream` class implements `AsyncIterable<WireEvent>`. It buffers events
 
 The SDK provides a hierarchy of error classes, all extending the base `MeerkatError`.
 
-### MeerkatError
+| Class | Description |
+|-------|-------------|
+| `MeerkatError` | Base error. Properties: `code` (string), `details` (unknown), `capabilityHint` (object). |
+| `CapabilityUnavailableError` | Thrown when a required capability is not available. |
+| `SessionNotFoundError` | Thrown when a session ID does not exist. |
+| `SkillNotFoundError` | Thrown when a referenced skill cannot be found. |
 
+<Accordion title="MeerkatError class definition">
 ```typescript
 class MeerkatError extends Error {
   readonly code: string;
@@ -491,32 +512,7 @@ class MeerkatError extends Error {
   );
 }
 ```
-
-Base error class. The `code` field contains a machine-readable error code (e.g. `"VERSION_MISMATCH"`, `"NOT_CONNECTED"`, `"CAPABILITY_UNAVAILABLE"`). The optional `capabilityHint` suggests which capability needs to be enabled.
-
-### CapabilityUnavailableError
-
-```typescript
-class CapabilityUnavailableError extends MeerkatError {}
-```
-
-Thrown when a required capability is not available in the runtime (e.g. feature not compiled in, disabled by policy).
-
-### SessionNotFoundError
-
-```typescript
-class SessionNotFoundError extends MeerkatError {}
-```
-
-Thrown when a session ID does not exist in the runtime.
-
-### SkillNotFoundError
-
-```typescript
-class SkillNotFoundError extends MeerkatError {}
-```
-
-Thrown when a referenced skill cannot be found.
+</Accordion>
 
 ### Error handling example
 
@@ -569,28 +565,7 @@ If the versions are incompatible, `connect()` throws a `MeerkatError` with code 
 
 ## Examples
 
-### Config management
-
-```typescript
-const client = new MeerkatClient();
-await client.connect();
-
-// Read the current config.
-const config = await client.getConfig();
-console.log(config);
-
-// Replace the entire config.
-await client.setConfig({ ...config, max_tokens: 4096 });
-
-// Or merge-patch specific fields.
-const updated = await client.patchConfig({ max_tokens: 8192 });
-console.log(updated.max_tokens);  // 8192
-
-await client.close();
-```
-
-### Structured output
-
+<Accordion title="Structured output">
 ```typescript
 const client = new MeerkatClient();
 await client.connect();
@@ -623,9 +598,9 @@ if (result.schema_warnings) {
 
 await client.close();
 ```
+</Accordion>
 
-### Multi-turn conversation
-
+<Accordion title="Multi-turn conversation">
 ```typescript
 const client = new MeerkatClient();
 await client.connect();
@@ -652,6 +627,7 @@ console.log(`Active sessions: ${sessions.length}`);
 await client.archiveSession(session.session_id);
 await client.close();
 ```
+</Accordion>
 
 ---
 

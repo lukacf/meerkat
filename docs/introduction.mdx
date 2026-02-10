@@ -3,12 +3,16 @@ title: "Introduction"
 description: "Meerkat is a modular, high-performance agent harness built in Rust."
 ---
 
+<img src="/logo.png" alt="Meerkat" width="200" />
+
 Meerkat is a **library-first, modular agent harness** — composable Rust crates that handle state machines, retries, budgets, streaming, tool execution, MCP, and multi-agent coordination.
 
 **Stable** — deterministic state machine, typed errors, compile-time guarantees.
 **Fast** — under 10ms cold start, ~20MB memory, single 5MB binary.
 
 ## Quick start
+
+Every surface runs the same agent engine. Here is "What is the capital of France?" across all seven:
 
 <Tabs>
   <Tab title="Rust">
@@ -23,14 +27,14 @@ Meerkat is a **library-first, modular agent harness** — composable Rust crates
     async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let result = meerkat::with_anthropic(std::env::var("ANTHROPIC_API_KEY")?)
             .model("claude-sonnet-4-5")
-            .system_prompt("You are a helpful assistant.")
             .run("What is the capital of France?")
             .await?;
-
         println!("{}", result.text);
         Ok(())
     }
     ```
+
+    See the [Rust SDK reference](/SDK) for the full API.
   </Tab>
   <Tab title="Python">
     ```bash
@@ -46,7 +50,7 @@ Meerkat is a **library-first, modular agent harness** — composable Rust crates
         print(result.text)
     ```
 
-    <Note>Requires the `rkat` binary on your `PATH`. See the [Python SDK guide](/sdks/python).</Note>
+    See the [Python SDK guide](/sdks/python) for the full API.
   </Tab>
   <Tab title="TypeScript">
     ```bash
@@ -63,44 +67,101 @@ Meerkat is a **library-first, modular agent harness** — composable Rust crates
     await client.close();
     ```
 
-    <Note>Requires the `rkat` binary on your `PATH`. See the [TypeScript SDK guide](/sdks/typescript).</Note>
+    See the [TypeScript SDK guide](/sdks/typescript) for the full API.
   </Tab>
   <Tab title="CLI">
     ```bash
     cargo install --path meerkat-cli
-
     export ANTHROPIC_API_KEY=sk-...
+
     rkat run "What is the capital of France?"
     ```
+
+    See the [CLI reference](/CLI) for all flags and options.
+  </Tab>
+  <Tab title="MCP">
+    Expose Meerkat as tools to other AI agents via MCP:
+
+    ```json Claude Code / MCP client config
+    {
+      "mcpServers": {
+        "meerkat": {
+          "command": "rkat",
+          "args": ["mcp-server"]
+        }
+      }
+    }
+    ```
+
+    Then call `meerkat_run` with your prompt:
+
+    ```json MCP tool call
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "What is the capital of France?"
+      }
+    }
+    ```
+
+    See the [MCP guide](/surfaces/mcp) for all parameters.
+  </Tab>
+  <Tab title="REST">
+    Start the server, then POST:
+
+    ```bash Start server
+    cargo run --package meerkat-rest
+    ```
+
+    ```bash curl
+    curl -X POST http://localhost:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{"prompt": "What is the capital of France?"}'
+    ```
+
+    See the [REST API guide](/surfaces/rest) for all endpoints.
+  </Tab>
+  <Tab title="JSON-RPC">
+    The JSON-RPC surface speaks newline-delimited JSON over stdin/stdout:
+
+    ```bash Start RPC server
+    rkat rpc
+    ```
+
+    ```json Create session
+    {"jsonrpc":"2.0","id":1,"method":"session/create","params":{"prompt":"What is the capital of France?"}}
+    ```
+
+    See the [JSON-RPC guide](/surfaces/rpc) for all methods.
   </Tab>
 </Tabs>
 
 ## Capabilities
 
 <CardGroup cols={2}>
-  <Card title="Multi-provider" icon="plug">
-    Anthropic, OpenAI, and Gemini with a unified streaming interface.
-  </Card>
-  <Card title="MCP native" icon="wrench">
-    Connect to any Model Context Protocol server for tool access.
-  </Card>
-  <Card title="Hooks" icon="anchor" href="/guides/hooks">
-    8 hook points with observe, rewrite, and guardrail semantics.
-  </Card>
   <Card title="Structured output" icon="square-code" href="/guides/structured-output">
     JSON-schema-validated extraction from any provider.
   </Card>
   <Card title="Semantic memory" icon="brain" href="/guides/memory">
     Auto-compact long conversations and recall via HNSW-indexed search.
   </Card>
+  <Card title="Skills" icon="puzzle-piece" href="/guides/skills">
+    Composable knowledge packs with capability gating.
+  </Card>
   <Card title="Sub-agents" icon="diagram-project" href="/guides/sub-agents">
     Spawn or fork child agents with budget and tool isolation.
+  </Card>
+  <Card title="Hooks" icon="anchor" href="/guides/hooks">
+    8 hook points with observe, rewrite, and guardrail semantics.
   </Card>
   <Card title="Multi-agent comms" icon="tower-broadcast" href="/guides/comms">
     Ed25519-authenticated peer-to-peer messaging between agents.
   </Card>
-  <Card title="Skills" icon="puzzle-piece" href="/guides/skills">
-    Composable knowledge packs with capability gating.
+  <Card title="Multi-provider" icon="plug" href="/configuration#providers">
+    Anthropic, OpenAI, and Gemini with a unified streaming interface.
+  </Card>
+  <Card title="MCP native" icon="wrench" href="/surfaces/mcp">
+    Connect to any Model Context Protocol server for tool access.
   </Card>
 </CardGroup>
 
@@ -134,7 +195,7 @@ meerkat = { version = "0.1", features = ["all-providers", "session-store", "sess
   <Card title="Examples" icon="code" href="/examples">
     Worked examples for every feature.
   </Card>
-  <Card title="Architecture" icon="layer-group" href="/reference/architecture">
-    How the crates fit together.
+  <Card title="Built-in tools" icon="wrench" href="/reference/builtin-tools">
+    Task, shell, memory, comms, and utility tools.
   </Card>
 </CardGroup>

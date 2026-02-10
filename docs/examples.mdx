@@ -1,84 +1,31 @@
 ---
 title: "Examples"
-description: "Detailed walkthroughs of runnable Meerkat examples covering the SDK, tools, multi-turn conversations, and inter-agent communication."
+description: "Runnable examples covering agent basics, tools, sessions, structured output, hooks, memory, sub-agents, and inter-agent communication."
 icon: "code"
 ---
 
-This guide provides detailed walkthroughs of the runnable examples in the Meerkat repository. Each section explains not just *what* the code does, but *why* it's structured that way.
+Detailed walkthroughs of runnable Meerkat examples. Each section explains not just *what* the code does, but *why* it is structured that way.
 
-## Overview
+<Note>
+All examples require an Anthropic API key exported as `ANTHROPIC_API_KEY`. Run any example from the repository root with `cargo run --example <name>`.
+</Note>
 
-<CardGroup cols={3}>
-  <Card title="Simple chat" icon="message" href="#1-simple-chat-simplers">
-    Minimal SDK usage with the fluent API. File: `simple.rs`
-  </Card>
-  <Card title="Using tools" icon="wrench" href="#2-using-tools-with_toolsrs">
-    Custom tool implementation with AgentBuilder. File: `with_tools.rs`
-  </Card>
-  <Card title="Multi-turn tools" icon="rotate" href="#3-multi-turn-with-tools-multi_turn_toolsrs">
-    Stateful tools and conversation continuity. File: `multi_turn_tools.rs`
-  </Card>
-  <Card title="Inter-agent comms" icon="tower-broadcast" href="#4-inter-agent-communication-comms_verbosers">
-    Two agents communicating via TCP. File: `comms_verbose.rs`
-  </Card>
-  <Card title="Hooks" icon="webhook" href="#5-hooks-hooks_example">
-    Lifecycle hooks for approval workflows and audit logging.
-  </Card>
-  <Card title="Structured output" icon="braces" href="#6-structured-output">
-    Extract typed JSON data from LLM responses.
-  </Card>
-  <Card title="Memory" icon="brain" href="#7-memory-and-compaction">
-    Semantic memory and context compaction.
-  </Card>
-  <Card title="Sub-agents" icon="sitemap" href="#8-sub-agents">
-    Parallel child agents for task decomposition.
-  </Card>
-</CardGroup>
+## Agent basics
 
-## Prerequisites
+Core patterns for building and running agents -- from a one-liner to custom tools with budget controls.
 
-### API keys
-
-All examples require an Anthropic API key:
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-```
-
-<Tip>
-For the comms example, you can optionally specify a different model via `ANTHROPIC_MODEL`.
-</Tip>
-
-### Running examples
-
-```bash
-# From the repository root
-cargo run --example simple
-cargo run --example with_tools
-cargo run --example multi_turn_tools
-cargo run --example comms_verbose
-```
-
----
-
-## 1. Simple chat (`simple.rs`)
+<Accordion title="Simple chat (simple.rs)">
 
 **Location:** `meerkat/examples/simple.rs`
 
-### What it demonstrates
-
-This is the "hello world" of Meerkat. It shows the simplest possible way to interact with an LLM using the fluent SDK API.
-
-### Code walkthrough
+The minimal "hello world" of Meerkat. Uses the fluent SDK API to send a single prompt and print the result.
 
 ```rust
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Step 1: Get API key from environment
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .expect("ANTHROPIC_API_KEY environment variable must be set");
 
-    // Step 2: Build and run in one fluent chain
     let result = meerkat::with_anthropic(api_key)
         .model("claude-sonnet-4")
         .system_prompt("You are a helpful assistant. Be concise in your responses.")
@@ -86,7 +33,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run("What is the capital of France? Answer in one sentence.")
         .await?;
 
-    // Step 3: Use the result
     println!("Response: {}", result.text);
     println!("\n--- Stats ---");
     println!("Session ID: {}", result.session_id);
@@ -97,9 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Why this pattern?
-
-**Fluent builder API:** The `meerkat::with_anthropic(api_key)` pattern creates a builder that lets you chain configuration. This is idiomatic Rust and makes the code self-documenting:
+**Builder chain breakdown:**
 
 ```rust
 meerkat::with_anthropic(api_key)  // Start with provider + credentials
@@ -109,7 +53,7 @@ meerkat::with_anthropic(api_key)  // Start with provider + credentials
     .run("...")                    // Execute with user prompt
 ```
 
-**The result struct:** `AgentResult` gives you everything you need:
+**The result struct** -- `AgentResult` gives you everything you need:
 
 <ResponseField name="text" type="String">
   The model's response.
@@ -127,7 +71,7 @@ meerkat::with_anthropic(api_key)  // Start with provider + credentials
   Token counts for cost tracking.
 </ResponseField>
 
-### Expected output
+**Expected output:**
 
 ```text
 Response: The capital of France is Paris.
@@ -138,25 +82,20 @@ Turns: 1
 Total tokens: 47
 ```
 
-### Key learnings
+**Key takeaways:**
+1. Meerkat handles session management, message formatting, and streaming internally.
+2. The `run()` method is async because it makes network calls.
+3. Sensible defaults -- you only specify what matters for your use case.
 
-1. **Minimal boilerplate:** Meerkat handles session management, message formatting, and streaming internally.
-2. **Everything is async:** The `run()` method is async because it makes network calls.
-3. **Sensible defaults:** You only need to specify what matters for your use case.
+</Accordion>
 
----
-
-## 2. Using tools (`with_tools.rs`)
+<Accordion title="Custom tools (with_tools.rs)">
 
 **Location:** `meerkat/examples/with_tools.rs`
 
-### What it demonstrates
+How to give an agent access to custom tools using the full `AgentBuilder` API with explicit components.
 
-How to give an agent access to custom tools. This example shows the full `AgentBuilder` API with explicit components rather than the simplified SDK.
-
-### Architecture overview
-
-The example creates three components that work together:
+**Architecture:**
 
 ```text
 +---------------------+     +----------------------+     +-------------+
@@ -175,16 +114,13 @@ The example creates three components that work together:
                                 +---------------+
 ```
 
-### Code walkthrough
-
-#### Step 1: Implement `AgentToolDispatcher`
+**Step 1 -- Implement `AgentToolDispatcher`:**
 
 ```rust
 struct MathToolDispatcher;
 
 #[async_trait]
 impl AgentToolDispatcher for MathToolDispatcher {
-    // Define what tools exist
     fn tools(&self) -> Vec<ToolDef> {
         vec![
             ToolDef {
@@ -203,7 +139,6 @@ impl AgentToolDispatcher for MathToolDispatcher {
         ]
     }
 
-    // Handle tool calls from the LLM
     async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
         match name {
             "add" => {
@@ -218,15 +153,10 @@ impl AgentToolDispatcher for MathToolDispatcher {
 }
 ```
 
-**Why this design?**
+- `tools()` returns JSON Schema definitions the LLM reads to understand available tools.
+- `dispatch()` executes the tool. Return type is always `String` because results go back into the conversation.
 
-- **`tools()`** returns JSON Schema definitions. The LLM uses these to understand what tools are available and how to call them.
-- **`dispatch()`** executes the tool when called. It receives the tool name and arguments as JSON.
-- **Return `String`:** Tool results are always strings because they go back into the conversation.
-
-#### Step 2: Implement `AgentLlmClient`
-
-This wraps `AnthropicClient` to implement the trait. See the [architecture reference](/reference/architecture) for how the trait abstraction works.
+**Step 2 -- Implement `AgentLlmClient`:**
 
 ```rust
 #[async_trait]
@@ -239,7 +169,6 @@ impl AgentLlmClient for AnthropicLlmAdapter {
         temperature: Option<f32>,
         provider_params: Option<&serde_json::Value>,
     ) -> Result<LlmStreamResult, meerkat::AgentError> {
-        // Build request
         let request = LlmRequest {
             model: self.model.clone(),
             messages: messages.to_vec(),
@@ -250,7 +179,6 @@ impl AgentLlmClient for AnthropicLlmAdapter {
             provider_params: provider_params.cloned(),
         };
 
-        // Stream and collect response
         let mut stream = self.client.stream(&request);
         // ... process stream events ...
 
@@ -264,11 +192,9 @@ impl AgentLlmClient for AnthropicLlmAdapter {
 }
 ```
 
-**Why implement this trait?**
+The `AgentLlmClient` trait abstracts over LLM providers. Meerkat-core doesn't care if you use Anthropic, OpenAI, or a local model.
 
-The `AgentLlmClient` trait abstracts over different LLM providers. Meerkat-core doesn't care if you're using Anthropic, OpenAI, or a local model -- it just needs something that implements this trait.
-
-#### Step 3: Build and run the agent
+**Step 3 -- Build and run:**
 
 ```rust
 let llm = Arc::new(AnthropicLlmAdapter::new(api_key, "claude-sonnet-4".to_string()));
@@ -286,7 +212,7 @@ let result = agent
     .await?;
 ```
 
-### Expected output
+**Expected output:**
 
 ```text
 Response: Let me calculate that for you.
@@ -311,30 +237,72 @@ Notice that `turns: 3` even though you only called `run()` once. This is because
 3. Turn 3: LLM receives "126", generates final response
 </Info>
 
-### Key learnings
+**Key takeaways:**
+1. The agent loops automatically when the LLM wants to use a tool.
+2. Tools are JSON-defined via JSON Schema.
+3. Components are wrapped in `Arc` because they are shared across async tasks.
+4. The full API gives you control over every component.
 
-1. **The agent loops automatically:** When an LLM wants to use a tool, Meerkat handles the back-and-forth.
-2. **Tools are JSON-defined:** Use JSON Schema to describe inputs. The LLM reads this.
-3. **Arc wrapping:** Components are wrapped in `Arc` because they're shared across async tasks.
-4. **Explicit is better:** The full API gives you control over every component.
+</Accordion>
 
----
+<Accordion title="Budget limits">
 
-## 3. Multi-turn with tools (`multi_turn_tools.rs`)
+You can constrain agent execution with `max_turns` to prevent runaway tool loops:
+
+```rust
+let result = meerkat::with_anthropic(api_key)
+    .model("claude-sonnet-4")
+    .max_tokens(1024)
+    .max_turns(5)  // Stop after 5 LLM calls
+    .run("Solve this complex problem step by step")
+    .await?;
+```
+
+The agent will stop and return whatever it has after reaching the turn limit, even if the LLM wanted to continue.
+
+</Accordion>
+
+<Accordion title="Streaming events">
+
+The agent emits `AgentEvent` values during execution. When using the SDK directly you get the final result; when using the RPC or REST surfaces, events stream to the client in real time.
+
+<Tabs>
+  <Tab title="JSON-RPC">
+Events are delivered as `session/event` notifications:
+
+```json
+{"jsonrpc":"2.0","method":"session/event","params":{"session_id":"...","event":{"type":"text_delta","content":"Hello"}}}
+{"jsonrpc":"2.0","method":"session/event","params":{"session_id":"...","event":{"type":"tool_use","name":"add","input":{"a":2,"b":3}}}}
+{"jsonrpc":"2.0","method":"session/event","params":{"session_id":"...","event":{"type":"turn_end","usage":{"input_tokens":50,"output_tokens":20}}}}
+```
+  </Tab>
+  <Tab title="REST">
+Events stream as Server-Sent Events when using the streaming endpoint:
+
+```bash
+curl -N -H "Content-Type: application/json" \
+  -d '{"prompt":"Hello","model":"claude-sonnet-4-5","stream":true}' \
+  http://localhost:3000/v1/sessions
+```
+  </Tab>
+</Tabs>
+
+</Accordion>
+
+## Sessions
+
+Session lifecycle and multi-turn conversations using a single agent instance.
+
+<Accordion title="Multi-turn with stateful tools (multi_turn_tools.rs)">
 
 **Location:** `meerkat/examples/multi_turn_tools.rs`
 
-### What it demonstrates
+Demonstrates stateful tools that persist data across conversation turns and multiple `run()` calls on the same agent.
 
-- Stateful tools that persist data across conversation turns
-- Multiple conversation turns with a single agent instance
-- How the agent maintains context between `run()` calls
-
-### Architecture: stateful tools
+**Stateful tool dispatcher:**
 
 ```rust
 struct MultiToolDispatcher {
-    // Tools can have internal state
     state: std::sync::Mutex<AppState>,
 }
 
@@ -344,11 +312,9 @@ struct AppState {
 }
 ```
 
-**Why use `Mutex`?**
+The dispatcher uses `Mutex` for thread-safe access. For a single-threaded runtime you could use `RefCell`, but `Mutex` is safer.
 
-The dispatcher might be called from multiple async tasks. `Mutex` ensures thread-safe access to the state. For a single-threaded runtime, you could use `RefCell`, but `Mutex` is safer.
-
-### Tools defined
+**Tools defined:**
 
 | Tool | Purpose |
 |------|---------|
@@ -357,7 +323,7 @@ The dispatcher might be called from multiple async tasks. `Mutex` ensures thread
 | `get_notes` | Retrieve all saved notes |
 | `get_calculation_history` | Show past calculations |
 
-### Conversation flow
+**Conversation flow:**
 
 ```rust
 // Turn 1: Calculate and save
@@ -374,7 +340,7 @@ let result = agent
 // LLM calls calculate("100 / 4") -> "25"
 // LLM calls calculate("25 + 37") -> "62"
 
-// Turn 3: Review history (this proves state persists!)
+// Turn 3: Review history (proves state persists)
 let result = agent
     .run("Show me all the calculations we've done and any notes we've saved.".to_string())
     .await?;
@@ -382,7 +348,7 @@ let result = agent
 // LLM calls get_notes() -> "1. The calculation 15 * 8 equals 120"
 ```
 
-### Key pattern: same agent instance
+**Key pattern -- reusing the same agent instance:**
 
 ```rust
 let mut agent = AgentBuilder::new()
@@ -395,15 +361,9 @@ let result2 = agent.run("Second message".to_string()).await?;  // Remembers resu
 let result3 = agent.run("Third message".to_string()).await?;   // Remembers result1 + result2
 ```
 
-**Why this works:**
+Each `run()` call adds the user message to the session, calls the LLM with the full conversation history, adds the assistant response, and saves via the store.
 
-The `Agent` holds a `Session` internally. Each `run()` call:
-1. Adds the user message to the session
-2. Calls the LLM with the full conversation history
-3. Adds the assistant response to the session
-4. Saves the session (via the store)
-
-### Expected output
+**Expected output:**
 
 ```text
 === Multi-Turn Tool Usage Example ===
@@ -436,492 +396,59 @@ Total turns: 11
 Total tokens: 1847
 ```
 
-### Key learnings
+**Key takeaways:**
+1. Tools can maintain state between turns, enabling complex workflows.
+2. Conversation context is managed automatically by the agent.
+3. The `turns` field shows total LLM calls across all `run()` invocations.
+4. Tool state and conversation state are separate concerns.
 
-1. **Stateful tools are powerful:** Your tools can maintain state between turns, enabling complex workflows.
-2. **Conversation context is automatic:** The agent handles message history for you.
-3. **Turn count accumulates:** The `turns` field shows total LLM calls across all `run()` invocations.
-4. **Tool state vs conversation state:** Tools hold application state; the agent holds conversation state.
-
----
-
-## 4. Inter-agent communication (`comms_verbose.rs`)
-
-**Location:** `meerkat/examples/comms_verbose.rs`
-
-### What it demonstrates
-
-Two completely separate agent instances communicating over TCP using encrypted channels. This is the foundation for building multi-agent systems.
-
-### Architecture overview
-
-```text
-+----------------------------------------------------------------+
-|                        AGENT A                                 |
-|  +--------------+  +---------------+  +------------------+     |
-|  | CommsManager |  | TCP Listener  |  | Agent + LLM      |     |
-|  | (keypair A)  |  | (port 12345)  |  | (send_message    |     |
-|  +--------------+  +---------------+  |  list_peers)     |     |
-|                                       +------------------+     |
-+----------------------------------------------------------------+
-                              |
-                              | TCP + Encryption
-                              v
-+----------------------------------------------------------------+
-|                        AGENT B                                 |
-|  +--------------+  +---------------+  +------------------+     |
-|  | CommsManager |  | TCP Listener  |  | Agent + LLM      |     |
-|  | (keypair B)  |  | (port 12346)  |  | (processes inbox)|     |
-|  +--------------+  +---------------+  +------------------+     |
-+----------------------------------------------------------------+
-```
-
-### Code walkthrough
-
-#### Step 1: Identity setup (cryptographic keys)
-
-```rust
-let keypair_a = Keypair::generate();
-let keypair_b = Keypair::generate();
-let pubkey_a = keypair_a.public_key();
-let pubkey_b = keypair_b.public_key();
-```
-
-**Why keypairs?**
-
-Each agent has a cryptographic identity. Messages are signed and encrypted, ensuring:
-- Authentication: You know who sent a message
-- Integrity: Messages can't be tampered with
-- Confidentiality: Only the intended recipient can read it
-
-#### Step 2: Trusted peers configuration
-
-```rust
-// Agent A knows about Agent B
-let trusted_for_a = TrustedPeers {
-    peers: vec![TrustedPeer {
-        name: "agent-b".to_string(),
-        pubkey: pubkey_b,
-        addr: format!("tcp://{}", addr_b),
-    }],
-};
-
-// Agent B knows about Agent A
-let trusted_for_b = TrustedPeers {
-    peers: vec![TrustedPeer {
-        name: "agent-a".to_string(),
-        pubkey: pubkey_a,
-        addr: format!("tcp://{}", addr_a),
-    }],
-};
-```
-
-**Why explicit trust?**
-
-<Note>
-Agents only accept messages from peers in their trusted list. This prevents spam and ensures security in multi-agent systems.
-</Note>
-
-#### Step 3: CommsManager setup
-
-```rust
-let config_a = CommsManagerConfig::with_keypair(keypair_a)
-    .trusted_peers(trusted_for_a.clone());
-let comms_manager_a = CommsManager::new(config_a);
-```
-
-The `CommsManager` handles:
-- Message encryption/decryption
-- Inbox queue management
-- Outbound message routing
-
-#### Step 4: TCP listeners
-
-```rust
-let _handle_a = spawn_tcp_listener(
-    &addr_a.to_string(),
-    secret_a,
-    Arc::new(trusted_for_a.clone()),
-    comms_manager_a.inbox_sender().clone(),
-).await?;
-```
-
-Each agent listens on its own TCP port. When a message arrives:
-1. Verify the sender's signature against trusted peers
-2. Decrypt the message
-3. Push to the inbox queue
-
-#### Step 5: Comms tools for LLM
-
-```rust
-let tools_a = CommsToolDispatcher::new(
-    comms_manager_a.router().clone(),
-    Arc::new(trusted_for_a),
-);
-```
-
-This gives the LLM two tools:
-- `send_message` - Send a message to a named peer
-- `list_peers` - List all trusted peers
-
-#### Step 6: Build `CommsAgent`
-
-```rust
-let agent_a_inner = AgentBuilder::new()
-    .model(&model)
-    .system_prompt(
-        "You are Agent A. You can communicate with other agents using the send_message tool."
-    )
-    .build(llm_a, tools_a, store.clone());
-
-let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
-```
-
-`CommsAgent` wraps a regular `Agent` and adds:
-- Automatic inbox polling
-- Message injection into conversation
-
-### Execution flow
-
-```text
-Phase 1: Agent A sends message
-------------------------------
-User -> Agent A: "Send 'Hello from Agent A!' to agent-b"
-Agent A LLM: Calls send_message tool
-send_message: Encrypts + TCP sends to Agent B's port
-Agent A LLM: "I've sent the message"
-
-Phase 2: Message delivery (500ms delay)
----------------------------------------
-TCP packet arrives at Agent B's listener
-Listener: Verifies signature, decrypts, pushes to inbox
-
-Phase 3: Agent B processes inbox
---------------------------------
-Agent B: Checks inbox, finds message from agent-a
-Agent B LLM: Receives message as context
-Agent B LLM: "I received: 'Hello from Agent A!' from agent-a"
-```
-
-### Logging output
-
-The example includes detailed logging wrappers that show every API call:
-
-```text
-+==============================================================+
-|  ANTHROPIC API CALL #1 - Agent A
-+==============================================================+
-| Model: claude-opus-4-6
-| Tools provided: ["send_message", "list_peers"]
-| Messages in context: 2
-| Last user message: Send the message 'Hello from Agent A!' to agent-b...
-+==============================================================+
-
-+--- LLM REQUESTED TOOL: send_message ---+
-| Args: {"to":"agent-b","message":"Hello from Agent A!"}
-+----------------------------------------+
-
-+==============================================================+
-|  TOOL EXECUTION #1 - Agent A calling 'send_message'
-+==============================================================+
-| Args: {
-|   "to": "agent-b",
-|   "message": "Hello from Agent A!"
-| }
-| SUCCESS: Message sent to agent-b
-+==============================================================+
-```
-
-### Key learnings
-
-1. **Agents are fully independent:** Each has its own keypair, port, LLM client, and state.
-2. **Security is built-in:** Cryptographic signatures and encryption by default.
-3. **Tools enable communication:** The LLM uses tools to interact with the comms layer.
-4. **Async inbox processing:** Messages arrive asynchronously; agents check when ready.
-
----
-
-## Building your own examples
-
-### Template for new examples
-
-```rust
-//! Brief description of what this example demonstrates
-//!
-//! Run with:
-//! ```bash
-//! ANTHROPIC_API_KEY=your-key cargo run --example your_example
-//! ```
-
-use meerkat::prelude::*;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Setup: Get configuration from environment
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .expect("ANTHROPIC_API_KEY environment variable must be set");
-
-    // 2. Build your agent (choose one approach)
-
-    // Option A: Simple SDK (no tools)
-    let result = meerkat::with_anthropic(api_key)
-        .model("claude-sonnet-4")
-        .run("Your prompt here")
-        .await?;
-
-    // Option B: Full builder (with tools)
-    // let llm = Arc::new(YourLlmAdapter::new(api_key));
-    // let tools = Arc::new(YourToolDispatcher);
-    // let store = Arc::new(MemoryStore::new());
-    // let mut agent = AgentBuilder::new()
-    //     .model("claude-sonnet-4")
-    //     .build(llm, tools, store);
-    // let result = agent.run("Your prompt".to_string()).await?;
-
-    // 3. Handle the result
-    println!("Response: {}", result.text);
-
-    Ok(())
-}
-```
-
-### Common patterns
-
-<Accordion title="Tool with external state">
-```rust
-struct DatabaseTools {
-    pool: Arc<sqlx::PgPool>,
-}
-
-#[async_trait]
-impl AgentToolDispatcher for DatabaseTools {
-    // ... tool definitions ...
-
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        match name {
-            "query" => {
-                let sql = args["sql"].as_str().ok_or("Missing sql")?;
-                // Use self.pool to execute query
-                Ok("results...".to_string())
-            }
-            _ => Err(format!("Unknown tool: {}", name)),
-        }
-    }
-}
-```
 </Accordion>
 
-<Accordion title="Composing multiple tool dispatchers">
-```rust
-struct CompositeDispatcher {
-    dispatchers: Vec<Arc<dyn AgentToolDispatcher>>,
+<Accordion title="Session lifecycle via JSON-RPC">
+
+Create a session, run multiple turns, then archive it:
+
+```json
+// 1. Create session + first turn
+{
+  "jsonrpc": "2.0", "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "You are a research assistant.",
+    "model": "claude-sonnet-4-5"
+  }
 }
 
-#[async_trait]
-impl AgentToolDispatcher for CompositeDispatcher {
-    fn tools(&self) -> Vec<ToolDef> {
-        self.dispatchers.iter()
-            .flat_map(|d| d.tools())
-            .collect()
-    }
-
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-        for dispatcher in &self.dispatchers {
-            if dispatcher.tools().iter().any(|t| t.name == name) {
-                return dispatcher.dispatch(name, args).await;
-            }
-        }
-        Err(format!("Unknown tool: {}", name))
-    }
+// 2. Continue with a follow-up turn
+{
+  "jsonrpc": "2.0", "id": 2,
+  "method": "turn/start",
+  "params": {
+    "session_id": "01936f8a-...",
+    "prompt": "Summarize what we discussed."
+  }
 }
-```
-</Accordion>
 
-<Accordion title="Validating tool arguments">
-```rust
-async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-    match name {
-        "send_email" => {
-            // Extract and validate
-            let to = args["to"].as_str()
-                .ok_or("Missing 'to' field")?;
-            let subject = args["subject"].as_str()
-                .ok_or("Missing 'subject' field")?;
-            let body = args["body"].as_str()
-                .ok_or("Missing 'body' field")?;
-
-            // Validate format
-            if !to.contains('@') {
-                return Err("Invalid email address".to_string());
-            }
-
-            // Execute
-            send_email(to, subject, body).await
-                .map_err(|e| format!("Failed to send: {}", e))
-        }
-        _ => Err(format!("Unknown tool: {}", name)),
-    }
+// 3. Archive when done
+{
+  "jsonrpc": "2.0", "id": 3,
+  "method": "session/archive",
+  "params": { "session_id": "01936f8a-..." }
 }
 ```
+
+See the [JSON-RPC surface](/surfaces/rpc) for the full method reference.
+
 </Accordion>
 
-### Error handling best practices
+## Structured output
+
+Force the agent to produce validated JSON conforming to a user-provided schema. See the full [structured output guide](/guides/structured-output) for schema compatibility details across providers.
+
+<Accordion title="Schema extraction via REST">
 
 <CodeGroup>
 
-```rust Good: descriptive error messages
-async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-    let path = args["path"].as_str()
-        .ok_or("Missing required 'path' argument")?;
-
-    std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read '{}': {}", path, e))
-}
-```
-
-```rust Bad: generic errors
-async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
-    let path = args["path"].as_str().ok_or("error")?;
-    std::fs::read_to_string(path).map_err(|_| "failed".to_string())
-}
-```
-
-</CodeGroup>
-
-### Testing your agent
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_tool_dispatch() {
-        let dispatcher = MathToolDispatcher;
-
-        // Test add
-        let result = dispatcher.dispatch(
-            "add",
-            &json!({"a": 2, "b": 3})
-        ).await;
-        assert_eq!(result, Ok("5".to_string()));
-
-        // Test missing argument
-        let result = dispatcher.dispatch(
-            "add",
-            &json!({"a": 2})
-        ).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    #[ignore]  // Requires API key
-    async fn test_full_agent() {
-        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
-        let result = meerkat::with_anthropic(api_key)
-            .model("claude-sonnet-4")
-            .run("Say 'hello' and nothing else")
-            .await
-            .unwrap();
-
-        assert!(result.text.to_lowercase().contains("hello"));
-    }
-}
-```
-
----
-
-## 5. Hooks (`hooks_example`)
-
-### What it demonstrates
-
-How to use lifecycle hooks to run custom logic before/after tool execution or
-at turn boundaries. Hooks let you implement approval workflows, audit logging,
-or input sanitization without modifying agent code.
-
-Hooks can be provided per-request via the `hooks_override` field:
-
-<Tabs>
-  <Tab title="REST API">
-```json
-{
-  "prompt": "Delete the temp files in /tmp/scratch",
-  "model": "claude-sonnet-4-5",
-  "enable_builtins": true,
-  "hooks_override": {
-    "entries": [
-      {
-        "id": "audit-log",
-        "point": "pre_tool_execution",
-        "mode": "blocking",
-        "command": ["python3", "audit_log.py"],
-        "timeout_ms": 5000
-      },
-      {
-        "id": "notify-slack",
-        "point": "post_tool_execution",
-        "mode": "background",
-        "command": ["curl", "-X", "POST", "https://hooks.slack.com/..."],
-        "timeout_ms": 10000
-      }
-    ],
-    "disable": []
-  }
-}
-```
-  </Tab>
-  <Tab title="JSON-RPC">
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "session/create",
-  "params": {
-    "prompt": "Summarize today's logs",
-    "hooks_override": {
-      "entries": [
-        {
-          "id": "approve-shell",
-          "point": "pre_tool_execution",
-          "mode": "blocking",
-          "command": ["./approve.sh"],
-          "timeout_ms": 30000
-        }
-      ],
-      "disable": ["default-rate-limiter"]
-    }
-  }
-}
-```
-  </Tab>
-</Tabs>
-
-### Key points
-
-- `entries` are appended after any config-file hooks. `disable` removes hooks
-  by ID before the merged list is evaluated.
-- `"background"` hooks fire-and-forget; failures are logged but do not block.
-- Hook points: `pre_tool_execution`, `post_tool_execution`.
-
-<Warning>
-`"blocking"` hooks must complete before the operation proceeds. A non-zero
-exit code from a blocking hook causes a `hook_denied` error (RPC code -32004).
-</Warning>
-
-See [Hooks documentation](/guides/hooks) for the full `HookRunOverrides` schema
-and config-file hook registration.
-
----
-
-## 6. Structured output
-
-### What it demonstrates
-
-How to extract structured data from LLM responses using JSON Schema. The agent
-runs an extraction turn that produces only schema-conformant JSON.
-
-<Tabs>
-  <Tab title="REST API">
 ```json Request
 {
   "prompt": "Analyze this code review and extract findings",
@@ -977,8 +504,13 @@ runs an extraction turn that produces only schema-conformant JSON.
   "schema_warnings": null
 }
 ```
-  </Tab>
-  <Tab title="JSON-RPC">
+
+</CodeGroup>
+
+</Accordion>
+
+<Accordion title="Schema extraction via JSON-RPC">
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -1007,39 +539,170 @@ runs an extraction turn that produces only schema-conformant JSON.
   }
 }
 ```
+
+</Accordion>
+
+<Accordion title="Key points">
+
+- When `output_schema` is provided, the `text` response field contains the raw JSON string; the `structured_output` field contains the parsed value.
+- `structured_output_retries` (default: 2) controls how many times the agent re-attempts extraction if the LLM output fails schema validation.
+- `schema_warnings` reports per-provider compatibility issues (e.g., keywords stripped for Gemini).
+- `output_schema` can be provided as a raw JSON Schema or as a wrapper object with explicit `name`, `strict`, `compat`, and `format` fields.
+
+</Accordion>
+
+## MCP tools
+
+Connect external MCP servers so the agent can call their tools. See the [MCP surface](/surfaces/mcp) for full configuration.
+
+<Accordion title="Adding an MCP server via CLI">
+
+```bash
+# Stdio transport
+rkat mcp add filesystem -- npx @anthropic/mcp-filesystem /path/to/dir
+
+# HTTP/SSE transport
+rkat mcp add weather --url https://weather-api.example.com/mcp
+
+# Verify
+rkat mcp list
+```
+
+Config is stored in `.rkat/mcp.toml` (project-level) or `~/.config/rkat/mcp.toml` (user-level). Once added, the agent automatically discovers tools from all configured MCP servers.
+
+</Accordion>
+
+<Accordion title="Using MCP tools in a session">
+
+After adding MCP servers, enable built-in tools so the agent can access them:
+
+<Tabs>
+  <Tab title="CLI">
+```bash
+rkat run --enable-builtins "List the files in the project directory"
+```
+  </Tab>
+  <Tab title="JSON-RPC">
+```json
+{
+  "jsonrpc": "2.0", "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "List the files in the project directory",
+    "model": "claude-sonnet-4-5",
+    "enable_builtins": true
+  }
+}
+```
   </Tab>
 </Tabs>
 
-<Info>
-`output_schema` can be provided as a raw JSON Schema (shown above) or as
-a wrapper object with explicit `name`, `strict`, `compat`, and `format` fields.
-</Info>
+</Accordion>
 
-### Key points
+## Hooks
 
-- When `output_schema` is provided, the `text` response field contains the
-  raw JSON string; the `structured_output` field contains the parsed value.
-- `structured_output_retries` (default: 2) controls how many times the agent
-  re-attempts extraction if the LLM output fails schema validation.
-- `schema_warnings` reports per-provider compatibility issues (e.g., keywords
-  stripped for Gemini).
+Lifecycle hooks run custom logic before/after tool execution or at turn boundaries. Hooks let you implement approval workflows, audit logging, or input sanitization without modifying agent code. See the full [hooks guide](/guides/hooks) for the `HookRunOverrides` schema and config-file registration.
 
-See [Structured Output documentation](/guides/structured-output) for schema
-compatibility details across providers.
+<Accordion title="Observer and audit logging">
 
----
+A `post_tool_execution` hook that logs every tool call to Slack (fire-and-forget):
 
-## 7. Memory and compaction
+<Tabs>
+  <Tab title="REST">
+```json
+{
+  "prompt": "Delete the temp files in /tmp/scratch",
+  "model": "claude-sonnet-4-5",
+  "enable_builtins": true,
+  "hooks_override": {
+    "entries": [
+      {
+        "id": "audit-log",
+        "point": "pre_tool_execution",
+        "mode": "blocking",
+        "command": ["python3", "audit_log.py"],
+        "timeout_ms": 5000
+      },
+      {
+        "id": "notify-slack",
+        "point": "post_tool_execution",
+        "mode": "background",
+        "command": ["curl", "-X", "POST", "https://hooks.slack.com/..."],
+        "timeout_ms": 10000
+      }
+    ],
+    "disable": []
+  }
+}
+```
+  </Tab>
+  <Tab title="JSON-RPC">
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "Summarize today's logs",
+    "hooks_override": {
+      "entries": [
+        {
+          "id": "approve-shell",
+          "point": "pre_tool_execution",
+          "mode": "blocking",
+          "command": ["./approve.sh"],
+          "timeout_ms": 30000
+        }
+      ],
+      "disable": ["default-rate-limiter"]
+    }
+  }
+}
+```
+  </Tab>
+</Tabs>
 
-### What it demonstrates
+</Accordion>
 
-How to enable semantic memory so the agent can index and search past
-conversation content. When compaction runs, older messages are summarized and
-indexed for retrieval via the `memory_search` tool.
+<Accordion title="Guardrail (blocking pre-tool hook)">
 
-### JSON-RPC example
+A blocking `pre_tool_execution` hook that must approve every tool call before it runs. A non-zero exit code from the hook causes a `hook_denied` error (RPC code -32004).
 
 ```json
+{
+  "id": "approve-dangerous-tools",
+  "point": "pre_tool_execution",
+  "mode": "blocking",
+  "command": ["./approve.sh"],
+  "timeout_ms": 30000
+}
+```
+
+<Warning>
+Blocking hooks must complete before the operation proceeds. Use a generous `timeout_ms` for interactive approval scripts.
+</Warning>
+
+</Accordion>
+
+<Accordion title="Key points">
+
+- `entries` are appended after any config-file hooks. `disable` removes hooks by ID before the merged list is evaluated.
+- `"background"` hooks fire-and-forget; failures are logged but do not block.
+- Hook points: `pre_tool_execution`, `post_tool_execution`.
+
+</Accordion>
+
+## Memory and compaction
+
+Semantic memory indexes past conversation content so the agent can recall it later. When compaction runs, older messages are summarized and indexed for retrieval via the `memory_search` tool. See the full [memory guide](/guides/memory).
+
+<Accordion title="Long conversation with recall">
+
+Enable memory when creating a session, then query past context in later turns:
+
+<CodeGroup>
+
+```json Create session with memory
 {
   "jsonrpc": "2.0",
   "id": 1,
@@ -1053,10 +716,7 @@ indexed for retrieval via the `memory_search` tool.
 }
 ```
 
-Follow-up turns on the same session can use `memory_search` (exposed as a
-built-in tool when `enable_memory` is true):
-
-```json
+```json Query past context
 {
   "jsonrpc": "2.0",
   "id": 2,
@@ -1068,29 +728,26 @@ built-in tool when `enable_memory` is true):
 }
 ```
 
-The agent will call the `memory_search` tool internally to retrieve relevant
-indexed content from earlier compacted turns.
+</CodeGroup>
 
-### Key points
+The agent calls the `memory_search` tool internally to retrieve relevant indexed content from earlier compacted turns.
+
+</Accordion>
+
+<Accordion title="Key points">
 
 - Requires the binary to be compiled with the `memory-store-session` feature.
 - Memory is per-session: indexed content is scoped to the session's history.
-- Compaction is triggered automatically based on `CompactionConfig` thresholds
-  (token count, message count, or turn count).
-- Use `capabilities/get` (RPC) or `GET /capabilities` (REST) to check if
-  `memory_store` is available in your build.
+- Compaction is triggered automatically based on `CompactionConfig` thresholds (token count, message count, or turn count).
+- Use `capabilities/get` (RPC) or `GET /capabilities` (REST) to check if `memory_store` is available in your build.
 
----
+</Accordion>
 
-## 8. Sub-agents
+## Sub-agents
 
-### What it demonstrates
+Spawn child agents for parallel work. Sub-agents inherit the parent's tool dispatcher but run with their own session and token budget. See the full [sub-agents guide](/guides/sub-agents).
 
-How to enable sub-agent tools so the main agent can fork or spawn child agents
-for parallel work. Sub-agents inherit the parent's tool dispatcher but run
-with their own session and token budget.
-
-### JSON-RPC example
+<Accordion title="Parallel research via JSON-RPC">
 
 ```json
 {
@@ -1106,70 +763,378 @@ with their own session and token budget.
 }
 ```
 
-The agent gains access to sub-agent tools (`fork`, `spawn`) and can delegate
-subtasks. Results are collected back into the parent session.
+The agent gains access to sub-agent tools (`fork`, `spawn`) and can delegate subtasks. Results are collected back into the parent session.
 
-### Key points
+</Accordion>
+
+<Accordion title="Key points">
 
 - Requires the binary to be compiled with the `sub-agents` feature.
-- Sub-agents are disabled by default to prevent recursive spawning. The factory
-  automatically disables sub-agents and comms for child agents.
-- Use `enable_subagents: true` in `session/create` params (RPC) or via
-  `AgentBuildConfig.override_subagents` in code.
-- Sub-agents share the parent's LLM client factory but get their own session
-  store (in-memory by default).
+- Sub-agents are disabled by default to prevent recursive spawning. The factory automatically disables sub-agents and comms for child agents.
+- Use `enable_subagents: true` in `session/create` params (RPC) or via `AgentBuildConfig.override_subagents` in code.
+- Sub-agents share the parent's LLM client factory but get their own session store (in-memory by default).
 
----
+</Accordion>
 
-## 9. Skills (phase 3)
+## Multi-agent comms
 
-### What it demonstrates
+Two completely separate agent instances communicating over TCP using encrypted channels. See the full [comms guide](/guides/comms).
 
-Skills are reusable, composable tool bundles that can be attached to a session.
-The skills system is defined in the contracts layer via `SkillsParams`.
+<Accordion title="Two agents exchanging messages (comms_verbose.rs)">
 
-### Contract types
+**Location:** `meerkat/examples/comms_verbose.rs`
+
+**Architecture:**
+
+```text
++----------------------------------------------------------------+
+|                        AGENT A                                 |
+|  +--------------+  +---------------+  +------------------+     |
+|  | CommsManager |  | TCP Listener  |  | Agent + LLM      |     |
+|  | (keypair A)  |  | (port 12345)  |  | (send_message    |     |
+|  +--------------+  +---------------+  |  list_peers)     |     |
+|                                       +------------------+     |
++----------------------------------------------------------------+
+                              |
+                              | TCP + Encryption
+                              v
++----------------------------------------------------------------+
+|                        AGENT B                                 |
+|  +--------------+  +---------------+  +------------------+     |
+|  | CommsManager |  | TCP Listener  |  | Agent + LLM      |     |
+|  | (keypair B)  |  | (port 12346)  |  | (processes inbox)|     |
+|  +--------------+  +---------------+  +------------------+     |
++----------------------------------------------------------------+
+```
+
+**Step 1 -- Identity setup (cryptographic keys):**
 
 ```rust
-pub struct SkillsParams {
-    pub skills_enabled: bool,           // Enable the skills system
-    pub skill_references: Vec<String>,  // Skill IDs to activate
+let keypair_a = Keypair::generate();
+let keypair_b = Keypair::generate();
+let pubkey_a = keypair_a.public_key();
+let pubkey_b = keypair_b.public_key();
+```
+
+Each agent has a cryptographic identity. Messages are signed and encrypted, ensuring authentication, integrity, and confidentiality.
+
+**Step 2 -- Trusted peers configuration:**
+
+```rust
+// Agent A knows about Agent B
+let trusted_for_a = TrustedPeers {
+    peers: vec![TrustedPeer {
+        name: "agent-b".to_string(),
+        pubkey: pubkey_b,
+        addr: format!("tcp://{}", addr_b),
+    }],
+};
+
+// Agent B knows about Agent A
+let trusted_for_b = TrustedPeers {
+    peers: vec![TrustedPeer {
+        name: "agent-a".to_string(),
+        pubkey: pubkey_a,
+        addr: format!("tcp://{}", addr_a),
+    }],
+};
+```
+
+<Note>
+Agents only accept messages from peers in their trusted list. This prevents spam and ensures security in multi-agent systems.
+</Note>
+
+**Step 3 -- CommsManager and TCP listeners:**
+
+```rust
+let config_a = CommsManagerConfig::with_keypair(keypair_a)
+    .trusted_peers(trusted_for_a.clone());
+let comms_manager_a = CommsManager::new(config_a);
+
+let _handle_a = spawn_tcp_listener(
+    &addr_a.to_string(),
+    secret_a,
+    Arc::new(trusted_for_a.clone()),
+    comms_manager_a.inbox_sender().clone(),
+).await?;
+```
+
+The `CommsManager` handles message encryption/decryption, inbox queue management, and outbound routing. Each agent listens on its own TCP port.
+
+**Step 4 -- Comms tools for the LLM:**
+
+```rust
+let tools_a = CommsToolDispatcher::new(
+    comms_manager_a.router().clone(),
+    Arc::new(trusted_for_a),
+);
+```
+
+This gives the LLM two tools: `send_message` and `list_peers`.
+
+**Step 5 -- Build `CommsAgent`:**
+
+```rust
+let agent_a_inner = AgentBuilder::new()
+    .model(&model)
+    .system_prompt(
+        "You are Agent A. You can communicate with other agents using the send_message tool."
+    )
+    .build(llm_a, tools_a, store.clone());
+
+let mut agent_a = CommsAgent::new(agent_a_inner, comms_manager_a);
+```
+
+`CommsAgent` wraps a regular `Agent` and adds automatic inbox polling and message injection into the conversation.
+
+**Execution flow:**
+
+```text
+Phase 1: Agent A sends message
+------------------------------
+User -> Agent A: "Send 'Hello from Agent A!' to agent-b"
+Agent A LLM: Calls send_message tool
+send_message: Encrypts + TCP sends to Agent B's port
+Agent A LLM: "I've sent the message"
+
+Phase 2: Message delivery (500ms delay)
+---------------------------------------
+TCP packet arrives at Agent B's listener
+Listener: Verifies signature, decrypts, pushes to inbox
+
+Phase 3: Agent B processes inbox
+--------------------------------
+Agent B: Checks inbox, finds message from agent-a
+Agent B LLM: Receives message as context
+Agent B LLM: "I received: 'Hello from Agent A!' from agent-a"
+```
+
+**Example logging output:**
+
+```text
++==============================================================+
+|  ANTHROPIC API CALL #1 - Agent A
++==============================================================+
+| Model: claude-opus-4-6
+| Tools provided: ["send_message", "list_peers"]
+| Messages in context: 2
+| Last user message: Send the message 'Hello from Agent A!' to agent-b...
++==============================================================+
+
++--- LLM REQUESTED TOOL: send_message ---+
+| Args: {"to":"agent-b","message":"Hello from Agent A!"}
++----------------------------------------+
+
++==============================================================+
+|  TOOL EXECUTION #1 - Agent A calling 'send_message'
++==============================================================+
+| Args: {
+|   "to": "agent-b",
+|   "message": "Hello from Agent A!"
+| }
+| SUCCESS: Message sent to agent-b
++==============================================================+
+```
+
+**Key takeaways:**
+1. Agents are fully independent -- each has its own keypair, port, LLM client, and state.
+2. Security is built-in via cryptographic signatures and encryption.
+3. The LLM uses tools to interact with the comms layer.
+4. Messages arrive asynchronously; agents check when ready.
+
+</Accordion>
+
+## Building your own
+
+Templates, patterns, and testing guidance for writing new examples.
+
+<Accordion title="Example template">
+
+```rust
+//! Brief description of what this example demonstrates
+//!
+//! Run with:
+//! ```bash
+//! ANTHROPIC_API_KEY=your-key cargo run --example your_example
+//! ```
+
+use meerkat::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Setup: Get configuration from environment
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .expect("ANTHROPIC_API_KEY environment variable must be set");
+
+    // 2. Build your agent (choose one approach)
+
+    // Option A: Simple SDK (no tools)
+    let result = meerkat::with_anthropic(api_key)
+        .model("claude-sonnet-4")
+        .run("Your prompt here")
+        .await?;
+
+    // Option B: Full builder (with tools)
+    // let llm = Arc::new(YourLlmAdapter::new(api_key));
+    // let tools = Arc::new(YourToolDispatcher);
+    // let store = Arc::new(MemoryStore::new());
+    // let mut agent = AgentBuilder::new()
+    //     .model("claude-sonnet-4")
+    //     .build(llm, tools, store);
+    // let result = agent.run("Your prompt".to_string()).await?;
+
+    // 3. Handle the result
+    println!("Response: {}", result.text);
+
+    Ok(())
 }
 ```
 
-### REST/RPC usage (planned)
+</Accordion>
 
-```json
-{
-  "prompt": "Analyze this codebase",
-  "skills_enabled": true,
-  "skill_references": ["code-review", "security-audit"]
+<Accordion title="Common patterns">
+
+**Tool with external state:**
+
+```rust
+struct DatabaseTools {
+    pool: Arc<sqlx::PgPool>,
+}
+
+#[async_trait]
+impl AgentToolDispatcher for DatabaseTools {
+    // ... tool definitions ...
+
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+        match name {
+            "query" => {
+                let sql = args["sql"].as_str().ok_or("Missing sql")?;
+                // Use self.pool to execute query
+                Ok("results...".to_string())
+            }
+            _ => Err(format!("Unknown tool: {}", name)),
+        }
+    }
 }
 ```
 
-### Key points
+**Composing multiple tool dispatchers:**
 
-- Skills are defined in `meerkat-contracts` as `SkillsParams` and are part of
-  the wire protocol, but the full runtime implementation is a Phase 3 feature.
-- Each skill reference maps to a registered skill bundle that provides tool
-  definitions, system prompt fragments, and configuration.
-- Active skill IDs are recorded in `SessionTooling.active_skills` for session
-  metadata tracking.
+```rust
+struct CompositeDispatcher {
+    dispatchers: Vec<Arc<dyn AgentToolDispatcher>>,
+}
 
----
+#[async_trait]
+impl AgentToolDispatcher for CompositeDispatcher {
+    fn tools(&self) -> Vec<ToolDef> {
+        self.dispatchers.iter()
+            .flat_map(|d| d.tools())
+            .collect()
+    }
 
-## Summary
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+        for dispatcher in &self.dispatchers {
+            if dispatcher.tools().iter().any(|t| t.name == name) {
+                return dispatcher.dispatch(name, args).await;
+            }
+        }
+        Err(format!("Unknown tool: {}", name))
+    }
+}
+```
 
-| Example | Key Concept | When to Use This Pattern |
-|---------|-------------|-------------------------|
-| `simple.rs` | Fluent SDK API | Quick scripts, simple queries |
-| `with_tools.rs` | Custom tools + AgentBuilder | Apps that need tool access |
-| `multi_turn_tools.rs` | Stateful tools + conversation | Complex workflows, assistants |
-| `comms_verbose.rs` | Inter-agent communication | Multi-agent systems |
-| Hooks | Lifecycle hooks | Approval workflows, audit logging |
-| Structured Output | JSON Schema extraction | Data extraction, form filling |
-| Memory/Compaction | Semantic memory + indexing | Long conversations, knowledge retention |
-| Sub-Agents | Parallel child agents | Task decomposition, parallel research |
-| Skills | Composable tool bundles | Reusable capability packages |
+**Validating tool arguments:**
 
-Start with `simple.rs` to understand the basics, then progress to the others as your needs grow. The examples are designed to build on each other conceptually.
+```rust
+async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    match name {
+        "send_email" => {
+            let to = args["to"].as_str()
+                .ok_or("Missing 'to' field")?;
+            let subject = args["subject"].as_str()
+                .ok_or("Missing 'subject' field")?;
+            let body = args["body"].as_str()
+                .ok_or("Missing 'body' field")?;
+
+            if !to.contains('@') {
+                return Err("Invalid email address".to_string());
+            }
+
+            send_email(to, subject, body).await
+                .map_err(|e| format!("Failed to send: {}", e))
+        }
+        _ => Err(format!("Unknown tool: {}", name)),
+    }
+}
+```
+
+</Accordion>
+
+<Accordion title="Error handling best practices">
+
+<CodeGroup>
+
+```rust Good: descriptive error messages
+async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    let path = args["path"].as_str()
+        .ok_or("Missing required 'path' argument")?;
+
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read '{}': {}", path, e))
+}
+```
+
+```rust Bad: generic errors
+async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    let path = args["path"].as_str().ok_or("error")?;
+    std::fs::read_to_string(path).map_err(|_| "failed".to_string())
+}
+```
+
+</CodeGroup>
+
+</Accordion>
+
+<Accordion title="Testing your agent">
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_tool_dispatch() {
+        let dispatcher = MathToolDispatcher;
+
+        // Test add
+        let result = dispatcher.dispatch(
+            "add",
+            &json!({"a": 2, "b": 3})
+        ).await;
+        assert_eq!(result, Ok("5".to_string()));
+
+        // Test missing argument
+        let result = dispatcher.dispatch(
+            "add",
+            &json!({"a": 2})
+        ).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore]  // Requires API key
+    async fn test_full_agent() {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+        let result = meerkat::with_anthropic(api_key)
+            .model("claude-sonnet-4")
+            .run("Say 'hello' and nothing else")
+            .await
+            .unwrap();
+
+        assert!(result.text.to_lowercase().contains("hello"));
+    }
+}
+```
+
+</Accordion>

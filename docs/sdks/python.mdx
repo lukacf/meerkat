@@ -4,39 +4,63 @@ description: "Python client for the Meerkat agent runtime, communicating over JS
 icon: "python"
 ---
 
-The Python SDK (`meerkat-sdk`) communicates with the `rkat` JSON-RPC server over stdio to manage sessions, run agent turns, stream events, and query capabilities.
+The Python SDK (`meerkat-sdk`) lets you manage sessions, run agent turns, stream events, and query capabilities from Python. It communicates with a local `rkat rpc` subprocess over JSON-RPC 2.0.
 
 - **Contract version:** `0.1.0`
 - **Python:** `>=3.10`
 - **License:** MIT OR Apache-2.0
 
-## Installation
+## Getting started
 
-<CodeGroup>
-```bash Standard install
-pip install sdks/python
-```
+<Steps>
+  <Step title="Install the SDK">
+    <CodeGroup>
+    ```bash Standard install
+    pip install sdks/python
+    ```
 
-```bash Development mode
-pip install -e "sdks/python[dev]"
-```
-</CodeGroup>
+    ```bash Development mode
+    pip install -e "sdks/python[dev]"
+    ```
+    </CodeGroup>
 
-The package is named `meerkat-sdk` (defined in `pyproject.toml`). It has zero runtime dependencies -- only `pytest` and `pytest-asyncio` are needed for development.
+    The package is named `meerkat-sdk`. It has zero runtime dependencies -- only `pytest` and `pytest-asyncio` are needed for development.
+  </Step>
+  <Step title="Install the rkat binary">
+    The SDK spawns `rkat rpc` as a subprocess. Build it from source:
 
-## Prerequisites
+    ```bash
+    cargo build -p meerkat-cli --release
+    # Binary is at target/release/rkat
+    ```
+  </Step>
+  <Step title="Connect and run">
+    ```python
+    import asyncio
+    from meerkat import MeerkatClient
 
-The `rkat` binary must be installed and available on your `PATH`. The SDK spawns `rkat rpc` as a subprocess and communicates via JSON-RPC 2.0 over newline-delimited JSON on stdin/stdout.
+    async def main():
+        client = MeerkatClient()
+        await client.connect()
 
-Build from source:
+        result = await client.create_session("What is the capital of France?")
+        print(result.text)           # "The capital of France is Paris."
+        print(result.session_id)     # UUID of the created session
 
-```bash
-cargo build -p meerkat-cli --release
-# Binary is at target/release/rkat
-```
+        # Multi-turn: continue the conversation
+        result2 = await client.start_turn(result.session_id, "And of Germany?")
+        print(result2.text)
+
+        await client.archive_session(result.session_id)
+        await client.close()
+
+    asyncio.run(main())
+    ```
+  </Step>
+</Steps>
 
 <Tip>
-If the binary is not on `PATH`, you can pass its location explicitly:
+If the `rkat` binary is not on `PATH`, you can pass its location explicitly:
 
 ```python
 client = MeerkatClient(rkat_path="/path/to/rkat")
@@ -45,38 +69,30 @@ client = MeerkatClient(rkat_path="/path/to/rkat")
 If the binary is not found, `MeerkatError` is raised immediately with code `"BINARY_NOT_FOUND"`.
 </Tip>
 
-## Quick start
+---
 
-```python
-import asyncio
-from meerkat import MeerkatClient
+## Method overview
 
-async def main():
-    # Connect to rkat rpc
-    client = MeerkatClient()
-    await client.connect()
-
-    # Create a session and run the first turn
-    result = await client.create_session("What is the capital of France?")
-    print(result.text)           # "The capital of France is Paris."
-    print(result.session_id)     # UUID of the created session
-
-    # Multi-turn: continue the conversation
-    result2 = await client.start_turn(result.session_id, "And of Germany?")
-    print(result2.text)
-
-    # Clean up
-    await client.archive_session(result.session_id)
-    await client.close()
-
-asyncio.run(main())
-```
+| Method | Description |
+|--------|-------------|
+| `connect()` | Spawn `rkat rpc`, handshake, fetch capabilities |
+| `close()` | Terminate the subprocess |
+| `create_session(prompt, ...)` | Create a session and run the first turn |
+| `start_turn(session_id, prompt)` | Continue an existing session |
+| `interrupt(session_id)` | Cancel an in-flight turn |
+| `list_sessions()` | List active sessions |
+| `read_session(session_id)` | Read session state |
+| `archive_session(session_id)` | Remove a session |
+| `get_capabilities()` | Get runtime capabilities |
+| `has_capability(id)` | Check if a capability is available |
+| `require_capability(id)` | Guard a code path by capability |
+| `get_config()` | Read runtime configuration |
+| `set_config(config)` | Replace runtime configuration |
+| `patch_config(patch)` | Merge-patch runtime configuration |
 
 ---
 
-## API reference
-
-### MeerkatClient
+## MeerkatClient
 
 ```python
 from meerkat import MeerkatClient
@@ -84,7 +100,7 @@ from meerkat import MeerkatClient
 
 The primary class. Spawns `rkat rpc` as a child process and speaks JSON-RPC over its stdin/stdout.
 
-#### Constructor
+### Constructor
 
 ```python
 MeerkatClient(rkat_path: str = "rkat")
@@ -96,7 +112,7 @@ MeerkatClient(rkat_path: str = "rkat")
 
 Raises `MeerkatError` (code `"BINARY_NOT_FOUND"`) if the binary is not found.
 
-#### connect()
+### connect()
 
 ```python
 async def connect(self) -> MeerkatClient
@@ -115,7 +131,7 @@ Starts the `rkat rpc` subprocess and performs the initialization handshake:
 
 Returns `self` for chaining.
 
-#### close()
+### close()
 
 ```python
 async def close(self) -> None
@@ -123,7 +139,7 @@ async def close(self) -> None
 
 Terminates the `rkat rpc` subprocess. Sends `SIGTERM` and waits up to 5 seconds; falls back to `SIGKILL` on timeout.
 
-#### create_session()
+### create_session()
 
 ```python
 async def create_session(
@@ -160,6 +176,7 @@ Creates a new session and runs the first turn. Maps to the `session/create` JSON
   Provider name: `"anthropic"`, `"openai"`, or `"gemini"`.
 </ParamField>
 
+<Accordion title="All optional parameters">
 <ParamField path="system_prompt" type="Optional[str]">
   Custom system prompt override.
 </ParamField>
@@ -207,10 +224,11 @@ Creates a new session and runs the first turn. Maps to the `session/create` JSON
 <ParamField path="provider_params" type="Optional[dict]">
   Provider-specific parameters (e.g. thinking config).
 </ParamField>
+</Accordion>
 
 Returns a `WireRunResult`.
 
-#### start_turn()
+### start_turn()
 
 ```python
 async def start_turn(
@@ -232,7 +250,7 @@ Starts a new turn on an existing session. Maps to the `turn/start` JSON-RPC meth
 
 Returns a `WireRunResult`.
 
-#### interrupt()
+### interrupt()
 
 ```python
 async def interrupt(self, session_id: str) -> None
@@ -240,7 +258,7 @@ async def interrupt(self, session_id: str) -> None
 
 Interrupts a running turn. Maps to `turn/interrupt`.
 
-#### list_sessions()
+### list_sessions()
 
 ```python
 async def list_sessions(self) -> list
@@ -248,7 +266,7 @@ async def list_sessions(self) -> list
 
 Lists active sessions. Maps to `session/list`. Returns a list of dicts, each with `session_id` and `state` keys.
 
-#### read_session()
+### read_session()
 
 ```python
 async def read_session(self, session_id: str) -> dict
@@ -256,7 +274,7 @@ async def read_session(self, session_id: str) -> dict
 
 Reads session state. Maps to `session/read`. Returns a dict with `session_id` and `state`.
 
-#### archive_session()
+### archive_session()
 
 ```python
 async def archive_session(self, session_id: str) -> None
@@ -264,7 +282,7 @@ async def archive_session(self, session_id: str) -> None
 
 Archives (removes) a session. Maps to `session/archive`.
 
-#### get_capabilities()
+### get_capabilities()
 
 ```python
 async def get_capabilities(self) -> CapabilitiesResponse
@@ -272,7 +290,7 @@ async def get_capabilities(self) -> CapabilitiesResponse
 
 Returns the cached `CapabilitiesResponse` from the initial handshake. If capabilities were not fetched during `connect()`, re-fetches via `capabilities/get`.
 
-#### has_capability()
+### has_capability()
 
 ```python
 def has_capability(self, capability_id: str) -> bool
@@ -284,7 +302,7 @@ Returns `True` if the given capability is available (status is `"Available"`). C
 `sessions`, `streaming`, `structured_output`, `hooks`, `builtins`, `shell`, `comms`, `sub_agents`, `memory_store`, `session_store`, `session_compaction`, `skills`
 </Accordion>
 
-#### require_capability()
+### require_capability()
 
 ```python
 def require_capability(self, capability_id: str) -> None
@@ -292,36 +310,33 @@ def require_capability(self, capability_id: str) -> None
 
 Raises `CapabilityUnavailableError` if the capability is not available.
 
-#### get_config()
+### Config management
 
 ```python
-async def get_config(self) -> dict
+# Read current configuration
+config = await client.get_config()
+print(config["agent"])
+
+# Replace entire configuration
+config["max_tokens"] = 4096
+await client.set_config(config)
+
+# Merge-patch specific fields (returns updated config)
+updated = await client.patch_config({"max_tokens": 2048})
+print(updated["max_tokens"])  # 2048
 ```
 
-Returns the runtime configuration. Maps to `config/get`.
-
-#### set_config()
-
-```python
-async def set_config(self, config: dict) -> None
-```
-
-Replaces the runtime configuration. Maps to `config/set`. The `config` dict is sent as `{"config": config}`.
-
-#### patch_config()
-
-```python
-async def patch_config(self, patch: dict) -> dict
-```
-
-Merge-patches the runtime configuration. Maps to `config/patch`. The `patch` dict is sent as `{"patch": patch}`. Returns the updated config.
+| Method | Maps to | Returns |
+|--------|---------|---------|
+| `get_config()` | `config/get` | `dict` |
+| `set_config(config)` | `config/set` | `None` |
+| `patch_config(patch)` | `config/patch` | `dict` (updated config) |
 
 ---
 
-### Wire types
+## Wire types
 
-#### WireRunResult
-
+<Accordion title="WireRunResult">
 ```python
 from meerkat import WireRunResult
 ```
@@ -355,9 +370,9 @@ Dataclass returned by `create_session()` and `start_turn()`.
 <ResponseField name="schema_warnings" type="Optional[list]">
   Schema validation warnings, if any.
 </ResponseField>
+</Accordion>
 
-#### WireUsage
-
+<Accordion title="WireUsage">
 ```python
 from meerkat import WireUsage
 ```
@@ -383,9 +398,9 @@ Dataclass for token usage.
 <ResponseField name="cache_read_tokens" type="Optional[int]">
   Tokens read from cache (provider-specific).
 </ResponseField>
+</Accordion>
 
-#### WireEvent
-
+<Accordion title="WireEvent">
 ```python
 from meerkat import WireEvent
 ```
@@ -407,14 +422,14 @@ Dataclass for streaming events.
 <ResponseField name="contract_version" type="str" default='""'>
   Contract version of the server.
 </ResponseField>
+</Accordion>
 
-#### CapabilitiesResponse
-
+<Accordion title="CapabilitiesResponse and CapabilityEntry">
 ```python
-from meerkat import CapabilitiesResponse
+from meerkat import CapabilitiesResponse, CapabilityEntry
 ```
 
-Dataclass returned by `get_capabilities()`.
+`CapabilitiesResponse` is a dataclass returned by `get_capabilities()`:
 
 <ResponseField name="contract_version" type="str" default='""'>
   Server contract version.
@@ -424,13 +439,7 @@ Dataclass returned by `get_capabilities()`.
   List of capability entries.
 </ResponseField>
 
-#### CapabilityEntry
-
-```python
-from meerkat import CapabilityEntry
-```
-
-Dataclass for a single capability.
+`CapabilityEntry` is a dataclass for a single capability:
 
 <ResponseField name="id" type="str" default='""'>
   Capability identifier (e.g. `"sessions"`, `"shell"`).
@@ -443,6 +452,7 @@ Dataclass for a single capability.
 <ResponseField name="status" type="str" default='"available"'>
   Status string: `"Available"`, `"DisabledByPolicy"`, `"NotCompiled"`, or `"NotSupportedByProtocol"`.
 </ResponseField>
+</Accordion>
 
 ---
 
@@ -532,29 +542,7 @@ async for event in stream:
 
 ---
 
-## Config management
-
-The SDK exposes the full config lifecycle via three methods:
-
-```python
-# Read current configuration
-config = await client.get_config()
-print(config["agent"])
-
-# Replace entire configuration
-config["max_tokens"] = 4096
-await client.set_config(config)
-
-# Merge-patch specific fields (returns updated config)
-updated = await client.patch_config({"max_tokens": 2048})
-print(updated["max_tokens"])  # 2048
-```
-
----
-
 ## Error handling
-
-### Error classes
 
 All errors inherit from `MeerkatError`.
 
@@ -573,10 +561,6 @@ from meerkat import (
 | `CapabilityUnavailableError` | Raised when a required capability is not available in the runtime. |
 | `SessionNotFoundError` | Raised when a session is not found. |
 | `SkillNotFoundError` | Raised when a skill reference cannot be resolved. |
-
-### Error codes
-
-The SDK surfaces JSON-RPC error codes as the string `code` attribute on `MeerkatError`. When the server returns an error, the numeric JSON-RPC code is converted to a string.
 
 <Tabs>
   <Tab title="Client-side codes">
@@ -643,8 +627,7 @@ print(CONTRACT_VERSION)  # "0.1.0"
 
 ## Examples
 
-### Multi-turn conversation
-
+<Accordion title="Multi-turn conversation">
 ```python
 import asyncio
 from meerkat import MeerkatClient
@@ -674,9 +657,9 @@ async def multi_turn():
 
 asyncio.run(multi_turn())
 ```
+</Accordion>
 
-### Structured output
-
+<Accordion title="Structured output">
 ```python
 import asyncio
 from meerkat import MeerkatClient
@@ -710,9 +693,9 @@ async def structured():
 
 asyncio.run(structured())
 ```
+</Accordion>
 
-### Capability checking
-
+<Accordion title="Capability checking">
 ```python
 import asyncio
 from meerkat import MeerkatClient, CapabilityChecker, CapabilityUnavailableError
@@ -745,9 +728,9 @@ async def check_caps():
 
 asyncio.run(check_caps())
 ```
+</Accordion>
 
-### Session management
-
+<Accordion title="Session management">
 ```python
 import asyncio
 from meerkat import MeerkatClient
@@ -777,9 +760,9 @@ async def manage_sessions():
 
 asyncio.run(manage_sessions())
 ```
+</Accordion>
 
-### Using with tools enabled
-
+<Accordion title="Using with tools enabled">
 ```python
 import asyncio
 from meerkat import MeerkatClient
@@ -801,6 +784,7 @@ async def with_tools():
 
 asyncio.run(with_tools())
 ```
+</Accordion>
 
 ---
 

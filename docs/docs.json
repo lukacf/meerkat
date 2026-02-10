@@ -32,11 +32,11 @@
           {
             "group": "Guides",
             "pages": [
-              "guides/hooks",
-              "guides/skills",
               "guides/structured-output",
               "guides/memory",
+              "guides/skills",
               "guides/sub-agents",
+              "guides/hooks",
               "guides/comms"
             ]
           }

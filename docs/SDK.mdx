@@ -4,42 +4,70 @@ description: "Comprehensive API reference for using Meerkat as a Rust library."
 icon: "code"
 ---
 
+The Meerkat Rust SDK gives you direct access to the agent loop, session lifecycle, tool dispatch, and LLM providers as library code. Use it when you need full control or are embedding Meerkat in a Rust application.
+
+## Method overview
+
+| Area | Method / Type | Purpose |
+|------|---------------|---------|
+| **Setup** | `Config::load()` | Load configuration from disk |
+| | `AgentFactory::new(cwd)` | Create a factory for building agents |
+| | `build_ephemeral_service(factory, config, cap)` | Build an in-memory session service |
+| **Sessions** | `service.create_session(req)` | Create a session and run the first turn |
+| | `service.start_turn(id, req)` | Continue an existing session |
+| | `service.read(id)` | Read session state |
+| | `service.list()` | List active sessions |
+| | `service.archive(id)` | Remove a session |
+| **Agent** | `agent.run(prompt)` | Run agent with a prompt |
+| | `agent.run_with_events(prompt, tx)` | Run with event streaming |
+| | `agent.cancel()` | Cancel the current run |
+| **Types** | `Message`, `ToolCall`, `ToolResult` | Core conversation types |
+| | `RunResult` | Result of a successful agent run |
+| | `AgentEvent` | Streaming event variants |
+| **Providers** | `AnthropicClient`, `OpenAiClient`, `GeminiClient` | Built-in LLM clients |
+| **Storage** | `JsonlStore`, `MemoryStore` | Session persistence backends |
+| **MCP** | `McpRouter` | Route tool calls to MCP servers |
+
 ## Installation
 
-Add Meerkat to your `Cargo.toml`:
+<Steps>
+  <Step title="Add the dependency">
+    Add Meerkat to your `Cargo.toml`:
 
-```toml
-[dependencies]
-meerkat = "0.1"
-tokio = { version = "1", features = ["full"] }
-```
+    ```toml
+    [dependencies]
+    meerkat = "0.1"
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Step>
+  <Step title="Choose feature flags">
+    Enable optional functionality via feature flags:
 
-### Feature flags
+    <CodeGroup>
+    ```toml Default (Anthropic + JSONL storage)
+    [dependencies]
+    meerkat = "0.1"
+    ```
 
-Meerkat uses feature flags to enable optional functionality:
+    ```toml All LLM providers
+    [dependencies]
+    meerkat = { version = "0.1", features = ["all-providers"] }
+    ```
 
-<CodeGroup>
-```toml Default (Anthropic + JSONL storage)
-[dependencies]
-meerkat = "0.1"
-```
+    ```toml Specific providers
+    [dependencies]
+    meerkat = { version = "0.1", features = ["anthropic", "openai", "gemini"] }
+    ```
 
-```toml All LLM providers
-[dependencies]
-meerkat = { version = "0.1", features = ["all-providers"] }
-```
+    ```toml Storage backends
+    [dependencies]
+    meerkat = { version = "0.1", features = ["jsonl-store", "memory-store"] }
+    ```
+    </CodeGroup>
+  </Step>
+</Steps>
 
-```toml Specific providers
-[dependencies]
-meerkat = { version = "0.1", features = ["anthropic", "openai", "gemini"] }
-```
-
-```toml Storage backends
-[dependencies]
-meerkat = { version = "0.1", features = ["jsonl-store", "memory-store"] }
-```
-</CodeGroup>
-
+<Accordion title="Feature flag reference">
 | Feature | Description | Default |
 |---------|-------------|---------|
 | `anthropic` | Anthropic Claude API client | Yes |
@@ -51,14 +79,13 @@ meerkat = { version = "0.1", features = ["jsonl-store", "memory-store"] }
 | `session-store` | Persistent sessions (redb-backed `PersistentSessionService`) | No |
 | `session-compaction` | Auto-compact long conversations (`DefaultCompactor`) | No |
 | `memory-store-session` | Semantic memory indexing (`HnswMemoryStore`) | No |
+</Accordion>
 
 ---
 
 ## Quick start
 
-### Minimal example (SessionService)
-
-The recommended way to use Meerkat is through `SessionService` with `build_ephemeral_service`:
+The recommended entry point is `SessionService` via `build_ephemeral_service`:
 
 ```rust
 use meerkat::{AgentFactory, AgentBuildConfig, Config, build_ephemeral_service};
@@ -89,8 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### With AgentBuildConfig (per-request configuration)
-
+<Accordion title="With per-request configuration (AgentBuildConfig)">
 For per-request configuration (custom tools, overrides), stage an `AgentBuildConfig`:
 
 ```rust
@@ -116,9 +142,9 @@ let result = service.create_session(CreateSessionRequest {
     host_mode: false,
 }).await?;
 ```
+</Accordion>
 
-### With tools
-
+<Accordion title="With custom tools">
 Custom tools implement `AgentToolDispatcher`:
 
 ```rust
@@ -162,13 +188,13 @@ impl AgentToolDispatcher for MathTools {
     }
 }
 ```
+</Accordion>
 
 ---
 
-## SessionService
+## Sessions
 
-`SessionService` is the canonical lifecycle API for all session management. All surfaces (CLI,
-REST, MCP Server, JSON-RPC) route through it.
+`SessionService` is the canonical lifecycle API for all session management. All surfaces (CLI, REST, MCP Server, JSON-RPC) route through it.
 
 ### Creating a service
 
@@ -228,6 +254,156 @@ match service.start_turn(&id, req).await {
     Err(SessionError::PersistenceDisabled) => println!("Persistence feature not enabled"),
     Err(e) => println!("Error: {}", e),
 }
+```
+
+---
+
+## Running agents
+
+The `Agent` struct is the main orchestrator that runs the agent loop.
+
+### Basic run
+
+```rust
+let result = agent.run("What is 2 + 2?".to_string()).await?;
+println!("Answer: {}", result.text);
+```
+
+### Run with event streaming
+
+```rust
+use tokio::sync::mpsc;
+use meerkat::AgentEvent;
+
+let (tx, mut rx) = mpsc::channel::<AgentEvent>(100);
+
+// Spawn event handler
+tokio::spawn(async move {
+    while let Some(event) = rx.recv().await {
+        match event {
+            AgentEvent::TextDelta { delta } => print!("{}", delta),
+            AgentEvent::ToolExecutionStarted { name, .. } => {
+                println!("[Calling {}...]", name);
+            }
+            AgentEvent::TurnCompleted { usage, .. } => {
+                println!("\n[Tokens: {}]", usage.total_tokens());
+            }
+            _ => {}
+        }
+    }
+});
+
+let result = agent.run_with_events("Tell me a story".to_string(), tx).await?;
+```
+
+### Agent methods
+
+| Method | Description |
+|--------|-------------|
+| `run(prompt)` | Run agent with user input |
+| `run_with_events(prompt, tx)` | Run with event streaming |
+| `session()` | Get current session (read-only) |
+| `session_mut()` | Get mutable session access |
+| `budget()` | Get current budget tracker |
+| `state()` | Get current loop state |
+| `cancel()` | Cancel the current run |
+
+### Error handling
+
+```rust
+use meerkat::AgentError;
+
+match agent.run("prompt".to_string()).await {
+    Ok(result) => println!("Success: {}", result.text),
+    Err(AgentError::LlmError(msg)) => println!("LLM error: {}", msg),
+    Err(AgentError::TokenBudgetExceeded { used, limit }) => {
+        println!("Token budget exceeded: {} / {}", used, limit);
+    }
+    Err(AgentError::TimeBudgetExceeded { elapsed_secs, limit_secs }) => {
+        println!("Time budget exceeded: {}s / {}s", elapsed_secs, limit_secs);
+    }
+    Err(AgentError::ToolCallBudgetExceeded { count, limit }) => {
+        println!("Tool call limit exceeded: {} / {}", count, limit);
+    }
+    Err(e) => println!("Other error: {}", e),
+}
+```
+
+---
+
+## Events
+
+<Accordion title="All event types">
+```rust
+use meerkat::AgentEvent;
+
+match event {
+    // Session lifecycle
+    AgentEvent::RunStarted { session_id, prompt } => {}
+    AgentEvent::RunCompleted { session_id, result, usage } => {}
+    AgentEvent::RunFailed { session_id, error } => {}
+
+    // LLM interaction
+    AgentEvent::TurnStarted { turn_number } => {}
+    AgentEvent::TextDelta { delta } => {}
+    AgentEvent::TextComplete { content } => {}
+    AgentEvent::ToolCallRequested { id, name, args } => {}
+    AgentEvent::ToolResultReceived { id, name, is_error } => {}
+    AgentEvent::TurnCompleted { stop_reason, usage } => {}
+
+    // Tool execution
+    AgentEvent::ToolExecutionStarted { id, name } => {}
+    AgentEvent::ToolExecutionCompleted { id, name, result, is_error, duration_ms } => {}
+    AgentEvent::ToolExecutionTimedOut { id, name, timeout_ms } => {}
+
+    // Budget
+    AgentEvent::BudgetWarning { budget_type, used, limit, percent } => {}
+    AgentEvent::CheckpointSaved { session_id, path } => {}
+
+    // Retry
+    AgentEvent::Retrying { attempt, max_attempts, error, delay_ms } => {}
+}
+```
+</Accordion>
+
+### Streaming events in real-time
+
+```rust
+use tokio::sync::mpsc;
+use meerkat::{AgentEvent, BudgetType};
+
+let (tx, mut rx) = mpsc::channel::<AgentEvent>(100);
+
+// Process events concurrently
+let handle = tokio::spawn(async move {
+    while let Some(event) = rx.recv().await {
+        match event {
+            AgentEvent::TextDelta { delta } => {
+                // Stream text to user
+                print!("{}", delta);
+                std::io::stdout().flush().ok();
+            }
+            AgentEvent::ToolExecutionStarted { name, .. } => {
+                println!("\n[Executing {}...]", name);
+            }
+            AgentEvent::ToolExecutionCompleted { name, duration_ms, .. } => {
+                println!("[{} completed in {}ms]", name, duration_ms);
+            }
+            AgentEvent::BudgetWarning { budget_type, percent, .. } => {
+                match budget_type {
+                    BudgetType::Tokens => println!("[Warning: {}% of token budget used]", percent * 100.0),
+                    BudgetType::Time => println!("[Warning: {}% of time budget used]", percent * 100.0),
+                    BudgetType::ToolCalls => println!("[Warning: {}% of tool calls used]", percent * 100.0),
+                }
+            }
+            _ => {}
+        }
+    }
+});
+
+// Run agent with event streaming
+let result = agent.run_with_events("prompt".to_string(), tx).await?;
+handle.await?;
 ```
 
 ---
@@ -373,245 +549,7 @@ println!("Tool calls: {}", result.tool_calls);  // Number of tool invocations
 
 ---
 
-## AgentBuilder
-
-<Note>
-For most use cases, prefer `SessionService` via `build_ephemeral_service()` (see
-[SessionService](#sessionservice) above). `AgentBuilder` is used internally by
-`AgentFactory::build_agent()`. Direct usage is only needed for advanced scenarios where you
-bypass the session service entirely.
-</Note>
-
-The `AgentBuilder` provides a fluent API for configuring agents:
-
-```rust
-use meerkat::AgentBuilder;
-
-// Used internally by AgentFactory -- prefer SessionService for new code
-let agent = AgentBuilder::new()
-    .model("claude-sonnet-4.5")
-    .system_prompt("You are a helpful assistant.")
-    .max_tokens_per_turn(4096)
-    .temperature(0.7)
-    .build(llm_client, tool_dispatcher, session_store);
-```
-
-### All builder methods
-
-| Method | Description | Default |
-|--------|-------------|---------|
-| `model(name)` | Set the model identifier | `"claude-opus-4-6"` |
-| `system_prompt(prompt)` | Set the system prompt | None |
-| `max_tokens_per_turn(n)` | Max tokens per LLM call | 8192 |
-| `temperature(t)` | Sampling temperature (0.0-1.0) | None (model default) |
-| `budget(limits)` | Set resource limits | Unlimited |
-| `retry_policy(policy)` | Configure retry behavior | 3 retries with backoff |
-| `resume_session(session)` | Resume from existing session | New session |
-| `provider_params(json)` | Provider-specific parameters | None |
-| `concurrency_limits(limits)` | Sub-agent limits | Default limits |
-| `with_hook_engine(engine)` | Attach a hook engine implementation | None |
-| `with_hook_run_overrides(overrides)` | Apply run-scoped hook overrides | Empty overrides |
-
-### Hook helpers
-
-The SDK exposes helpers used internally by `AgentFactory` for hook resolution.
-When using `SessionService`, hooks are resolved automatically during agent construction:
-
-```rust
-use meerkat::{create_default_hook_engine, resolve_layered_hooks_config};
-
-let config = meerkat::Config::load().await?;
-let cwd = std::env::current_dir()?;
-
-// These are called internally by AgentFactory::build_agent()
-let layered_hooks = resolve_layered_hooks_config(&cwd, &config).await;
-let hook_engine = create_default_hook_engine(layered_hooks);
-```
-
-`HookRunOverrides` schema:
-- `disable`: hook ids disabled for one run
-- `entries`: additional hook entries appended after layered config hooks
-
-### Budget configuration
-
-Budget limits can be set via `AgentBuildConfig` when using `SessionService`, or via `AgentBuilder` directly:
-
-```rust
-use meerkat::BudgetLimits;
-use std::time::Duration;
-
-let budget = BudgetLimits::default()
-    .with_max_tokens(100_000)
-    .with_max_duration(Duration::from_secs(300))
-    .with_max_tool_calls(50);
-
-// Via AgentBuildConfig (preferred):
-let mut build_config = AgentBuildConfig::new("claude-sonnet-4".into());
-build_config.budget = Some(budget);
-```
-
-### Retry configuration
-
-```rust
-use meerkat::RetryPolicy;
-use std::time::Duration;
-
-let retry = RetryPolicy {
-    max_retries: 5,
-    initial_delay: Duration::from_millis(500),
-    max_delay: Duration::from_secs(30),
-    multiplier: 2.0,
-};
-```
-
-### Provider parameters
-
-Pass provider-specific options like thinking budgets via `AgentBuildConfig`:
-
-<Tabs>
-  <Tab title="Anthropic">
-    ```rust
-    use serde_json::json;
-
-    let mut build_config = AgentBuildConfig::new("claude-sonnet-4".into());
-    build_config.provider_params = Some(json!({
-        "thinking_budget": 10000
-    }));
-    ```
-  </Tab>
-  <Tab title="OpenAI">
-    ```rust
-    use serde_json::json;
-
-    let mut build_config = AgentBuildConfig::new("gpt-5.2".into());
-    build_config.provider_params = Some(json!({
-        "reasoning_effort": "high",
-        "seed": 42
-    }));
-    ```
-  </Tab>
-  <Tab title="Gemini">
-    ```rust
-    use serde_json::json;
-
-    let mut build_config = AgentBuildConfig::new("gemini-3-flash-preview".into());
-    build_config.provider_params = Some(json!({
-        "thinking_budget": 8000,
-        "top_k": 40
-    }));
-    ```
-  </Tab>
-</Tabs>
-
----
-
-## Agent
-
-The `Agent` struct is the main orchestrator that runs the agent loop.
-
-### Running the agent
-
-```rust
-// Simple run
-let result = agent.run("What is 2 + 2?".to_string()).await?;
-println!("Answer: {}", result.text);
-
-// Run with event streaming
-use tokio::sync::mpsc;
-use meerkat::AgentEvent;
-
-let (tx, mut rx) = mpsc::channel::<AgentEvent>(100);
-
-// Spawn event handler
-tokio::spawn(async move {
-    while let Some(event) = rx.recv().await {
-        match event {
-            AgentEvent::TextDelta { delta } => print!("{}", delta),
-            AgentEvent::ToolExecutionStarted { name, .. } => {
-                println!("[Calling {}...]", name);
-            }
-            AgentEvent::TurnCompleted { usage, .. } => {
-                println!("\n[Tokens: {}]", usage.total_tokens());
-            }
-            _ => {}
-        }
-    }
-});
-
-let result = agent.run_with_events("Tell me a story".to_string(), tx).await?;
-```
-
-### Agent methods
-
-| Method | Description |
-|--------|-------------|
-| `run(prompt)` | Run agent with user input |
-| `run_with_events(prompt, tx)` | Run with event streaming |
-| `session()` | Get current session (read-only) |
-| `session_mut()` | Get mutable session access |
-| `budget()` | Get current budget tracker |
-| `state()` | Get current loop state |
-| `cancel()` | Cancel the current run |
-
-### Event types
-
-<Accordion title="All event types">
-```rust
-use meerkat::AgentEvent;
-
-match event {
-    // Session lifecycle
-    AgentEvent::RunStarted { session_id, prompt } => {}
-    AgentEvent::RunCompleted { session_id, result, usage } => {}
-    AgentEvent::RunFailed { session_id, error } => {}
-
-    // LLM interaction
-    AgentEvent::TurnStarted { turn_number } => {}
-    AgentEvent::TextDelta { delta } => {}
-    AgentEvent::TextComplete { content } => {}
-    AgentEvent::ToolCallRequested { id, name, args } => {}
-    AgentEvent::ToolResultReceived { id, name, is_error } => {}
-    AgentEvent::TurnCompleted { stop_reason, usage } => {}
-
-    // Tool execution
-    AgentEvent::ToolExecutionStarted { id, name } => {}
-    AgentEvent::ToolExecutionCompleted { id, name, result, is_error, duration_ms } => {}
-    AgentEvent::ToolExecutionTimedOut { id, name, timeout_ms } => {}
-
-    // Budget
-    AgentEvent::BudgetWarning { budget_type, used, limit, percent } => {}
-    AgentEvent::CheckpointSaved { session_id, path } => {}
-
-    // Retry
-    AgentEvent::Retrying { attempt, max_attempts, error, delay_ms } => {}
-}
-```
-</Accordion>
-
-### Error handling
-
-```rust
-use meerkat::AgentError;
-
-match agent.run("prompt".to_string()).await {
-    Ok(result) => println!("Success: {}", result.text),
-    Err(AgentError::LlmError(msg)) => println!("LLM error: {}", msg),
-    Err(AgentError::TokenBudgetExceeded { used, limit }) => {
-        println!("Token budget exceeded: {} / {}", used, limit);
-    }
-    Err(AgentError::TimeBudgetExceeded { elapsed_secs, limit_secs }) => {
-        println!("Time budget exceeded: {}s / {}s", elapsed_secs, limit_secs);
-    }
-    Err(AgentError::ToolCallBudgetExceeded { count, limit }) => {
-        println!("Tool call limit exceeded: {} / {}", count, limit);
-    }
-    Err(e) => println!("Other error: {}", e),
-}
-```
-
----
-
-## LLM clients
+## Providers
 
 Meerkat provides built-in clients for major LLM providers.
 
@@ -659,8 +597,46 @@ Meerkat provides built-in clients for major LLM providers.
   </Tab>
 </Tabs>
 
-### Implementing a custom LLM client
+### Provider parameters
 
+Pass provider-specific options like thinking budgets via `AgentBuildConfig`:
+
+<Tabs>
+  <Tab title="Anthropic">
+    ```rust
+    use serde_json::json;
+
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4".into());
+    build_config.provider_params = Some(json!({
+        "thinking_budget": 10000
+    }));
+    ```
+  </Tab>
+  <Tab title="OpenAI">
+    ```rust
+    use serde_json::json;
+
+    let mut build_config = AgentBuildConfig::new("gpt-5.2".into());
+    build_config.provider_params = Some(json!({
+        "reasoning_effort": "high",
+        "seed": 42
+    }));
+    ```
+  </Tab>
+  <Tab title="Gemini">
+    ```rust
+    use serde_json::json;
+
+    let mut build_config = AgentBuildConfig::new("gemini-3-flash-preview".into());
+    build_config.provider_params = Some(json!({
+        "thinking_budget": 8000,
+        "top_k": 40
+    }));
+    ```
+  </Tab>
+</Tabs>
+
+<Accordion title="Implementing a custom LLM client">
 To integrate a custom LLM provider, implement the `AgentLlmClient` trait:
 
 ```rust
@@ -706,12 +682,13 @@ impl AgentLlmClient for MyCustomClient {
     }
 }
 ```
+</Accordion>
 
 ---
 
 ## Tool system
 
-### ToolDef schema
+### Defining tools
 
 Define tools using JSON Schema:
 
@@ -808,8 +785,7 @@ impl AgentToolDispatcher for MyToolDispatcher {
 }
 ```
 
-### ToolRegistry
-
+<Accordion title="ToolRegistry (dynamic registration)">
 For dynamic tool registration:
 
 ```rust
@@ -828,6 +804,7 @@ registry.register(tool_def, Box::new(|args| {
 // Get all registered tools
 let tools = registry.tools();
 ```
+</Accordion>
 
 ---
 
@@ -882,8 +859,7 @@ let tools = registry.tools();
   </Tab>
 </Tabs>
 
-### Implementing a custom store
-
+<Accordion title="Implementing a custom store">
 Implement the `AgentSessionStore` trait:
 
 ```rust
@@ -907,6 +883,7 @@ impl AgentSessionStore for MyStore {
     }
 }
 ```
+</Accordion>
 
 ---
 
@@ -951,8 +928,7 @@ let result = router.call_tool("tool_name", &args).await?;
 router.shutdown().await;
 ```
 
-### MCP server configuration
-
+<Accordion title="MCP server configuration">
 ```rust
 use meerkat::McpServerConfig;
 use std::collections::HashMap;
@@ -971,10 +947,104 @@ let config = McpServerConfig::http(
     "https://server.example.com/sse",
 );
 ```
+</Accordion>
+
+---
+
+## AgentBuilder
+
+<Note>
+For most use cases, prefer `SessionService` via `build_ephemeral_service()` (see
+[Sessions](#sessions) above). `AgentBuilder` is used internally by
+`AgentFactory::build_agent()`. Direct usage is only needed for advanced scenarios where you
+bypass the session service entirely.
+</Note>
+
+The `AgentBuilder` provides a fluent API for configuring agents:
+
+```rust
+use meerkat::AgentBuilder;
+
+// Used internally by AgentFactory -- prefer SessionService for new code
+let agent = AgentBuilder::new()
+    .model("claude-sonnet-4.5")
+    .system_prompt("You are a helpful assistant.")
+    .max_tokens_per_turn(4096)
+    .temperature(0.7)
+    .build(llm_client, tool_dispatcher, session_store);
+```
+
+<Accordion title="All builder methods">
+| Method | Description | Default |
+|--------|-------------|---------|
+| `model(name)` | Set the model identifier | `"claude-opus-4-6"` |
+| `system_prompt(prompt)` | Set the system prompt | None |
+| `max_tokens_per_turn(n)` | Max tokens per LLM call | 8192 |
+| `temperature(t)` | Sampling temperature (0.0-1.0) | None (model default) |
+| `budget(limits)` | Set resource limits | Unlimited |
+| `retry_policy(policy)` | Configure retry behavior | 3 retries with backoff |
+| `resume_session(session)` | Resume from existing session | New session |
+| `provider_params(json)` | Provider-specific parameters | None |
+| `concurrency_limits(limits)` | Sub-agent limits | Default limits |
+| `with_hook_engine(engine)` | Attach a hook engine implementation | None |
+| `with_hook_run_overrides(overrides)` | Apply run-scoped hook overrides | Empty overrides |
+</Accordion>
+
+<Accordion title="Hook helpers">
+The SDK exposes helpers used internally by `AgentFactory` for hook resolution.
+When using `SessionService`, hooks are resolved automatically during agent construction:
+
+```rust
+use meerkat::{create_default_hook_engine, resolve_layered_hooks_config};
+
+let config = meerkat::Config::load().await?;
+let cwd = std::env::current_dir()?;
+
+// These are called internally by AgentFactory::build_agent()
+let layered_hooks = resolve_layered_hooks_config(&cwd, &config).await;
+let hook_engine = create_default_hook_engine(layered_hooks);
+```
+
+`HookRunOverrides` schema:
+- `disable`: hook ids disabled for one run
+- `entries`: additional hook entries appended after layered config hooks
+</Accordion>
 
 ---
 
 ## Advanced topics
+
+### Budget configuration
+
+Budget limits can be set via `AgentBuildConfig` when using `SessionService`, or via `AgentBuilder` directly:
+
+```rust
+use meerkat::BudgetLimits;
+use std::time::Duration;
+
+let budget = BudgetLimits::default()
+    .with_max_tokens(100_000)
+    .with_max_duration(Duration::from_secs(300))
+    .with_max_tool_calls(50);
+
+// Via AgentBuildConfig (preferred):
+let mut build_config = AgentBuildConfig::new("claude-sonnet-4".into());
+build_config.budget = Some(budget);
+```
+
+### Retry configuration
+
+```rust
+use meerkat::RetryPolicy;
+use std::time::Duration;
+
+let retry = RetryPolicy {
+    max_retries: 5,
+    initial_delay: Duration::from_millis(500),
+    max_delay: Duration::from_secs(30),
+    multiplier: 2.0,
+};
+```
 
 ### Sub-agent spawning
 
@@ -999,8 +1069,7 @@ let op_id = agent.spawn(spec).await?;
 let results = agent.collect_sub_agent_results().await;
 ```
 
-### Forking conversations
-
+<Accordion title="Forking conversations">
 Fork into parallel branches:
 
 ```rust
@@ -1021,9 +1090,9 @@ let branches = vec![
 
 let op_ids = agent.fork(branches, ForkBudgetPolicy::Split).await?;
 ```
+</Accordion>
 
-### Budget management
-
+<Accordion title="Budget management details">
 ```rust
 use meerkat::{Budget, BudgetLimits, BudgetPool};
 use std::time::Duration;
@@ -1053,48 +1122,7 @@ let allocated = pool.reserve(&child_limits)?;
 // ... run child agent ...
 pool.reclaim(&allocated, tokens_used);
 ```
-
-### Streaming events
-
-Process events in real-time:
-
-```rust
-use tokio::sync::mpsc;
-use meerkat::{AgentEvent, BudgetType};
-
-let (tx, mut rx) = mpsc::channel::<AgentEvent>(100);
-
-// Process events concurrently
-let handle = tokio::spawn(async move {
-    while let Some(event) = rx.recv().await {
-        match event {
-            AgentEvent::TextDelta { delta } => {
-                // Stream text to user
-                print!("{}", delta);
-                std::io::stdout().flush().ok();
-            }
-            AgentEvent::ToolExecutionStarted { name, .. } => {
-                println!("\n[Executing {}...]", name);
-            }
-            AgentEvent::ToolExecutionCompleted { name, duration_ms, .. } => {
-                println!("[{} completed in {}ms]", name, duration_ms);
-            }
-            AgentEvent::BudgetWarning { budget_type, percent, .. } => {
-                match budget_type {
-                    BudgetType::Tokens => println!("[Warning: {}% of token budget used]", percent * 100.0),
-                    BudgetType::Time => println!("[Warning: {}% of time budget used]", percent * 100.0),
-                    BudgetType::ToolCalls => println!("[Warning: {}% of tool calls used]", percent * 100.0),
-                }
-            }
-            _ => {}
-        }
-    }
-});
-
-// Run agent with event streaming
-let result = agent.run_with_events("prompt".to_string(), tx).await?;
-handle.await?;
-```
+</Accordion>
 
 ### Session resumption via SessionService
 

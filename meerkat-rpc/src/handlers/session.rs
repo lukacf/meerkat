@@ -56,6 +56,12 @@ pub struct CreateSessionParams {
     /// Agent name for comms (required when host_mode is true).
     #[serde(default)]
     pub comms_name: Option<String>,
+    /// Enable sub-agent tools (fork, spawn).
+    #[serde(default)]
+    pub enable_subagents: bool,
+    /// Enable semantic memory (memory_search tool + compaction indexing).
+    #[serde(default)]
+    pub enable_memory: bool,
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
@@ -152,6 +158,8 @@ pub async fn handle_create(
     build_config.override_shell = Some(params.enable_builtins && params.enable_shell);
     build_config.host_mode = params.host_mode;
     build_config.comms_name = params.comms_name;
+    build_config.override_subagents = Some(params.enable_subagents);
+    build_config.override_memory = Some(params.enable_memory);
     build_config.provider_params = params.provider_params;
 
     // Create the session

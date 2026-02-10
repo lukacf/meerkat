@@ -898,7 +898,17 @@ async fn handle_capabilities() -> anyhow::Result<()> {
 async fn handle_rpc() -> anyhow::Result<()> {
     let (config, _config_base_dir) = load_config().await?;
     let store_path = get_session_store_dir().await;
-    let factory = AgentFactory::new(store_path);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let project_root = find_project_root(&cwd);
+
+    // Max-permissive factory flags: per-request AgentBuildConfig overrides
+    // control what tools are actually enabled (same pattern as MCP server).
+    let factory = AgentFactory::new(store_path)
+        .project_root(project_root.unwrap_or(cwd))
+        .builtins(true)
+        .shell(true)
+        .subagents(true)
+        .memory(true);
 
     let runtime = Arc::new(meerkat_rpc::session_runtime::SessionRuntime::new(
         factory, config, 64,
@@ -1123,6 +1133,8 @@ async fn run_agent(
         external_tools,
         override_builtins: None,
         override_shell: None,
+        override_subagents: None,
+        override_memory: None,
     };
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
@@ -1316,6 +1328,8 @@ async fn resume_session(
         external_tools,
         override_builtins: None,
         override_shell: None,
+        override_subagents: None,
+        override_memory: None,
     };
 
     // Build the session service and stage the build config

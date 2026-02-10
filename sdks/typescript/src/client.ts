@@ -114,6 +114,8 @@ export class MeerkatClient {
     hooks_override?: Record<string, unknown>;
     enable_builtins?: boolean;
     enable_shell?: boolean;
+    enable_subagents?: boolean;
+    enable_memory?: boolean;
     host_mode?: boolean;
     comms_name?: string;
     provider_params?: Record<string, unknown>;

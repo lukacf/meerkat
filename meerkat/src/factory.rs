@@ -150,6 +150,12 @@ pub struct AgentBuildConfig {
     /// Per-build override for factory-level `enable_shell`.
     /// When `Some`, takes precedence over `AgentFactory::enable_shell`.
     pub override_shell: Option<bool>,
+    /// Per-build override for factory-level `enable_subagents`.
+    /// When `Some`, takes precedence over `AgentFactory::enable_subagents`.
+    pub override_subagents: Option<bool>,
+    /// Per-build override for factory-level `enable_memory`.
+    /// When `Some`, takes precedence over `AgentFactory::enable_memory`.
+    pub override_memory: Option<bool>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -177,6 +183,8 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("external_tools", &self.external_tools.is_some())
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
+            .field("override_subagents", &self.override_subagents)
+            .field("override_memory", &self.override_memory)
             .finish()
     }
 }
@@ -202,6 +210,8 @@ impl AgentBuildConfig {
             external_tools: None,
             override_builtins: None,
             override_shell: None,
+            override_subagents: None,
+            override_memory: None,
         }
     }
 }
@@ -255,6 +265,7 @@ pub struct AgentFactory {
     pub enable_subagents: bool,
     #[cfg(feature = "comms")]
     pub enable_comms: bool,
+    pub enable_memory: bool,
 }
 
 impl AgentFactory {
@@ -268,6 +279,7 @@ impl AgentFactory {
             enable_subagents: false,
             #[cfg(feature = "comms")]
             enable_comms: false,
+            enable_memory: false,
         }
     }
 
@@ -292,6 +304,12 @@ impl AgentFactory {
     /// Enable or disable sub-agent tools.
     pub fn subagents(mut self, enabled: bool) -> Self {
         self.enable_subagents = enabled;
+        self
+    }
+
+    /// Enable or disable semantic memory (memory_search tool + compaction indexing).
+    pub fn memory(mut self, enabled: bool) -> Self {
+        self.enable_memory = enabled;
         self
     }
 
@@ -544,13 +562,18 @@ impl AgentFactory {
             .override_builtins
             .unwrap_or(self.enable_builtins);
         let effective_shell = build_config.override_shell.unwrap_or(self.enable_shell);
+        let effective_subagents = build_config
+            .override_subagents
+            .unwrap_or(self.enable_subagents);
         let (mut tools, mut tool_usage_instructions) = self
             .build_tool_dispatcher_for_agent_with_overrides(
                 config,
                 build_config.external_tools,
                 effective_builtins,
                 effective_shell,
-            )?;
+                effective_subagents,
+            )
+            .await?;
 
         // 7. Create session store adapter
         #[cfg(feature = "jsonl-store")]
@@ -710,9 +733,13 @@ impl AgentFactory {
             builder = builder.with_hook_engine(engine);
         }
 
-        // 12b. Wire memory store + memory_search tool (when memory-store-session is enabled)
+        // 12b. Wire memory store + memory_search tool (when feature compiled + enabled)
+        #[allow(unused_variables)]
+        let effective_memory = build_config
+            .override_memory
+            .unwrap_or(self.enable_memory);
         #[cfg(feature = "memory-store-session")]
-        {
+        if effective_memory {
             let memory_dir = self.store_path.join("memory");
             match meerkat_memory::HnswMemoryStore::open(&memory_dir) {
                 Ok(store) => {
@@ -770,7 +797,7 @@ impl AgentFactory {
                 builtins: effective_builtins,
                 shell: effective_shell,
                 comms: build_config.host_mode,
-                subagents: self.enable_subagents,
+                subagents: effective_subagents,
                 active_skills: active_skill_ids,
             },
             host_mode: build_config.host_mode,
@@ -785,14 +812,16 @@ impl AgentFactory {
 
     /// Build the tool dispatcher and usage instructions.
     ///
-    /// `effective_builtins` and `effective_shell` override the factory-level
-    /// `enable_builtins` / `enable_shell` flags for this specific build.
-    fn build_tool_dispatcher_for_agent_with_overrides(
+    /// `effective_builtins`, `effective_shell`, and `effective_subagents` override
+    /// the factory-level flags for this specific build. Delegates to
+    /// [`Self::build_builtin_dispatcher`] for the full sub-agent wiring path.
+    async fn build_tool_dispatcher_for_agent_with_overrides(
         &self,
         _config: &Config,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         effective_builtins: bool,
         effective_shell: bool,
+        effective_subagents: bool,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -834,11 +863,17 @@ impl AgentFactory {
             BuiltinToolConfig::default()
         };
 
-        // Create composite dispatcher (with optional external tools)
-        let dispatcher =
-            CompositeDispatcher::new(task_store, &builtin_config, shell_config, external, None)?;
-        let usage_instructions = dispatcher.usage_instructions();
+        // Use a temporary factory with the effective subagents flag to delegate
+        // to build_builtin_dispatcher which has the full sub-agent wiring.
+        let mut temp_factory = self.clone();
+        temp_factory.enable_subagents = effective_subagents;
+        let dispatcher = temp_factory
+            .build_builtin_dispatcher(task_store, builtin_config, shell_config, external, None)
+            .await?;
 
-        Ok((Arc::new(dispatcher), usage_instructions))
+        // Extract usage instructions from the dispatcher
+        // (CompositeDispatcher implements AgentToolDispatcher which has tools())
+        let usage = String::new(); // Usage instructions are injected via system prompt assembly
+        Ok((dispatcher, usage))
     }
 }

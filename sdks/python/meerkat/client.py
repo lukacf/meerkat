@@ -102,6 +102,8 @@ class MeerkatClient:
         hooks_override: Optional[dict] = None,
         enable_builtins: bool = False,
         enable_shell: bool = False,
+        enable_subagents: bool = False,
+        enable_memory: bool = False,
         host_mode: bool = False,
         comms_name: Optional[str] = None,
         provider_params: Optional[dict] = None,
@@ -119,6 +121,8 @@ class MeerkatClient:
             hooks_override: Run-scoped hook overrides.
             enable_builtins: Enable built-in tools (task management, etc.).
             enable_shell: Enable shell tool (requires enable_builtins).
+            enable_subagents: Enable sub-agent tools (fork, spawn).
+            enable_memory: Enable semantic memory (memory_search tool).
             host_mode: Run in host mode for inter-agent comms.
             comms_name: Agent name for comms (required when host_mode is True).
             provider_params: Provider-specific parameters.
@@ -142,6 +146,10 @@ class MeerkatClient:
             params["enable_builtins"] = True
         if enable_shell:
             params["enable_shell"] = True
+        if enable_subagents:
+            params["enable_subagents"] = True
+        if enable_memory:
+            params["enable_memory"] = True
         if host_mode:
             params["host_mode"] = True
         if comms_name:

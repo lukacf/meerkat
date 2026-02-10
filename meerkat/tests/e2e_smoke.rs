@@ -416,6 +416,7 @@ mod scenario_02_tool_driven_shell {
             .await
             .expect("Shell agent should build");
 
+
         let result = agent
             .run(
                 "Use the shell tool to run: echo 'hello meerkat smoke'. \

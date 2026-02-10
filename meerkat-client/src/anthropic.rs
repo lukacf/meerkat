@@ -549,6 +549,8 @@ impl LlmClient for AnthropicClient {
                 let mut stream = stream_result?;
                 let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
                 let mut current_tool_id: Option<String> = None;
+                let mut current_tool_name: Option<String> = None;
+                let mut accumulated_tool_args = String::new();
                 let mut current_block_type: Option<String> = None;
                 let mut current_thinking_signature: Option<String> = None;
                 let mut last_stop_reason: Option<StopReason> = None;
@@ -584,6 +586,7 @@ impl LlmClient for AnthropicClient {
                                         }
                                         "input_json_delta" => {
                                             if let Some(partial_json) = delta.partial_json {
+                                                accumulated_tool_args.push_str(&partial_json);
                                                 saw_event = true;
                                                 yield LlmEvent::ToolCallDelta {
                                                     id: current_tool_id.clone().unwrap_or_default(),
@@ -631,6 +634,8 @@ impl LlmClient for AnthropicClient {
                                         "tool_use" => {
                                             let id = content_block.id.unwrap_or_default();
                                             current_tool_id = Some(id.clone());
+                                            current_tool_name = content_block.name.clone();
+                                            accumulated_tool_args.clear();
                                             saw_event = true;
                                             yield LlmEvent::ToolCallDelta {
                                                 id,
@@ -654,6 +659,31 @@ impl LlmClient for AnthropicClient {
                                             text: String::new(), // Text was already streamed via deltas
                                             meta,
                                         };
+                                    }
+                                    Some("tool_use") => {
+                                        // Finalize tool call: assemble accumulated
+                                        // JSON args from deltas into a complete event.
+                                        if let Some(ref tool_id) = current_tool_id {
+                                            // Accumulate args from the buffer by
+                                            // reading the accumulated json string.
+                                            // The name was set in content_block_start
+                                            // and passed via the initial ToolCallDelta.
+                                            // We emit ToolCallComplete with the
+                                            // accumulated_tool_args (collected during
+                                            // input_json_delta events).
+                                            let args_str = accumulated_tool_args.clone();
+                                            let args_val: serde_json::Value = serde_json::from_str(&args_str)
+                                                .unwrap_or(serde_json::json!({}));
+                                            saw_event = true;
+                                            yield LlmEvent::ToolCallComplete {
+                                                id: tool_id.clone(),
+                                                name: current_tool_name.take().unwrap_or_default(),
+                                                args: args_val,
+                                                meta: None,
+                                            };
+                                            accumulated_tool_args.clear();
+                                        }
+                                        current_tool_id = None;
                                     }
                                     _ => {}
                                 }

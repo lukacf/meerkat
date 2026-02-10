@@ -395,20 +395,15 @@ pub async fn handle_tools_call_with_notifier(
                 .map_err(|e| format!("Invalid arguments: {}", e))?;
             handle_meerkat_config(input).await
         }
-        "meerkat_capabilities" => handle_meerkat_capabilities(state),
+        "meerkat_capabilities" => handle_meerkat_capabilities().await,
         _ => Err(format!("Unknown tool: {}", tool_name)),
     }
 }
 
-fn handle_meerkat_capabilities(_state: &MeerkatMcpState) -> Result<Value, String> {
-    let config = load_config_async_block();
+async fn handle_meerkat_capabilities() -> Result<Value, String> {
+    let config = load_config_async().await;
     let response = meerkat::surface::build_capabilities_response(&config);
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
-}
-
-/// Load config synchronously for capability resolution.
-fn load_config_async_block() -> meerkat_core::Config {
-    meerkat_core::Config::default()
 }
 
 async fn handle_meerkat_config(input: MeerkatConfigInput) -> Result<Value, String> {

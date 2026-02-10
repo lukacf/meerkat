@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = []
-schema = ["dep:schemars"]
+schema = ["dep:schemars", "meerkat-core/schema"]
 
 [dependencies]
 meerkat-core = { workspace = true }

@@ -140,7 +140,7 @@ class MeerkatClient:
         if not self._capabilities:
             return False
         return any(
-            c.id == capability_id and c.status == "available"
+            c.id == capability_id and c.status == "Available"
             for c in self._capabilities.capabilities
         )
 

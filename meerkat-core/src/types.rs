@@ -383,7 +383,14 @@ impl Message {
             Message::User(u) => u.content.clone(),
             Message::Assistant(a) => a.content.clone(),
             Message::BlockAssistant(ba) => {
-                ba.text_blocks().collect::<Vec<_>>().join("\n")
+                let mut result = String::new();
+                for text in ba.text_blocks() {
+                    if !result.is_empty() {
+                        result.push('\n');
+                    }
+                    result.push_str(text);
+                }
+                result
             }
             Message::System(_) | Message::ToolResults { .. } => String::new(),
         }

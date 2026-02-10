@@ -19,7 +19,7 @@ class CapabilityChecker:
 
     def has(self, capability_id: str) -> bool:
         """Check if a capability is available."""
-        return self._capabilities.get(capability_id) == "available"
+        return self._capabilities.get(capability_id) == "Available"
 
     def require(self, capability_id: str) -> None:
         """Raise CapabilityUnavailableError if capability is not available."""
@@ -32,4 +32,4 @@ class CapabilityChecker:
     @property
     def available(self) -> list[str]:
         """List all available capability IDs."""
-        return [k for k, v in self._capabilities.items() if v == "available"]
+        return [k for k, v in self._capabilities.items() if v == "Available"]

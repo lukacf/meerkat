@@ -10,6 +10,7 @@ use meerkat_core::{HookRunOverrides, OutputSchema, Provider};
 
 /// Core session creation parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CoreCreateParams {
     pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,6 +44,7 @@ pub struct CommsParams {
 
 /// Hook parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HookParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks_override: Option<HookRunOverrides>,

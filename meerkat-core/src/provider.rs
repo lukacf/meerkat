@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Supported LLM providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     Anthropic,

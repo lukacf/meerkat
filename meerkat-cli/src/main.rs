@@ -1,10 +1,9 @@
 //! meerkat-cli - Headless CLI for Meerkat
 
-mod adapters;
 mod mcp;
 
 #[cfg(feature = "mcp")]
-use adapters::McpRouterAdapter;
+use meerkat_mcp::McpRouterAdapter;
 use meerkat::{AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::service::{CreateSessionRequest, SessionService};
@@ -584,8 +583,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         },
         Commands::Rpc => handle_rpc().await,
         Commands::Capabilities => {
-            handle_capabilities();
-            Ok(())
+            handle_capabilities().await
         }
     };
 
@@ -887,13 +885,14 @@ async fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> any
     Ok(())
 }
 
-fn handle_capabilities() {
-    let config = meerkat_core::Config::default();
+async fn handle_capabilities() -> anyhow::Result<()> {
+    let (config, _) = load_config().await?;
     let response = meerkat::surface::build_capabilities_response(&config);
     println!(
         "{}",
         serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string())
     );
+    Ok(())
 }
 
 async fn handle_rpc() -> anyhow::Result<()> {

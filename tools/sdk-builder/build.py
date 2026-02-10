@@ -31,25 +31,29 @@ def load_manifest(path: Path) -> dict:
 
 
 def resolve_features(manifest: dict) -> list[str]:
-    """Resolve feature flags from the manifest."""
+    """Resolve feature flags from the manifest.
+
+    Returns CLI-level features only. Features like 'anthropic', 'jsonl-store',
+    and 'sub-agents' are hardcoded in meerkat-cli's dependency on the facade
+    crate and do not need to be passed as --features flags.
+    """
     features = manifest.get("features", {})
     include = features.get("include", [])
     exclude = features.get("exclude", [])
 
-    # Start with default features from the facade crate
-    all_features = [
-        "anthropic", "jsonl-store", "comms", "mcp", "sub-agents", "skills",
-    ]
+    # Only features that meerkat-cli actually defines in its [features] table.
+    # Facade-level features (anthropic, jsonl-store, sub-agents) are wired
+    # through the CLI's dependency declaration on the meerkat facade crate.
+    cli_features = ["comms", "mcp"]
 
-    # Apply include/exclude
     result = []
-    for f in all_features:
+    for f in cli_features:
         if f in exclude:
             continue
         result.append(f)
 
     for f in include:
-        if f not in result:
+        if f not in result and f in cli_features:
             result.append(f)
 
     return result
@@ -57,12 +61,9 @@ def resolve_features(manifest: dict) -> list[str]:
 
 def build_runtime(features: list[str], root: Path) -> Path:
     """Build the rkat binary with the given features."""
-    features_str = ",".join(features) if features else "default"
-    cmd = [
-        "cargo", "build", "-p", "meerkat-cli",
-        "--features", features_str,
-        "--release",
-    ]
+    cmd = ["cargo", "build", "-p", "meerkat-cli", "--release"]
+    if features:
+        cmd.extend(["--features", ",".join(features)])
     print(f"Building runtime: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
     if result.returncode != 0:

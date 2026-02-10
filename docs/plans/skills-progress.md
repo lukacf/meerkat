@@ -1,6 +1,6 @@
 # Skills System Redesign — Progress
 
-## Current Phase: 4
+## Current Phase: 5
 ## Current Status: implementing
 
 ---
@@ -101,23 +101,30 @@
 ## Phase 4: Engine Revision
 
 ### Tests
-- [ ] test_inventory_section_uses_xml
-- [ ] test_resolve_and_render_returns_vec
-- [ ] test_resolve_and_render_unknown_id
-- [ ] test_list_skills_no_filter
-- [ ] test_list_skills_collection_filter
-- [ ] test_list_skills_query_filter
-- [ ] test_collections_derived
-- [ ] test_preload_missing_skill_errors
-- [ ] test_resolve_slash_namespaced_id
-- [ ] test_resolve_slash_root_level
-- [ ] test_resolve_deep_nested
+- [x] test_inventory_section_uses_xml
+- [x] test_resolve_and_render_returns_vec
+- [x] test_resolve_and_render_unknown_id
+- [x] test_list_skills_no_filter
+- [x] test_list_skills_collection_filter
+- [x] test_list_skills_query_filter
+- [x] test_collections_derived
+- [x] test_preload_missing_skill_errors
+- [x] test_resolve_slash_namespaced_id
+- [x] test_resolve_slash_root_level
+- [x] test_resolve_deep_nested
 
 ### Implementation
-- [ ] DefaultSkillEngine: new trait shape
-- [ ] resolve_and_render → Vec<ResolvedSkill>
-- [ ] list_skills() + collections()
-- [ ] Resolver: simplified slash-prefix only
+- [x] DefaultSkillEngine: new trait shape
+- [x] resolve_and_render → Vec<ResolvedSkill>
+- [x] list_skills() + collections()
+- [x] Resolver: simplified slash-prefix only
+
+### Gate Results — Attempt 1
+- build-gate: PASS
+- test-gate: PASS (41 meerkat-skills tests)
+- performance-gate: PASS
+- spec-accuracy-gate: PASS (all 11 tests, all items)
+- rust-quality-gate: PASS (no violations, no warnings)
 
 ## Phase 5: Configuration System
 

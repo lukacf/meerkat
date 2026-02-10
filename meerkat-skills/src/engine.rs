@@ -111,8 +111,19 @@ mod tests {
         }
     }
 
+    fn multi_source() -> InMemorySkillSource {
+        InMemorySkillSource::new(vec![
+            test_skill("extraction/email", "Email Extractor", &[]),
+            test_skill("extraction/fiction", "Fiction Extractor", &[]),
+            test_skill("formatting/markdown", "Markdown Output", &[]),
+            test_skill("pdf-processing", "PDF Processing", &[]),
+        ])
+    }
+
+    // --- Inventory ---
+
     #[tokio::test]
-    async fn test_inventory_section() {
+    async fn test_inventory_section_uses_xml() {
         let source = InMemorySkillSource::new(vec![
             test_skill("task-workflow", "Task Workflow", &["builtins"]),
             test_skill("shell-patterns", "Shell Patterns", &["builtins", "shell"]),
@@ -124,7 +135,6 @@ mod tests {
         );
 
         let section = engine.inventory_section().await.unwrap();
-        // Now uses XML format
         assert!(section.contains("<available_skills>"));
         assert!(section.contains("<skill id=\"task-workflow\">"));
         assert!(section.contains("<skill id=\"shell-patterns\">"));
@@ -137,7 +147,6 @@ mod tests {
             test_skill("shell-patterns", "Shell Patterns", &["builtins", "shell"]),
         ]);
 
-        // Only builtins available — shell-patterns should be filtered out
         let engine =
             DefaultSkillEngine::new(Box::new(source), vec!["builtins".to_string()]);
 
@@ -146,8 +155,10 @@ mod tests {
         assert!(!section.contains("shell-patterns"));
     }
 
+    // --- resolve_and_render ---
+
     #[tokio::test]
-    async fn test_resolve_and_render() {
+    async fn test_resolve_and_render_returns_vec() {
         let source = InMemorySkillSource::new(vec![test_skill(
             "task-workflow",
             "Task Workflow",
@@ -161,10 +172,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        // Now uses <skill id="..."> format
         assert!(result[0]
             .rendered_body
             .contains("<skill id=\"task-workflow\">"));
         assert!(result[0].rendered_body.contains("Content for task-workflow"));
+        assert_eq!(result[0].name, "Task Workflow");
+        assert!(result[0].byte_size > 0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_and_render_unknown_id() {
+        let source = InMemorySkillSource::new(vec![]);
+        let engine = DefaultSkillEngine::new(Box::new(source), vec![]);
+
+        let result = engine
+            .resolve_and_render(&[SkillId("nonexistent/skill".into())])
+            .await;
+        assert!(matches!(result, Err(SkillError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_preload_missing_skill_errors() {
+        let source = InMemorySkillSource::new(vec![test_skill(
+            "existing/skill",
+            "Existing",
+            &[],
+        )]);
+        let engine = DefaultSkillEngine::new(Box::new(source), vec![]);
+
+        // One valid, one invalid — should fail on the invalid one
+        let result = engine
+            .resolve_and_render(&[
+                SkillId("existing/skill".into()),
+                SkillId("missing/skill".into()),
+            ])
+            .await;
+        assert!(matches!(result, Err(SkillError::NotFound { .. })));
+    }
+
+    // --- list_skills ---
+
+    #[tokio::test]
+    async fn test_list_skills_no_filter() {
+        let engine = DefaultSkillEngine::new(Box::new(multi_source()), vec![]);
+        let skills = engine
+            .list_skills(&SkillFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(skills.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_list_skills_collection_filter() {
+        let engine = DefaultSkillEngine::new(Box::new(multi_source()), vec![]);
+        let skills = engine
+            .list_skills(&SkillFilter {
+                collection: Some("extraction".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(skills.len(), 2);
+        assert!(skills.iter().all(|s| s.id.0.starts_with("extraction/")));
+    }
+
+    #[tokio::test]
+    async fn test_list_skills_query_filter() {
+        let engine = DefaultSkillEngine::new(Box::new(multi_source()), vec![]);
+        let skills = engine
+            .list_skills(&SkillFilter {
+                query: Some("email".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id.0, "extraction/email");
+    }
+
+    // --- collections ---
+
+    #[tokio::test]
+    async fn test_collections_derived() {
+        let engine = DefaultSkillEngine::new(Box::new(multi_source()), vec![]);
+        let collections = engine.collections().await.unwrap();
+
+        // extraction (2 skills) and formatting (1 skill)
+        assert_eq!(collections.len(), 2);
+        let extraction = collections.iter().find(|c| c.path == "extraction");
+        assert!(extraction.is_some());
+        assert_eq!(extraction.map(|c| c.count), Some(2));
     }
 }

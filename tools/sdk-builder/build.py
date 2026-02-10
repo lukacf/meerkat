@@ -41,15 +41,23 @@ def resolve_features(manifest: dict) -> list[str]:
     include = features.get("include", [])
     exclude = features.get("exclude", [])
 
+    # Backward/compat aliases used by manifests.
+    aliases = {
+        # Historical profile key; maps to the CLI forwarding feature.
+        "memory-store-session": "memory-store",
+    }
+    include = [aliases.get(f, f) for f in include]
+    exclude = [aliases.get(f, f) for f in exclude]
+
     # All features that meerkat-cli defines in its [features] table.
     # These forward to the meerkat facade crate's feature flags.
     cli_features = [
         # LLM providers
         "anthropic", "openai", "gemini",
         # Storage
-        "jsonl-store",
+        "jsonl-store", "memory-store",
         # Session capabilities
-        "session-store", "session-compaction", "memory-store-session",
+        "session-store", "session-compaction",
         # Subsystems
         "comms", "mcp", "sub-agents", "skills",
     ]

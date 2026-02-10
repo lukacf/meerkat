@@ -15,7 +15,7 @@
   "navbar": {
     "links": [
       {
-        "type": "github",
+        "label": "GitHub",
         "href": "https://github.com/lukacf/meerkat"
       }
     ]
@@ -43,17 +43,12 @@
         ]
       },
       {
-        "tab": "SDKs",
+        "tab": "SDKs & CLI",
         "groups": [
           {
             "group": "SDKs",
             "pages": ["SDK", "sdks/python", "sdks/typescript"]
-          }
-        ]
-      },
-      {
-        "tab": "CLI",
-        "groups": [
+          },
           {
             "group": "CLI",
             "pages": ["CLI"]
@@ -61,7 +56,7 @@
         ]
       },
       {
-        "tab": "Surfaces",
+        "tab": "API surfaces",
         "groups": [
           {
             "group": "API surfaces",
@@ -75,9 +70,14 @@
           {
             "group": "Reference",
             "pages": [
-              "reference/api-reference",
               "reference/builtin-tools",
-              "reference/architecture",
+              "reference/api-reference",
+              "reference/architecture"
+            ]
+          },
+          {
+            "group": "Contracts",
+            "pages": [
               "reference/capability-matrix",
               "reference/session-contracts"
             ]

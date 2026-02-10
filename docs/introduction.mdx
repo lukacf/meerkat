@@ -3,27 +3,22 @@ title: "Introduction"
 description: "Meerkat is a modular, high-performance agent harness built in Rust."
 ---
 
-## What is Meerkat?
+Meerkat is a **library-first, modular agent harness** — composable Rust crates that handle state machines, retries, budgets, streaming, tool execution, MCP, and multi-agent coordination.
 
-Meerkat is a **library-first, modular agent harness** — a set of composable Rust crates that handle the hard parts of building agentic systems: state machines, retries, budgets, streaming, tool execution, MCP, multi-agent coordination.
-
-It is designed to be **stable** (deterministic state machine, typed errors, compile-time guarantees) and **fast** (&lt;10ms cold start, ~20MB memory, single 5MB binary).
-
-The library comes first; surfaces come second. The CLI, REST API, JSON-RPC server, MCP server, Python SDK, and TypeScript SDK are all thin layers over the same engine.
+**Stable** — deterministic state machine, typed errors, compile-time guarantees.
+**Fast** — under 10ms cold start, ~20MB memory, single 5MB binary.
 
 ## Quick start
 
 <Tabs>
   <Tab title="Rust">
-    Add Meerkat to your `Cargo.toml`:
-
-    ```toml
+    ```toml Cargo.toml
     [dependencies]
     meerkat = "0.1"
     tokio = { version = "1", features = ["full"] }
     ```
 
-    ```rust
+    ```rust main.rs
     #[tokio::main]
     async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let result = meerkat::with_anthropic(std::env::var("ANTHROPIC_API_KEY")?)
@@ -51,7 +46,7 @@ The library comes first; surfaces come second. The CLI, REST API, JSON-RPC serve
         print(result.text)
     ```
 
-    Requires the `rkat` binary on your `PATH`. See the [Python SDK guide](/sdks/python).
+    <Note>Requires the `rkat` binary on your `PATH`. See the [Python SDK guide](/sdks/python).</Note>
   </Tab>
   <Tab title="TypeScript">
     ```bash
@@ -68,7 +63,7 @@ The library comes first; surfaces come second. The CLI, REST API, JSON-RPC serve
     await client.close();
     ```
 
-    Requires the `rkat` binary on your `PATH`. See the [TypeScript SDK guide](/sdks/typescript).
+    <Note>Requires the `rkat` binary on your `PATH`. See the [TypeScript SDK guide](/sdks/typescript).</Note>
   </Tab>
   <Tab title="CLI">
     ```bash
@@ -80,7 +75,7 @@ The library comes first; surfaces come second. The CLI, REST API, JSON-RPC serve
   </Tab>
 </Tabs>
 
-## Core capabilities
+## Capabilities
 
 <CardGroup cols={2}>
   <Card title="Multi-provider" icon="plug">
@@ -92,13 +87,13 @@ The library comes first; surfaces come second. The CLI, REST API, JSON-RPC serve
   <Card title="Hooks" icon="anchor" href="/guides/hooks">
     8 hook points with observe, rewrite, and guardrail semantics.
   </Card>
-  <Card title="Structured output" icon="brackets-curly" href="/guides/structured-output">
+  <Card title="Structured output" icon="square-code" href="/guides/structured-output">
     JSON-schema-validated extraction from any provider.
   </Card>
   <Card title="Semantic memory" icon="brain" href="/guides/memory">
     Auto-compact long conversations and recall via HNSW-indexed search.
   </Card>
-  <Card title="Sub-agents" icon="sitemap" href="/guides/sub-agents">
+  <Card title="Sub-agents" icon="diagram-project" href="/guides/sub-agents">
     Spawn or fork child agents with budget and tool isolation.
   </Card>
   <Card title="Multi-agent comms" icon="tower-broadcast" href="/guides/comms">
@@ -113,27 +108,33 @@ The library comes first; surfaces come second. The CLI, REST API, JSON-RPC serve
 
 Pick only what you need. Disabled capabilities return typed errors — no panics, no silent degradation.
 
-```toml
-# Minimal: just the agent loop + one provider
+<CodeGroup>
+```toml Minimal
+[dependencies]
 meerkat = { version = "0.1", default-features = false, features = ["anthropic"] }
-
-# Add persistence and compaction
-meerkat = { version = "0.1", features = ["anthropic", "session-store", "session-compaction"] }
-
-# Everything
-meerkat = { version = "0.1", features = ["all-providers", "session-store", "session-compaction", "memory-store-session"] }
 ```
 
-## Surfaces
+```toml With persistence
+[dependencies]
+meerkat = { version = "0.1", features = ["anthropic", "session-store", "session-compaction"] }
+```
 
-All surfaces share the same `SessionService` lifecycle and `AgentFactory` construction pipeline.
+```toml Everything
+[dependencies]
+meerkat = { version = "0.1", features = ["all-providers", "session-store", "session-compaction", "memory-store-session"] }
+```
+</CodeGroup>
 
-| Surface | Use case | Guide |
-|---------|----------|-------|
-| **Rust crate** | Embed agents in your Rust application | [SDK guide](/SDK) |
-| **Python SDK** | Script agents from Python | [Python guide](/sdks/python) |
-| **TypeScript SDK** | Script agents from Node.js | [TypeScript guide](/sdks/typescript) |
-| **CLI (`rkat`)** | Terminal, CI/CD, shell scripts | [CLI guide](/CLI) |
-| **REST API** | HTTP integration | [REST guide](/surfaces/rest) |
-| **JSON-RPC** | Stateful IDE/desktop integration | [RPC guide](/surfaces/rpc) |
-| **MCP Server** | Expose as tools to other AI agents | [MCP guide](/surfaces/mcp) |
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Configuration" icon="sliders" href="/configuration">
+    Environment variables, config files, feature flags.
+  </Card>
+  <Card title="Examples" icon="code" href="/examples">
+    Worked examples for every feature.
+  </Card>
+  <Card title="Architecture" icon="layer-group" href="/reference/architecture">
+    How the crates fit together.
+  </Card>
+</CardGroup>

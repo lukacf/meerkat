@@ -70,7 +70,7 @@ class MeerkatClient:
                 CapabilityEntry(
                     id=c.get("id", ""),
                     description=c.get("description", ""),
-                    status=c.get("status", "Available"),
+                    status=self._normalize_status(c.get("status", "Available")),
                 )
                 for c in caps_result.get("capabilities", [])
             ],
@@ -94,6 +94,7 @@ class MeerkatClient:
         self,
         prompt: str,
         model: Optional[str] = None,
+        provider: Optional[str] = None,
         system_prompt: Optional[str] = None,
         max_tokens: Optional[int] = None,
     ) -> WireRunResult:
@@ -101,6 +102,8 @@ class MeerkatClient:
         params: dict = {"prompt": prompt}
         if model:
             params["model"] = model
+        if provider:
+            params["provider"] = provider
         if system_prompt:
             params["system_prompt"] = system_prompt
         if max_tokens:
@@ -164,6 +167,20 @@ class MeerkatClient:
                 f"Capability '{capability_id}' is not available",
             )
 
+    # --- Config ---
+
+    async def get_config(self) -> dict:
+        """Get runtime configuration."""
+        return await self._request("config/get", {})
+
+    async def set_config(self, config: dict) -> None:
+        """Replace runtime configuration."""
+        await self._request("config/set", {"config": config})
+
+    async def patch_config(self, patch: dict) -> dict:
+        """Merge-patch runtime configuration. Returns updated config."""
+        return await self._request("config/patch", {"patch": patch})
+
     # --- Internal ---
 
     async def _request(self, method: str, params: dict) -> dict:
@@ -200,6 +217,21 @@ class MeerkatClient:
                         err.get("data"),
                     )
                 return response.get("result", {})
+
+    @staticmethod
+    def _normalize_status(raw) -> str:
+        """Normalize a CapabilityStatus from the wire.
+
+        On the wire, Available is the string ``"Available"`` but other variants
+        are externally-tagged objects like ``{"DisabledByPolicy": {"description": "..."}}``.
+        We normalize to the variant name string for simple comparison.
+        """
+        if isinstance(raw, str):
+            return raw
+        if isinstance(raw, dict):
+            # Externally-tagged enum — the single key is the variant name
+            return next(iter(raw), "Unknown")
+        return str(raw)
 
     @staticmethod
     def _check_version_compatible(server: str, client: str) -> bool:

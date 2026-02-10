@@ -88,7 +88,7 @@ export class MeerkatClient {
         (cap): CapabilityEntry => ({
           id: String(cap.id ?? ""),
           description: String(cap.description ?? ""),
-          status: String(cap.status ?? "Available"),
+          status: MeerkatClient.normalizeStatus(cap.status),
         }),
       ),
     };
@@ -174,7 +174,39 @@ export class MeerkatClient {
     }
   }
 
+  // --- Config ---
+
+  async getConfig(): Promise<Record<string, unknown>> {
+    return (await this.request("config/get", {})) as Record<string, unknown>;
+  }
+
+  async setConfig(config: Record<string, unknown>): Promise<void> {
+    await this.request("config/set", { config });
+  }
+
+  async patchConfig(patch: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return (await this.request("config/patch", { patch })) as Record<
+      string,
+      unknown
+    >;
+  }
+
   // --- Internal ---
+
+  /**
+   * Normalize a CapabilityStatus from the wire.
+   * Available is the string "Available", but other variants are
+   * externally-tagged objects like {"DisabledByPolicy": {"description": "..."}}.
+   * We normalize to the variant name string.
+   */
+  private static normalizeStatus(raw: unknown): string {
+    if (typeof raw === "string") return raw;
+    if (typeof raw === "object" && raw !== null) {
+      const keys = Object.keys(raw);
+      return keys[0] ?? "Unknown";
+    }
+    return String(raw);
+  }
 
   private request(method: string, params: unknown): Promise<unknown> {
     if (!this.process?.stdin) {

@@ -60,9 +60,8 @@ mod tests {
         SkillDescriptor {
             id: SkillId(id.to_string()),
             name: name.to_string(),
-            description: String::new(),
             scope: SkillScope::Builtin,
-            requires_capabilities: Vec::new(),
+            ..Default::default()
         }
     }
 

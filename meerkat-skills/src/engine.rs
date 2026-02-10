@@ -3,10 +3,12 @@
 use std::collections::HashSet;
 
 use async_trait::async_trait;
-use meerkat_core::skills::{SkillDescriptor, SkillEngine, SkillError, SkillSource};
+use meerkat_core::skills::{
+    ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillError, SkillFilter, SkillId,
+    SkillSource,
+};
 
 use crate::renderer;
-use crate::resolver;
 
 /// Default implementation of [`SkillEngine`].
 pub struct DefaultSkillEngine {
@@ -41,32 +43,43 @@ fn filter_by_capabilities(
 #[async_trait]
 impl SkillEngine for DefaultSkillEngine {
     async fn inventory_section(&self) -> Result<String, SkillError> {
-        let all_skills = self.source.list().await?;
+        let all_skills = self.source.list(&SkillFilter::default()).await?;
         let available = filter_by_capabilities(all_skills, &self.available_capabilities);
         Ok(renderer::render_inventory(&available))
     }
 
     async fn resolve_and_render(
         &self,
-        references: &[String],
-        available_capabilities: &[String],
-    ) -> Result<String, SkillError> {
-        let all_skills = self.source.list().await?;
-        let caps: HashSet<String> = available_capabilities.iter().cloned().collect();
-        let available = filter_by_capabilities(all_skills, &caps);
-
-        let mut blocks = Vec::new();
-        for reference in references {
-            match resolver::resolve_reference(reference, &available) {
-                Ok(id) => {
-                    let doc = self.source.load(&id).await?;
-                    blocks.push(renderer::render_injection(&doc.descriptor.name, &doc.body));
-                }
-                Err(e) => return Err(e),
-            }
+        ids: &[SkillId],
+    ) -> Result<Vec<ResolvedSkill>, SkillError> {
+        let mut results = Vec::new();
+        for id in ids {
+            let doc = self.source.load(id).await?;
+            let rendered = renderer::render_injection(&doc.descriptor.name, &doc.body);
+            let byte_size = rendered.len();
+            results.push(ResolvedSkill {
+                id: id.clone(),
+                name: doc.descriptor.name.clone(),
+                rendered_body: rendered,
+                byte_size,
+            });
         }
+        Ok(results)
+    }
 
-        Ok(blocks.join("\n\n"))
+    async fn collections(&self) -> Result<Vec<SkillCollection>, SkillError> {
+        self.source.collections().await
+    }
+
+    async fn list_skills(
+        &self,
+        filter: &SkillFilter,
+    ) -> Result<Vec<SkillDescriptor>, SkillError> {
+        let all_skills = self.source.list(filter).await?;
+        Ok(filter_by_capabilities(
+            all_skills,
+            &self.available_capabilities,
+        ))
     }
 }
 
@@ -86,6 +99,7 @@ mod tests {
                 description: format!("Description for {name}"),
                 scope: SkillScope::Builtin,
                 requires_capabilities: caps.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
             },
             body: format!("# {name}\n\nContent for {id}."),
             extensions: IndexMap::new(),
@@ -117,10 +131,8 @@ mod tests {
         ]);
 
         // Only builtins available — shell-patterns should be filtered out
-        let engine = DefaultSkillEngine::new(
-            Box::new(source),
-            vec!["builtins".to_string()],
-        );
+        let engine =
+            DefaultSkillEngine::new(Box::new(source), vec!["builtins".to_string()]);
 
         let section = engine.inventory_section().await.unwrap();
         assert!(section.contains("`/task-workflow`"));
@@ -129,17 +141,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_and_render() {
-        let source = InMemorySkillSource::new(vec![
-            test_skill("task-workflow", "Task Workflow", &[]),
-        ]);
+        let source = InMemorySkillSource::new(vec![test_skill(
+            "task-workflow",
+            "Task Workflow",
+            &[],
+        )]);
 
         let engine = DefaultSkillEngine::new(Box::new(source), vec![]);
 
         let result = engine
-            .resolve_and_render(&["/task-workflow".to_string()], &[])
+            .resolve_and_render(&[SkillId("task-workflow".into())])
             .await
             .unwrap();
-        assert!(result.contains("<skill name=\"Task Workflow\">"));
-        assert!(result.contains("Content for task-workflow"));
+        assert_eq!(result.len(), 1);
+        assert!(result[0]
+            .rendered_body
+            .contains("<skill name=\"Task Workflow\">"));
+        assert!(result[0].rendered_body.contains("Content for task-workflow"));
     }
 }

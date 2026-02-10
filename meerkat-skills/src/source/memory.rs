@@ -1,7 +1,9 @@
 //! In-memory skill source for testing.
 
 use async_trait::async_trait;
-use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillError, SkillId, SkillSource};
+use meerkat_core::skills::{
+    SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillId, SkillSource, apply_filter,
+};
 
 /// In-memory skill source for testing and SDK embedding.
 pub struct InMemorySkillSource {
@@ -16,8 +18,10 @@ impl InMemorySkillSource {
 
 #[async_trait]
 impl SkillSource for InMemorySkillSource {
-    async fn list(&self) -> Result<Vec<SkillDescriptor>, SkillError> {
-        Ok(self.skills.iter().map(|s| s.descriptor.clone()).collect())
+    async fn list(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
+        let all: Vec<SkillDescriptor> =
+            self.skills.iter().map(|s| s.descriptor.clone()).collect();
+        Ok(apply_filter(&all, filter))
     }
 
     async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError> {

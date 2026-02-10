@@ -43,6 +43,7 @@ pub fn parse_skill_md(
             description: fm.description,
             scope,
             requires_capabilities: fm.requires_capabilities,
+            ..Default::default()
         },
         body: body.to_string(),
         extensions: IndexMap::new(),

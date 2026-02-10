@@ -1,7 +1,10 @@
 //! Filesystem skill source.
 
 use async_trait::async_trait;
-use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillError, SkillId, SkillScope, SkillSource};
+use meerkat_core::skills::{
+    SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillId, SkillScope, SkillSource,
+    apply_filter,
+};
 use std::path::PathBuf;
 
 /// Skill source that reads from a filesystem directory.
@@ -20,7 +23,7 @@ impl FilesystemSkillSource {
 
 #[async_trait]
 impl SkillSource for FilesystemSkillSource {
-    async fn list(&self) -> Result<Vec<SkillDescriptor>, SkillError> {
+    async fn list(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
         let mut descriptors = Vec::new();
 
         let mut entries = match tokio::fs::read_dir(&self.root).await {
@@ -59,7 +62,7 @@ impl SkillSource for FilesystemSkillSource {
             }
         }
 
-        Ok(descriptors)
+        Ok(apply_filter(&descriptors, filter))
     }
 
     async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError> {
@@ -68,7 +71,11 @@ impl SkillSource for FilesystemSkillSource {
 
         let content = tokio::fs::read_to_string(&skill_file)
             .await
-            .map_err(|e| SkillError::Load(format!("failed to read {}: {e}", skill_file.display()).into()))?;
+            .map_err(|e| {
+                SkillError::Load(
+                    format!("failed to read {}: {e}", skill_file.display()).into(),
+                )
+            })?;
 
         crate::parser::parse_skill_md(id.clone(), self.scope, &content)
     }

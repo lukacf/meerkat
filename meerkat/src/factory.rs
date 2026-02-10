@@ -661,7 +661,7 @@ impl AgentFactory {
             let composite = CompositeSkillSource::new(sources);
 
             // Collect active skill IDs from all sources (project, user, embedded)
-            let skill_ids: Vec<meerkat_core::skills::SkillId> = match composite.list().await {
+            let skill_ids: Vec<meerkat_core::skills::SkillId> = match composite.list(&meerkat_core::skills::SkillFilter::default()).await {
                 Ok(descriptors) => descriptors.into_iter().map(|d| d.id).collect(),
                 Err(_) => Vec::new(),
             };

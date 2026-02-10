@@ -2,7 +2,9 @@
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
-use meerkat_core::skills::{SkillDescriptor, SkillDocument, SkillError, SkillId, SkillSource};
+use meerkat_core::skills::{
+    SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillId, SkillSource, apply_filter,
+};
 
 use crate::registration::{SkillRegistration, collect_registered_skills};
 
@@ -14,6 +16,7 @@ fn registration_to_descriptor(reg: &SkillRegistration) -> SkillDescriptor {
         description: reg.description.to_string(),
         scope: reg.scope,
         requires_capabilities: reg.requires_capabilities.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
     }
 }
 
@@ -47,11 +50,12 @@ impl Default for EmbeddedSkillSource {
 
 #[async_trait]
 impl SkillSource for EmbeddedSkillSource {
-    async fn list(&self) -> Result<Vec<SkillDescriptor>, SkillError> {
-        Ok(collect_registered_skills()
+    async fn list(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
+        let all: Vec<SkillDescriptor> = collect_registered_skills()
             .into_iter()
             .map(registration_to_descriptor)
-            .collect())
+            .collect();
+        Ok(apply_filter(&all, filter))
     }
 
     async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError> {

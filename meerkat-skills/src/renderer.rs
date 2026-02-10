@@ -52,14 +52,14 @@ mod tests {
                 name: "Task Workflow".to_string(),
                 description: "How to use task tools".to_string(),
                 scope: SkillScope::Builtin,
-                requires_capabilities: Vec::new(),
+                ..Default::default()
             },
             SkillDescriptor {
                 id: SkillId("shell-patterns".to_string()),
                 name: "Shell Patterns".to_string(),
                 description: "Background job workflows".to_string(),
                 scope: SkillScope::Builtin,
-                requires_capabilities: Vec::new(),
+                ..Default::default()
             },
         ];
 

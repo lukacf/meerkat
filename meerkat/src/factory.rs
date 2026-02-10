@@ -633,17 +633,15 @@ impl AgentFactory {
             }
 
             // Embedded skills (lowest precedence)
-            let embedded = EmbeddedSkillSource::new();
+            sources.push(Box::new(EmbeddedSkillSource::new()));
 
-            // Collect active skill IDs before moving source into composite
-            let skill_ids: Vec<meerkat_core::skills::SkillId> = match embedded.list().await {
+            let composite = CompositeSkillSource::new(sources);
+
+            // Collect active skill IDs from all sources (project, user, embedded)
+            let skill_ids: Vec<meerkat_core::skills::SkillId> = match composite.list().await {
                 Ok(descriptors) => descriptors.into_iter().map(|d| d.id).collect(),
                 Err(_) => Vec::new(),
             };
-
-            sources.push(Box::new(embedded));
-
-            let composite = CompositeSkillSource::new(sources);
 
             // Collect available capability strings for filtering
             let available_caps: Vec<String> = meerkat_contracts::build_capabilities()

@@ -1,7 +1,7 @@
 # Skills System Redesign — Progress
 
-## Current Phase: 1
-## Current Status: gating
+## Current Phase: 3
+## Current Status: implementing
 
 ---
 
@@ -37,25 +37,32 @@
 ## Phase 2: Source Updates
 
 ### Tests
-- [ ] test_list_with_empty_filter
-- [ ] test_list_with_collection_filter
-- [ ] test_list_collection_filter_no_sibling
-- [ ] test_recursive_scan_nested_dirs
-- [ ] test_recursive_scan_deep_nesting
-- [ ] test_collection_md_loading
-- [ ] test_collection_md_missing_fallback
-- [ ] test_root_level_skill
-- [ ] test_list_with_collection_filter (filesystem)
-- [ ] test_named_sources_populate_source_name
-- [ ] test_shadowing_by_name
-- [ ] test_list_merges_across_sources
-- [ ] test_collections_merged_across_sources
+- [x] test_list_with_empty_filter
+- [x] test_list_with_collection_filter
+- [x] test_list_collection_filter_no_sibling
+- [x] test_recursive_scan_nested_dirs
+- [x] test_recursive_scan_deep_nesting
+- [x] test_collection_md_loading
+- [x] test_collection_md_missing_fallback
+- [x] test_root_level_skill
+- [x] test_list_with_collection_filter (filesystem)
+- [x] test_named_sources_populate_source_name
+- [x] test_shadowing_by_name
+- [x] test_list_merges_across_sources
+- [x] test_collections_merged_across_sources
 
 ### Implementation
-- [ ] InMemorySkillSource: filter + segment-aware prefix
-- [ ] FilesystemSkillSource: recursive scan + namespaced IDs + COLLECTION.md
-- [ ] EmbeddedSkillSource: filter param
-- [ ] CompositeSkillSource: NamedSource + source_name + shadowing tracing
+- [x] InMemorySkillSource: filter + segment-aware prefix
+- [x] FilesystemSkillSource: recursive scan + namespaced IDs + COLLECTION.md
+- [x] EmbeddedSkillSource: filter param
+- [x] CompositeSkillSource: NamedSource + source_name + shadowing tracing
+
+### Gate Results — Attempt 1
+- build-gate: PASS (11s)
+- test-gate: PASS (all 28 meerkat-skills tests pass, full suite clean)
+- performance-gate: PASS (build 11s, tests 6s)
+- spec-accuracy-gate: PASS (all 13 tests verified, all items implemented)
+- rust-quality-gate: PASS (warnings fixed: async is_dir, redundant HashSet eliminated)
 
 ## Phase 3: Renderer — XML Format
 

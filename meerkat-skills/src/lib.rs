@@ -16,6 +16,7 @@ pub use engine::DefaultSkillEngine;
 pub use registration::{SkillRegistration, collect_registered_skills};
 pub use source::{
     CompositeSkillSource, EmbeddedSkillSource, FilesystemSkillSource, InMemorySkillSource,
+    NamedSource,
 };
 
 // Capability registration

@@ -1135,6 +1135,7 @@ async fn run_agent(
         override_shell: None,
         override_subagents: None,
         override_memory: None,
+            preload_skills: None,
     };
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
@@ -1330,6 +1331,7 @@ async fn resume_session(
         override_shell: None,
         override_subagents: None,
         override_memory: None,
+            preload_skills: None,
     };
 
     // Build the session service and stage the build config

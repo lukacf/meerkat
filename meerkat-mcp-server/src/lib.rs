@@ -510,6 +510,7 @@ async fn handle_meerkat_run(
         override_shell: Some(input.enable_builtins && enable_shell),
         override_subagents: None,
         override_memory: None,
+            preload_skills: None,
     };
 
     // Hold slot lock across staging + create to prevent concurrent
@@ -656,6 +657,7 @@ async fn handle_meerkat_resume(
         override_shell: Some(enable_builtins && enable_shell),
         override_subagents: None,
         override_memory: None,
+            preload_skills: None,
     };
 
     // Try start_turn on the live session first (it may still be alive

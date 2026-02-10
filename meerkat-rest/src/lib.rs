@@ -465,6 +465,7 @@ async fn create_session(
         override_shell: None,
         override_subagents: None,
         override_memory: None,
+            preload_skills: None,
     };
 
     // Hold the slot lock across staging + create to prevent concurrent
@@ -646,6 +647,7 @@ async fn continue_session(
                 override_shell: Some(tooling.shell),
                 override_subagents: Some(tooling.subagents),
                 override_memory: None,
+            preload_skills: None,
             };
 
             // Hold slot lock across staging + create to prevent races.

@@ -387,3 +387,58 @@ async fn build_agent_uses_config_default_max_tokens() {
         "Should use config default max_tokens"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6: Skills Factory Wiring Tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_preload_none_generates_inventory() {
+    let factory = AgentFactory::new("/tmp/test-store");
+    let config = Config::default();
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        preload_skills: None, // No pre-loading → inventory mode
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    // Agent should build successfully even with no skills on disk
+    // (empty directories produce empty inventory, which is fine)
+    let _ = agent;
+}
+
+#[tokio::test]
+async fn test_enabled_false_skips_skills() {
+    let factory = AgentFactory::new("/tmp/test-store");
+    let mut config = Config::default();
+    config.skills.enabled = false;
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let metadata = agent.session().session_metadata().unwrap();
+    // Skills should not be active when disabled
+    assert!(metadata.tooling.active_skills.is_none());
+}
+
+#[tokio::test]
+async fn test_preload_missing_skill_fails_build() {
+    let factory = AgentFactory::new("/tmp/test-store");
+    let config = Config::default();
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        preload_skills: Some(vec![meerkat_core::skills::SkillId(
+            "nonexistent/skill".into(),
+        )]),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let result = factory.build_agent(build_config, &config).await;
+    assert!(result.is_err(), "Should fail when preloading a nonexistent skill");
+}

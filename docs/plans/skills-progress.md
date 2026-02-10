@@ -1,6 +1,6 @@
 # Skills System Redesign — Progress
 
-## Current Phase: 9
+## Current Phase: 10
 ## Current Status: implementing
 
 ---
@@ -235,14 +235,19 @@
 ## Phase 9: Wire Format & Surface Integration
 
 ### Tests
-- [ ] test_skills_params_none_serde
-- [ ] test_skills_params_empty_normalizes
-- [ ] test_skills_params_with_ids
+- [x] test_skills_params_none_serde
+- [x] test_skills_params_empty_normalizes
+- [x] test_skills_params_with_ids
 
 ### Implementation
-- [ ] Revise SkillsParams
-- [ ] Surface integration (REST, RPC, MCP Server, CLI)
-- [ ] Some([]) → None normalization
+- [x] Revise SkillsParams (preload_skills + skill_references as Option<Vec<String>>)
+- [x] normalize() method for Some([]) → None
+- [ ] Surface integration (REST, RPC, MCP Server, CLI) — deferred (surfaces don't use SkillsParams yet)
+
+### Gate Results — Attempt 1
+- build-gate: PASS
+- test-gate: PASS (3 new wire format tests, full suite clean)
+- performance-gate: PASS
 
 ## Phase 10: HttpSkillSource
 

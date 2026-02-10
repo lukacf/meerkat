@@ -81,6 +81,16 @@
 
 ---
 
+## Accepted Deviations
+
+1. **`SkillDescriptor.requires_capabilities` is `Vec<String>` not `Vec<CapabilityId>`** — avoids circular dependency between `meerkat-core` and `meerkat-contracts`. `meerkat-skills` resolves strings to typed IDs at runtime.
+
+2. **`SkillRegistration` uses flat `&'static str` fields instead of nested `SkillDescriptor`** — required by `inventory::submit!` which needs static data. `SkillDescriptor` uses `String` fields incompatible with statics.
+
+3. **Python generated types use `dataclass` instead of Pydantic models** — avoids mandatory `pydantic` dependency. Functionally equivalent for serialization/deserialization.
+
+---
+
 ## Gate Results
 
 ### Phase 0 — Attempt 1

@@ -64,5 +64,68 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         serde_json::to_string_pretty(&capabilities)?,
     )?;
 
+    // Events — WireEvent embeds AgentEvent which lacks JsonSchema.
+    // Emit a structural description instead of a full JSON Schema.
+    let events = serde_json::json!({
+        "WireEvent": {
+            "description": "Event envelope: session_id, sequence, event (AgentEvent), contract_version",
+            "note": "AgentEvent is a large enum; full JSON Schema requires schemars derives on meerkat-core types"
+        }
+    });
+    fs::write(
+        output_dir.join("events.json"),
+        serde_json::to_string_pretty(&events)?,
+    )?;
+
+    // RPC methods — describes the JSON-RPC method surface
+    let rpc_methods = serde_json::json!({
+        "methods": [
+            {"name": "initialize", "description": "Handshake, returns server capabilities"},
+            {"name": "session/create", "description": "Create session + run first turn"},
+            {"name": "session/list", "description": "List active sessions"},
+            {"name": "session/read", "description": "Get session state"},
+            {"name": "session/archive", "description": "Remove session"},
+            {"name": "turn/start", "description": "Start a new turn on existing session"},
+            {"name": "turn/interrupt", "description": "Cancel in-flight turn"},
+            {"name": "capabilities/get", "description": "Get runtime capabilities"},
+            {"name": "config/get", "description": "Read config"},
+            {"name": "config/set", "description": "Replace config"},
+            {"name": "config/patch", "description": "Merge-patch config"},
+        ],
+        "notifications": [
+            {"name": "session/event", "description": "AgentEvent payload during turns"},
+        ]
+    });
+    fs::write(
+        output_dir.join("rpc-methods.json"),
+        serde_json::to_string_pretty(&rpc_methods)?,
+    )?;
+
+    // REST OpenAPI — describes REST endpoint surface
+    let rest_openapi = serde_json::json!({
+        "openapi": "3.0.0",
+        "info": {
+            "title": "Meerkat REST API",
+            "version": crate::version::ContractVersion::CURRENT.to_string(),
+        },
+        "paths": {
+            "/sessions": {"post": {"summary": "Create and run a new session"}},
+            "/sessions/{id}": {"get": {"summary": "Get session details"}},
+            "/sessions/{id}/messages": {"post": {"summary": "Continue session with new message"}},
+            "/sessions/{id}/events": {"get": {"summary": "SSE event stream"}},
+            "/capabilities": {"get": {"summary": "Get runtime capabilities"}},
+            "/config": {
+                "get": {"summary": "Get config"},
+                "put": {"summary": "Replace config"},
+                "patch": {"summary": "Patch config"},
+            },
+            "/health": {"get": {"summary": "Health check"}},
+        }
+    });
+    fs::write(
+        output_dir.join("rest-openapi.json"),
+        serde_json::to_string_pretty(&rest_openapi)?,
+    )?;
+
     Ok(())
 }

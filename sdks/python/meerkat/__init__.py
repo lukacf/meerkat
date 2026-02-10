@@ -1,5 +1,6 @@
 """Meerkat Python SDK — communicate with the Meerkat agent runtime via JSON-RPC."""
 
+from .capabilities import CapabilityChecker
 from .client import MeerkatClient
 from .errors import (
     CapabilityUnavailableError,
@@ -7,7 +8,9 @@ from .errors import (
     SessionNotFoundError,
     SkillNotFoundError,
 )
-from .generated.types import (
+from .skills import SkillHelper
+from .streaming import EventStream
+from .types import (
     CONTRACT_VERSION,
     CapabilitiesResponse,
     CapabilityEntry,
@@ -18,6 +21,9 @@ from .generated.types import (
 
 __all__ = [
     "MeerkatClient",
+    "CapabilityChecker",
+    "EventStream",
+    "SkillHelper",
     "MeerkatError",
     "CapabilityUnavailableError",
     "SessionNotFoundError",

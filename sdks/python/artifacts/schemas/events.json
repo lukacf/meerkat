@@ -1,0 +1,6 @@
+{
+  "WireEvent": {
+    "description": "Event envelope: session_id, sequence, event (AgentEvent), contract_version",
+    "note": "AgentEvent is a large enum; full JSON Schema requires schemars derives on meerkat-core types"
+  }
+}

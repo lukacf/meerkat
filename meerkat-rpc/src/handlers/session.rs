@@ -8,7 +8,7 @@ use meerkat::AgentBuildConfig;
 use meerkat_core::Provider;
 use meerkat_core::event::AgentEvent;
 
-use super::{RpcResponseExt, UsageResult, parse_params};
+use super::{RpcResponseExt, parse_params};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
@@ -49,15 +49,8 @@ pub struct ArchiveSessionParams {
 // Response types
 // ---------------------------------------------------------------------------
 
-/// Result for `session/create`.
-#[derive(Debug, Serialize)]
-pub struct CreateSessionResult {
-    pub session_id: String,
-    pub text: String,
-    pub turns: u32,
-    pub tool_calls: u32,
-    pub usage: UsageResult,
-}
+/// Result for `session/create` — uses canonical wire type from contracts.
+pub type CreateSessionResult = meerkat_contracts::WireRunResult;
 
 /// Result for `session/list`.
 #[derive(Debug, Serialize)]
@@ -136,14 +129,7 @@ pub async fn handle_create(
         }
     };
 
-    let response = CreateSessionResult {
-        session_id: session_id.to_string(),
-        text: result.text,
-        turns: result.turns,
-        tool_calls: result.tool_calls,
-        usage: result.usage.into(),
-    };
-
+    let response: CreateSessionResult = result.into();
     RpcResponse::success(id, response)
 }
 

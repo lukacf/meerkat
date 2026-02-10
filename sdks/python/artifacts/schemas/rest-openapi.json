@@ -1,0 +1,50 @@
+{
+  "info": {
+    "title": "Meerkat REST API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.0.0",
+  "paths": {
+    "/capabilities": {
+      "get": {
+        "summary": "Get runtime capabilities"
+      }
+    },
+    "/config": {
+      "get": {
+        "summary": "Get config"
+      },
+      "patch": {
+        "summary": "Patch config"
+      },
+      "put": {
+        "summary": "Replace config"
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health check"
+      }
+    },
+    "/sessions": {
+      "post": {
+        "summary": "Create and run a new session"
+      }
+    },
+    "/sessions/{id}": {
+      "get": {
+        "summary": "Get session details"
+      }
+    },
+    "/sessions/{id}/events": {
+      "get": {
+        "summary": "SSE event stream"
+      }
+    },
+    "/sessions/{id}/messages": {
+      "post": {
+        "summary": "Continue session with new message"
+      }
+    }
+  }
+}

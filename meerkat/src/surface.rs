@@ -5,6 +5,28 @@
 use meerkat_core::AgentEvent;
 use tokio::sync::mpsc;
 
+/// Validate whether host mode can be enabled in the current build.
+///
+/// Delegates to `meerkat_comms::validate_host_mode()` when the comms feature
+/// is compiled in; returns an error if requested but comms is not available.
+///
+/// This is the canonical entry point — all surfaces should call this.
+pub fn resolve_host_mode(requested: bool) -> Result<bool, String> {
+    #[cfg(feature = "comms")]
+    {
+        meerkat_comms::validate_host_mode(requested)
+    }
+    #[cfg(not(feature = "comms"))]
+    {
+        if requested {
+            return Err(
+                "host_mode requires comms support (build with --features comms)".to_string(),
+            );
+        }
+        Ok(false)
+    }
+}
+
 /// Spawn a task that forwards agent events from a channel to a callback.
 ///
 /// Returns the sender half of the channel. The spawned task runs until

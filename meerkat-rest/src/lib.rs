@@ -34,7 +34,7 @@ use meerkat_core::service::{
     StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
-    Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider, SchemaWarning,
+    Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
     SessionTooling, format_verbose_event,
 };
 use serde::{Deserialize, Serialize};
@@ -198,20 +198,7 @@ fn rest_instance_root() -> PathBuf {
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, ApiError> {
-    #[cfg(feature = "comms")]
-    {
-        meerkat_comms::validate_host_mode(requested)
-            .map_err(|e| ApiError::BadRequest(e))
-    }
-    #[cfg(not(feature = "comms"))]
-    {
-        if requested {
-            return Err(ApiError::BadRequest(
-                "host_mode requires comms support (build with --features comms)".to_string(),
-            ));
-        }
-        Ok(false)
-    }
+    meerkat::surface::resolve_host_mode(requested).map_err(ApiError::BadRequest)
 }
 
 /// Create session request
@@ -284,21 +271,8 @@ pub struct ContinueSessionRequest {
     pub hooks_override: Option<HookRunOverrides>,
 }
 
-/// Session response
-#[derive(Debug, Serialize)]
-pub struct SessionResponse {
-    pub session_id: String,
-    pub text: String,
-    pub turns: u32,
-    pub tool_calls: u32,
-    pub usage: UsageResponse,
-    /// Validated structured output (if output_schema was provided)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub structured_output: Option<Value>,
-    /// Warnings produced during schema compilation (if any)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema_warnings: Option<Vec<SchemaWarning>>,
-}
+/// Session response — canonical wire type from contracts.
+pub type SessionResponse = meerkat_contracts::WireRunResult;
 
 /// Usage response — re-export from contracts.
 pub type UsageResponse = meerkat_contracts::WireUsage;
@@ -418,17 +392,9 @@ fn spawn_event_forwarder(
     })
 }
 
-/// Convert a `RunResult` into a `SessionResponse`.
+/// Convert a `RunResult` into a `SessionResponse` (via contracts `From` impl).
 fn run_result_to_response(result: meerkat_core::types::RunResult) -> SessionResponse {
-    SessionResponse {
-        session_id: result.session_id.to_string(),
-        text: result.text,
-        turns: result.turns,
-        tool_calls: result.tool_calls,
-        usage: result.usage.into(),
-        structured_output: result.structured_output,
-        schema_warnings: result.schema_warnings,
-    }
+    result.into()
 }
 
 /// Map a `SessionError` to an `ApiError`, handling `CallbackPending` specially
@@ -448,7 +414,7 @@ fn session_error_to_api_result(
                 // Return a success response with the pre-created session_id so the
                 // caller can resume via continue_session.
                 return Ok(Json(SessionResponse {
-                    session_id: fallback_session_id.to_string(),
+                    session_id: fallback_session_id.clone(),
                     text: "Agent is waiting for tool results".to_string(),
                     turns: 0,
                     tool_calls: 0,

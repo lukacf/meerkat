@@ -20,7 +20,7 @@ def load_schemas(artifacts_dir: Path) -> dict:
     return schemas
 
 
-def generate_python_types(schemas: dict, output_dir: Path) -> None:
+def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = True, has_skills: bool = True) -> None:
     """Generate Python type definitions from schemas."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -77,7 +77,20 @@ def generate_python_types(schemas: dict, output_dir: Path) -> None:
     types_content += "@dataclass\nclass CapabilitiesResponse:\n"
     types_content += '    """Response from capabilities/get."""\n'
     types_content += "    contract_version: str = ''\n"
-    types_content += "    capabilities: list = field(default_factory=list)\n"
+    types_content += "    capabilities: list = field(default_factory=list)\n\n"
+
+    # Conditional params based on available capabilities
+    if has_comms:
+        types_content += "\n@dataclass\nclass CommsParams:\n"
+        types_content += '    """Comms parameters (available because comms capability is compiled)."""\n'
+        types_content += "    host_mode: bool = False\n"
+        types_content += "    comms_name: Optional[str] = None\n\n"
+
+    if has_skills:
+        types_content += "\n@dataclass\nclass SkillsParams:\n"
+        types_content += '    """Skills parameters (available because skills capability is compiled)."""\n'
+        types_content += "    skills_enabled: bool = False\n"
+        types_content += "    skill_references: list = field(default_factory=list)\n\n"
 
     (output_dir / "types.py").write_text(types_content)
 
@@ -107,7 +120,7 @@ def generate_python_types(schemas: dict, output_dir: Path) -> None:
     (output_dir / "errors.py").write_text(errors_content)
 
 
-def generate_typescript_types(schemas: dict, output_dir: Path) -> None:
+def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: bool = True, has_skills: bool = True) -> None:
     """Generate TypeScript type definitions from schemas."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -154,6 +167,19 @@ def generate_typescript_types(schemas: dict, output_dir: Path) -> None:
     types_content += "  capabilities: CapabilityEntry[];\n"
     types_content += "}\n"
 
+    # Conditional params based on available capabilities
+    if has_comms:
+        types_content += "\nexport interface CommsParams {\n"
+        types_content += "  host_mode: boolean;\n"
+        types_content += "  comms_name?: string;\n"
+        types_content += "}\n"
+
+    if has_skills:
+        types_content += "\nexport interface SkillsParams {\n"
+        types_content += "  skills_enabled: boolean;\n"
+        types_content += "  skill_references: string[];\n"
+        types_content += "}\n"
+
     (output_dir / "types.ts").write_text(types_content)
 
     # Generate errors
@@ -198,6 +224,19 @@ def generate_typescript_types(schemas: dict, output_dir: Path) -> None:
     (output_dir / "index.ts").write_text(index_content)
 
 
+def load_available_capabilities(artifacts_dir: Path) -> set[str]:
+    """Load available capability IDs from capabilities.json."""
+    caps_file = artifacts_dir / "capabilities.json"
+    if not caps_file.exists():
+        return set()  # All capabilities if no file
+    with open(caps_file) as f:
+        data = json.load(f)
+    # Extract capability IDs from the CapabilityId schema enum values
+    cap_schema = data.get("CapabilityId", {})
+    enum_values = cap_schema.get("schema", {}).get("oneOf", [])
+    return {v.get("const", "") for v in enum_values if "const" in v}
+
+
 def main():
     root = Path(__file__).parent.parent.parent
     artifacts_dir = root / "artifacts" / "schemas"
@@ -209,14 +248,25 @@ def main():
     schemas = load_schemas(artifacts_dir)
     print(f"Loaded {len(schemas)} schema files")
 
+    # Load available capabilities for conditional codegen
+    available_caps = load_available_capabilities(artifacts_dir)
+    if available_caps:
+        print(f"Available capabilities: {sorted(available_caps)}")
+    else:
+        print("No capabilities.json found; generating full surface")
+
+    # Determine which optional param types to include
+    has_comms = "comms" in available_caps or not available_caps
+    has_skills = "skills" in available_caps or not available_caps
+
     # Generate Python
     py_output = root / "sdks" / "python" / "meerkat" / "generated"
-    generate_python_types(schemas, py_output)
+    generate_python_types(schemas, py_output, has_comms=has_comms, has_skills=has_skills)
     print(f"Generated Python types in {py_output}")
 
     # Generate TypeScript
     ts_output = root / "sdks" / "typescript" / "src" / "generated"
-    generate_typescript_types(schemas, ts_output)
+    generate_typescript_types(schemas, ts_output, has_comms=has_comms, has_skills=has_skills)
     print(f"Generated TypeScript types in {ts_output}")
 
 

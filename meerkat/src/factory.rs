@@ -709,7 +709,23 @@ impl AgentFactory {
             builder = builder.with_hook_engine(engine);
         }
 
-        // 12b. Wire compactor (when session-compaction is enabled)
+        // 12b. Wire memory store (when memory-store-session is enabled)
+        #[cfg(feature = "memory-store-session")]
+        {
+            let memory_dir = self.store_path.join("memory");
+            match meerkat_memory::HnswMemoryStore::open(&memory_dir) {
+                Ok(store) => {
+                    builder = builder.memory_store(
+                        Arc::new(store) as Arc<dyn meerkat_core::memory::MemoryStore>
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to open HnswMemoryStore at {}: {e}", memory_dir.display());
+                }
+            }
+        }
+
+        // 12c. Wire compactor (when session-compaction is enabled)
         #[cfg(feature = "session-compaction")]
         {
             use meerkat_core::CompactionConfig;

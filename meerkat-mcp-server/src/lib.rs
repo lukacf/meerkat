@@ -154,17 +154,7 @@ async fn load_config_async() -> Config {
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, String> {
-    #[cfg(feature = "comms")]
-    {
-        meerkat_comms::validate_host_mode(requested)
-    }
-    #[cfg(not(feature = "comms"))]
-    {
-        if requested {
-            return Err("host_mode requires comms support (build with --features comms)".to_string());
-        }
-        Ok(false)
-    }
+    meerkat::surface::resolve_host_mode(requested)
 }
 
 /// Delegate to `meerkat_store::resolve_store_path` for path resolution.

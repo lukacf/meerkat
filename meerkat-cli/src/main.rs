@@ -1004,20 +1004,7 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
 }
 
 fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
-    #[cfg(feature = "comms")]
-    {
-        meerkat_comms::validate_host_mode(requested)
-            .map_err(|e| anyhow::anyhow!(e))
-    }
-    #[cfg(not(feature = "comms"))]
-    {
-        if requested {
-            return Err(anyhow::anyhow!(
-                "--host-mode requires comms support (build with --features comms)"
-            ));
-        }
-        Ok(false)
-    }
+    meerkat::surface::resolve_host_mode(requested).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Load MCP tools as an external tool dispatcher for AgentBuildConfig.

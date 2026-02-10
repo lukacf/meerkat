@@ -112,7 +112,7 @@ def test_smoke_full_lifecycle():
 
         # List sessions — should include ours
         sessions = rpc_request(proc, "session/list", {}, 4)
-        session_ids = [s.get("id", "") for s in sessions.get("sessions", [])]
+        session_ids = [s.get("session_id", "") for s in sessions.get("sessions", [])]
         assert session_id in session_ids, "Session should appear in list"
 
         # Archive
@@ -120,7 +120,7 @@ def test_smoke_full_lifecycle():
 
         # List again — should be gone
         sessions = rpc_request(proc, "session/list", {}, 6)
-        session_ids = [s.get("id", "") for s in sessions.get("sessions", [])]
+        session_ids = [s.get("session_id", "") for s in sessions.get("sessions", [])]
         assert session_id not in session_ids, "Session should be gone after archive"
 
     finally:

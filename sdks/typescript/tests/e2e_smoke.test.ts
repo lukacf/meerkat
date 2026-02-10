@@ -163,7 +163,7 @@ describe("E2E Smoke: TypeScript SDK", { skip: !rkatAvailable() }, () => {
         unknown
       >;
       const sessions = (list.sessions ?? []) as Array<Record<string, unknown>>;
-      const ids = sessions.map((s) => s.id);
+      const ids = sessions.map((s) => s.session_id);
       assert.ok(ids.includes(sessionId), "Session should be in list");
 
       // Archive
@@ -177,7 +177,7 @@ describe("E2E Smoke: TypeScript SDK", { skip: !rkatAvailable() }, () => {
       const sessions2 = (list2.sessions ?? []) as Array<
         Record<string, unknown>
       >;
-      const ids2 = sessions2.map((s) => s.id);
+      const ids2 = sessions2.map((s) => s.session_id);
       assert.ok(
         !ids2.includes(sessionId),
         "Session should be gone after archive",

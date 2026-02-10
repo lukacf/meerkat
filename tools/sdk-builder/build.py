@@ -33,21 +33,34 @@ def load_manifest(path: Path) -> dict:
 def resolve_features(manifest: dict) -> list[str]:
     """Resolve feature flags from the manifest.
 
-    Returns CLI-level features only. Features like 'anthropic', 'jsonl-store',
-    and 'sub-agents' are hardcoded in meerkat-cli's dependency on the facade
-    crate and do not need to be passed as --features flags.
+    All features are forwarded through meerkat-cli's [features] table
+    to the facade crate. The manifest's include/exclude lists control
+    which features are enabled in the built binary.
     """
     features = manifest.get("features", {})
     include = features.get("include", [])
     exclude = features.get("exclude", [])
 
-    # Only features that meerkat-cli actually defines in its [features] table.
-    # Facade-level features (anthropic, jsonl-store, sub-agents) are wired
-    # through the CLI's dependency declaration on the meerkat facade crate.
-    cli_features = ["comms", "mcp"]
+    # All features that meerkat-cli defines in its [features] table.
+    # These forward to the meerkat facade crate's feature flags.
+    cli_features = [
+        # LLM providers
+        "anthropic", "openai", "gemini",
+        # Storage
+        "jsonl-store",
+        # Session capabilities
+        "session-store", "session-compaction", "memory-store-session",
+        # Subsystems
+        "comms", "mcp", "sub-agents", "skills",
+    ]
+
+    # Start with CLI defaults (matches [features] default in Cargo.toml)
+    defaults = [
+        "anthropic", "jsonl-store", "sub-agents", "skills", "comms", "mcp",
+    ]
 
     result = []
-    for f in cli_features:
+    for f in defaults:
         if f in exclude:
             continue
         result.append(f)

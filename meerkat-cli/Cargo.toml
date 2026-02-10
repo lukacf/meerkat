@@ -33,7 +33,7 @@ path = "tests/e2e_smoke.rs"
 required-features = ["integration-real-tests"]
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "jsonl-store", "sub-agents"] }
+meerkat = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
@@ -58,9 +58,27 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 
 [features]
-default = ["comms", "mcp"]
+default = ["anthropic", "jsonl-store", "sub-agents", "skills", "comms", "mcp"]
+
+# LLM providers (forwarded to facade)
+anthropic = ["meerkat/anthropic"]
+openai = ["meerkat/openai"]
+gemini = ["meerkat/gemini"]
+
+# Storage backends (forwarded to facade)
+jsonl-store = ["meerkat/jsonl-store"]
+
+# Session capabilities (forwarded to facade)
+session-store = ["meerkat/session-store"]
+session-compaction = ["meerkat/session-compaction"]
+memory-store-session = ["meerkat/memory-store-session"]
+
+# Subsystems
 comms = ["dep:meerkat-comms", "meerkat/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat/mcp"]
+sub-agents = ["meerkat/sub-agents"]
+skills = ["meerkat/skills"]
+
 integration-real-tests = []
 
 [dev-dependencies]

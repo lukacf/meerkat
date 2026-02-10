@@ -760,11 +760,9 @@ impl AgentFactory {
                             ))
                         })?;
                     tools = Arc::new(gateway);
-                    if !tool_usage_instructions.is_empty() {
-                        tool_usage_instructions.push_str("\n\n");
-                    }
-                    tool_usage_instructions
-                        .push_str(meerkat_memory::MemorySearchDispatcher::usage_instructions());
+                    // Tool guidance reaches the model via the embedded
+                    // `memory-retrieval` skill (loaded in step 11), not
+                    // through usage_instructions strings.
                 }
                 Err(e) => {
                     tracing::warn!(

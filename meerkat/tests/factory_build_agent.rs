@@ -166,15 +166,15 @@ async fn build_agent_sets_session_metadata() {
     assert_eq!(metadata.model, "claude-sonnet-4-5");
     assert_eq!(metadata.max_tokens, 2048);
     assert_eq!(metadata.provider, Provider::Anthropic);
-    assert_eq!(
-        metadata.tooling,
-        SessionTooling {
-            builtins: true,
-            shell: true,
-            comms: false,
-            subagents: false,
-        }
-    );
+    assert!(metadata.tooling.builtins);
+    assert!(metadata.tooling.shell);
+    assert!(!metadata.tooling.comms);
+    assert!(!metadata.tooling.subagents);
+    // When skills feature is enabled, active_skills should be populated
+    #[cfg(feature = "skills")]
+    assert!(metadata.tooling.active_skills.is_some());
+    #[cfg(not(feature = "skills"))]
+    assert!(metadata.tooling.active_skills.is_none());
     assert!(!metadata.host_mode);
     assert!(metadata.comms_name.is_none());
 }
@@ -256,6 +256,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             shell: false,
             comms: false,
             subagents: false,
+            active_skills: None,
         },
         host_mode: false,
         comms_name: None,

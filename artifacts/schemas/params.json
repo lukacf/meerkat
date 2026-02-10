@@ -1,0 +1,38 @@
+{
+  "CommsParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Comms parameters.",
+    "properties": {
+      "comms_name": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "host_mode": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "title": "CommsParams",
+    "type": "object"
+  },
+  "SkillsParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Skills parameters (Phase 3).",
+    "properties": {
+      "skill_references": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "skills_enabled": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "title": "SkillsParams",
+    "type": "object"
+  }
+}

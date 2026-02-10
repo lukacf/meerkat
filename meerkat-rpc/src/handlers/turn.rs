@@ -1,12 +1,12 @@
 //! `turn/*` method handlers.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 
 use meerkat_core::event::AgentEvent;
 
-use super::{RpcResponseExt, UsageResult, parse_params};
+use super::{RpcResponseExt, parse_params};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
@@ -34,15 +34,8 @@ pub struct InterruptParams {
 // Response types
 // ---------------------------------------------------------------------------
 
-/// Result for `turn/start`.
-#[derive(Debug, Serialize)]
-pub struct TurnResult {
-    pub session_id: String,
-    pub text: String,
-    pub turns: u32,
-    pub tool_calls: u32,
-    pub usage: UsageResult,
-}
+/// Result for `turn/start` — uses canonical wire type from contracts.
+pub type TurnResult = meerkat_contracts::WireRunResult;
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -92,19 +85,7 @@ pub async fn handle_start(
         }
     };
 
-    let response = TurnResult {
-        session_id: session_id.to_string(),
-        text: result.text,
-        turns: result.turns,
-        tool_calls: result.tool_calls,
-        usage: UsageResult {
-            input_tokens: result.usage.input_tokens,
-            output_tokens: result.usage.output_tokens,
-            cache_creation_tokens: result.usage.cache_creation_tokens,
-            cache_read_tokens: result.usage.cache_read_tokens,
-        },
-    };
-
+    let response: TurnResult = result.into();
     RpcResponse::success(id, response)
 }
 

@@ -1,0 +1,54 @@
+{
+  "methods": [
+    {
+      "description": "Handshake, returns server capabilities",
+      "name": "initialize"
+    },
+    {
+      "description": "Create session + run first turn",
+      "name": "session/create"
+    },
+    {
+      "description": "List active sessions",
+      "name": "session/list"
+    },
+    {
+      "description": "Get session state",
+      "name": "session/read"
+    },
+    {
+      "description": "Remove session",
+      "name": "session/archive"
+    },
+    {
+      "description": "Start a new turn on existing session",
+      "name": "turn/start"
+    },
+    {
+      "description": "Cancel in-flight turn",
+      "name": "turn/interrupt"
+    },
+    {
+      "description": "Get runtime capabilities",
+      "name": "capabilities/get"
+    },
+    {
+      "description": "Read config",
+      "name": "config/get"
+    },
+    {
+      "description": "Replace config",
+      "name": "config/set"
+    },
+    {
+      "description": "Merge-patch config",
+      "name": "config/patch"
+    }
+  ],
+  "notifications": [
+    {
+      "description": "AgentEvent payload during turns",
+      "name": "session/event"
+    }
+  ]
+}

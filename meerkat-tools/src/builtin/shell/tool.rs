@@ -480,10 +480,12 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    #[cfg(feature = "integration-real-tests")]
     fn nu_available() -> bool {
         which::which("nu").is_ok()
     }
 
+    #[cfg(feature = "integration-real-tests")]
     fn skip_if_no_nu() -> bool {
         if nu_available() {
             return false;

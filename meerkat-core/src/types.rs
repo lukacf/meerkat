@@ -372,6 +372,31 @@ pub enum Message {
     ToolResults { results: Vec<ToolResult> },
 }
 
+impl Message {
+    /// Extract text content suitable for semantic indexing.
+    ///
+    /// Returns user and assistant text content. System messages and
+    /// tool results are excluded (system prompts are not conversation
+    /// content, tool results are structured data).
+    pub fn as_indexable_text(&self) -> String {
+        match self {
+            Message::User(u) => u.content.clone(),
+            Message::Assistant(a) => a.content.clone(),
+            Message::BlockAssistant(ba) => {
+                let mut result = String::new();
+                for text in ba.text_blocks() {
+                    if !result.is_empty() {
+                        result.push('\n');
+                    }
+                    result.push_str(text);
+                }
+                result
+            }
+            Message::System(_) | Message::ToolResults { .. } => String::new(),
+        }
+    }
+}
+
 /// System message content
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

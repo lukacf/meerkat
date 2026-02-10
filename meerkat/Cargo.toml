@@ -18,6 +18,8 @@ meerkat-memory = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 meerkat-hooks = { workspace = true }
+meerkat-contracts = { workspace = true }
+meerkat-skills = { workspace = true, optional = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
@@ -41,7 +43,7 @@ meerkat-mcp-server = { workspace = true }
 nix = { workspace = true }
 
 [features]
-default = ["anthropic", "jsonl-store", "comms", "mcp", "sub-agents"]
+default = ["anthropic", "jsonl-store", "comms", "mcp", "sub-agents", "skills"]
 integration-real-tests = []
 
 # LLM providers
@@ -63,6 +65,7 @@ memory-store-session = ["dep:meerkat-memory"]
 comms = ["dep:meerkat-comms", "meerkat-tools/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat-tools/mcp"]
 sub-agents = ["meerkat-tools/sub-agents"]
+skills = ["dep:meerkat-skills"]
 
 [lints]
 workspace = true
@@ -85,4 +88,9 @@ required-features = ["integration-real-tests"]
 [[test]]
 name = "e2e_shell"
 path = "tests/e2e_shell.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "e2e_smoke"
+path = "tests/e2e_smoke.rs"
 required-features = ["integration-real-tests"]

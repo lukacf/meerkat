@@ -12,9 +12,11 @@ repository.workspace = true
 meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
 meerkat-mcp = { workspace = true }
 meerkat-core = { workspace = true }
+meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
+meerkat-comms = { workspace = true, optional = true }
 async-trait = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 serde = { workspace = true, features = ["derive"] }
@@ -26,7 +28,7 @@ dirs = { workspace = true }
 
 [features]
 default = ["comms"]
-comms = ["meerkat/comms"]
+comms = ["meerkat/comms", "dep:meerkat-comms"]
 
 [lints]
 workspace = true

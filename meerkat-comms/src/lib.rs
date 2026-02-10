@@ -38,3 +38,43 @@ pub use agent::dispatcher::{
     CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, wrap_with_comms,
 };
 pub use mcp::tools::{ToolContext, handle_tools_call, tools_list};
+
+// Capability registration
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::Comms,
+        description: "Inter-agent communication: send, request, response, list peers + host mode",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: Some("comms"),
+        prerequisites: &[],
+        status_resolver: None,
+    }
+}
+
+// Skill registration
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "multi-agent-comms",
+        name: "Multi-Agent Comms",
+        description: "Setting up host mode, peer trust, send vs request/response patterns",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["comms"],
+        body: include_str!("../skills/multi-agent-comms/SKILL.md"),
+        extensions: &[],
+    }
+}
+
+/// Confirm host mode availability when the comms crate is compiled in.
+///
+/// This function is intentionally a passthrough — its existence in the
+/// dependency graph *is* the validation. When `meerkat-comms` is linked,
+/// comms is available and host mode can be enabled. The feature-gate check
+/// lives in `meerkat::surface::resolve_host_mode()`, which calls this
+/// function under `#[cfg(feature = "comms")]` and returns an error under
+/// `#[cfg(not(feature = "comms"))]`.
+///
+/// This two-layer design avoids duplicating the `cfg` check in every
+/// surface crate.
+pub fn validate_host_mode(requested: bool) -> Result<bool, String> {
+    Ok(requested)
+}

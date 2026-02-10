@@ -167,6 +167,16 @@ pub enum AgentEvent {
         error: String,
         delay_ms: u64,
     },
+
+    // === Skill Events ===
+    /// Skills resolved for this turn.
+    SkillsResolved {
+        skills: Vec<crate::skills::SkillId>,
+        injection_bytes: usize,
+    },
+
+    /// A skill reference could not be resolved.
+    SkillResolutionFailed { reference: String, error: String },
 }
 
 /// Type of budget being tracked

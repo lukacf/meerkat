@@ -29,6 +29,7 @@ pub struct AgentBuilder {
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
     pub(super) hook_run_overrides: HookRunOverrides,
     pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
+    pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
 }
 
 impl AgentBuilder {
@@ -46,6 +47,7 @@ impl AgentBuilder {
             hook_engine: None,
             hook_run_overrides: HookRunOverrides::default(),
             compactor: None,
+            memory_store: None,
         }
     }
 
@@ -106,6 +108,12 @@ impl AgentBuilder {
     /// Set output schema for structured output extraction
     pub fn output_schema(mut self, schema: OutputSchema) -> Self {
         self.config.output_schema = Some(schema);
+        self
+    }
+
+    /// Set the memory store for indexing compaction discards.
+    pub fn memory_store(mut self, store: Arc<dyn crate::memory::MemoryStore>) -> Self {
+        self.memory_store = Some(store);
         self
     }
 
@@ -188,6 +196,7 @@ impl AgentBuilder {
             compactor: self.compactor,
             last_input_tokens: 0,
             last_compaction_turn: None,
+            memory_store: self.memory_store,
         }
     }
 }

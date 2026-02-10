@@ -25,9 +25,11 @@ required-features = ["integration-real-tests"]
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
 meerkat-core = { workspace = true }
+meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
+meerkat-comms = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -46,7 +48,7 @@ dirs = { workspace = true }
 
 [features]
 default = ["comms"]
-comms = ["meerkat/comms"]
+comms = ["meerkat/comms", "dep:meerkat-comms"]
 integration-real-tests = []
 
 [dev-dependencies]

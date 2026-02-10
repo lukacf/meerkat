@@ -1,0 +1,16 @@
+# Standard profile — builtins, session store, shell, skills.
+[profile]
+name = "meerkat-standard"
+
+[features]
+include = ["session-store", "skills"]
+exclude = ["comms", "sub-agents", "memory-store", "session-compaction"]
+
+[sdk]
+languages = ["python", "typescript"]
+
+[sdk.python]
+package_name = "meerkat-standard"
+
+[sdk.typescript]
+package_name = "@meerkat/standard"

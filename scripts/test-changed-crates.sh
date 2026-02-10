@@ -54,5 +54,19 @@ if [ -z "$PKG_FLAGS" ]; then
 fi
 
 echo "Testing changed crates:$PKG_FLAGS"
+# Use --lib only for crates that have a library target (bin-only crates
+# like meerkat-cli would fail with "no library targets found").
+LIB_FLAGS=""
+for crate_dir in $CHANGED_CRATES; do
+  if grep -q '^\[lib\]' "$crate_dir/Cargo.toml" 2>/dev/null || \
+     [ -f "$crate_dir/src/lib.rs" ]; then
+    pkg=$(grep '^name' "$crate_dir/Cargo.toml" | head -1 | sed 's/.*= *"//' | sed 's/".*//')
+    LIB_FLAGS="$LIB_FLAGS -p $pkg"
+  fi
+done
+if [ -n "$LIB_FLAGS" ]; then
+  # shellcheck disable=SC2086
+  CARGO_TARGET_DIR="$FAST_TARGET_DIR" cargo test $LIB_FLAGS --lib
+fi
 # shellcheck disable=SC2086
-CARGO_TARGET_DIR="$FAST_TARGET_DIR" cargo test $PKG_FLAGS --lib --bins --tests
+CARGO_TARGET_DIR="$FAST_TARGET_DIR" cargo test $PKG_FLAGS --bins --tests

@@ -23,6 +23,8 @@ tokio = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+meerkat-skills = { workspace = true }
+inventory = { workspace = true }
 reqwest = { workspace = true }
 http = "1"
 sse-stream = "0.2"

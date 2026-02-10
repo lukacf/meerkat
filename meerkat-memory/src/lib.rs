@@ -8,6 +8,33 @@
 
 pub mod hnsw;
 pub mod simple;
+pub mod tool;
 
 pub use hnsw::HnswMemoryStore;
 pub use simple::SimpleMemoryStore;
+pub use tool::MemorySearchDispatcher;
+
+// Skill registration
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "memory-retrieval",
+        name: "Memory Retrieval",
+        description: "How semantic memory works with compaction and the MemoryStore trait",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["memory_store"],
+        body: include_str!("../skills/memory-retrieval/SKILL.md"),
+        extensions: &[],
+    }
+}
+
+// Capability registration
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::MemoryStore,
+        description: "HNSW semantic search + redb persistence (indexes compaction discards)",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: Some("memory-store"),
+        prerequisites: &[],
+        status_resolver: None,
+    }
+}

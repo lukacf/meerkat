@@ -79,8 +79,11 @@ impl BuiltinTool for ShellJobCancelTool {
 mod tests {
     use super::*;
     use crate::builtin::shell::config::ShellConfig;
+    #[cfg(feature = "integration-real-tests")]
     use crate::builtin::shell::types::JobStatus;
+    #[cfg(feature = "integration-real-tests")]
     use std::time::Duration;
+    #[cfg(feature = "integration-real-tests")]
     use tempfile::TempDir;
 
     // ==================== ShellJobCancelTool Struct Tests ====================

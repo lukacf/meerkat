@@ -59,6 +59,7 @@ mod tests {
     use super::*;
     use crate::builtin::shell::config::ShellConfig;
     use serde_json::json;
+    #[cfg(feature = "integration-real-tests")]
     use tempfile::TempDir;
 
     // ==================== ShellJobsListTool Struct Tests ====================

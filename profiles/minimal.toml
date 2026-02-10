@@ -1,0 +1,17 @@
+# Minimal profile — core agent loop only.
+# No builtins, no comms, no skills, no session persistence.
+[profile]
+name = "meerkat-minimal"
+
+[features]
+include = []
+exclude = ["comms", "sub-agents", "session-store", "session-compaction", "memory-store", "skills", "mcp"]
+
+[sdk]
+languages = ["python", "typescript"]
+
+[sdk.python]
+package_name = "meerkat-minimal"
+
+[sdk.typescript]
+package_name = "@meerkat/minimal"

@@ -1,0 +1,21 @@
+{
+  "name": "@meerkat/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Meerkat agent runtime",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test tests/"
+  },
+  "license": "MIT OR Apache-2.0"
+}

@@ -195,6 +195,22 @@ pub use meerkat_tools::{
 #[cfg(feature = "mcp")]
 pub use meerkat_mcp::{McpConnection, McpError, McpRouter, McpServerConfig};
 
+// Contracts re-exports
+pub use meerkat_contracts::{
+    self as contracts, CapabilitiesResponse, CapabilityHint, CapabilityId,
+    CapabilityRegistration, CapabilityScope, CapabilityStatus, CommsParams, ContractVersion,
+    CoreCreateParams, ErrorCategory, ErrorCode, HookParams, Protocol, SkillsParams,
+    StructuredOutputParams, WireError, WireEvent, WireRunResult, WireSessionInfo,
+    WireSessionSummary, WireUsage, build_capabilities,
+};
+
+// Surface infrastructure
+pub mod surface;
+
+// Prompt assembly
+mod prompt_assembly;
+pub use prompt_assembly::assemble_system_prompt;
+
 // SDK module
 mod sdk;
 pub use sdk::*;

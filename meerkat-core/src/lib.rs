@@ -21,6 +21,7 @@ pub mod retry;
 pub mod schema;
 pub mod service;
 pub mod session;
+pub mod skills;
 pub mod state;
 pub mod sub_agent;
 pub mod turn_boundary;

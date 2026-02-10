@@ -154,24 +154,12 @@ async fn load_config_async() -> Config {
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, String> {
-    if requested && !cfg!(feature = "comms") {
-        return Err("host_mode requires comms support (build with --features comms)".to_string());
-    }
-    Ok(requested && cfg!(feature = "comms"))
+    meerkat::surface::resolve_host_mode(requested)
 }
 
+/// Delegate to `meerkat_store::resolve_store_path` for path resolution.
 fn resolve_store_path(config: &Config) -> PathBuf {
-    config
-        .store
-        .sessions_path
-        .clone()
-        .or_else(|| config.storage.directory.clone())
-        .unwrap_or_else(|| {
-            dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("meerkat")
-                .join("sessions")
-        })
+    meerkat_store::resolve_store_path(config)
 }
 
 /// Shared state for the MCP server, holding the session service.
@@ -363,6 +351,15 @@ pub fn tools_list() -> Vec<Value> {
             "description": "Get or update Meerkat config for this MCP server instance.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatConfigInput>()
         }),
+        json!({
+            "name": "meerkat_capabilities",
+            "description": "Get the list of capabilities available in this Meerkat runtime.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
     ]
 }
 
@@ -398,8 +395,15 @@ pub async fn handle_tools_call_with_notifier(
                 .map_err(|e| format!("Invalid arguments: {}", e))?;
             handle_meerkat_config(input).await
         }
+        "meerkat_capabilities" => handle_meerkat_capabilities().await,
         _ => Err(format!("Unknown tool: {}", tool_name)),
     }
+}
+
+async fn handle_meerkat_capabilities() -> Result<Value, String> {
+    let config = load_config_async().await;
+    let response = meerkat::surface::build_capabilities_response(&config);
+    serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
 async fn handle_meerkat_config(input: MeerkatConfigInput) -> Result<Value, String> {
@@ -504,6 +508,8 @@ async fn handle_meerkat_run(
         external_tools,
         override_builtins: Some(input.enable_builtins),
         override_shell: Some(input.enable_builtins && enable_shell),
+        override_subagents: None,
+        override_memory: None,
     };
 
     // Hold slot lock across staging + create to prevent concurrent
@@ -648,6 +654,8 @@ async fn handle_meerkat_resume(
         external_tools,
         override_builtins: Some(enable_builtins),
         override_shell: Some(enable_builtins && enable_shell),
+        override_subagents: None,
+        override_memory: None,
     };
 
     // Try start_turn on the live session first (it may still be alive
@@ -777,7 +785,7 @@ mod tests {
     #[test]
     fn test_tools_list_schema() {
         let tools = tools_list();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
 
         let run_tool = &tools[0];
         assert_eq!(run_tool["name"], "meerkat_run");
@@ -802,6 +810,9 @@ mod tests {
         let config_tool = &tools[2];
         assert_eq!(config_tool["name"], "meerkat_config");
         assert!(config_tool["inputSchema"]["properties"]["action"].is_object());
+
+        let capabilities_tool = &tools[3];
+        assert_eq!(capabilities_tool["name"], "meerkat_capabilities");
     }
 
     #[test]

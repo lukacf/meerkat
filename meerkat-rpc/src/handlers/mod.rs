@@ -2,12 +2,12 @@
 //!
 //! Each sub-module handles a group of JSON-RPC methods.
 
+pub mod capabilities;
 pub mod config;
 pub mod initialize;
 pub mod session;
 pub mod turn;
 
-use serde::Serialize;
 use serde_json::value::RawValue;
 
 use crate::error;
@@ -42,13 +42,5 @@ impl RpcResponseExt for RpcResponse {
     }
 }
 
-/// Serializable usage information shared by session and turn results.
-#[derive(Debug, Serialize)]
-pub struct UsageResult {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_creation_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_read_tokens: Option<u64>,
-}
+/// Re-export `WireUsage` from contracts as the canonical usage type.
+pub use meerkat_contracts::WireUsage as UsageResult;

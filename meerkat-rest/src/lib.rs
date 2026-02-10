@@ -34,7 +34,7 @@ use meerkat_core::service::{
     StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
-    Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider, SchemaWarning,
+    Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
     SessionTooling, format_verbose_event,
 };
 use serde::{Deserialize, Serialize};
@@ -198,12 +198,7 @@ fn rest_instance_root() -> PathBuf {
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, ApiError> {
-    if requested && !cfg!(feature = "comms") {
-        return Err(ApiError::BadRequest(
-            "host_mode requires comms support (build with --features comms)".to_string(),
-        ));
-    }
-    Ok(requested && cfg!(feature = "comms"))
+    meerkat::surface::resolve_host_mode(requested).map_err(ApiError::BadRequest)
 }
 
 /// Create session request
@@ -276,29 +271,11 @@ pub struct ContinueSessionRequest {
     pub hooks_override: Option<HookRunOverrides>,
 }
 
-/// Session response
-#[derive(Debug, Serialize)]
-pub struct SessionResponse {
-    pub session_id: String,
-    pub text: String,
-    pub turns: u32,
-    pub tool_calls: u32,
-    pub usage: UsageResponse,
-    /// Validated structured output (if output_schema was provided)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub structured_output: Option<Value>,
-    /// Warnings produced during schema compilation (if any)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema_warnings: Option<Vec<SchemaWarning>>,
-}
+/// Session response — canonical wire type from contracts.
+pub type SessionResponse = meerkat_contracts::WireRunResult;
 
-/// Usage response
-#[derive(Debug, Serialize)]
-pub struct UsageResponse {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-}
+/// Usage response — re-export from contracts.
+pub type UsageResponse = meerkat_contracts::WireUsage;
 
 /// Session details response
 #[derive(Debug, Serialize)]
@@ -329,12 +306,21 @@ pub fn router(state: AppState) -> Router {
             get(get_config).put(set_config).patch(patch_config),
         )
         .route("/health", get(health_check))
+        .route("/capabilities", get(get_capabilities))
         .with_state(state)
 }
 
 /// Health check endpoint
 async fn health_check() -> &'static str {
     "ok"
+}
+
+/// Get runtime capabilities with status resolved against config.
+async fn get_capabilities(
+    State(state): State<AppState>,
+) -> Json<meerkat_contracts::CapabilitiesResponse> {
+    let config = state.config_store.get().await.unwrap_or_default();
+    Json(meerkat::surface::build_capabilities_response(&config))
 }
 
 /// Get the current config
@@ -396,21 +382,9 @@ fn spawn_event_forwarder(
     })
 }
 
-/// Convert a `RunResult` into a `SessionResponse`.
+/// Convert a `RunResult` into a `SessionResponse` (via contracts `From` impl).
 fn run_result_to_response(result: meerkat_core::types::RunResult) -> SessionResponse {
-    SessionResponse {
-        session_id: result.session_id.to_string(),
-        text: result.text,
-        turns: result.turns,
-        tool_calls: result.tool_calls,
-        usage: UsageResponse {
-            input_tokens: result.usage.input_tokens,
-            output_tokens: result.usage.output_tokens,
-            total_tokens: result.usage.total_tokens(),
-        },
-        structured_output: result.structured_output,
-        schema_warnings: result.schema_warnings,
-    }
+    result.into()
 }
 
 /// Map a `SessionError` to an `ApiError`, handling `CallbackPending` specially
@@ -430,15 +404,11 @@ fn session_error_to_api_result(
                 // Return a success response with the pre-created session_id so the
                 // caller can resume via continue_session.
                 return Ok(Json(SessionResponse {
-                    session_id: fallback_session_id.to_string(),
+                    session_id: fallback_session_id.clone(),
                     text: "Agent is waiting for tool results".to_string(),
                     turns: 0,
                     tool_calls: 0,
-                    usage: UsageResponse {
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        total_tokens: 0,
-                    },
+                    usage: UsageResponse::default(),
                     structured_output: None,
                     schema_warnings: None,
                 }));
@@ -493,6 +463,8 @@ async fn create_session(
         external_tools: None,
         override_builtins: None,
         override_shell: None,
+        override_subagents: None,
+        override_memory: None,
     };
 
     // Hold the slot lock across staging + create to prevent concurrent
@@ -624,6 +596,7 @@ async fn continue_session(
                     shell: state.enable_shell,
                     comms: false,
                     subagents: false,
+                    active_skills: None,
                 });
 
             let model = req
@@ -671,6 +644,8 @@ async fn continue_session(
                 external_tools: None,
                 override_builtins: Some(tooling.builtins),
                 override_shell: Some(tooling.shell),
+                override_subagents: Some(tooling.subagents),
+                override_memory: None,
             };
 
             // Hold slot lock across staging + create to prevent races.

@@ -8,6 +8,7 @@ use crate::protocol::{RpcId, RpcResponse};
 #[derive(Debug, Clone, Serialize)]
 pub struct ServerCapabilities {
     pub server_info: ServerInfo,
+    pub contract_version: String,
     pub methods: Vec<String>,
 }
 
@@ -25,6 +26,7 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
             name: "meerkat-rpc".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
+        contract_version: meerkat_contracts::ContractVersion::CURRENT.to_string(),
         methods: vec![
             "initialize".to_string(),
             "initialized".to_string(),

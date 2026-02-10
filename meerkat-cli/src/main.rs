@@ -1,10 +1,9 @@
 //! meerkat-cli - Headless CLI for Meerkat
 
-mod adapters;
 mod mcp;
 
 #[cfg(feature = "mcp")]
-use adapters::McpRouterAdapter;
+use meerkat_mcp::McpRouterAdapter;
 use meerkat::{AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::service::{CreateSessionRequest, SessionService};
@@ -270,6 +269,9 @@ enum Commands {
 
     /// Start the JSON-RPC stdio server
     Rpc,
+
+    /// Show runtime capabilities
+    Capabilities,
 }
 
 #[derive(Subcommand)]
@@ -580,6 +582,9 @@ async fn main() -> anyhow::Result<ExitCode> {
             ConfigCommands::Patch { file, json } => handle_config_patch(file, json).await,
         },
         Commands::Rpc => handle_rpc().await,
+        Commands::Capabilities => {
+            handle_capabilities().await
+        }
     };
 
     // Map result to exit code
@@ -880,10 +885,30 @@ async fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> any
     Ok(())
 }
 
+async fn handle_capabilities() -> anyhow::Result<()> {
+    let (config, _) = load_config().await?;
+    let response = meerkat::surface::build_capabilities_response(&config);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string())
+    );
+    Ok(())
+}
+
 async fn handle_rpc() -> anyhow::Result<()> {
     let (config, _config_base_dir) = load_config().await?;
     let store_path = get_session_store_dir().await;
-    let factory = AgentFactory::new(store_path);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let project_root = find_project_root(&cwd);
+
+    // Max-permissive factory flags: per-request AgentBuildConfig overrides
+    // control what tools are actually enabled (same pattern as MCP server).
+    let factory = AgentFactory::new(store_path)
+        .project_root(project_root.unwrap_or(cwd))
+        .builtins(true)
+        .shell(true)
+        .subagents(true)
+        .memory(true);
 
     let runtime = Arc::new(meerkat_rpc::session_runtime::SessionRuntime::new(
         factory, config, 64,
@@ -978,12 +1003,7 @@ async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
 }
 
 fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
-    if requested && !cfg!(feature = "comms") {
-        return Err(anyhow::anyhow!(
-            "--host-mode requires comms support (build with --features comms)"
-        ));
-    }
-    Ok(requested && cfg!(feature = "comms"))
+    meerkat::surface::resolve_host_mode(requested).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Load MCP tools as an external tool dispatcher for AgentBuildConfig.
@@ -1113,6 +1133,8 @@ async fn run_agent(
         external_tools,
         override_builtins: None,
         override_shell: None,
+        override_subagents: None,
+        override_memory: None,
     };
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
@@ -1235,6 +1257,7 @@ async fn resume_session(
             shell: config.tools.shell_enabled,
             comms: config.tools.comms_enabled,
             subagents: config.tools.subagents_enabled,
+            active_skills: None,
         });
     let host_mode_requested = stored_metadata
         .as_ref()
@@ -1305,6 +1328,8 @@ async fn resume_session(
         external_tools,
         override_builtins: None,
         override_shell: None,
+        override_subagents: None,
+        override_memory: None,
     };
 
     // Build the session service and stage the build config

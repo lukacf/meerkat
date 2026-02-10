@@ -14,7 +14,7 @@ use meerkat_client::{
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
-    SessionTooling, SystemPromptConfig,
+    SessionTooling,
 };
 #[cfg(feature = "sub-agents")]
 use meerkat_core::{ConcurrencyLimits, SubAgentManager};
@@ -150,6 +150,12 @@ pub struct AgentBuildConfig {
     /// Per-build override for factory-level `enable_shell`.
     /// When `Some`, takes precedence over `AgentFactory::enable_shell`.
     pub override_shell: Option<bool>,
+    /// Per-build override for factory-level `enable_subagents`.
+    /// When `Some`, takes precedence over `AgentFactory::enable_subagents`.
+    pub override_subagents: Option<bool>,
+    /// Per-build override for factory-level `enable_memory`.
+    /// When `Some`, takes precedence over `AgentFactory::enable_memory`.
+    pub override_memory: Option<bool>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -177,6 +183,8 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("external_tools", &self.external_tools.is_some())
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
+            .field("override_subagents", &self.override_subagents)
+            .field("override_memory", &self.override_memory)
             .finish()
     }
 }
@@ -202,6 +210,8 @@ impl AgentBuildConfig {
             external_tools: None,
             override_builtins: None,
             override_shell: None,
+            override_subagents: None,
+            override_memory: None,
         }
     }
 }
@@ -255,6 +265,7 @@ pub struct AgentFactory {
     pub enable_subagents: bool,
     #[cfg(feature = "comms")]
     pub enable_comms: bool,
+    pub enable_memory: bool,
 }
 
 impl AgentFactory {
@@ -268,6 +279,7 @@ impl AgentFactory {
             enable_subagents: false,
             #[cfg(feature = "comms")]
             enable_comms: false,
+            enable_memory: false,
         }
     }
 
@@ -292,6 +304,12 @@ impl AgentFactory {
     /// Enable or disable sub-agent tools.
     pub fn subagents(mut self, enabled: bool) -> Self {
         self.enable_subagents = enabled;
+        self
+    }
+
+    /// Enable or disable semantic memory (memory_search tool + compaction indexing).
+    pub fn memory(mut self, enabled: bool) -> Self {
+        self.enable_memory = enabled;
         self
     }
 
@@ -482,7 +500,7 @@ impl AgentFactory {
     ///   SessionMetadata.
     pub async fn build_agent(
         &self,
-        build_config: AgentBuildConfig,
+        mut build_config: AgentBuildConfig,
         config: &Config,
     ) -> Result<DynAgent, BuildAgentError> {
         // 1. Validate host_mode
@@ -538,17 +556,24 @@ impl AgentFactory {
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
 
         // 6. Build tool dispatcher (with optional external tools and per-build overrides)
+        //    Extract system_prompt before build_config is partially moved.
+        let per_request_prompt = build_config.system_prompt.take();
         let effective_builtins = build_config
             .override_builtins
             .unwrap_or(self.enable_builtins);
         let effective_shell = build_config.override_shell.unwrap_or(self.enable_shell);
+        let effective_subagents = build_config
+            .override_subagents
+            .unwrap_or(self.enable_subagents);
         let (mut tools, mut tool_usage_instructions) = self
             .build_tool_dispatcher_for_agent_with_overrides(
                 config,
                 build_config.external_tools,
                 effective_builtins,
                 effective_shell,
-            )?;
+                effective_subagents,
+            )
+            .await?;
 
         // 7. Create session store adapter
         #[cfg(feature = "jsonl-store")]
@@ -607,15 +632,76 @@ impl AgentFactory {
         let layered_hooks = resolve_layered_hooks_config(hooks_root, config).await;
         let hook_engine = create_default_hook_engine(layered_hooks);
 
-        // 11. Build system prompt
-        let mut system_prompt = match build_config.system_prompt {
-            Some(prompt) => prompt,
-            None => SystemPromptConfig::new().compose().await,
+        // 11. Build skill engine and inventory section (if skills feature enabled)
+        #[cfg(feature = "skills")]
+        let skill_inventory_section = {
+            use meerkat_skills::{DefaultSkillEngine, EmbeddedSkillSource, FilesystemSkillSource, CompositeSkillSource};
+            use meerkat_core::skills::{SkillEngine, SkillScope, SkillSource};
+
+            let mut sources: Vec<Box<dyn meerkat_core::skills::SkillSource>> = Vec::new();
+
+            // Project-level skills (highest precedence)
+            let project_root = self.project_root.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+            sources.push(Box::new(FilesystemSkillSource::new(
+                project_root.join(".rkat/skills"),
+                SkillScope::Project,
+            )));
+
+            // User-level skills
+            if let Some(home) = std::env::var_os("HOME") {
+                sources.push(Box::new(FilesystemSkillSource::new(
+                    std::path::PathBuf::from(home).join(".rkat/skills"),
+                    SkillScope::User,
+                )));
+            }
+
+            // Embedded skills (lowest precedence)
+            sources.push(Box::new(EmbeddedSkillSource::new()));
+
+            let composite = CompositeSkillSource::new(sources);
+
+            // Collect active skill IDs from all sources (project, user, embedded)
+            let skill_ids: Vec<meerkat_core::skills::SkillId> = match composite.list().await {
+                Ok(descriptors) => descriptors.into_iter().map(|d| d.id).collect(),
+                Err(_) => Vec::new(),
+            };
+
+            // Collect available capability strings for filtering
+            let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
+                .into_iter()
+                .map(|c| c.id.to_string())
+                .collect();
+
+            let engine = DefaultSkillEngine::new(Box::new(composite), available_caps);
+
+            // Generate inventory section for system prompt
+            let section = match engine.inventory_section().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to generate skill inventory section: {e}");
+                    String::new()
+                }
+            };
+
+            (section, Some(skill_ids))
         };
-        if !tool_usage_instructions.is_empty() {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(&tool_usage_instructions);
-        }
+        #[cfg(not(feature = "skills"))]
+        let skill_inventory_section: (String, Option<Vec<meerkat_core::skills::SkillId>>) = (String::new(), None);
+        let (inventory_section, active_skill_ids) = skill_inventory_section;
+
+        // 12. Build system prompt (single canonical path)
+        let extra_sections: Vec<&str> = if inventory_section.is_empty() {
+            vec![]
+        } else {
+            vec![inventory_section.as_str()]
+        };
+        let system_prompt = crate::assemble_system_prompt(
+            config,
+            per_request_prompt.as_deref(),
+            &extra_sections,
+            &tool_usage_instructions,
+        )
+        .await;
 
         // 12. Build AgentBuilder
         let budget_limits = build_config
@@ -647,7 +733,47 @@ impl AgentFactory {
             builder = builder.with_hook_engine(engine);
         }
 
-        // 12b. Wire compactor (when session-compaction is enabled)
+        // 12b. Wire memory store + memory_search tool (when feature compiled + enabled)
+        #[allow(unused_variables)]
+        let effective_memory = build_config
+            .override_memory
+            .unwrap_or(self.enable_memory);
+        #[cfg(feature = "memory-store-session")]
+        if effective_memory {
+            let memory_dir = self.store_path.join("memory");
+            match meerkat_memory::HnswMemoryStore::open(&memory_dir) {
+                Ok(store) => {
+                    let store =
+                        Arc::new(store) as Arc<dyn meerkat_core::memory::MemoryStore>;
+                    builder = builder.memory_store(Arc::clone(&store));
+
+                    // Compose memory_search tool into the dispatcher
+                    let memory_dispatcher =
+                        meerkat_memory::MemorySearchDispatcher::new(Arc::clone(&store));
+                    let gateway = meerkat_core::ToolGatewayBuilder::new()
+                        .add_dispatcher(tools)
+                        .add_dispatcher(Arc::new(memory_dispatcher))
+                        .build()
+                        .map_err(|e| {
+                            BuildAgentError::Config(format!(
+                                "Failed to compose memory tools: {e}"
+                            ))
+                        })?;
+                    tools = Arc::new(gateway);
+                    // Tool guidance reaches the model via the embedded
+                    // `memory-retrieval` skill (loaded in step 11), not
+                    // through usage_instructions strings.
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to open HnswMemoryStore at {}: {e}",
+                        memory_dir.display()
+                    );
+                }
+            }
+        }
+
+        // 12c. Wire compactor (when session-compaction is enabled)
         #[cfg(feature = "session-compaction")]
         {
             use meerkat_core::CompactionConfig;
@@ -669,7 +795,8 @@ impl AgentFactory {
                 builtins: effective_builtins,
                 shell: effective_shell,
                 comms: build_config.host_mode,
-                subagents: self.enable_subagents,
+                subagents: effective_subagents,
+                active_skills: active_skill_ids,
             },
             host_mode: build_config.host_mode,
             comms_name: build_config.comms_name,
@@ -683,14 +810,16 @@ impl AgentFactory {
 
     /// Build the tool dispatcher and usage instructions.
     ///
-    /// `effective_builtins` and `effective_shell` override the factory-level
-    /// `enable_builtins` / `enable_shell` flags for this specific build.
-    fn build_tool_dispatcher_for_agent_with_overrides(
+    /// `effective_builtins`, `effective_shell`, and `effective_subagents` override
+    /// the factory-level flags for this specific build. Delegates to
+    /// [`Self::build_builtin_dispatcher`] for the full sub-agent wiring path.
+    async fn build_tool_dispatcher_for_agent_with_overrides(
         &self,
         _config: &Config,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         effective_builtins: bool,
         effective_shell: bool,
+        effective_subagents: bool,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -732,11 +861,17 @@ impl AgentFactory {
             BuiltinToolConfig::default()
         };
 
-        // Create composite dispatcher (with optional external tools)
-        let dispatcher =
-            CompositeDispatcher::new(task_store, &builtin_config, shell_config, external, None)?;
-        let usage_instructions = dispatcher.usage_instructions();
+        // Use a temporary factory with the effective subagents flag to delegate
+        // to build_builtin_dispatcher which has the full sub-agent wiring.
+        let mut temp_factory = self.clone();
+        temp_factory.enable_subagents = effective_subagents;
+        let dispatcher = temp_factory
+            .build_builtin_dispatcher(task_store, builtin_config, shell_config, external, None)
+            .await?;
 
-        Ok((Arc::new(dispatcher), usage_instructions))
+        // Extract usage instructions from the dispatcher
+        // (CompositeDispatcher implements AgentToolDispatcher which has tools())
+        let usage = String::new(); // Usage instructions are injected via system prompt assembly
+        Ok((dispatcher, usage))
     }
 }

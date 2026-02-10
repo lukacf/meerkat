@@ -10,6 +10,9 @@ repository.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
+meerkat-contracts = { workspace = true }
+meerkat-skills = { workspace = true }
+inventory = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 indexmap = "2"

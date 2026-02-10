@@ -62,3 +62,20 @@ pub use jsonl::JsonlStore;
 
 #[cfg(feature = "memory")]
 pub use memory::MemoryStore;
+
+/// Resolve the session store path from config, with sensible fallbacks.
+///
+/// Precedence: `config.store.sessions_path` > `config.storage.directory` > platform data dir.
+pub fn resolve_store_path(config: &meerkat_core::Config) -> std::path::PathBuf {
+    config
+        .store
+        .sessions_path
+        .clone()
+        .or_else(|| config.storage.directory.clone())
+        .unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("meerkat")
+                .join("sessions")
+        })
+}

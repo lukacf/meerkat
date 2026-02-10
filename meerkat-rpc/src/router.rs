@@ -102,6 +102,10 @@ impl MethodRouter {
                     .await
             }
             "turn/interrupt" => handlers::turn::handle_interrupt(id, params, &self.runtime).await,
+            "capabilities/get" => {
+                let config = self.config_store.get().await.unwrap_or_default();
+                handlers::capabilities::handle_get(id, &config)
+            }
             "config/get" => handlers::config::handle_get(id, &self.config_store).await,
             "config/set" => handlers::config::handle_set(id, params, &self.config_store).await,
             "config/patch" => handlers::config::handle_patch(id, params, &self.config_store).await,

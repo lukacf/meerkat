@@ -210,4 +210,6 @@ where
     pub(crate) last_input_tokens: u64,
     /// Turn number when compaction last occurred.
     pub(crate) last_compaction_turn: Option<u32>,
+    /// Optional memory store for indexing compaction discards.
+    pub(crate) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
 }

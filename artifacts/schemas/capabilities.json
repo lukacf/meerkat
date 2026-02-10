@@ -1,0 +1,305 @@
+{
+  "CapabilitiesResponse": {
+    "$defs": {
+      "CapabilityEntry": {
+        "description": "A single capability's status in the current runtime.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/$defs/CapabilityId"
+          },
+          "status": {
+            "$ref": "#/$defs/CapabilityStatus"
+          }
+        },
+        "required": [
+          "id",
+          "description",
+          "status"
+        ],
+        "type": "object"
+      },
+      "CapabilityId": {
+        "description": "Every capability known to Meerkat. Adding a variant forces updates to\nthe registry, error mappings, and codegen templates.",
+        "enum": [
+          "sessions",
+          "streaming",
+          "structured_output",
+          "hooks",
+          "builtins",
+          "shell",
+          "comms",
+          "sub_agents",
+          "memory_store",
+          "session_store",
+          "session_compaction",
+          "skills"
+        ],
+        "type": "string"
+      },
+      "CapabilityStatus": {
+        "description": "Runtime status of a capability.",
+        "oneOf": [
+          {
+            "const": "Available",
+            "description": "Compiled in, config-enabled, protocol supports it.",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Compiled in but disabled by policy.\n\n`description` summarizes why — this is intentionally a human-readable\nstring, not a config path, because the reality is multi-layered:\nalways-compiled features like `Builtins` and `Shell` are controlled by\n`AgentFactory` flags, per-build `AgentBuildConfig` overrides, and\n`BuiltinToolConfig` policy layers (soft + enforced). A single\n\"config_path\" can't represent that resolution chain.",
+            "properties": {
+              "DisabledByPolicy": {
+                "properties": {
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "description"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "DisabledByPolicy"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Not compiled into this build (feature flag absent).",
+            "properties": {
+              "NotCompiled": {
+                "properties": {
+                  "feature": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "feature"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "NotCompiled"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "This protocol surface doesn't support it.",
+            "properties": {
+              "NotSupportedByProtocol": {
+                "properties": {
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "NotSupportedByProtocol"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContractVersion": {
+        "description": "Semantic version for the Meerkat wire contract.\n\nStart at 0.1.0 — allow breaking changes during Phase 1-3 development.\nBump to 1.0.0 when the SDK Builder ships (Phase 5) and external\nconsumers exist. Before 1.0.0, minor bumps can be breaking.",
+        "properties": {
+          "major": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "minor": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "patch": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "major",
+          "minor",
+          "patch"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response to a `capabilities/get` request.",
+    "properties": {
+      "capabilities": {
+        "items": {
+          "$ref": "#/$defs/CapabilityEntry"
+        },
+        "type": "array"
+      },
+      "contract_version": {
+        "$ref": "#/$defs/ContractVersion"
+      }
+    },
+    "required": [
+      "contract_version",
+      "capabilities"
+    ],
+    "title": "CapabilitiesResponse",
+    "type": "object"
+  },
+  "CapabilityId": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Every capability known to Meerkat. Adding a variant forces updates to\nthe registry, error mappings, and codegen templates.",
+    "enum": [
+      "sessions",
+      "streaming",
+      "structured_output",
+      "hooks",
+      "builtins",
+      "shell",
+      "comms",
+      "sub_agents",
+      "memory_store",
+      "session_store",
+      "session_compaction",
+      "skills"
+    ],
+    "title": "CapabilityId",
+    "type": "string"
+  },
+  "CapabilityScope": {
+    "$defs": {
+      "Protocol": {
+        "description": "Protocol surfaces supported by Meerkat.",
+        "enum": [
+          "rpc",
+          "rest",
+          "mcp",
+          "cli"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Where a capability applies.",
+    "oneOf": [
+      {
+        "const": "Universal",
+        "description": "Available on all protocol surfaces.",
+        "type": "string"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Available only on specific protocols.",
+        "properties": {
+          "Extension": {
+            "properties": {
+              "protocols": {
+                "items": {
+                  "$ref": "#/$defs/Protocol"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "protocols"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "Extension"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "CapabilityScope"
+  },
+  "CapabilityStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Runtime status of a capability.",
+    "oneOf": [
+      {
+        "const": "Available",
+        "description": "Compiled in, config-enabled, protocol supports it.",
+        "type": "string"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Compiled in but disabled by policy.\n\n`description` summarizes why — this is intentionally a human-readable\nstring, not a config path, because the reality is multi-layered:\nalways-compiled features like `Builtins` and `Shell` are controlled by\n`AgentFactory` flags, per-build `AgentBuildConfig` overrides, and\n`BuiltinToolConfig` policy layers (soft + enforced). A single\n\"config_path\" can't represent that resolution chain.",
+        "properties": {
+          "DisabledByPolicy": {
+            "properties": {
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "description"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "DisabledByPolicy"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Not compiled into this build (feature flag absent).",
+        "properties": {
+          "NotCompiled": {
+            "properties": {
+              "feature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "feature"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "NotCompiled"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "This protocol surface doesn't support it.",
+        "properties": {
+          "NotSupportedByProtocol": {
+            "properties": {
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "NotSupportedByProtocol"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "CapabilityStatus"
+  }
+}

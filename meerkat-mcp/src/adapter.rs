@@ -1,29 +1,24 @@
-//! Adapters to bridge existing crate types to agent traits
+//! Adapter that bridges [`McpRouter`] to [`AgentToolDispatcher`].
 
-#[cfg(feature = "mcp")]
 use async_trait::async_trait;
-#[cfg(feature = "mcp")]
+use meerkat_core::error::ToolError;
 use meerkat_core::{ToolCallView, ToolDef, ToolResult, agent::AgentToolDispatcher};
-#[cfg(feature = "mcp")]
-use meerkat_tools::ToolError;
-#[cfg(feature = "mcp")]
 use serde_json::Value;
-#[cfg(feature = "mcp")]
 use std::sync::Arc;
-
-#[cfg(feature = "mcp")]
-use meerkat_mcp::McpRouter;
-#[cfg(feature = "mcp")]
 use tokio::sync::RwLock;
 
-/// Adapter that wraps an McpRouter to implement AgentToolDispatcher
-#[cfg(feature = "mcp")]
+use crate::McpRouter;
+
+/// Adapter that wraps an [`McpRouter`] to implement [`AgentToolDispatcher`].
+///
+/// Caches tools from the router for synchronous access via `tools()`.
+/// Call [`refresh_tools()`](Self::refresh_tools) after router initialization
+/// to populate the cache.
 pub struct McpRouterAdapter {
     router: RwLock<Option<McpRouter>>,
     cached_tools: RwLock<Arc<[Arc<ToolDef>]>>,
 }
 
-#[cfg(feature = "mcp")]
 impl McpRouterAdapter {
     pub fn new(router: McpRouter) -> Self {
         Self {
@@ -32,9 +27,7 @@ impl McpRouterAdapter {
         }
     }
 
-    /// Refresh the cached tool list from the router
-    ///
-    /// Note: list_tools() is now synchronous since tools are cached in the router.
+    /// Refresh the cached tool list from the router.
     pub async fn refresh_tools(&self) -> Result<(), String> {
         let router = self.router.read().await;
         if let Some(router) = router.as_ref() {
@@ -45,7 +38,7 @@ impl McpRouterAdapter {
         Ok(())
     }
 
-    /// Gracefully shutdown the MCP router
+    /// Gracefully shutdown the MCP router.
     ///
     /// Takes the router out of the adapter and shuts it down.
     /// After this call, tool calls will fail.
@@ -58,12 +51,11 @@ impl McpRouterAdapter {
 }
 
 #[async_trait]
-#[cfg(feature = "mcp")]
 impl AgentToolDispatcher for McpRouterAdapter {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        // Return the cached tools (blocking read in sync context)
-        // Note: This requires refresh_tools() to be called before first use
-        // We use try_read to avoid deadlocks, falling back to empty vec
+        // Return the cached tools (blocking read in sync context).
+        // Requires refresh_tools() to be called before first use.
+        // Uses try_read to avoid deadlocks, falling back to empty vec.
         match self.cached_tools.try_read() {
             Ok(tools) => Arc::clone(&tools),
             Err(_) => Arc::from([]),

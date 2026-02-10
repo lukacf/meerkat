@@ -1,6 +1,6 @@
 # Skills System Redesign — Progress
 
-## Current Phase: 3
+## Current Phase: 4
 ## Current Status: implementing
 
 ---
@@ -67,22 +67,36 @@
 ## Phase 3: Renderer — XML Format
 
 ### Tests
-- [ ] test_render_inventory_flat_xml
-- [ ] test_render_inventory_collections_xml
-- [ ] test_render_inventory_empty
-- [ ] test_render_injection_xml
-- [ ] test_injection_escapes_closing_tag
-- [ ] test_injection_escapes_whitespace_tag
-- [ ] test_injection_escapes_case_insensitive
-- [ ] test_injection_truncation
-- [ ] test_escape_before_truncate
-- [ ] test_inventory_threshold_boundary
+- [x] test_render_inventory_flat_xml
+- [x] test_render_inventory_collections_xml
+- [x] test_render_inventory_empty
+- [x] test_render_injection_xml
+- [x] test_injection_escapes_closing_tag
+- [x] test_injection_escapes_whitespace_tag
+- [x] test_injection_escapes_case_insensitive
+- [x] test_injection_truncation
+- [x] test_escape_before_truncate
+- [x] test_inventory_threshold_boundary
 
 ### Implementation
-- [ ] XML inventory renderer (flat + collections modes)
-- [ ] XML injection renderer with escaping
-- [ ] Escape-before-truncate ordering
-- [ ] Inventory threshold parameter
+- [x] XML inventory renderer (flat + collections modes)
+- [x] XML injection renderer with escaping
+- [x] Escape-before-truncate ordering
+- [x] Inventory threshold parameter
+
+### Gate Results — Attempt 1
+- build-gate: PASS
+- test-gate: PASS (35 meerkat-skills tests)
+- performance-gate: PASS
+- spec-accuracy-gate: PASS (all 10 tests, all items)
+- rust-quality-gate: FAIL (.expect in library code)
+
+### Gate Results — Attempt 2
+- build-gate: PASS
+- test-gate: PASS
+- performance-gate: PASS
+- spec-accuracy-gate: PASS
+- rust-quality-gate: PASS (fixed: .expect→match, Cow for escape, write! for format, floor_char_boundary for UTF-8 safety)
 
 ## Phase 4: Engine Revision
 

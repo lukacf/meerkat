@@ -45,7 +45,12 @@ impl SkillEngine for DefaultSkillEngine {
     async fn inventory_section(&self) -> Result<String, SkillError> {
         let all_skills = self.source.list(&SkillFilter::default()).await?;
         let available = filter_by_capabilities(all_skills, &self.available_capabilities);
-        Ok(renderer::render_inventory(&available))
+        let collections = self.source.collections().await?;
+        Ok(renderer::render_inventory(
+            &available,
+            &collections,
+            renderer::DEFAULT_INVENTORY_THRESHOLD,
+        ))
     }
 
     async fn resolve_and_render(
@@ -55,7 +60,7 @@ impl SkillEngine for DefaultSkillEngine {
         let mut results = Vec::new();
         for id in ids {
             let doc = self.source.load(id).await?;
-            let rendered = renderer::render_injection(&doc.descriptor.name, &doc.body);
+            let rendered = renderer::render_injection(&id.0, &doc.body);
             let byte_size = rendered.len();
             results.push(ResolvedSkill {
                 id: id.clone(),
@@ -119,8 +124,10 @@ mod tests {
         );
 
         let section = engine.inventory_section().await.unwrap();
-        assert!(section.contains("`/task-workflow`"));
-        assert!(section.contains("`/shell-patterns`"));
+        // Now uses XML format
+        assert!(section.contains("<available_skills>"));
+        assert!(section.contains("<skill id=\"task-workflow\">"));
+        assert!(section.contains("<skill id=\"shell-patterns\">"));
     }
 
     #[tokio::test]
@@ -135,8 +142,8 @@ mod tests {
             DefaultSkillEngine::new(Box::new(source), vec!["builtins".to_string()]);
 
         let section = engine.inventory_section().await.unwrap();
-        assert!(section.contains("`/task-workflow`"));
-        assert!(!section.contains("`/shell-patterns`"));
+        assert!(section.contains("<skill id=\"task-workflow\">"));
+        assert!(!section.contains("shell-patterns"));
     }
 
     #[tokio::test]
@@ -154,9 +161,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
+        // Now uses <skill id="..."> format
         assert!(result[0]
             .rendered_body
-            .contains("<skill name=\"Task Workflow\">"));
+            .contains("<skill id=\"task-workflow\">"));
         assert!(result[0].rendered_body.contains("Content for task-workflow"));
     }
 }

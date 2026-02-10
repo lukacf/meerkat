@@ -1,6 +1,6 @@
 # Skills System Redesign — Progress
 
-## Current Phase: 8
+## Current Phase: 9
 ## Current Status: implementing
 
 ---
@@ -212,20 +212,25 @@
 ## Phase 8: Discovery Tools
 
 ### Tests
-- [ ] test_browse_root_returns_listing
-- [ ] test_browse_collection_returns_listing
-- [ ] test_browse_search_returns_search
-- [ ] test_browse_both_query_wins
-- [ ] test_browse_empty_collection
-- [ ] test_load_skill_returns_body
-- [ ] test_load_skill_not_found
+- [x] test_browse_root_returns_listing
+- [x] test_browse_collection_returns_listing
+- [x] test_browse_search_returns_search
+- [x] test_browse_both_query_wins
+- [x] test_browse_empty_collection
+- [x] test_load_skill_returns_body
+- [x] test_load_skill_not_found
 
 ### Implementation
-- [ ] BrowseSkillsTool
-- [ ] LoadSkillTool
-- [ ] SkillToolSet
-- [ ] Register in CompositeDispatcher
-- [ ] Factory passes engine to dispatcher
+- [x] BrowseSkillsTool (with schemars-derived schema)
+- [x] LoadSkillTool (with schemars-derived schema)
+- [x] SkillToolSet
+- [ ] Register in CompositeDispatcher (deferred — needs engine in dispatcher)
+- [ ] Factory passes engine to dispatcher (deferred — needs Phase 6 wiring extension)
+
+### Gate Results — Attempt 1
+- build-gate: PASS
+- test-gate: PASS (7 skill tool tests, full suite including RCT contracts)
+- performance-gate: PASS
 
 ## Phase 9: Wire Format & Surface Integration
 

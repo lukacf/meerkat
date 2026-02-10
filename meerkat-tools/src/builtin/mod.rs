@@ -24,6 +24,8 @@ pub mod memory_store;
 pub mod project;
 pub mod shell;
 pub mod store;
+#[cfg(feature = "skills")]
+pub mod skills;
 #[cfg(feature = "sub-agents")]
 pub mod sub_agent;
 pub mod tasks;

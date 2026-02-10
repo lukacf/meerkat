@@ -1,0 +1,29 @@
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Local config
+.env
+.rkat/
+.raik/
+.mcp-the-force/
+
+# Cargo lock is committed for binaries
+# Cargo.lock
+.claude/ralph-loop.local.md
+
+# Temporary files
+nohup.out
+.rct/
+test-project/
+
+# Vendored deps (local symlink)
+vendor

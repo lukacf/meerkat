@@ -231,10 +231,10 @@ def load_available_capabilities(artifacts_dir: Path) -> set[str]:
         return set()  # All capabilities if no file
     with open(caps_file) as f:
         data = json.load(f)
-    # Extract capability IDs from the CapabilityId schema enum values
+    # Extract capability IDs from the CapabilityId schema's "enum" array
     cap_schema = data.get("CapabilityId", {})
-    enum_values = cap_schema.get("schema", {}).get("oneOf", [])
-    return {v.get("const", "") for v in enum_values if "const" in v}
+    enum_values = cap_schema.get("enum", [])
+    return set(enum_values)
 
 
 def main():

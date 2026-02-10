@@ -54,3 +54,18 @@ class CapabilitiesResponse:
     """Response from capabilities/get."""
     contract_version: str = ''
     capabilities: list = field(default_factory=list)
+
+
+@dataclass
+class CommsParams:
+    """Comms parameters (available because comms capability is compiled)."""
+    host_mode: bool = False
+    comms_name: Optional[str] = None
+
+
+@dataclass
+class SkillsParams:
+    """Skills parameters (available because skills capability is compiled)."""
+    skills_enabled: bool = False
+    skill_references: list = field(default_factory=list)
+

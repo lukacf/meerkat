@@ -205,6 +205,7 @@ impl AgentBuilder {
             last_input_tokens: 0,
             last_compaction_turn: None,
             memory_store: self.memory_store,
+            skill_engine: self.skill_engine,
         }
     }
 }

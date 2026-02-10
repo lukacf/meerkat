@@ -38,3 +38,13 @@ export interface CapabilitiesResponse {
   contract_version: string;
   capabilities: CapabilityEntry[];
 }
+
+export interface CommsParams {
+  host_mode: boolean;
+  comms_name?: string;
+}
+
+export interface SkillsParams {
+  skills_enabled: boolean;
+  skill_references: string[];
+}

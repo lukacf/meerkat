@@ -56,7 +56,8 @@ def resolve_features(manifest: dict) -> list[str]:
 
     # Start with CLI defaults (matches [features] default in Cargo.toml)
     defaults = [
-        "anthropic", "jsonl-store", "sub-agents", "skills", "comms", "mcp",
+        "anthropic", "openai", "gemini", "jsonl-store",
+        "sub-agents", "skills", "comms", "mcp",
     ]
 
     result = []

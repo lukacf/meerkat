@@ -58,7 +58,7 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 
 [features]
-default = ["anthropic", "jsonl-store", "sub-agents", "skills", "comms", "mcp"]
+default = ["anthropic", "openai", "gemini", "jsonl-store", "sub-agents", "skills", "comms", "mcp"]
 
 # LLM providers (forwarded to facade)
 anthropic = ["meerkat/anthropic"]

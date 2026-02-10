@@ -1,0 +1,679 @@
+# Inter-Agent Communication (Comms)
+
+Meerkat provides a built-in inter-agent communication system that allows multiple agent instances to exchange messages, delegate tasks, and coordinate work. The system is implemented in the `meerkat-comms` crate and integrated into the agent loop, CLI, and all surface crates.
+
+Comms requires the `comms` Cargo feature to be compiled in.
+
+## Overview
+
+The comms system provides:
+
+- **Four LLM-facing tools**: `send_message`, `send_request`, `send_response`, `list_peers`
+- **Three transport layers**: Unix Domain Sockets (UDS), TCP, and in-process (`inproc`)
+- **Ed25519 cryptographic identity**: Every agent has a keypair; all messages are signed
+- **Trust-based peer model**: Agents only accept messages from explicitly trusted peers
+- **Host mode**: An agent processes its initial prompt then stays alive waiting for incoming comms messages
+- **Inbox with notification**: Incoming messages are queued and drained at turn boundaries
+
+### Architecture
+
+```
+                        ┌─────────────────────┐
+                        │    Agent Loop        │
+                        │  (meerkat-core)      │
+                        │                      │
+                        │  drain_comms_inbox() │
+                        │  run_host_mode()     │
+                        └────────┬─────────────┘
+                                 │
+                    ┌────────────┴────────────┐
+                    │     CommsRuntime        │
+                    │  (meerkat-comms)        │
+                    │                          │
+                    │  Router  Inbox  Keypair  │
+                    │  TrustedPeers            │
+                    └────────────┬─────────────┘
+                                 │
+              ┌──────────────────┼──────────────────┐
+              │                  │                   │
+         ┌────┴────┐      ┌─────┴─────┐      ┌─────┴─────┐
+         │   UDS   │      │    TCP    │      │  inproc   │
+         │ Listener│      │ Listener  │      │ Registry  │
+         └─────────┘      └───────────┘      └───────────┘
+```
+
+### Crate Layout
+
+| Crate | Role |
+|-------|------|
+| `meerkat-comms` | Core comms: identity, trust, transport, router, inbox, runtime, MCP tools, agent integration |
+| `meerkat-tools` (`builtin::comms`) | `CommsToolSurface`, `CommsToolSet`, individual `BuiltinTool` implementations |
+| `meerkat-core` | `CommsRuntime` trait, `CommsRuntimeConfig`, `CommsRuntimeMode` enum, agent host-mode impl |
+| `meerkat` (facade) | `build_comms_runtime_from_config()`, `compose_tools_with_comms()`, factory wiring |
+
+## Identity and Cryptography
+
+Each agent has an Ed25519 keypair managed by the `Keypair` type (`meerkat-comms/src/identity.rs`).
+
+- **Key generation**: `Keypair::generate()` creates a new random keypair using `OsRng`.
+- **Key persistence**: `Keypair::save(dir)` writes `identity.key` (secret, mode `0600` on Unix) and `identity.pub` to disk. `Keypair::load(dir)` reads them back. `Keypair::load_or_generate(dir)` is the canonical entry point -- loads existing keys or creates new ones.
+- **Public key format**: `PubKey` is a 32-byte Ed25519 public key. The canonical string format is `ed25519:<base64>` (standard Base64 with padding), produced by `PubKey::to_peer_id()` and parsed by `PubKey::from_peer_id()`.
+- **Signatures**: `Signature` is a 64-byte Ed25519 signature.
+- **Default identity directory**: `.rkat/identity/` (relative to base dir, resolved by `CoreCommsConfig::resolve_paths()`).
+
+### Envelope Signing
+
+Every message is wrapped in a signed `Envelope`:
+
+```rust
+pub struct Envelope {
+    pub id: Uuid,       // Unique message ID
+    pub from: PubKey,   // Sender's public key
+    pub to: PubKey,     // Recipient's public key
+    pub kind: MessageKind,
+    pub sig: Signature,  // Ed25519 signature over canonical CBOR of [id, from, to, kind]
+}
+```
+
+The signable bytes are computed by serializing `(id, from, to, kind)` as CBOR, then recursively sorting all map keys by canonical order (RFC 8949) before encoding. This ensures deterministic signing across implementations.
+
+## Trust Model
+
+Agents maintain a list of trusted peers in a `TrustedPeers` collection (`meerkat-comms/src/trust.rs`).
+
+### TrustedPeer Structure
+
+```rust
+pub struct TrustedPeer {
+    pub name: String,     // Human-readable name (used by tools)
+    pub pubkey: PubKey,   // Ed25519 public key
+    pub addr: String,     // Address: "uds://...", "tcp://...", or "inproc://..."
+}
+```
+
+### Trust File Format
+
+Stored as JSON at `.rkat/trusted_peers.json` (default path):
+
+```json
+{
+  "peers": [
+    {
+      "name": "coding-agent",
+      "pubkey": "ed25519:KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=",
+      "addr": "tcp://192.168.1.50:4200"
+    },
+    {
+      "name": "review-agent",
+      "pubkey": "ed25519:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+      "addr": "uds:///tmp/meerkat-review.sock"
+    }
+  ]
+}
+```
+
+### Trust Enforcement
+
+Incoming connections are validated in `handle_connection()` (`meerkat-comms/src/io_task.rs`):
+
+1. Read the envelope from the stream (CBOR, length-prefixed)
+2. Verify the Ed25519 signature (`envelope.verify()`)
+3. Check the sender is in the trusted peers list (`trusted.is_trusted(&envelope.from)`)
+4. Verify the envelope is addressed to us (`envelope.to == keypair.public_key()`)
+5. If all pass: send an ACK (for `Message` and `Request` kinds), then enqueue to inbox
+6. If any check fails: silently drop (no error returned to sender)
+
+## Transport Layer
+
+All transports use a length-prefixed CBOR framing protocol implemented by `TransportCodec` (`meerkat-comms/src/transport/codec.rs`).
+
+### Wire Format
+
+```
+┌──────────────┬──────────────────────────────────┐
+│ 4 bytes (BE) │ CBOR-encoded Envelope            │
+│ payload len  │ (up to MAX_PAYLOAD_SIZE bytes)    │
+└──────────────┴──────────────────────────────────┘
+```
+
+- **Maximum payload size**: `MAX_PAYLOAD_SIZE = 1,048,576` bytes (1 MB), defined in `meerkat-comms/src/transport/mod.rs`.
+- **Encoding**: CBOR (RFC 8949) via the `ciborium` crate.
+
+### Address Formats (PeerAddr)
+
+Addresses are parsed by `PeerAddr::parse()`:
+
+| Scheme | Format | Use Case |
+|--------|--------|----------|
+| `uds://` | `uds:///path/to/socket.sock` | Same-machine, lowest latency |
+| `tcp://` | `tcp://host:port` | Cross-machine (supports hostnames; DNS resolved at connect time) |
+| `inproc://` | `inproc://agent-name` | In-process sub-agent communication via `InprocRegistry` |
+
+### UDS Transport
+
+Unix Domain Socket listeners are spawned by `spawn_uds_listener()`. The socket file is created at the configured path (existing files are removed first). Parent directories are created automatically.
+
+### TCP Transport
+
+TCP listeners are spawned by `spawn_tcp_listener()`. Accepts connections and processes each in a dedicated tokio task.
+
+### Inproc Transport
+
+The `InprocRegistry` (`meerkat-comms/src/inproc.rs`) is a process-global registry (singleton via `OnceLock`) that maps agent names and public keys to their inbox senders. Messages are delivered directly in-memory without serialization over the network.
+
+- `InprocRegistry::global()` returns the singleton
+- `register(name, pubkey, sender)` adds an agent (evicts stale entries on name or pubkey collision)
+- `unregister(pubkey)` removes an agent
+- `send(from_keypair, to_name, kind)` creates a signed envelope and delivers it directly to the peer's inbox
+
+When `CommsRuntime` is created, it automatically registers itself in the global `InprocRegistry`. When dropped, it unregisters.
+
+## Message Types
+
+Defined in `meerkat-comms/src/types.rs`:
+
+### MessageKind
+
+```rust
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum MessageKind {
+    Message { body: String },
+    Request { intent: String, params: JsonValue },
+    Response { in_reply_to: Uuid, status: Status, result: JsonValue },
+    Ack { in_reply_to: Uuid },
+}
+```
+
+### Status
+
+```rust
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Accepted,
+    Completed,
+    Failed,
+}
+```
+
+### ACK Behavior
+
+| Message Kind | Sender waits for ACK? | Receiver sends ACK? |
+|-------------|----------------------|---------------------|
+| `Message` | Yes (with timeout) | Yes |
+| `Request` | Yes (with timeout) | Yes |
+| `Response` | No | No |
+| `Ack` | No | No (would loop) |
+
+ACK timeout defaults to 30 seconds (`DEFAULT_ACK_TIMEOUT_SECS`). If no ACK is received, the send fails with `SendError::PeerOffline`.
+
+### MessageIntent (High-Level)
+
+The `MessageIntent` enum (`meerkat-comms/src/agent/types.rs`) provides type-safe intent values for requests:
+
+| Variant | String | Description |
+|---------|--------|-------------|
+| `Delegate` | `"delegate"` | Delegate a task |
+| `Status` | `"status"` | Request status update |
+| `Cancel` | `"cancel"` | Cancel an operation |
+| `Ack` | `"ack"` | Request acknowledgment |
+| `Review` | `"review"` | Review something |
+| `Calculate` | `"calculate"` | Request computation |
+| `Query` | `"query"` | Request information |
+| `Custom(String)` | (any string) | User-defined |
+
+Standard strings are parsed into their enum variants; unknown strings become `Custom`.
+
+## Inbox
+
+The `Inbox` (`meerkat-comms/src/inbox.rs`) is a bounded MPSC channel (default capacity: 1024) with a `Notify` mechanism for waking waiting tasks when messages arrive.
+
+```rust
+pub struct Inbox { rx, notify }
+pub struct InboxSender { tx, notify }  // Clone-able; given to IO tasks
+```
+
+- `InboxSender::send(item)` enqueues an item and calls `notify.notify_waiters()` to wake any task blocked on `inbox_notify.notified().await`
+- `Inbox::try_drain()` returns all currently available items without blocking
+- `Inbox::recv()` blocks until a message is available
+
+### InboxItem
+
+```rust
+pub enum InboxItem {
+    External { envelope: Envelope },      // Message from another agent
+    SubagentResult { subagent_id, result, summary },  // Sub-agent completion
+}
+```
+
+When converting to `CommsMessage` for the agent loop, ACKs and messages from unknown peers are filtered out.
+
+## LLM-Facing Tools
+
+Four tools are exposed to the LLM when comms is enabled. Tool definitions and dispatch are implemented in `meerkat-comms/src/mcp/tools.rs` with wrappers in `meerkat-tools/src/builtin/comms/`.
+
+### send_message
+
+Send a fire-and-forget text message to a peer.
+
+**Input schema** (`SendMessageInput`):
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `to` | `string` | Yes | Peer name to send message to |
+| `body` | `string` | Yes | Message content |
+
+**Response**: `{"status": "sent"}`
+
+### send_request
+
+Send a request to a peer. The sender waits for an ACK (not the response itself -- the response comes as a separate message).
+
+**Input schema** (`SendRequestInput`):
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `to` | `string` | Yes | Peer name to send request to |
+| `intent` | `string` | Yes | Request intent/action (e.g., `"review"`, `"delegate"`) |
+| `params` | `object` | No (default: `null`) | Request parameters |
+
+**Response**: `{"status": "sent"}`
+
+### send_response
+
+Send a response to a previously received request.
+
+**Input schema** (`SendResponseInput`):
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `to` | `string` | Yes | Peer name to send response to |
+| `in_reply_to` | `string` (UUID) | Yes | ID of the request being responded to |
+| `status` | `string` | Yes | One of `"accepted"`, `"completed"`, `"failed"` |
+| `result` | `object` | No (default: `null`) | Response result data |
+
+**Response**: `{"status": "sent"}`
+
+### list_peers
+
+List all trusted peers and their addresses.
+
+**Input schema** (`ListPeersInput`): Empty object `{}`
+
+**Response**:
+
+```json
+{
+  "peers": [
+    {
+      "name": "review-agent",
+      "peer_id": "ed25519:...",
+      "address": "tcp://192.168.1.50:4200"
+    }
+  ]
+}
+```
+
+### Tool Availability
+
+Comms tools are conditionally available based on whether any trusted peers are configured. The `CommsToolSurface::peer_availability()` function creates an `Availability` predicate that hides the tools from the LLM when no peers exist, preventing unnecessary tool calls.
+
+## Router
+
+The `Router` (`meerkat-comms/src/router.rs`) is the high-level send API. It holds the keypair, trusted peers (behind `Arc<RwLock<TrustedPeers>>`), config, and inbox sender.
+
+Key methods:
+
+- `send(peer_name, kind)` -- resolves the peer by name, creates and signs an envelope, connects to the peer's address, sends the envelope, and optionally waits for an ACK
+- `send_message(peer_name, body)` -- convenience wrapper for `MessageKind::Message`
+- `send_request(peer_name, intent, params)` -- convenience wrapper for `MessageKind::Request`
+- `send_response(peer_name, in_reply_to, status, result)` -- convenience wrapper for `MessageKind::Response`
+
+The router dispatches to the appropriate transport based on the peer's `PeerAddr`:
+- `PeerAddr::Uds` -- connects via `UnixStream`
+- `PeerAddr::Tcp` -- connects via `TcpStream`
+- `PeerAddr::Inproc` -- delivers via `InprocRegistry::global().send()`
+
+### CommsConfig
+
+```rust
+pub struct CommsConfig {
+    pub ack_timeout_secs: u64,     // Default: 30
+    pub max_message_bytes: u32,    // Default: 1,048,576 (1 MB)
+}
+```
+
+## CommsRuntime
+
+The `CommsRuntime` (`meerkat-comms/src/runtime/comms_runtime.rs`) manages the full lifecycle of an agent's comms subsystem:
+
+1. Loads or generates the keypair from `identity_dir`
+2. Loads trusted peers from `trusted_peers_path`
+3. Creates the router, inbox, and inbox sender
+4. Registers in the global `InprocRegistry`
+5. Optionally starts UDS and/or TCP listeners
+
+### Construction
+
+- `CommsRuntime::new(resolved_config)` -- full runtime with identity persistence and optional listeners
+- `CommsRuntime::inproc_only(name)` -- lightweight runtime with a fresh ephemeral keypair, no listeners, no disk I/O (for sub-agents)
+
+### Key Methods
+
+- `start_listeners()` -- starts UDS and/or TCP listeners based on config
+- `drain_messages()` -- drains the inbox and converts items to `CommsMessage`
+- `recv_message()` -- blocking receive with notification-based wakeup
+- `shutdown()` -- aborts all listener tasks
+
+On drop, the runtime calls `shutdown()` and unregisters from the `InprocRegistry`.
+
+### CoreCommsRuntime Trait (meerkat-core)
+
+```rust
+#[async_trait]
+pub trait CommsRuntime: Send + Sync {
+    async fn drain_messages(&self) -> Vec<String>;
+    fn inbox_notify(&self) -> Arc<tokio::sync::Notify>;
+}
+```
+
+`meerkat-comms::CommsRuntime` implements this trait, converting `CommsMessage` items to user-facing text strings via `to_user_message_text()`.
+
+## Configuration
+
+### Config File (`.rkat/config.toml`)
+
+The comms runtime mode is configured in the top-level `Config` struct (`meerkat-core/src/config.rs`):
+
+```toml
+[comms]
+mode = "inproc"           # "inproc", "tcp", or "uds"
+address = "0.0.0.0:4200"  # Required when mode = "tcp" or "uds"
+auto_enable_for_subagents = false
+```
+
+**`CommsRuntimeConfig` fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | `CommsRuntimeMode` | `Inproc` | Transport mode |
+| `address` | `Option<String>` | `None` | Listen address (TCP socket address or UDS path) |
+| `auto_enable_for_subagents` | `bool` | `false` | Whether to auto-enable comms for spawned sub-agents |
+
+**`CommsRuntimeMode` variants:**
+
+| Variant | Value | Description |
+|---------|-------|-------------|
+| `Inproc` | `"inproc"` | In-process only (no network listeners) |
+| `Tcp` | `"tcp"` | TCP listener on `address` |
+| `Uds` | `"uds"` | UDS listener at `address` path |
+
+### CoreCommsConfig (Internal)
+
+The `CoreCommsConfig` (`meerkat-comms/src/runtime/comms_config.rs`) is the internal config used by `CommsRuntime`:
+
+```rust
+pub struct CoreCommsConfig {
+    pub enabled: bool,
+    pub name: String,                        // Default: "meerkat"
+    pub listen_uds: Option<PathBuf>,
+    pub listen_tcp: Option<SocketAddr>,
+    pub identity_dir: PathBuf,               // Default: ".rkat/identity"
+    pub trusted_peers_path: PathBuf,         // Default: ".rkat/trusted_peers.json"
+    pub ack_timeout_secs: u64,               // Default: 30
+    pub max_message_bytes: usize,            // Default: 1,048,576
+}
+```
+
+Paths support `{name}` interpolation (replaced with the agent's comms name). Relative paths are resolved against the base directory via `resolve_paths(base_dir)`.
+
+## CLI Usage
+
+### Run with Comms
+
+```bash
+# Enable comms with a name (uses config file for transport mode)
+rkat run --comms-name my-agent "Your prompt here"
+
+# Disable comms explicitly
+rkat run --no-comms "Your prompt here"
+
+# Specify TCP listen address (for incoming connections)
+rkat run --comms-name my-agent --comms-listen-tcp "0.0.0.0:4200" "Your prompt"
+```
+
+### Host Mode
+
+Host mode keeps the agent alive after processing the initial prompt, listening for incoming comms messages:
+
+```bash
+rkat run --comms-name orchestrator --host "You are a project coordinator."
+```
+
+In host mode:
+1. The agent processes the initial prompt normally
+2. After the first run completes, the agent enters a wait loop
+3. When comms messages arrive (via the inbox), they are injected as user messages and the agent runs again
+4. The agent exits when it receives a `DISMISS` message, its budget is exhausted, or it encounters a graceful error
+
+### CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--comms-name <NAME>` | Agent name for peer identification. Enables comms if set. |
+| `--comms-listen-tcp <ADDR>` | TCP address to listen on (e.g., `"0.0.0.0:4200"`) |
+| `--no-comms` | Disable inter-agent communication entirely |
+| `--host` | Run in host mode (stay alive for comms messages after initial prompt) |
+
+All comms flags require the `comms` feature at compile time (`#[cfg(feature = "comms")]`).
+
+## SDK / Programmatic Usage
+
+### Building a Comms Runtime
+
+```rust
+use meerkat::build_comms_runtime_from_config;
+
+let runtime = build_comms_runtime_from_config(&config, base_dir, "my-agent").await?;
+```
+
+This function reads `config.comms.mode` and creates the appropriate runtime:
+- `Inproc` -- calls `CommsRuntime::inproc_only()`
+- `Tcp` -- creates a full runtime with `CommsRuntime::new()` and starts TCP listeners
+- `Uds` -- creates a full runtime with `CommsRuntime::new()` and starts UDS listeners
+
+### Composing Tools with Comms
+
+```rust
+use meerkat::compose_tools_with_comms;
+
+let (tools_with_comms, usage_instructions) =
+    compose_tools_with_comms(base_tools, tool_usage_instructions, &runtime)?;
+```
+
+This wraps the base tool dispatcher with comms tools via `ToolGateway`, registering `send_message`, `send_request`, `send_response`, and `list_peers`. The comms tools are conditionally available based on whether any trusted peers are configured.
+
+### Using AgentFactory
+
+The `AgentFactory::build_agent()` method handles comms wiring automatically when `host_mode` is enabled:
+
+```rust
+let factory = AgentFactory::new(store_path)
+    .project_root(project_root)
+    .comms(true);  // Enable comms in the factory
+
+let build_config = AgentBuildConfig {
+    model: "claude-sonnet-4-5".to_string(),
+    host_mode: true,
+    comms_name: Some("my-agent".to_string()),
+    // ... other fields
+    ..AgentBuildConfig::new("claude-sonnet-4-5")
+};
+
+let agent = factory.build_agent(build_config, &config).await?;
+```
+
+The factory:
+1. Validates that `comms_name` is set when `host_mode` is `true`
+2. Calls `build_comms_runtime_from_config()` to create the runtime
+3. Calls `compose_tools_with_comms()` to add comms tools to the dispatcher
+4. Attaches the runtime to the agent via `AgentBuilder::with_comms_runtime()`
+5. Records `host_mode` and `comms_name` in `SessionMetadata`
+
+### Using CommsAgent Directly
+
+For low-level control, use `CommsAgent` which wraps an `Agent` with a `CommsManager`:
+
+```rust
+use meerkat_comms::agent::{CommsAgent, CommsManager, CommsManagerConfig};
+
+let config = CommsManagerConfig::with_keypair(keypair)
+    .trusted_peers(trusted_peers)
+    .comms_config(comms_config);
+let comms_manager = CommsManager::new(config)?;
+
+let agent = AgentBuilder::new()
+    .model("claude-sonnet-4-5")
+    .build(llm_client, tools, store)
+    .await;
+
+let mut comms_agent = CommsAgent::new(agent, comms_manager);
+
+// Run with comms inbox draining
+let result = comms_agent.run("Send a greeting to agent-b".to_string()).await?;
+
+// Or run in stay-alive mode (processes initial prompt then waits for messages)
+let result = comms_agent.run_stay_alive("You are a coordinator.".to_string(), None).await?;
+```
+
+### CommsBootstrap (Sub-Agent Integration)
+
+The `CommsBootstrap` handles comms setup for both standalone agents and child sub-agents:
+
+```rust
+// Standalone
+let bootstrap = CommsBootstrap::from_config(config, base_dir);
+let prepared = bootstrap.prepare().await?;
+
+// Child sub-agent (inproc, auto-trusts parent)
+let bootstrap = CommsBootstrap::for_child_inproc(
+    "child-agent".to_string(),
+    ParentCommsContext {
+        parent_name: "parent".to_string(),
+        parent_pubkey: parent_pubkey_bytes,
+        parent_addr: "inproc://parent".to_string(),
+        comms_base_dir: base_dir,
+    },
+);
+let prepared = bootstrap.prepare().await?;
+```
+
+`PreparedComms` contains:
+- `runtime: CommsRuntime` -- ready to use
+- `advertise: Option<CommsAdvertise>` -- for child agents, contains the name/pubkey/addr to register with the parent
+
+## Agent Loop Integration
+
+### Turn-Boundary Inbox Draining
+
+The agent loop calls `drain_comms_inbox()` at turn boundaries. This method:
+1. Calls `comms_runtime.drain_messages()` to get formatted message strings
+2. If messages exist, combines them and pushes a `UserMessage` into the session
+3. Returns `true` if any messages were injected
+
+### Host Mode Loop
+
+`Agent::run_host_mode()` (`meerkat-core/src/agent/comms_impl.rs`):
+
+1. Runs the initial prompt (or skips if empty)
+2. Enters a loop:
+   - Checks budget exhaustion
+   - Drains the comms inbox
+   - If messages exist, runs them through the agent
+   - If no messages, waits on `inbox_notify.notified()` with a timeout from the budget
+3. Exits on budget exhaustion or graceful error
+
+### Message Injection Format
+
+Incoming messages are formatted as text for the LLM:
+
+- **Message**: `[COMMS MESSAGE from <peer>]\n<body>`
+- **Request**: `[COMMS REQUEST from <peer> (id: <uuid>)]\nIntent: <intent>\nParams: <json>\n\nTo respond, use send_response with peer="<peer>", request_id="<uuid>"`
+- **Response**: `[COMMS RESPONSE from <peer> (to request: <uuid>)]\nStatus: <status>\nResult: <json>`
+
+## Security
+
+- **All messages are signed** with Ed25519 using canonical CBOR encoding for deterministic signatures
+- **Trust is explicit**: only messages from peers in `trusted_peers.json` are accepted
+- **Misaddressed messages are dropped**: the receiver verifies `envelope.to` matches its own public key
+- **Private keys are stored with restrictive permissions**: `identity.key` is written with mode `0600` on Unix
+- **Secret bytes are zeroized**: `Keypair::from_secret()` zeroizes the input after copying; `Keypair::save()` zeroizes the buffer after writing
+- **ACK validation**: ACK signatures, sender, recipient, and `in_reply_to` ID are all verified to prevent spoofed/misrouted ACKs
+- **No replay protection**: The current implementation does not include nonce-based replay prevention
+
+## Skill Registration
+
+The comms crate registers a built-in skill `multi-agent-comms` via `inventory::submit!`:
+
+```
+id: "multi-agent-comms"
+name: "Multi-Agent Comms"
+description: "Setting up host mode, peer trust, send vs request/response patterns"
+requires_capabilities: ["comms"]
+```
+
+This skill is loaded by the skill engine and included in the system prompt inventory when the `comms` capability is available.
+
+## Capability Registration
+
+The comms crate registers a capability via `inventory::submit!`:
+
+```
+id: CapabilityId::Comms
+description: "Inter-agent communication: send, request, response, list peers + host mode"
+scope: CapabilityScope::Universal
+requires_feature: Some("comms")
+```
+
+## Key Source Files
+
+| File | Description |
+|------|-------------|
+| `meerkat-comms/src/identity.rs` | `Keypair`, `PubKey`, `Signature`, key persistence |
+| `meerkat-comms/src/trust.rs` | `TrustedPeer`, `TrustedPeers`, trust file I/O |
+| `meerkat-comms/src/types.rs` | `Envelope`, `MessageKind`, `Status`, `InboxItem` |
+| `meerkat-comms/src/router.rs` | `Router`, `CommsConfig`, `SendError` |
+| `meerkat-comms/src/inbox.rs` | `Inbox`, `InboxSender`, `InboxError` |
+| `meerkat-comms/src/inproc.rs` | `InprocRegistry`, in-process transport |
+| `meerkat-comms/src/io_task.rs` | `handle_connection()`, incoming connection handler |
+| `meerkat-comms/src/transport/mod.rs` | `PeerAddr`, `TransportError`, `MAX_PAYLOAD_SIZE` |
+| `meerkat-comms/src/transport/codec.rs` | `TransportCodec`, `EnvelopeFrame` |
+| `meerkat-comms/src/mcp/tools.rs` | MCP tool schemas and dispatch (`SendMessageInput`, etc.) |
+| `meerkat-comms/src/agent/mod.rs` | `CommsAgent`, `CommsAgentBuilder` |
+| `meerkat-comms/src/agent/types.rs` | `CommsMessage`, `CommsContent`, `MessageIntent` |
+| `meerkat-comms/src/agent/manager.rs` | `CommsManager`, `CommsManagerConfig` |
+| `meerkat-comms/src/agent/dispatcher.rs` | `CommsToolDispatcher`, `DynCommsToolDispatcher`, `wrap_with_comms()` |
+| `meerkat-comms/src/agent/listener.rs` | `spawn_uds_listener()`, `spawn_tcp_listener()` |
+| `meerkat-comms/src/runtime/comms_config.rs` | `CoreCommsConfig`, `ResolvedCommsConfig` |
+| `meerkat-comms/src/runtime/comms_runtime.rs` | `CommsRuntime`, `CommsRuntimeError` |
+| `meerkat-comms/src/runtime/comms_bootstrap.rs` | `CommsBootstrap`, `ParentCommsContext`, `PreparedComms` |
+| `meerkat-core/src/agent/comms_impl.rs` | `drain_comms_inbox()`, `run_host_mode()` |
+| `meerkat-core/src/config.rs` | `CommsRuntimeConfig`, `CommsRuntimeMode` |
+| `meerkat-tools/src/builtin/comms/surface.rs` | `CommsToolSurface` (tool dispatcher for gateway) |
+| `meerkat-tools/src/builtin/comms/tools.rs` | `SendMessageTool`, `SendRequestTool`, `SendResponseTool`, `ListPeersTool` |
+| `meerkat-tools/src/builtin/comms/tool_set.rs` | `CommsToolSet` |
+| `meerkat/src/sdk.rs` | `build_comms_runtime_from_config()`, `compose_tools_with_comms()` |
+| `meerkat/src/factory.rs` | `AgentFactory::build_agent()` comms wiring |
+
+---
+
+## CODE ISSUES FOUND:
+
+1. **`comms_listen_tcp` CLI flag is accepted but ignored.** In `meerkat-cli/src/main.rs` line 486, the `comms_listen_tcp` value is discarded with `let _ = comms_listen_tcp;` and a comment "handled by the factory via config settings." However, the factory does not receive this value -- it reads `config.comms.address` from the config file instead. The CLI flag has no effect.
+
+2. **Duplicate `comms_tool_defs()` function.** The same function that converts `tools_list()` JSON into `Vec<Arc<ToolDef>>` is independently implemented in three places: `meerkat-comms/src/agent/dispatcher.rs`, `meerkat-tools/src/builtin/comms/surface.rs`, and `meerkat-tools/src/builtin/comms/tools.rs` (via `get_tool_def`). These should share a single implementation to avoid drift.
+
+3. **`CommsConfig.max_message_bytes` type inconsistency.** In `CoreCommsConfig` the field is `max_message_bytes: usize`, but in `CommsConfig` (used by the router) it is `max_message_bytes: u32`. The conversion in `CoreCommsConfig::resolve_paths()` uses `as u32` cast which could silently truncate on 64-bit platforms if the value exceeds `u32::MAX`.
+
+4. **`CommsAgent::run_stay_alive` uses a `DISMISS` string check** (`body.trim().eq_ignore_ascii_case("DISMISS")`) that is not documented in any tool schema or system prompt. The agent loop's `run_host_mode()` does not implement the same DISMISS check -- the two host-mode implementations have different exit conditions.
+
+5. **Outdated model name in example.** `meerkat/examples/comms_verbose.rs` line 373 defaults to `"claude-3-sonnet-20240229"` which contradicts the project's model naming convention (should be `"claude-sonnet-4-5"` per CLAUDE.md).

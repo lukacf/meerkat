@@ -144,7 +144,7 @@ impl AgentBuilder {
 
 ### Hook Contracts
 
-Core hook interfaces are exposed from `meerkat_core` and re-exported by `meerkat`:
+Core hook interfaces are exposed from `meerkat_core` and re-exported by `meerkat`. Hooks execute at defined points in the agent loop. Each hook entry specifies a point, execution mode (foreground/background), capability (observe/guardrail/rewrite), and a runtime adapter (in-process, command, or HTTP). See `meerkat-hooks` for the `DefaultHookEngine` implementation.
 
 ```rust
 pub enum HookPoint {
@@ -170,8 +170,33 @@ pub enum HookCapability {
 }
 
 pub struct HookRunOverrides {
+    /// Additional hook entries to register for this run only.
     pub entries: Vec<HookEntryConfig>,
+    /// Hook IDs to disable for this run.
     pub disable: Vec<HookId>,
+}
+
+/// Newtype wrapper for hook identifiers.
+pub struct HookId(pub String);
+
+/// Configuration for a single hook entry.
+pub struct HookEntryConfig {
+    pub id: HookId,
+    pub point: HookPoint,
+    pub priority: i32,
+    pub mode: HookExecutionMode,
+    pub capability: HookCapability,
+    pub enabled: bool,
+    pub runtime: HookRuntimeConfig,
+    pub failure_policy: Option<HookFailurePolicy>,
+    pub timeout_ms: Option<u64>,
+}
+
+pub enum HookFailurePolicy {
+    /// Continue execution on hook failure. Default for `Observe` capability.
+    FailOpen,
+    /// Deny execution on hook failure. Default for `Guardrail` and `Rewrite`.
+    FailClosed,
 }
 ```
 
@@ -522,6 +547,10 @@ pub enum AgentEvent {
     },
     HookRewriteApplied { hook_id: String, point: HookPoint, patch: HookPatch },
     HookPatchPublished { hook_id: String, point: HookPoint, envelope: HookPatchEnvelope },
+
+    /// Skill lifecycle events (emitted when skills feature is enabled)
+    SkillsResolved { skills: Vec<SkillId>, injection_bytes: usize },
+    SkillResolutionFailed { reference: String, error: String },
 }
 ```
 
@@ -611,11 +640,15 @@ Tool execution abstraction:
 ```rust
 #[async_trait]
 pub trait AgentToolDispatcher: Send + Sync {
-    /// Get available tool definitions
-    fn tools(&self) -> Vec<ToolDef>;
+    /// Get available tool definitions (Arc for zero-copy sharing)
+    fn tools(&self) -> Arc<[Arc<ToolDef>]>;
 
     /// Execute a tool call
-    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String>;
+    ///
+    /// `ToolCallView` is a zero-allocation borrowed view:
+    ///   { id: &str, name: &str, args: &RawValue }
+    /// Use `call.parse_args::<T>()` to deserialize arguments.
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError>;
 }
 ```
 
@@ -634,6 +667,392 @@ pub trait AgentSessionStore: Send + Sync {
 
     /// List all sessions
     async fn list(&self) -> Result<Vec<SessionId>, AgentError>;
+}
+```
+
+---
+
+## Module: `meerkat_contracts`
+
+Wire types, capability model, and error contracts shared across all protocol surfaces.
+
+### CapabilityId
+
+Every capability known to Meerkat. Adding a variant forces updates to the registry, error mappings, and codegen templates:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(strum::EnumIter, strum::EnumString, strum::Display)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityId {
+    Sessions,           // Core agent loop, session lifecycle
+    Streaming,          // Event streaming during turns
+    StructuredOutput,   // Schema-validated JSON output
+    Hooks,              // Hook pipeline (always compiled, policy-controlled)
+    Builtins,           // Task, wait, datetime tools (always compiled, policy-controlled)
+    Shell,              // Shell execution tool (always compiled, policy-controlled)
+    Comms,              // Inter-agent communication (feature: "comms")
+    SubAgents,          // Sub-agent spawn/fork (feature: "sub-agents")
+    MemoryStore,        // Semantic memory indexing (feature: "memory-store")
+    SessionStore,       // Durable session persistence (feature: "session-store")
+    SessionCompaction,  // Context compaction (feature: "session-compaction")
+    Skills,             // Skill loading and injection (feature: "skills")
+}
+```
+
+### CapabilityRegistration
+
+Self-registration entry for capabilities. Feature-gated crates submit these via `inventory::submit!`. The `status_resolver` allows crates to check runtime config/policy to determine whether a capability is actually available (versus merely compiled in):
+
+```rust
+pub struct CapabilityRegistration {
+    pub id: CapabilityId,
+    pub description: &'static str,
+    pub scope: CapabilityScope,
+    pub requires_feature: Option<&'static str>,
+    pub prerequisites: &'static [CapabilityId],
+    pub status_resolver: Option<fn(&Config) -> CapabilityStatus>,
+}
+```
+
+### CapabilityScope
+
+Where a capability applies. Used in capability registrations to indicate whether a capability is available on all protocol surfaces or only specific ones:
+
+```rust
+pub enum CapabilityScope {
+    /// Available on all protocol surfaces (CLI, REST, MCP Server, JSON-RPC).
+    Universal,
+    /// Available only on specific protocols.
+    Extension { protocols: Cow<'static, [Protocol]> },
+}
+```
+
+### Protocol
+
+Protocol surface identifiers used in capability scoping and error projections:
+
+```rust
+pub enum Protocol {
+    Rpc,
+    Rest,
+    Mcp,
+    Cli,
+}
+```
+
+### CapabilityStatus
+
+Runtime status of a capability after build, config, and protocol resolution:
+
+```rust
+pub enum CapabilityStatus {
+    /// Compiled in, config-enabled, protocol supports it.
+    Available,
+
+    /// Compiled in but disabled by policy. The description is human-readable
+    /// because the resolution chain (factory flags -> build config -> tool policy)
+    /// cannot be captured by a single config path.
+    DisabledByPolicy { description: Cow<'static, str> },
+
+    /// Not compiled into this build (feature flag absent).
+    NotCompiled { feature: Cow<'static, str> },
+
+    /// This protocol surface doesn't support it.
+    NotSupportedByProtocol { reason: Cow<'static, str> },
+}
+```
+
+### ErrorCode
+
+Stable error codes for wire protocol, with projections to JSON-RPC codes, HTTP status, and CLI exit codes:
+
+```rust
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ErrorCode {
+    SessionNotFound,        // RPC: -32001, HTTP: 404, CLI: 10
+    SessionBusy,            // RPC: -32002, HTTP: 409, CLI: 11
+    SessionNotRunning,      // RPC: -32003, HTTP: 409, CLI: 12
+    ProviderError,          // RPC: -32010, HTTP: 502, CLI: 20
+    BudgetExhausted,        // RPC: -32011, HTTP: 429, CLI: 21
+    HookDenied,             // RPC: -32012, HTTP: 403, CLI: 22
+    AgentError,             // RPC: -32013, HTTP: 500, CLI: 30
+    CapabilityUnavailable,  // RPC: -32020, HTTP: 501, CLI: 40
+    SkillNotFound,          // RPC: -32021, HTTP: 404, CLI: 41
+    SkillResolutionFailed,  // RPC: -32022, HTTP: 422, CLI: 42
+    InvalidParams,          // RPC: -32602, HTTP: 400, CLI: 2
+    InternalError,          // RPC: -32603, HTTP: 500, CLI: 1
+}
+
+impl ErrorCode {
+    pub const fn jsonrpc_code(self) -> i32;
+    pub const fn http_status(self) -> u16;
+    pub const fn cli_exit_code(self) -> i32;
+    pub fn category(self) -> ErrorCategory;
+}
+```
+
+### WireError
+
+Canonical error envelope used by all surfaces:
+
+```rust
+pub struct WireError {
+    pub code: ErrorCode,
+    pub category: ErrorCategory,
+    pub message: Cow<'static, str>,
+    pub details: Option<serde_json::Value>,
+    pub capability_hint: Option<CapabilityHint>,
+}
+
+impl WireError {
+    pub fn new(code: ErrorCode, message: impl Into<Cow<'static, str>>) -> Self;
+    pub fn with_capability_hint(self, hint: CapabilityHint) -> Self;
+    pub fn with_details(self, details: serde_json::Value) -> Self;
+}
+
+impl From<SessionError> for WireError { ... }
+```
+
+`CapabilityHint` points the caller to the missing capability when `CapabilityUnavailable` is returned:
+
+```rust
+pub struct CapabilityHint {
+    pub capability_id: CapabilityId,
+    pub message: Cow<'static, str>,
+}
+```
+
+### ContractVersion
+
+Semver-style version embedded in events, capabilities response, SDK packages, and RPC handshake:
+
+```rust
+pub struct ContractVersion { major: u32, minor: u32, patch: u32 }
+
+impl ContractVersion {
+    pub const CURRENT: Self;  // Currently 0.1.0
+    pub fn is_compatible_with(&self, other: &Self) -> bool;
+}
+// + Display, FromStr, Copy, Ord
+```
+
+### Wire Request Fragments
+
+Composable request parameter groups. Protocol crates inline the fields they support and provide accessor methods returning the fragment type. No `#[serde(flatten)]`:
+
+```rust
+/// Core session creation parameters.
+pub struct CoreCreateParams {
+    pub prompt: String,
+    pub model: Option<String>,
+    pub provider: Option<Provider>,
+    pub max_tokens: Option<u32>,
+    pub system_prompt: Option<String>,
+}
+
+/// Structured output parameters.
+pub struct StructuredOutputParams {
+    pub output_schema: Option<OutputSchema>,
+    pub structured_output_retries: Option<u32>,
+}
+
+/// Comms parameters.
+pub struct CommsParams {
+    pub host_mode: bool,
+    pub comms_name: Option<String>,
+}
+
+/// Hook parameters.
+pub struct HookParams {
+    pub hooks_override: Option<HookRunOverrides>,
+}
+
+/// Skills parameters.
+pub struct SkillsParams {
+    pub skills_enabled: bool,
+    pub skill_references: Vec<String>,
+}
+```
+
+### OutputSchema
+
+Schema definition for structured output. Defined in `meerkat_core::types` and re-exported by the facade. Used in `StructuredOutputParams` and `RunResult`. Accepts both raw JSON schemas and wrapped schemas (with `name`, `strict`, `compat`, `format` fields). Providers receive a lowered schema suited to their API (Anthropic, OpenAI, Gemini).
+
+```rust
+pub struct OutputSchema {
+    /// The JSON schema that the output must conform to.
+    /// Normalized on construction (object types get `properties` and `required` keys).
+    pub schema: MeerkatSchema,
+    /// Optional name for the schema (used by some providers, e.g., OpenAI function calling).
+    pub name: Option<String>,
+    /// Strict mode: when true, the agent retries if the LLM output fails validation
+    /// against the schema. The number of retries is controlled by `structured_output_retries`.
+    pub strict: bool,
+    /// Provider compatibility mode for schema lowering.
+    pub compat: SchemaCompat,
+    /// Schema format version.
+    pub format: SchemaFormat,
+}
+
+impl OutputSchema {
+    pub fn new(schema: Value) -> Result<Self, SchemaError>;
+    pub fn with_name(self, name: impl Into<String>) -> Self;
+    pub fn strict(self) -> Self;
+    pub fn with_compat(self, compat: SchemaCompat) -> Self;
+    pub fn from_json_str(raw: &str) -> Result<Self, SchemaError>;
+    pub fn from_json_value(value: Value) -> Result<Self, SchemaError>;
+    /// Create from a Rust type via schemars (compile-time schema generation).
+    pub fn from_type<T: schemars::JsonSchema>() -> Result<Self, SchemaError>;
+}
+```
+
+### MeerkatSchema
+
+Wrapper around a JSON `Value` that enforces normalization (object types always have `properties` and `required` keys). Created via `MeerkatSchema::new(value)` which returns `Err(SchemaError::InvalidRoot)` if the root is not a JSON object.
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MeerkatSchema(Value);
+
+impl MeerkatSchema {
+    pub fn new(schema: Value) -> Result<Self, SchemaError>;
+    pub fn as_value(&self) -> &Value;
+}
+```
+
+### SchemaCompat
+
+Controls how the schema is lowered for providers that have schema restrictions:
+
+```rust
+pub enum SchemaCompat {
+    /// Allow lossy lowering (drop unsupported features silently). Default.
+    Lossy,
+    /// Reject schemas that cannot be represented exactly by the provider.
+    Strict,
+}
+```
+
+### SchemaFormat
+
+Schema format version. Currently only one version exists:
+
+```rust
+pub enum SchemaFormat {
+    /// Meerkat V1 format. Default.
+    MeerkatV1,
+}
+```
+
+### SchemaWarning
+
+Emitted during provider-specific schema lowering when features are dropped or adapted:
+
+```rust
+pub struct SchemaWarning {
+    pub provider: Provider,
+    pub path: String,
+    pub message: String,
+}
+```
+
+---
+
+## Module: `meerkat_core::skills`
+
+Skill system contracts. The `meerkat-skills` crate provides implementations.
+
+### SkillId
+
+Newtype identifier for type safety:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SkillId(pub String);
+
+impl Display for SkillId { ... }
+```
+
+### SkillScope
+
+Where a skill was discovered:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillScope {
+    Builtin,   // Embedded in a component crate via inventory
+    Project,   // .rkat/skills/
+    User,      // ~/.rkat/skills/
+}
+```
+
+### SkillDescriptor
+
+Metadata describing a skill:
+
+```rust
+pub struct SkillDescriptor {
+    pub id: SkillId,
+    pub name: String,
+    pub description: String,
+    pub scope: SkillScope,
+    /// Capability IDs required for this skill (as string forms of CapabilityId).
+    /// Using strings avoids circular dependency between meerkat-core and
+    /// meerkat-contracts. Resolved to typed IDs at runtime by meerkat-skills.
+    pub requires_capabilities: Vec<String>,
+}
+```
+
+### SkillDocument
+
+A loaded skill with its full content:
+
+```rust
+pub struct SkillDocument {
+    pub descriptor: SkillDescriptor,
+    pub body: String,
+    pub extensions: IndexMap<String, String>,
+}
+```
+
+### SkillError
+
+```rust
+pub enum SkillError {
+    NotFound { id: SkillId },
+    CapabilityUnavailable { id: SkillId, capability: String },
+    Ambiguous { reference: String, matches: Vec<SkillId> },
+    Load(Cow<'static, str>),
+    Parse(Cow<'static, str>),
+}
+```
+
+### SkillSource (trait)
+
+```rust
+#[async_trait]
+pub trait SkillSource: Send + Sync {
+    async fn list(&self) -> Result<Vec<SkillDescriptor>, SkillError>;
+    async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError>;
+}
+```
+
+### SkillEngine (trait)
+
+```rust
+#[async_trait]
+pub trait SkillEngine: Send + Sync {
+    /// Generate the skill inventory section for the system prompt.
+    async fn inventory_section(&self) -> Result<String, SkillError>;
+    /// Resolve skill references and render injection content.
+    async fn resolve_and_render(
+        &self,
+        references: &[String],
+        available_capabilities: &[String],
+    ) -> Result<String, SkillError>;
 }
 ```
 

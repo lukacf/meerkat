@@ -4,6 +4,10 @@
 
 **Current Status:** complete
 
+> **Note:** Detailed phase specifications (design rationale, code samples, acceptance
+> criteria, and architecture diagrams) are in
+> [docs/internal/plan-combined-roadmap.md](internal/plan-combined-roadmap.md).
+
 ## Phase 0 — Prompt Assembly Unification
 
 - [x] Extract `assemble_system_prompt` function — `meerkat/src/prompt_assembly.rs`

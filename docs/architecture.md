@@ -345,6 +345,55 @@ The core loop executes hooks at these points:
 Synchronous (`foreground`) patches are applied in-loop.
 Asynchronous (`background`) post-hook rewrites are event-only (`HookPatchPublished`) and do not retroactively mutate persisted session history.
 
+### Hooks Pipeline Architecture
+
+The `DefaultHookEngine` (in `meerkat-hooks/src/lib.rs`) processes hooks in a two-phase pipeline:
+
+1. **Foreground phase** -- hooks sorted by `(priority ASC, registration_index ASC)` execute sequentially. Each hook receives a `HookInvocation` containing the hook point, session ID, turn number, and point-specific context (LLM request, tool call, etc.). Hooks return a `RuntimeHookResponse` with an optional `HookDecision` (Allow/Deny) and optional `HookPatch` list. A `Deny` decision short-circuits remaining hooks immediately.
+
+2. **Background phase** -- if no deny occurred, background hooks are spawned as independent tokio tasks bounded by a `Semaphore` (`background_max_concurrency`). Pre-hooks in background mode are forced to observe-only (patches and deny decisions are dropped). Post-hooks in background mode publish `HookPatchEnvelope` records that are drained on the next `execute()` call.
+
+Three runtime adapters invoke the actual hook logic:
+- **In-process**: calls a registered `InProcessHookHandler` (Rust closure) directly.
+- **Command**: spawns an external process, writes `HookInvocation` as JSON to stdin, reads `RuntimeHookResponse` from stdout. Stream sizes are bounded by `payload_max_bytes`.
+- **HTTP**: POSTs `HookInvocation` JSON to a remote endpoint and parses the response. Response body is bounded by `payload_max_bytes`.
+
+Run-scoped overrides (`HookRunOverrides`) allow callers to disable specific hooks or inject additional entries for a single run without mutating the base configuration.
+
+### Sub-Agent Task Management
+
+Sub-agents are managed through the `SubAgentManager` (in `meerkat-core`) and the spawn/fork tools (in `meerkat-tools/src/builtin/sub_agent/`).
+
+**Spawn flow** (`agent_spawn`):
+1. The parent agent calls `agent_spawn` with a prompt, optional provider/model, tool access policy, and budget.
+2. `AgentSpawnTool` validates concurrency limits, nesting depth, provider/model against the allowlist, and prompt non-emptiness.
+3. A `FilteredDispatcher` wraps the parent's tool dispatcher if the child uses an `AllowList` or `DenyList` policy.
+4. An LLM client is created via `LlmClientFactory` for the resolved provider.
+5. A fresh session is created (no history inheritance). If comms is enabled, the child's prompt is enriched with parent communication context.
+6. `spawn_sub_agent_dyn()` registers the child in `SubAgentManager` and starts execution in a background tokio task.
+7. The parent receives the child's `OperationId` and name for tracking via `agent_status`.
+
+**Fork flow** (`agent_fork`) creates branches with full conversation history, splitting the parent's budget according to `ForkBudgetPolicy`.
+
+**Lifecycle**: children run independently. The parent polls `agent_status` to check completion. `agent_cancel` sends a cancellation signal. `SubAgentManager` enforces `ConcurrencyLimits` (max concurrent, max depth, max total).
+
+### Comms Transport Design
+
+The `meerkat-comms` crate provides inter-agent communication with a layered architecture:
+
+**Identity layer** (`identity.rs`): Ed25519 `Keypair`/`PubKey`/`Signature`. Every agent has a keypair. Messages are signed by the sender and verified by the receiver.
+
+**Trust layer** (`trust.rs`): `TrustedPeers` maintains a map of known peers (name, public key, address). Only messages from trusted peers are accepted.
+
+**Transport layer** (`transport/`): Three backends behind `PeerAddr`:
+- **UDS** (Unix Domain Sockets) -- local inter-process, lowest latency.
+- **TCP** -- cross-host communication.
+- **Inproc** (`InprocRegistry`) -- in-process channels for sub-agents in the same process. Uses a global registry; the sender looks up the peer by name, verifies the keypair signature, and delivers directly to the peer's inbox.
+
+**Wire format**: `Envelope` containing `{id, from, to, kind, sig}`. `MessageKind` variants: `Message` (fire-and-forget text), `Request`/`Response` (intent + params / in_reply_to + status + result), `Ack` (delivery confirmation). The `Router` handles serialization via `TransportCodec` (length-prefixed framing) and waits for ACK on non-response messages with a configurable timeout.
+
+**Agent integration**: `CommsToolDispatcher` wraps the base tool dispatcher via `wrap_with_comms()`, overlaying comms tools (`comms_send`, `comms_request`, `comms_response`, `comms_list_peers`) without modifying the `CompositeDispatcher`. The `Inbox` is drained at turn boundaries (step 8 in the agent loop), injecting received messages into the session.
+
 ### Data Flow Through Agent Loop
 
 ```

@@ -789,6 +789,327 @@ mod tests {
 
 ---
 
+## 5. Hooks (`hooks_example`)
+
+### What It Demonstrates
+
+How to use lifecycle hooks to run custom logic before/after tool execution or
+at turn boundaries. Hooks let you implement approval workflows, audit logging,
+or input sanitization without modifying agent code.
+
+### REST API Example
+
+Hooks can be provided per-request via the `hooks_override` field:
+
+```json
+{
+  "prompt": "Delete the temp files in /tmp/scratch",
+  "model": "claude-sonnet-4-5",
+  "enable_builtins": true,
+  "hooks_override": {
+    "entries": [
+      {
+        "id": "audit-log",
+        "point": "pre_tool_execution",
+        "mode": "blocking",
+        "command": ["python3", "audit_log.py"],
+        "timeout_ms": 5000
+      },
+      {
+        "id": "notify-slack",
+        "point": "post_tool_execution",
+        "mode": "background",
+        "command": ["curl", "-X", "POST", "https://hooks.slack.com/..."],
+        "timeout_ms": 10000
+      }
+    ],
+    "disable": []
+  }
+}
+```
+
+### JSON-RPC Example
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "Summarize today's logs",
+    "hooks_override": {
+      "entries": [
+        {
+          "id": "approve-shell",
+          "point": "pre_tool_execution",
+          "mode": "blocking",
+          "command": ["./approve.sh"],
+          "timeout_ms": 30000
+        }
+      ],
+      "disable": ["default-rate-limiter"]
+    }
+  }
+}
+```
+
+### Key Points
+
+- `entries` are appended after any config-file hooks. `disable` removes hooks
+  by ID before the merged list is evaluated.
+- `"blocking"` hooks must complete before the operation proceeds. A non-zero
+  exit code from a blocking hook causes a `hook_denied` error (RPC code -32004).
+- `"background"` hooks fire-and-forget; failures are logged but do not block.
+- Hook points: `pre_tool_execution`, `post_tool_execution`.
+
+See [Hooks documentation](./hooks.md) for the full `HookRunOverrides` schema
+and config-file hook registration.
+
+---
+
+## 6. Structured Output
+
+### What It Demonstrates
+
+How to extract structured data from LLM responses using JSON Schema. The agent
+runs an extraction turn that produces only schema-conformant JSON.
+
+### REST API Example
+
+```json
+{
+  "prompt": "Analyze this code review and extract findings",
+  "model": "claude-opus-4-6",
+  "output_schema": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "severity": {"type": "string", "enum": ["critical", "warning", "info"]},
+              "file": {"type": "string"},
+              "line": {"type": "integer"},
+              "message": {"type": "string"}
+            },
+            "required": ["severity", "file", "message"]
+          }
+        },
+        "summary": {"type": "string"}
+      },
+      "required": ["findings", "summary"]
+    },
+    "name": "code_review",
+    "strict": false,
+    "compat": "lossy",
+    "format": "meerkat_v1"
+  },
+  "structured_output_retries": 3
+}
+```
+
+Response:
+```json
+{
+  "session_id": "01936f8a-...",
+  "text": "{\"findings\":[{\"severity\":\"warning\",\"file\":\"main.rs\",\"line\":42,\"message\":\"Unused variable\"}],\"summary\":\"One minor issue found.\"}",
+  "turns": 1,
+  "tool_calls": 0,
+  "usage": {"input_tokens": 120, "output_tokens": 80, "total_tokens": 200},
+  "structured_output": {
+    "findings": [
+      {
+        "severity": "warning",
+        "file": "main.rs",
+        "line": 42,
+        "message": "Unused variable"
+      }
+    ],
+    "summary": "One minor issue found."
+  },
+  "schema_warnings": null
+}
+```
+
+### JSON-RPC Example
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "Extract the key entities from: 'Apple released the iPhone 16 in Cupertino'",
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "entities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "type": {"type": "string"}
+            },
+            "required": ["name", "type"]
+          }
+        }
+      },
+      "required": ["entities"]
+    },
+    "structured_output_retries": 2
+  }
+}
+```
+
+Note: `output_schema` can be provided as a raw JSON Schema (shown above) or as
+a wrapper object with explicit `name`, `strict`, `compat`, and `format` fields.
+
+### Key Points
+
+- When `output_schema` is provided, the `text` response field contains the
+  raw JSON string; the `structured_output` field contains the parsed value.
+- `structured_output_retries` (default: 2) controls how many times the agent
+  re-attempts extraction if the LLM output fails schema validation.
+- `schema_warnings` reports per-provider compatibility issues (e.g., keywords
+  stripped for Gemini).
+
+See [Structured Output documentation](./structured-output.md) for schema
+compatibility details across providers.
+
+---
+
+## 7. Memory and Compaction
+
+### What It Demonstrates
+
+How to enable semantic memory so the agent can index and search past
+conversation content. When compaction runs, older messages are summarized and
+indexed for retrieval via the `memory_search` tool.
+
+### JSON-RPC Example
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "You are a research assistant. Remember everything I tell you.",
+    "model": "claude-sonnet-4-5",
+    "enable_builtins": true,
+    "enable_memory": true
+  }
+}
+```
+
+Follow-up turns on the same session can use `memory_search` (exposed as a
+built-in tool when `enable_memory` is true):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "turn/start",
+  "params": {
+    "session_id": "01936f8a-...",
+    "prompt": "What did I tell you about the Rust borrow checker last week?"
+  }
+}
+```
+
+The agent will call the `memory_search` tool internally to retrieve relevant
+indexed content from earlier compacted turns.
+
+### Key Points
+
+- Requires the binary to be compiled with the `memory-store-session` feature.
+- Memory is per-session: indexed content is scoped to the session's history.
+- Compaction is triggered automatically based on `CompactionConfig` thresholds
+  (token count, message count, or turn count).
+- Use `capabilities/get` (RPC) or `GET /capabilities` (REST) to check if
+  `memory_store` is available in your build.
+
+---
+
+## 8. Sub-Agents
+
+### What It Demonstrates
+
+How to enable sub-agent tools so the main agent can fork or spawn child agents
+for parallel work. Sub-agents inherit the parent's tool dispatcher but run
+with their own session and token budget.
+
+### JSON-RPC Example
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "Research these three topics in parallel: Rust async, Go goroutines, Erlang processes",
+    "model": "claude-opus-4-6",
+    "enable_builtins": true,
+    "enable_subagents": true
+  }
+}
+```
+
+The agent gains access to sub-agent tools (`fork`, `spawn`) and can delegate
+subtasks. Results are collected back into the parent session.
+
+### Key Points
+
+- Requires the binary to be compiled with the `sub-agents` feature.
+- Sub-agents are disabled by default to prevent recursive spawning. The factory
+  automatically disables sub-agents and comms for child agents.
+- Use `enable_subagents: true` in `session/create` params (RPC) or via
+  `AgentBuildConfig.override_subagents` in code.
+- Sub-agents share the parent's LLM client factory but get their own session
+  store (in-memory by default).
+
+---
+
+## 9. Skills (Phase 3)
+
+### What It Demonstrates
+
+Skills are reusable, composable tool bundles that can be attached to a session.
+The skills system is defined in the contracts layer via `SkillsParams`.
+
+### Contract Types
+
+```rust
+pub struct SkillsParams {
+    pub skills_enabled: bool,           // Enable the skills system
+    pub skill_references: Vec<String>,  // Skill IDs to activate
+}
+```
+
+### REST/RPC Usage (planned)
+
+```json
+{
+  "prompt": "Analyze this codebase",
+  "skills_enabled": true,
+  "skill_references": ["code-review", "security-audit"]
+}
+```
+
+### Key Points
+
+- Skills are defined in `meerkat-contracts` as `SkillsParams` and are part of
+  the wire protocol, but the full runtime implementation is a Phase 3 feature.
+- Each skill reference maps to a registered skill bundle that provides tool
+  definitions, system prompt fragments, and configuration.
+- Active skill IDs are recorded in `SessionTooling.active_skills` for session
+  metadata tracking.
+
+---
+
 ## Summary
 
 | Example | Key Concept | When to Use This Pattern |
@@ -797,5 +1118,10 @@ mod tests {
 | `with_tools.rs` | Custom tools + AgentBuilder | Apps that need tool access |
 | `multi_turn_tools.rs` | Stateful tools + conversation | Complex workflows, assistants |
 | `comms_verbose.rs` | Inter-agent communication | Multi-agent systems |
+| Hooks | Lifecycle hooks | Approval workflows, audit logging |
+| Structured Output | JSON Schema extraction | Data extraction, form filling |
+| Memory/Compaction | Semantic memory + indexing | Long conversations, knowledge retention |
+| Sub-Agents | Parallel child agents | Task decomposition, parallel research |
+| Skills | Composable tool bundles | Reusable capability packages |
 
 Start with `simple.rs` to understand the basics, then progress to the others as your needs grow. The examples are designed to build on each other conceptually.

@@ -1,4 +1,11 @@
-# Future SDKs: Python and Node.js Bindings
+> **DEPRECATED:** This design document describes a PyO3/NAPI-RS native-binding
+> approach that was **never implemented**. The actual SDKs use JSON-RPC over a
+> subprocess (`rkat rpc`) instead. See the real SDK documentation:
+>
+> - **Python SDK:** [sdks/python/README.md](../sdks/python/README.md)
+> - **TypeScript SDK:** [sdks/typescript/README.md](../sdks/typescript/README.md)
+
+# Future SDKs: Python and Node.js Bindings (HISTORICAL)
 
 This document outlines the design for Python and Node.js/TypeScript SDKs that bind to the Meerkat Rust core. Both SDKs expose the same user-facing functionality as CLI, REST, and MCP interfaces.
 

@@ -266,9 +266,9 @@ let mut agent = AgentBuilder::new()
 
 | Model | Context | Best For |
 |-------|---------|----------|
-| `gpt-4o` | 128K | General purpose |
-| `gpt-4-turbo` | 128K | Complex tasks |
-| `gpt-3.5-turbo` | 16K | Simple, fast tasks |
+| `gpt-5.2` | 1M | General purpose, advanced reasoning (default) |
+| `gpt-5.2-pro` | 1M | Highest quality reasoning |
+| `gpt-5.1-codex-max` | 1M | Code generation, agentic coding |
 
 ### Gemini Models
 
@@ -477,3 +477,104 @@ export RUST_LOG=trace
 | `info` | Session lifecycle, turns, completions |
 | `debug` | Tool calls, responses, retries |
 | `trace` | Wire-level protocol details |
+
+## Memory and Compaction Configuration
+
+### Semantic Memory
+
+When the `memory-store-session` feature is enabled and memory is activated
+(`enable_memory` on `AgentFactory` or `override_memory` on `AgentBuildConfig`),
+the agent gains a `memory_search` tool backed by `HnswMemoryStore` (hnsw_rs + redb).
+Compacted conversation turns are automatically indexed into memory for later recall.
+
+Memory data is stored under `<store_path>/memory/`.
+
+### Compaction Config
+
+Compaction is controlled by `CompactionConfig` (defined in `meerkat-core/src/compact.rs`).
+The `DefaultCompactor` in `meerkat-session` uses these defaults:
+
+```toml
+# These values are compiled defaults; override programmatically via CompactionConfig.
+auto_compact_threshold = 100000   # Trigger when last_input_tokens >= this value
+recent_turn_budget = 4            # Number of recent complete turns to retain
+max_summary_tokens = 4096         # Max tokens for the compaction summary
+min_turns_between_compactions = 3 # Minimum turns between consecutive compactions
+```
+
+Compaction requires the `session-compaction` feature flag. When disabled,
+`SessionService` returns `SessionError::CompactionDisabled`.
+
+## Sub-Agent Configuration
+
+Sub-agent policy is configured under `[sub_agents]` in config files:
+
+```toml
+[sub_agents]
+default_provider = "inherit"   # "inherit" = use parent's provider
+default_model = "inherit"      # "inherit" = use parent's model
+
+[sub_agents.allowed_models]
+anthropic = ["claude-opus-4-6", "claude-sonnet-4-5"]
+openai = ["gpt-5.2"]
+gemini = ["gemini-3-flash-preview", "gemini-3-pro-preview"]
+```
+
+### Concurrency Limits
+
+`ConcurrencyLimits` (defined in `meerkat-core/src/ops.rs`) controls sub-agent
+resource usage. Defaults:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_depth` | `3` | Maximum sub-agent nesting depth |
+| `max_concurrent_ops` | `32` | Maximum concurrent operations (all types) |
+| `max_concurrent_agents` | `8` | Maximum concurrent sub-agents |
+| `max_children_per_agent` | `5` | Maximum children per parent agent |
+
+Sub-agents require the `sub-agents` feature flag. Enable per-request via
+`override_subagents` on `AgentBuildConfig` or `enable_subagents` on `AgentFactory`.
+
+## Comms Configuration
+
+Agent-to-agent communication is configured under `[comms]`:
+
+```toml
+[comms]
+mode = "inproc"                    # Transport: "inproc", "tcp", or "uds"
+address = "127.0.0.1:4200"        # Listen address (tcp/uds only)
+auto_enable_for_subagents = false  # Auto-enable comms for spawned sub-agents
+```
+
+Comms requires the `comms` feature flag. Enable at the factory level with
+`AgentFactory::comms(true)` and per-request with `host_mode` + `comms_name`
+on `AgentBuildConfig`.
+
+## Environment Variables (Complete Reference)
+
+### API Keys (RKAT_* takes precedence)
+
+| Variable | Fallback | Provider |
+|----------|----------|----------|
+| `RKAT_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` | Anthropic Claude |
+| `RKAT_OPENAI_API_KEY` | `OPENAI_API_KEY` | OpenAI GPT |
+| `RKAT_GEMINI_API_KEY` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` | Google Gemini |
+
+The `RKAT_*` variants take precedence over the provider-native names. This allows
+running Meerkat with dedicated keys separate from other tools.
+
+### Testing Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RKAT_TEST_CLIENT` | Set to `1` to enable test client mode | unset |
+| `ANTHROPIC_MODEL` | Model for Anthropic E2E tests | `claude-opus-4-6` |
+| `OPENAI_MODEL` | Model for OpenAI E2E tests | `gpt-5.2` |
+| `GEMINI_MODEL` | Model for Gemini E2E tests | `gemini-3-flash-preview` |
+
+### Runtime Variables
+
+| Variable | Description |
+|----------|-------------|
+| `RUST_LOG` | Logging level filter (see [Logging](#logging) above) |
+| `HOME` | Used to locate user-level config and skills (`~/.rkat/`) |

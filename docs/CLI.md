@@ -102,10 +102,10 @@ rkat run "What is the capital of France?"
 rkat run --model claude-opus-4-6 "Explain quantum computing"
 
 # Use OpenAI
-rkat run --model gpt-4o "Write a haiku about Rust"
+rkat run --model gpt-5.2 "Write a haiku about Rust"
 
 # Use Gemini
-rkat run --model gemini-2.0-flash "What are the benefits of async/await?"
+rkat run --model gemini-3-flash-preview "What are the benefits of async/await?"
 ```
 
 Output options:
@@ -533,7 +533,7 @@ rkat run --model claude-sonnet-4 --param thinking_budget=10000 "Solve this compl
 rkat run --model o3-mini --param reasoning_effort=high "Prove this theorem"
 
 # Deterministic output with seed
-rkat run --model gpt-4o --param seed=42 "Generate a random number"
+rkat run --model gpt-5.2 --param seed=42 "Generate a random number"
 ```
 
 ### Gemini Parameters
@@ -545,7 +545,7 @@ rkat run --model gpt-4o --param seed=42 "Generate a random number"
 
 ```bash
 # Gemini with thinking budget
-rkat run --model gemini-2.0-flash --param thinking_budget=5000 "Analyze this data"
+rkat run --model gemini-3-flash-preview --param thinking_budget=5000 "Analyze this data"
 ```
 
 ---
@@ -580,9 +580,9 @@ echo "$result" | jq -r '.text'
 
 ```bash
 # Same prompt to different providers
-rkat run --model claude-sonnet-4 "Explain monads in one sentence"
-rkat run --model gpt-4o "Explain monads in one sentence"
-rkat run --model gemini-2.0-flash "Explain monads in one sentence"
+rkat run --model claude-sonnet-4-5 "Explain monads in one sentence"
+rkat run --model gpt-5.2 "Explain monads in one sentence"
+rkat run --model gemini-3-flash-preview "Explain monads in one sentence"
 ```
 
 ### Using MCP Tools
@@ -650,7 +650,6 @@ done
 
 ## See Also
 
-- [Quickstart Guide](./quickstart.md) - Get started with Meerkat
 - [RPC Reference](./rpc.md) - JSON-RPC stdio server protocol
 - [Configuration Guide](./configuration.md) - Detailed configuration options
 - [Architecture](./architecture.md) - How Meerkat works

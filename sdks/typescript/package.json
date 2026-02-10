@@ -17,5 +17,8 @@
     "build": "tsc",
     "test": "node --test tests/"
   },
-  "license": "MIT OR Apache-2.0"
+  "license": "MIT OR Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^22"
+  }
 }

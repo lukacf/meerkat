@@ -1,0 +1,347 @@
+# Hooks
+
+Meerkat's hook system provides typed extension points within the agent loop for observation, guardrails, and content rewriting. Hooks fire at deterministic points during agent execution and support three runtimes: in-process, command (subprocess), and HTTP.
+
+## Hook Points
+
+The `HookPoint` enum defines 8 extension points (from `meerkat-core/src/hooks.rs`):
+
+| HookPoint | Classification | When it fires |
+|-----------|---------------|---------------|
+| `RunStarted` | pre | Start of `Agent::run()`, before any LLM call. |
+| `PreLlmRequest` | pre | Before each LLM streaming call. |
+| `PreToolExecution` | pre | Before each individual tool call is dispatched. |
+| `TurnBoundary` | pre | Between turns, after all tool results are collected. |
+| `PostLlmResponse` | post | After the LLM response is received. |
+| `PostToolExecution` | post | After each tool execution completes. |
+| `RunCompleted` | post | After a successful run completes. |
+| `RunFailed` | post | After a run fails with an error. |
+
+Classification is determined by the `is_pre()` and `is_post()` methods on `HookPoint`. Pre-points block loop progression in foreground mode; post-points publish results asynchronously in background mode.
+
+## Capabilities
+
+The `HookCapability` enum declares what a hook is allowed to do:
+
+| HookCapability | Purpose | Default failure policy |
+|----------------|---------|----------------------|
+| `Observe` | Read-only logging and metrics | `FailOpen` |
+| `Guardrail` | Can issue `Deny` decisions to block execution | `FailClosed` |
+| `Rewrite` | Can return `HookPatch` values to mutate data | `FailClosed` |
+
+Default failure policies are determined by `default_failure_policy()` in `meerkat-core/src/hooks.rs`. They can be overridden per-hook via the `failure_policy` field.
+
+## Execution Modes
+
+The `HookExecutionMode` enum controls whether a hook blocks the agent loop:
+
+| HookExecutionMode | Behavior |
+|-------------------|----------|
+| `Foreground` | Blocks loop progression. Decision and patches are applied synchronously. |
+| `Background` | Runs asynchronously. Patches are published via `HookPatchEnvelope`. |
+
+### Background hook constraints
+
+Background hooks have two safety constraints enforced at configuration validation time:
+
+1. **Pre-point background hooks must be observe-only.** A background hook on a `is_pre()` point with any capability other than `Observe` is rejected with `HookEngineError::InvalidConfiguration`.
+
+2. **Background hooks must use `FailOpen` policy.** A background hook with an effective policy of `FailClosed` is rejected with `HookEngineError::InvalidConfiguration`.
+
+Background hooks on post-points publish patches via `HookPatchEnvelope` (containing `revision`, `hook_id`, `point`, `patch`, `published_at`). These envelopes are drained and included in the `HookExecutionReport` on subsequent `execute()` calls.
+
+## Failure Policies
+
+The `HookFailurePolicy` enum determines behavior when a hook times out or encounters a runtime error:
+
+| HookFailurePolicy | On timeout | On runtime error |
+|-------------------|-----------|-----------------|
+| `FailOpen` | Logged as error, execution continues | Logged as error, execution continues |
+| `FailClosed` | Emits `Deny` with `HookReasonCode::Timeout` | Emits `Deny` with `HookReasonCode::RuntimeError` |
+
+The effective policy is resolved by `HookEntryConfig::effective_failure_policy()`:
+- If `failure_policy` is explicitly set on the entry, that value is used.
+- Otherwise, `default_failure_policy(capability)` is applied.
+
+## Decisions
+
+The `HookDecision` enum represents the outcome of hook execution:
+
+```rust
+pub enum HookDecision {
+    Allow,
+    Deny {
+        hook_id: HookId,
+        reason_code: HookReasonCode,
+        message: String,
+        payload: Option<Value>,  // optional structured data
+    },
+}
+```
+
+### Reason codes
+
+The `HookReasonCode` enum provides typed denial categories:
+
+| HookReasonCode | Meaning |
+|----------------|---------|
+| `PolicyViolation` | Business rule or policy constraint |
+| `SafetyViolation` | Content safety check |
+| `SchemaViolation` | Schema or format validation failure |
+| `Timeout` | Hook timed out (system-generated) |
+| `RuntimeError` | Hook execution failed (system-generated) |
+
+## Patches
+
+The `HookPatch` enum defines typed rewrite intents. Each variant is valid only at certain hook points:
+
+| HookPatch variant | Fields | Valid at |
+|-------------------|--------|---------|
+| `LlmRequest` | `max_tokens: Option<u32>`, `temperature: Option<f32>`, `provider_params: Option<Value>` | `PreLlmRequest` |
+| `AssistantText` | `text: String` | `PostLlmResponse` |
+| `ToolArgs` | `args: Value` | `PreToolExecution` |
+| `ToolResult` | `content: String`, `is_error: Option<bool>` | `PostToolExecution` |
+| `RunResult` | `text: String` | `RunCompleted` |
+
+## Runtimes
+
+The `DefaultHookEngine` (in `meerkat-hooks/src/lib.rs`) supports three runtimes, selected by the `kind` field of `HookRuntimeConfig`:
+
+### `in_process`
+
+Calls a registered Rust closure. Config:
+
+```json
+{ "type": "in_process", "name": "my-handler" }
+```
+
+The handler is registered at engine construction time via `DefaultHookEngine::with_in_process_handler()` or `register_in_process_handler()`. The handler type is:
+
+```rust
+type InProcessHookHandler = Arc<dyn Fn(HookInvocation) -> HandlerFuture + Send + Sync>;
+```
+
+### `command`
+
+Spawns a subprocess. The `HookInvocation` is serialized as JSON to stdin; the process must write a `RuntimeHookResponse` JSON object to stdout. Config:
+
+```json
+{
+  "type": "command",
+  "command": "python3",
+  "args": ["hooks/safety_check.py"],
+  "env": { "LOG_LEVEL": "debug" }
+}
+```
+
+The subprocess payload size is capped at `payload_max_bytes` (default 128 KiB). Non-zero exit codes produce `HookEngineError::ExecutionFailed`.
+
+### `http`
+
+Sends a POST request to a URL. The `HookInvocation` is the JSON body; the response must be a `RuntimeHookResponse` JSON object. Config:
+
+```json
+{
+  "type": "http",
+  "url": "https://hooks.example.com/safety",
+  "method": "POST",
+  "headers": { "Authorization": "Bearer $TOKEN" }
+}
+```
+
+The `method` defaults to `"POST"` if not specified. Response body size is capped at `payload_max_bytes`.
+
+## Runtime Hook Response
+
+All three runtimes return the same `RuntimeHookResponse` structure:
+
+```json
+{
+  "decision": { "decision": "deny", "hook_id": "my-guard", "reason_code": "policy_violation", "message": "blocked" },
+  "patches": [
+    { "patch_type": "tool_args", "args": { "sanitized": true } }
+  ]
+}
+```
+
+Both `decision` and `patches` are optional. An empty response `{}` is equivalent to "no opinion".
+
+## Invocation Payload
+
+Hooks receive a `HookInvocation` struct containing contextual data. Fields are populated based on the hook point:
+
+| Field | Type | Populated at |
+|-------|------|-------------|
+| `point` | `HookPoint` | Always |
+| `session_id` | `SessionId` | Always |
+| `turn_number` | `Option<u32>` | Most points |
+| `prompt` | `Option<String>` | `RunStarted` |
+| `error` | `Option<String>` | `RunFailed` |
+| `llm_request` | `Option<HookLlmRequest>` | `PreLlmRequest` |
+| `llm_response` | `Option<HookLlmResponse>` | `PostLlmResponse` |
+| `tool_call` | `Option<HookToolCall>` | `PreToolExecution` |
+| `tool_result` | `Option<HookToolResult>` | `PostToolExecution` |
+
+### Supporting types
+
+- **`HookLlmRequest`**: `max_tokens`, `temperature`, `provider_params`, `message_count`
+- **`HookLlmResponse`**: `assistant_text`, `tool_call_names`, `stop_reason`, `usage`
+- **`HookToolCall`**: `tool_use_id`, `name`, `args`
+- **`HookToolResult`**: `tool_use_id`, `name`, `content`, `is_error`
+
+## Priority Ordering and Deny Short-Circuiting
+
+Foreground hooks are sorted by `priority` (ascending), then by `registration_index` (ascending, for determinism when priorities are equal). Lower numeric priority values run first.
+
+When a foreground hook returns `Deny`:
+1. The denial is recorded as the merged decision.
+2. **All remaining foreground hooks are skipped** (short-circuit).
+3. **All background hooks are skipped** (they only fire when no foreground `Deny` occurred).
+
+This means a priority-1 guardrail that denies will prevent a priority-100 observer from running.
+
+## Configuration
+
+### Config file (`.rkat/config.toml`)
+
+Hook configuration lives under the `[hooks]` table. The `HooksConfig` struct:
+
+```toml
+[hooks]
+default_timeout_ms = 5000       # Default: 5000
+payload_max_bytes = 131072      # Default: 128 * 1024 (128 KiB)
+background_max_concurrency = 32 # Default: 32
+
+[[hooks.entries]]
+id = "safety-check"
+enabled = true
+point = "pre_tool_execution"
+mode = "foreground"
+capability = "guardrail"
+priority = 10
+# failure_policy = "fail_closed"  # Optional; defaults based on capability
+# timeout_ms = 10000              # Optional; overrides default_timeout_ms
+
+[hooks.entries.runtime]
+type = "command"
+command = "python3"
+args = ["hooks/safety_check.py"]
+```
+
+### `HookEntryConfig` fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | `HookId` | `"hook"` | Unique identifier for the hook |
+| `enabled` | `bool` | `true` | Whether the hook is active |
+| `point` | `HookPoint` | `TurnBoundary` | Which hook point to fire at |
+| `mode` | `HookExecutionMode` | `Foreground` | Foreground or background |
+| `capability` | `HookCapability` | `Observe` | What the hook can do |
+| `priority` | `i32` | `100` | Execution order (lower runs first) |
+| `failure_policy` | `Option<HookFailurePolicy>` | `None` | Override default failure policy |
+| `timeout_ms` | `Option<u64>` | `None` | Override default timeout |
+| `runtime` | `HookRuntimeConfig` | in_process/noop | Runtime configuration |
+
+### Layered config loading
+
+Hook entries from global config (`~/.rkat/config.toml`) and project config (`.rkat/config.toml`) are combined additively via `HooksConfig::append_entries_from()`. Global entries load first, then project entries are appended after them.
+
+## Per-Run Overrides
+
+The `HookRunOverrides` struct allows per-request hook customization:
+
+```rust
+pub struct HookRunOverrides {
+    pub entries: Vec<HookEntryConfig>,  // Additional hooks for this run
+    pub disable: Vec<HookId>,           // Hook IDs to disable for this run
+}
+```
+
+Disabled hooks are removed from the effective entry list. Override entries are appended after the filtered base entries. All resulting entries are re-validated.
+
+### CLI usage
+
+```bash
+# Inline JSON
+rkat run "prompt" --hooks-override-json '{"disable":["safety-check"]}'
+
+# From file
+rkat run "prompt" --hooks-override-file overrides.json
+```
+
+### Wire format (RPC/REST/MCP)
+
+Hook overrides are passed via `HookParams`:
+
+```json
+{
+  "hooks_override": {
+    "disable": ["safety-check"],
+    "entries": []
+  }
+}
+```
+
+## Agent Events
+
+The hook engine emits `AgentEvent` variants during execution (from `meerkat-core/src/agent/hook_impl.rs`):
+
+| Event | When |
+|-------|------|
+| `HookStarted` | A hook begins execution |
+| `HookCompleted` | A hook finishes successfully |
+| `HookFailed` | A hook encounters an error |
+| `HookDenied` | A hook returns a `Deny` decision |
+| `HookPatchPublished` | A background hook publishes a patch envelope |
+
+## SDK Usage
+
+### Registering an in-process hook
+
+```rust
+use meerkat_hooks::{DefaultHookEngine, InProcessHookHandler, RuntimeHookResponse};
+use meerkat_core::{HooksConfig, HookEntryConfig, HookId, HookPoint,
+                   HookCapability, HookRuntimeConfig};
+use std::sync::Arc;
+
+let mut config = HooksConfig::default();
+config.entries.push(HookEntryConfig {
+    id: HookId::new("my-guardrail"),
+    point: HookPoint::PreToolExecution,
+    capability: HookCapability::Guardrail,
+    priority: 10,
+    runtime: HookRuntimeConfig::new(
+        "in_process",
+        Some(serde_json::json!({"name": "my-handler"})),
+    )?,
+    ..Default::default()
+});
+
+let engine = DefaultHookEngine::new(config)
+    .with_in_process_handler(
+        "my-handler",
+        Arc::new(|invocation| {
+            Box::pin(async move {
+                // Inspect invocation.tool_call, return decision
+                Ok(RuntimeHookResponse::default())
+            })
+        }),
+    );
+```
+
+### Using hook overrides in AgentBuildConfig
+
+```rust
+use meerkat_core::HookRunOverrides;
+
+let overrides = HookRunOverrides {
+    disable: vec![HookId::new("noisy-observer")],
+    entries: vec![],
+};
+
+// Pass via AgentBuildConfig.hooks_override
+```
+
+## CODE ISSUES FOUND
+
+1. The embedded `hook-authoring` SKILL.md (registered in `meerkat-hooks/src/lib.rs`) describes "7 hook points" in its description field, but the actual `HookPoint` enum has 8 variants. The SKILL.md body also references non-existent hook point names (`PreTurnStart`, `PostTurnEnd`, `PreSessionCreate`) that do not match the actual enum variants.

@@ -74,9 +74,12 @@ Response:
       "name": "meerkat-rpc",
       "version": "0.1.0"
     },
+    "contract_version": "0.1.0",
     "methods": [
+      "initialize", "initialized",
       "session/create", "session/list", "session/read",
       "session/archive", "turn/start", "turn/interrupt",
+      "capabilities/get",
       "config/get", "config/set", "config/patch"
     ]
   }
@@ -87,7 +90,19 @@ Response:
 
 Create a new session and run the first turn.
 
-Request:
+Request (minimal):
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/create",
+  "params": {
+    "prompt": "What is Rust?"
+  }
+}
+```
+
+Request (full):
 ```json
 {
   "jsonrpc": "2.0",
@@ -96,14 +111,48 @@ Request:
   "params": {
     "prompt": "What is Rust?",
     "model": "claude-sonnet-4-5",
+    "provider": "anthropic",
     "max_tokens": 4096,
-    "system_prompt": "You are a helpful assistant."
+    "system_prompt": "You are a helpful assistant.",
+    "output_schema": {
+      "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+      "name": "answer"
+    },
+    "structured_output_retries": 2,
+    "hooks_override": null,
+    "enable_builtins": false,
+    "enable_shell": false,
+    "enable_subagents": false,
+    "enable_memory": false,
+    "host_mode": false,
+    "comms_name": null,
+    "provider_params": null
   }
 }
 ```
 
 Only `prompt` is required. All other fields are optional and fall back to
 config defaults.
+
+#### Parameter reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `prompt` | `string` | **(required)** | The user prompt to send to the agent |
+| `model` | `string \| null` | `"claude-sonnet-4-5"` | Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`) |
+| `provider` | `string \| null` | inferred from model | Provider name: `"anthropic"`, `"openai"`, `"gemini"`, `"other"` |
+| `max_tokens` | `u32 \| null` | config default | Max tokens per turn |
+| `system_prompt` | `string \| null` | `null` | Override system prompt |
+| `output_schema` | `object \| null` | `null` | JSON schema for structured output extraction (wrapper or raw schema) |
+| `structured_output_retries` | `u32` | `2` | Max retries for structured output validation |
+| `hooks_override` | `HookRunOverrides \| null` | `null` | Run-scoped hook overrides (entries to add, hook IDs to disable) |
+| `enable_builtins` | `bool` | `false` | Enable built-in tools (task management, etc.) |
+| `enable_shell` | `bool` | `false` | Enable shell tool (requires `enable_builtins`) |
+| `enable_subagents` | `bool` | `false` | Enable sub-agent tools (fork, spawn) |
+| `enable_memory` | `bool` | `false` | Enable semantic memory (`memory_search` tool + compaction indexing) |
+| `host_mode` | `bool` | `false` | Run in host mode for inter-agent comms (requires `comms_name`) |
+| `comms_name` | `string \| null` | `null` | Agent name for inter-agent communication |
+| `provider_params` | `object \| null` | `null` | Provider-specific parameters (e.g., thinking config, reasoning effort) |
 
 Response:
 ```json
@@ -117,8 +166,11 @@ Response:
     "tool_calls": 0,
     "usage": {
       "input_tokens": 50,
-      "output_tokens": 200
-    }
+      "output_tokens": 200,
+      "total_tokens": 250
+    },
+    "structured_output": null,
+    "schema_warnings": null
   }
 }
 ```
@@ -196,12 +248,85 @@ Request:
 {"jsonrpc":"2.0","id":7,"method":"turn/interrupt","params":{"session_id":"01936f8a-..."}}
 ```
 
+### capabilities/get
+
+Return runtime capabilities with status resolved against config. This lists
+every capability known to Meerkat with its current status (available, disabled
+by policy, not compiled, etc.).
+
+Request:
+```json
+{"jsonrpc":"2.0","id":8,"method":"capabilities/get"}
+```
+
+Response:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "contract_version": {"major": 0, "minor": 1, "patch": 0},
+    "capabilities": [
+      {
+        "id": "sessions",
+        "description": "Session lifecycle management",
+        "status": "Available"
+      },
+      {
+        "id": "structured_output",
+        "description": "Structured output extraction with JSON schema",
+        "status": "Available"
+      },
+      {
+        "id": "hooks",
+        "description": "Lifecycle hooks for tool and turn events",
+        "status": "Available"
+      },
+      {
+        "id": "builtins",
+        "description": "Built-in tools (task management)",
+        "status": {"DisabledByPolicy": {"description": "Disabled by config"}}
+      },
+      {
+        "id": "shell",
+        "description": "Shell command execution",
+        "status": {"DisabledByPolicy": {"description": "Disabled by config"}}
+      },
+      {
+        "id": "comms",
+        "description": "Inter-agent communication",
+        "status": {"NotCompiled": {"feature": "comms"}}
+      },
+      {
+        "id": "sub_agents",
+        "description": "Sub-agent forking and spawning",
+        "status": "Available"
+      },
+      {
+        "id": "memory_store",
+        "description": "Semantic memory indexing",
+        "status": "Available"
+      }
+    ]
+  }
+}
+```
+
+Possible `status` values:
+
+| Status | Shape | Meaning |
+|--------|-------|---------|
+| `Available` | `"Available"` | Compiled in, config-enabled, protocol supports it |
+| `DisabledByPolicy` | `{"DisabledByPolicy": {"description": "..."}}` | Compiled in but disabled by policy |
+| `NotCompiled` | `{"NotCompiled": {"feature": "..."}}` | Feature flag absent at compile time |
+| `NotSupportedByProtocol` | `{"NotSupportedByProtocol": {"reason": "..."}}` | This protocol surface does not support it |
+
 ### config/get
 
 Read current config.
 
 ```json
-{"jsonrpc":"2.0","id":8,"method":"config/get"}
+{"jsonrpc":"2.0","id":9,"method":"config/get"}
 ```
 
 ### config/set
@@ -209,7 +334,7 @@ Read current config.
 Replace the config.
 
 ```json
-{"jsonrpc":"2.0","id":9,"method":"config/set","params":{"agent":{"model":"gpt-5.2"}}}
+{"jsonrpc":"2.0","id":10,"method":"config/set","params":{"agent":{"model":"gpt-5.2"}}}
 ```
 
 ### config/patch
@@ -217,7 +342,7 @@ Replace the config.
 Merge-patch the config (RFC 7396).
 
 ```json
-{"jsonrpc":"2.0","id":10,"method":"config/patch","params":{"max_tokens":8192}}
+{"jsonrpc":"2.0","id":11,"method":"config/patch","params":{"max_tokens":8192}}
 ```
 
 ---

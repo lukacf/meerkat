@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a session and run the first turn
     let result = service.create_session(CreateSessionRequest {
-        model: "claude-sonnet-4".into(),
+        model: "claude-sonnet-4.5".into(),
         prompt: "What is the capital of France?".into(),
         system_prompt: Some("You are a helpful assistant.".into()),
         max_tokens: Some(1024),
@@ -394,7 +394,7 @@ use meerkat::AgentBuilder;
 
 // Used internally by AgentFactory -- prefer SessionService for new code
 let agent = AgentBuilder::new()
-    .model("claude-sonnet-4")
+    .model("claude-sonnet-4.5")
     .system_prompt("You are a helpful assistant.")
     .max_tokens_per_turn(4096)
     .temperature(0.7)
@@ -1203,9 +1203,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
+## Python and TypeScript SDKs
+
+In addition to the Rust library documented above, Meerkat provides first-party SDKs for Python
+and TypeScript. Both SDKs communicate with a local `rkat rpc` subprocess over JSON-RPC 2.0
+(newline-delimited JSON on stdin/stdout) -- no native bindings are required.
+
+### Python SDK (`meerkat-sdk`)
+
+- **Package:** `meerkat-sdk` (install via `pip install sdks/python`)
+- **Python:** >= 3.10, zero runtime dependencies
+- **Docs:** [sdks/python/README.md](../sdks/python/README.md)
+
+Provides `MeerkatClient` with async session lifecycle (create, turn, interrupt, list, archive),
+event streaming, and capability discovery.
+
+### TypeScript SDK (`@meerkat/sdk`)
+
+- **Package:** `@meerkat/sdk` (install via `npm install @meerkat/sdk`)
+- **Node.js:** >= 18
+- **Docs:** [sdks/typescript/README.md](../sdks/typescript/README.md)
+
+Provides `MeerkatClient` with the same session lifecycle API, typed event streaming via
+async iterators, and full TypeScript type definitions.
+
+---
+
 ## See Also
 
-- [Quickstart Guide](./quickstart.md) - Getting started with the CLI
 - [Architecture](./architecture.md) - System design and internals
 - [CAPABILITY_MATRIX.md](./CAPABILITY_MATRIX.md) - Build profiles, error codes, feature behavior
 - [SESSION_CONTRACTS.md](./SESSION_CONTRACTS.md) - Session lifecycle operational contracts

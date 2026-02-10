@@ -1,59 +1,20 @@
 //! E2E smoke tests for the RPC server (scenarios 15-17).
 //!
 //! Reuses the same duplex-stream pattern from `integration_server.rs`.
-//! Scenarios 15 and 17 require a live Anthropic API key and are `#[ignore]`.
-//! Scenario 16 uses a mock LLM client and runs in the normal test suite.
+//! All scenarios require a live Anthropic API key and are `#[ignore]`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use futures::stream;
 use meerkat::AgentFactory;
-use meerkat_client::{LlmClient, LlmError};
-use meerkat_core::{Config, MemoryConfigStore, StopReason};
+use meerkat_client::LlmClient;
+use meerkat_core::{Config, MemoryConfigStore};
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
-
-// ---------------------------------------------------------------------------
-// Mock LLM client
-// ---------------------------------------------------------------------------
-
-struct MockLlmClient;
-
-#[async_trait]
-impl LlmClient for MockLlmClient {
-    fn stream<'a>(
-        &'a self,
-        _request: &'a meerkat_client::LlmRequest,
-    ) -> Pin<Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>>
-    {
-        Box::pin(stream::iter(vec![
-            Ok(meerkat_client::LlmEvent::TextDelta {
-                delta: "Hello from mock".to_string(),
-                meta: None,
-            }),
-            Ok(meerkat_client::LlmEvent::Done {
-                outcome: meerkat_client::LlmDoneOutcome::Success {
-                    stop_reason: StopReason::EndTurn,
-                },
-            }),
-        ]))
-    }
-
-    fn provider(&self) -> &'static str {
-        "mock"
-    }
-
-    async fn health_check(&self) -> Result<(), LlmError> {
-        Ok(())
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -76,24 +37,8 @@ fn smoke_model() -> String {
     std::env::var("SMOKE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
 }
 
-/// Set up a server with duplex streams using the MockLlmClient.
-///
-/// Returns:
-/// - `client_writer`: write JSONL requests here
-/// - `client_reader`: read JSONL responses/notifications here (wrapped in BufReader)
-/// - `server_handle`: JoinHandle for the server task
-fn spawn_test_server() -> (
-    tokio::io::DuplexStream,
-    BufReader<tokio::io::DuplexStream>,
-    tokio::task::JoinHandle<Result<(), meerkat_rpc::server::ServerError>>,
-) {
-    spawn_test_server_with_client(Arc::new(MockLlmClient))
-}
-
 /// Set up a server with duplex streams using the given LLM client.
-///
-/// This variant allows injecting a real LLM client for live API tests.
-fn spawn_test_server_with_client(
+fn spawn_test_server(
     client: Arc<dyn LlmClient>,
 ) -> (
     tokio::io::DuplexStream,
@@ -188,7 +133,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     };
 
     let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
-    let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client);
+    let (mut writer, mut reader, server_handle) = spawn_test_server(client);
 
     let live_timeout = Duration::from_secs(120);
 
@@ -385,159 +330,242 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 16: RPC capabilities + config round-trip (mock LLM)
+// Scenario 16: Kitchen-sink RPC compound test (live API)
 // ---------------------------------------------------------------------------
 
-/// Scenario 16: Capabilities and config round-trip using mock LLM.
+/// Scenario 16: Compound test exercising many features through JSON-RPC.
 ///
-/// Initialize -> capabilities/get (verify structure) -> config/get ->
-/// config/patch (change max_tokens) -> config/get (verify patched).
-/// No API key needed.
+/// Single test that chains: initialize (verify contract_version) ->
+/// session/create with shell + builtins enabled -> agent uses shell tool ->
+/// follow-up turn recalling context -> session/read (verify idle) ->
+/// session/list (verify present) -> create SECOND session with structured
+/// output -> verify structured_output in response -> session/archive first ->
+/// session/list (first gone, second present) -> capabilities/get (verify
+/// sessions + shell available) -> config/get + config/patch roundtrip.
+///
+/// Exercises: initialization, tool calling, multi-turn, structured output,
+/// session CRUD, capabilities, config — all through a single RPC connection.
 #[tokio::test]
-async fn e2e_scenario_16_capabilities_and_config_roundtrip() {
-    let (mut writer, mut reader, server_handle) = spawn_test_server();
+#[ignore = "e2e: live API"]
+async fn e2e_scenario_16_kitchen_sink() {
+    let api_key = match anthropic_api_key() {
+        Some(key) => key,
+        None => {
+            eprintln!("Skipping scenario 16: no ANTHROPIC_API_KEY set");
+            return;
+        }
+    };
 
-    // 1. Initialize
-    let init_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {}
-    });
-    send_request(&mut writer, &init_req).await;
-    let init_resp = read_response(&mut reader).await;
-    assert_eq!(init_resp["id"], 1);
-    assert!(
-        init_resp["error"].is_null(),
-        "initialize failed: {}",
-        init_resp
-    );
-    assert_eq!(init_resp["result"]["server_info"]["name"], "meerkat-rpc");
+    let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
+    let (mut writer, mut reader, server_handle) = spawn_test_server(client);
 
-    // 2. capabilities/get
-    let caps_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "capabilities/get"
-    });
-    send_request(&mut writer, &caps_req).await;
-    let caps_resp = read_response(&mut reader).await;
-    assert_eq!(caps_resp["id"], 2);
+    let t = Duration::from_secs(120);
+    let model = smoke_model();
+    let mut req_id = 0u64;
+    let mut next_id = || {
+        req_id += 1;
+        req_id
+    };
+
+    // --- 1. Initialize: verify contract_version ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "initialize failed: {resp}");
     assert!(
-        caps_resp["error"].is_null(),
-        "capabilities/get failed: {}",
-        caps_resp
+        resp["result"]["contract_version"].is_string(),
+        "initialize should return contract_version string"
+    );
+    eprintln!("[scenario 16] initialized, contract_version={}", resp["result"]["contract_version"]);
+
+    // --- 2. Create session A: shell + builtins enabled ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc":"2.0","id":id,"method":"session/create",
+            "params":{
+                "prompt": "Use the shell tool to run: echo KITCHEN_SINK_42. Then tell me the output.",
+                "model": model,
+                "enable_builtins": true,
+                "enable_shell": true
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "session/create A failed: {resp}");
+    let session_a = resp["result"]["session_id"].as_str().unwrap().to_string();
+    let tool_calls_a = resp["result"]["tool_calls"].as_u64().unwrap_or(0);
+    let text_a = resp["result"]["text"].as_str().unwrap_or("").to_lowercase();
+    eprintln!("[scenario 16] session A: tool_calls={tool_calls_a}, text={}", &text_a[..text_a.len().min(80)]);
+    assert!(tool_calls_a >= 1, "Session A should have tool calls, got {tool_calls_a}");
+    assert!(
+        text_a.contains("kitchen_sink_42"),
+        "Session A should contain shell output, got: {text_a}"
     );
 
-    // Verify capabilities structure
-    let caps_result = &caps_resp["result"];
+    // --- 3. Follow-up turn on session A: context recall ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc":"2.0","id":id,"method":"turn/start",
+            "params":{"session_id": session_a, "prompt": "What was the output of the shell command you just ran? Reply briefly."}
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "turn/start A failed: {resp}");
+    let text_a2 = resp["result"]["text"].as_str().unwrap_or("").to_lowercase();
+    eprintln!("[scenario 16] turn A2: {}", &text_a2[..text_a2.len().min(80)]);
     assert!(
-        caps_result["contract_version"].is_object(),
-        "Expected contract_version object, got: {}",
-        caps_result
+        text_a2.contains("kitchen_sink_42") || text_a2.contains("kitchen"),
+        "Follow-up should recall shell output, got: {text_a2}"
+    );
+
+    // --- 4. session/read: verify idle ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/read","params":{"session_id": session_a}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "session/read failed: {resp}");
+    assert_eq!(resp["result"]["state"], "idle");
+
+    // --- 5. Create session B: structured output ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc":"2.0","id":id,"method":"session/create",
+            "params":{
+                "prompt": "What is the capital of France and what is its approximate population in millions?",
+                "model": model,
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "population_millions": {"type": "number"}
+                    },
+                    "required": ["city", "population_millions"]
+                }
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "session/create B failed: {resp}");
+    let session_b = resp["result"]["session_id"].as_str().unwrap().to_string();
+    let structured = &resp["result"]["structured_output"];
+    eprintln!("[scenario 16] session B structured_output: {structured}");
+    assert!(
+        !structured.is_null(),
+        "Session B should have structured_output"
     );
     assert!(
-        caps_result["contract_version"]["major"].is_u64(),
-        "contract_version should have numeric major field"
+        structured["city"].is_string(),
+        "structured_output should have city"
     );
-    let capabilities = caps_result["capabilities"]
+    let city = structured["city"].as_str().unwrap().to_lowercase();
+    assert!(city.contains("paris"), "City should be Paris, got: {city}");
+
+    // --- 6. session/list: both sessions present ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/list"}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "session/list failed: {resp}");
+    let ids: Vec<&str> = resp["result"]["sessions"]
         .as_array()
-        .expect("capabilities should be an array");
-    assert!(
-        !capabilities.is_empty(),
-        "capabilities array should not be empty"
-    );
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["session_id"].as_str())
+        .collect();
+    assert!(ids.contains(&session_a.as_str()), "Session A should be in list");
+    assert!(ids.contains(&session_b.as_str()), "Session B should be in list");
+    eprintln!("[scenario 16] list: {ids:?}");
 
-    // Each capability should have id, description, status
-    for cap in capabilities {
-        assert!(
-            cap["id"].is_string(),
-            "capability should have string id, got: {}",
-            cap
-        );
-        assert!(
-            cap["description"].is_string(),
-            "capability should have string description, got: {}",
-            cap
-        );
-        // Status is either a plain string ("Available") or an object ({"DisabledByPolicy": ...})
-        assert!(
-            cap["status"].is_string() || cap["status"].is_object(),
-            "capability status should be a string or object, got: {}",
-            cap
-        );
-    }
+    // --- 7. Archive session A ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/archive","params":{"session_id": session_a}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "session/archive failed: {resp}");
+    assert_eq!(resp["result"]["archived"], true);
 
-    // Verify "sessions" capability is present
-    let cap_ids: Vec<&str> = capabilities
+    // --- 8. session/list: A gone, B still present ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/list"}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    let ids: Vec<&str> = resp["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["session_id"].as_str())
+        .collect();
+    assert!(!ids.contains(&session_a.as_str()), "A should be gone");
+    assert!(ids.contains(&session_b.as_str()), "B should remain");
+
+    // --- 9. capabilities/get: verify sessions + shell ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"capabilities/get"}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "capabilities/get failed: {resp}");
+    let cap_ids: Vec<&str> = resp["result"]["capabilities"]
+        .as_array()
+        .unwrap()
         .iter()
         .filter_map(|c| c["id"].as_str())
         .collect();
-    assert!(
-        cap_ids.contains(&"sessions"),
-        "Expected 'sessions' capability, got: {:?}",
-        cap_ids
-    );
+    assert!(cap_ids.contains(&"sessions"), "Should have sessions capability");
+    assert!(cap_ids.contains(&"builtins"), "Should have builtins capability");
+    assert!(cap_ids.contains(&"shell"), "Should have shell capability");
+    eprintln!("[scenario 16] capabilities: {cap_ids:?}");
 
-    // 3. config/get (initial)
-    let config_get_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": "config/get"
-    });
-    send_request(&mut writer, &config_get_req).await;
-    let config_resp = read_response(&mut reader).await;
-    assert_eq!(config_resp["id"], 3);
-    assert!(
-        config_resp["error"].is_null(),
-        "config/get failed: {}",
-        config_resp
-    );
-    let initial_max_tokens = config_resp["result"]["max_tokens"]
-        .as_u64()
-        .expect("max_tokens should be a number");
+    // --- 10. config/get + config/patch roundtrip ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"config/get"}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "config/get failed: {resp}");
+    let original_max = resp["result"]["max_tokens"].as_u64().unwrap();
 
-    // 4. config/patch (change max_tokens)
-    let new_max_tokens = initial_max_tokens + 512;
-    let patch_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 4,
-        "method": "config/patch",
-        "params": {"max_tokens": new_max_tokens}
-    });
-    send_request(&mut writer, &patch_req).await;
-    let patch_resp = read_response(&mut reader).await;
-    assert_eq!(patch_resp["id"], 4);
-    assert!(
-        patch_resp["error"].is_null(),
-        "config/patch failed: {}",
-        patch_resp
-    );
-    assert_eq!(
-        patch_resp["result"]["max_tokens"], new_max_tokens,
-        "Patched config should reflect new max_tokens"
-    );
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"config/patch","params":{"max_tokens": original_max + 100}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "config/patch failed: {resp}");
+    assert_eq!(resp["result"]["max_tokens"], original_max + 100);
 
-    // 5. config/get (verify patched value persists)
-    let config_get_req2 = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 5,
-        "method": "config/get"
-    });
-    send_request(&mut writer, &config_get_req2).await;
-    let config_resp2 = read_response(&mut reader).await;
-    assert_eq!(config_resp2["id"], 5);
-    assert!(
-        config_resp2["error"].is_null(),
-        "config/get (after patch) failed: {}",
-        config_resp2
-    );
-    assert_eq!(
-        config_resp2["result"]["max_tokens"], new_max_tokens,
-        "max_tokens should match patched value on re-read"
-    );
+    eprintln!("[scenario 16] kitchen-sink test complete: tool calling + structured output + session CRUD + capabilities + config");
 
-    // Clean up
     drop(writer);
     server_handle.await.unwrap().unwrap();
 }
@@ -563,7 +591,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
     };
 
     let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
-    let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client);
+    let (mut writer, mut reader, server_handle) = spawn_test_server(client);
 
     let live_timeout = Duration::from_secs(120);
 

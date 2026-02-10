@@ -378,9 +378,10 @@ mod scenario_01_multi_provider {
             eprintln!("[scenario 1] Skipping Gemini: no API key");
         }
 
-        if !ran_any {
-            eprintln!("[scenario 1] Skipping entirely: no provider API keys available");
-        }
+        assert!(
+            ran_any,
+            "At least one provider API key must be available for scenario 1"
+        );
     }
 }
 
@@ -532,40 +533,30 @@ mod scenario_03_structured_output {
             result.tool_calls
         );
 
-        if let Some(ref so) = result.structured_output {
-            let files = so.get("files").and_then(|f| f.as_array());
+        let so = result
+            .structured_output
+            .as_ref()
+            .expect("structured_output must be present — extraction turn is mandatory");
+
+        let files = so
+            .get("files")
+            .and_then(|f| f.as_array())
+            .expect("Structured output must have a 'files' array");
+        assert!(!files.is_empty(), "Files array must not be empty: {:?}", so);
+
+        for file in files {
             assert!(
-                files.is_some(),
-                "Structured output should have a 'files' array: {:?}",
-                so
+                file.get("name").is_some(),
+                "Each file must have a 'name' field: {:?}",
+                file
             );
-            let files = files.unwrap();
             assert!(
-                !files.is_empty(),
-                "Files array should not be empty: {:?}",
-                so
-            );
-            for file in files {
-                assert!(
-                    file.get("name").is_some(),
-                    "Each file should have a 'name' field: {:?}",
-                    file
-                );
-                assert!(
-                    file.get("size").is_some(),
-                    "Each file should have a 'size' field: {:?}",
-                    file
-                );
-            }
-            eprintln!("[scenario 3] Structured output validated: {} files", files.len());
-        } else {
-            // Some models may not produce structured output reliably; log but
-            // don't fail hard since extraction is best-effort with some LLMs.
-            eprintln!(
-                "[scenario 3] WARNING: structured_output was None. text={}",
-                result.text.trim()
+                file.get("size").is_some(),
+                "Each file must have a 'size' field: {:?}",
+                file
             );
         }
+        eprintln!("[scenario 3] Structured output validated: {} files", files.len());
     }
 }
 
@@ -575,7 +566,6 @@ mod scenario_03_structured_output {
 
 mod scenario_04_sub_agent {
     use super::*;
-    use meerkat::{ConcurrencyLimits, SpawnSpec};
 
     #[tokio::test]
     #[ignore = "e2e: live API"]
@@ -585,80 +575,56 @@ mod scenario_04_sub_agent {
             return;
         };
 
-        let llm_client = Arc::new(AnthropicClient::new(
-            anthropic_api_key().unwrap(),
-        ).unwrap());
-        let llm_adapter = Arc::new(self::LlmClientAdapter::new(llm_client, smoke_model()));
-        let tools = Arc::new(EmptyToolDispatcher);
-        let (_store, store_adapter, _temp_dir2) = create_temp_store().await;
+        // Use AgentFactory with subagents enabled — the agent gets the
+        // agent_spawn/agent_fork/agent_status/agent_list tools and must
+        // actually use them to complete the prompt.
+        let temp_dir = TempDir::new().unwrap();
+        let factory = AgentFactory::new(temp_dir.path().join("sessions"))
+            .builtins(true)
+            .subagents(true)
+            .project_root(temp_dir.path());
 
-        let agent = AgentBuilder::new()
-            .model(smoke_model())
-            .max_tokens_per_turn(512)
-            .system_prompt("You are a helpful assistant that can spawn sub-agents.")
-            .concurrency_limits(ConcurrencyLimits {
-                max_depth: 3,
-                max_concurrent_ops: 10,
-                max_concurrent_agents: 5,
-                max_children_per_agent: 3,
-            })
-            .build(llm_adapter, tools, store_adapter)
-            .await;
-
-        // Test spawn - "pros" sub-agent
-        let spec_pros = SpawnSpec {
-            prompt: "List 2 pros of Rust.".to_string(),
-            context: ContextStrategy::FullHistory,
-            tool_access: ToolAccessPolicy::Inherit,
-            budget: BudgetLimits {
-                max_tokens: Some(500),
-                max_duration: None,
-                max_tool_calls: Some(3),
-            },
-            allow_spawn: false,
-            system_prompt: Some("You analyze pros of topics.".to_string()),
-        };
-
-        let op_id_pros = agent.spawn(spec_pros).await.unwrap();
-        assert!(
-            !op_id_pros.to_string().is_empty(),
-            "Pros spawn should return an operation ID"
+        let config = Config::default();
+        let mut build_config = AgentBuildConfig::new(smoke_model());
+        build_config.system_prompt = Some(
+            "You are an orchestrator. When asked to analyze something, \
+             use agent_spawn to delegate sub-tasks. After spawning, \
+             use agent_status to check results. Be brief."
+                .to_string(),
         );
 
-        // Test spawn - "cons" sub-agent
-        let spec_cons = SpawnSpec {
-            prompt: "List 2 cons of Rust.".to_string(),
-            context: ContextStrategy::FullHistory,
-            tool_access: ToolAccessPolicy::Inherit,
-            budget: BudgetLimits {
-                max_tokens: Some(500),
-                max_duration: None,
-                max_tool_calls: Some(3),
-            },
-            allow_spawn: false,
-            system_prompt: Some("You analyze cons of topics.".to_string()),
-        };
+        let mut agent = factory
+            .build_agent(build_config, &config)
+            .await
+            .expect("Sub-agent factory should build");
 
-        let op_id_cons = agent.spawn(spec_cons).await.unwrap();
-        assert!(
-            !op_id_cons.to_string().is_empty(),
-            "Cons spawn should return an operation ID"
-        );
-
-        // Verify the two IDs are distinct
-        assert_ne!(
-            op_id_pros.to_string(),
-            op_id_cons.to_string(),
-            "Two spawns should produce different operation IDs"
-        );
+        let result = agent
+            .run(
+                "Spawn a sub-agent to answer: what is 2+2? \
+                 Then check its status with agent_status and tell me the result."
+                    .to_string(),
+            )
+            .await
+            .expect("Sub-agent orchestration should succeed");
 
         eprintln!(
-            "[scenario 4] Spawned sub-agents: pros={}, cons={}",
-            op_id_pros, op_id_cons
+            "[scenario 4] tool_calls={}, turns={}, text={}",
+            result.tool_calls,
+            result.turns,
+            &result.text[..result.text.len().min(120)]
         );
 
-        // Verify depth tracking
-        assert_eq!(agent.depth(), 0, "Parent agent depth should be 0");
+        assert!(
+            result.tool_calls >= 2,
+            "Should have called agent_spawn + agent_status (at least 2 tool calls), got {}",
+            result.tool_calls
+        );
+        let text_lower = result.text.to_lowercase();
+        assert!(
+            text_lower.contains('4') || text_lower.contains("four"),
+            "Should relay the sub-agent's answer (4), got: {}",
+            result.text
+        );
     }
 }
 
@@ -1417,23 +1383,21 @@ mod scenario_10_memory {
             r5.text.trim()
         );
 
-        // The memory_search tool should have been called
-        // Note: If compaction didn't fire (threshold not reached), the agent
-        // may answer from context instead of memory. Both are valid outcomes.
-        if r5.tool_calls > 0 {
-            eprintln!("[scenario 10] memory_search tool was called");
-        } else {
-            eprintln!(
-                "[scenario 10] memory_search tool was NOT called \
-                 (compaction may not have fired yet)"
-            );
-        }
+        // The memory_search tool must have been called. If compaction didn't
+        // fire the test configuration is wrong (threshold too high).
+        assert!(
+            r5.tool_calls > 0,
+            "memory_search tool must be called — compaction should have discarded \
+             early turns and the agent should search memory to recall them. \
+             Got 0 tool_calls. text={}",
+            r5.text
+        );
+        eprintln!("[scenario 10] memory_search tool was called ({} tool calls)", r5.tool_calls);
 
-        // Regardless of how the agent found the answer, it should mention AURORA
         let text5_lower = r5.text.to_lowercase();
         assert!(
-            text5_lower.contains("aurora") || text5_lower.contains("codename"),
-            "Agent should recall the project codename: {}",
+            text5_lower.contains("aurora"),
+            "Agent must recall the project codename AURORA from memory: {}",
             r5.text
         );
     }
@@ -1533,37 +1497,7 @@ mod scenario_19_multi_turn_context {
     }
 }
 
-// ============================================================================
-// SCENARIO 20: Comms (alias for scenario 8 — included in numbering)
-// ============================================================================
-
-// Scenario 20 is the comms test. In the plan, scenarios 19-21 from the Python
-// SDK surface are mapped to the Rust SDK file. Since scenario 20 is the comms
-// test and is already covered by scenario 8 above, we create a thin alias that
-// re-runs the same pattern (gated behind the comms feature).
-
-#[cfg(feature = "comms")]
-mod scenario_20_comms {
-    // Scenario 20 is functionally identical to scenario 8. The comms exchange
-    // test is already covered in scenario_08_comms above. This module exists
-    // to maintain the numbering from the plan.
-    //
-    // If a distinct scenario is needed in the future, it can be expanded here.
-
-    #[tokio::test]
-    #[ignore = "e2e: live API"]
-    async fn e2e_smoke_comms_scenario_20() {
-        // Delegate to scenario 8. Since both are in the same test binary and
-        // gated behind the same feature, this is a simple re-run guard.
-        let Some(_api_key) = super::anthropic_api_key() else {
-            eprintln!("Skipping scenario 20: missing ANTHROPIC_API_KEY");
-            return;
-        };
-        eprintln!(
-            "[scenario 20] Comms exchange is covered by scenario 8 (e2e_smoke_comms_exchange)"
-        );
-    }
-}
+// Scenario 20 removed — was a no-op alias for scenario 8.
 
 // ============================================================================
 // SCENARIO 21: SDK Builder — custom profile build + codegen
@@ -1621,76 +1555,61 @@ exclude = ["mcp"]
         std::fs::write(&profile_path, profile_content)
             .expect("Should write profile TOML");
 
-        // Run the build.py with --check-only if available, or just verify it
-        // parses without error. We do NOT run a full build here since that
-        // would compile the entire workspace; instead we verify the script
-        // can at least parse our profile.
+        // Run the build.py with the profile manifest. The script takes a
+        // positional argument (the TOML path). This will attempt a real build
+        // which includes: feature resolution, cargo build, schema emission,
+        // codegen, and bundle manifest.
+        let workspace_root = build_py
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .expect("workspace root");
+
         let output = tokio::process::Command::new("python3")
             .arg(build_py.to_str().unwrap())
-            .arg("--profile")
             .arg(profile_path.to_str().unwrap())
-            .arg("--dry-run")
-            .current_dir(
-                build_py
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .and_then(|p| p.parent())
-                    .unwrap_or(std::path::Path::new(".")),
-            )
+            .current_dir(workspace_root)
             .output()
-            .await;
+            .await
+            .expect("python3 must be available to run build.py");
 
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                eprintln!("[scenario 21] build.py stdout: {}", stdout.trim());
-                eprintln!("[scenario 21] build.py stderr: {}", stderr.trim());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("[scenario 21] build.py stdout:\n{}", stdout.trim());
+        eprintln!("[scenario 21] build.py stderr:\n{}", stderr.trim());
 
-                // The script may not support --dry-run; any non-crash exit is acceptable
-                // for this smoke test. If it exits with an unknown flag error, that still
-                // means the script loaded and parsed successfully.
-                if out.status.success() {
-                    eprintln!("[scenario 21] build.py ran successfully with --dry-run");
-                } else {
-                    // Check if it failed due to unknown --dry-run flag (acceptable)
-                    let combined = format!("{}{}", stdout, stderr);
-                    if combined.contains("unrecognized")
-                        || combined.contains("unknown")
-                        || combined.contains("dry-run")
-                        || combined.contains("dry_run")
-                    {
-                        eprintln!(
-                            "[scenario 21] build.py does not support --dry-run, \
-                             but script loaded OK"
-                        );
-                    } else {
-                        eprintln!(
-                            "[scenario 21] build.py exited with status {}: {}",
-                            out.status, combined.trim()
-                        );
-                        // Don't fail the test — the build.py may require additional
-                        // dependencies or environment that is not available in CI.
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[scenario 21] Failed to run build.py: {}", e);
-                // Not a hard failure — the script runner may not be available
-            }
-        }
-
-        // Verify the profile TOML was written correctly
-        let profile_read =
-            std::fs::read_to_string(&profile_path).expect("Should read profile back");
         assert!(
-            profile_read.contains("smoke-test"),
-            "Profile should contain the name"
+            output.status.success(),
+            "build.py must exit 0. status={}, stderr={}",
+            output.status,
+            stderr.trim()
         );
+
+        // Verify outputs exist
         assert!(
-            profile_read.contains("comms"),
-            "Profile should include comms feature"
+            stdout.contains("Build complete"),
+            "build.py should print 'Build complete', got: {}",
+            stdout.trim()
         );
-        eprintln!("[scenario 21] Profile TOML validated");
+
+        // Verify bundle manifest was written
+        let bundle_manifest = workspace_root.join("dist/smoke-test/bundle-manifest.json");
+        assert!(
+            bundle_manifest.exists(),
+            "Bundle manifest should exist at {}",
+            bundle_manifest.display()
+        );
+        let manifest_content = std::fs::read_to_string(&bundle_manifest)
+            .expect("Should read bundle manifest");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&manifest_content).expect("Bundle manifest must be valid JSON");
+        assert_eq!(
+            manifest["profile"], "smoke-test",
+            "Bundle manifest profile should be 'smoke-test'"
+        );
+        eprintln!("[scenario 21] Bundle manifest validated: {}", manifest_content.trim());
+
+        // Clean up dist output
+        let _ = std::fs::remove_dir_all(workspace_root.join("dist/smoke-test"));
     }
 }

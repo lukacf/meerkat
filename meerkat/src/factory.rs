@@ -710,18 +710,40 @@ impl AgentFactory {
             builder = builder.with_hook_engine(engine);
         }
 
-        // 12b. Wire memory store (when memory-store-session is enabled)
+        // 12b. Wire memory store + memory_search tool (when memory-store-session is enabled)
         #[cfg(feature = "memory-store-session")]
         {
             let memory_dir = self.store_path.join("memory");
             match meerkat_memory::HnswMemoryStore::open(&memory_dir) {
                 Ok(store) => {
-                    builder = builder.memory_store(
-                        Arc::new(store) as Arc<dyn meerkat_core::memory::MemoryStore>
-                    );
+                    let store =
+                        Arc::new(store) as Arc<dyn meerkat_core::memory::MemoryStore>;
+                    builder = builder.memory_store(Arc::clone(&store));
+
+                    // Compose memory_search tool into the dispatcher
+                    let memory_dispatcher =
+                        meerkat_memory::MemorySearchDispatcher::new(Arc::clone(&store));
+                    let gateway = meerkat_core::ToolGatewayBuilder::new()
+                        .add_dispatcher(tools)
+                        .add_dispatcher(Arc::new(memory_dispatcher))
+                        .build()
+                        .map_err(|e| {
+                            BuildAgentError::Config(format!(
+                                "Failed to compose memory tools: {e}"
+                            ))
+                        })?;
+                    tools = Arc::new(gateway);
+                    if !tool_usage_instructions.is_empty() {
+                        tool_usage_instructions.push_str("\n\n");
+                    }
+                    tool_usage_instructions
+                        .push_str(meerkat_memory::MemorySearchDispatcher::usage_instructions());
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to open HnswMemoryStore at {}: {e}", memory_dir.display());
+                    tracing::warn!(
+                        "Failed to open HnswMemoryStore at {}: {e}",
+                        memory_dir.display()
+                    );
                 }
             }
         }

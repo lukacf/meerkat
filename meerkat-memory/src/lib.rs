@@ -8,9 +8,11 @@
 
 pub mod hnsw;
 pub mod simple;
+pub mod tool;
 
 pub use hnsw::HnswMemoryStore;
 pub use simple::SimpleMemoryStore;
+pub use tool::MemorySearchDispatcher;
 
 // Skill registration
 inventory::submit! {

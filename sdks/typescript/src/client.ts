@@ -148,7 +148,7 @@ export class MeerkatClient {
   hasCapability(capabilityId: string): boolean {
     if (!this.capabilities) return false;
     return this.capabilities.capabilities.some(
-      (c) => c.id === capabilityId && c.status === "available",
+      (c) => c.id === capabilityId && c.status === "Available",
     );
   }
 

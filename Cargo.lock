@@ -1731,6 +1731,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-skills",
  "redb",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",

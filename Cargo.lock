@@ -1637,6 +1637,7 @@ dependencies = [
  "humantime-serde",
  "indexmap",
  "jsonschema",
+ "regex",
  "schemars",
  "serde",
  "serde_json",

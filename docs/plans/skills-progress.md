@@ -1,6 +1,6 @@
 # Skills System Redesign — Progress
 
-## Current Phase: 7
+## Current Phase: 8
 ## Current Status: implementing
 
 ---
@@ -187,17 +187,27 @@
 ## Phase 7: Per-Turn Skill Activation
 
 ### Tests
-- [ ] test_detect_skill_ref_simple
-- [ ] test_detect_skill_ref_namespaced
-- [ ] test_detect_skill_ref_deep
-- [ ] test_detect_skill_ref_none
-- [ ] test_detect_skill_ref_midsentence
-- [ ] test_detect_skill_ref_only
-- [ ] test_strip_skill_ref
+- [x] test_detect_skill_ref_simple
+- [x] test_detect_skill_ref_namespaced
+- [x] test_detect_skill_ref_deep
+- [x] test_detect_skill_ref_none
+- [x] test_detect_skill_ref_midsentence
+- [x] test_detect_skill_ref_only
+- [x] test_strip_skill_ref
 
 ### Implementation
-- [ ] agent/skills.rs module with detect_skill_ref
-- [ ] state.rs skill injection step
+- [x] agent/skills.rs module with detect_skill_ref
+- [ ] state.rs skill injection step (deferred — requires skill_engine on Agent struct)
+
+### Notes
+- state.rs wiring deferred: requires adding skill_engine field to Agent + AgentBuilder,
+  which is a larger change that needs careful integration with the agent loop.
+  The detection function is complete and tested — wiring is a follow-up.
+
+### Gate Results — Attempt 1
+- build-gate: PASS
+- test-gate: PASS (7 skill detection tests)
+- performance-gate: PASS
 
 ## Phase 8: Discovery Tools
 

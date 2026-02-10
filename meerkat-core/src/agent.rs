@@ -8,6 +8,7 @@ pub mod compact;
 mod extraction;
 mod hook_impl;
 mod runner;
+pub mod skills;
 mod state;
 
 use crate::budget::Budget;

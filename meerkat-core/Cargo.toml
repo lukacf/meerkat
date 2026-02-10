@@ -25,6 +25,7 @@ jsonschema = { workspace = true }
 schemars = { workspace = true }
 strum = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
+regex = "1"
 
 [features]
 default = ["schema"]

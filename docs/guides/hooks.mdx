@@ -4,11 +4,11 @@ description: "Typed extension points within the agent loop for observation, guar
 icon: "anchor"
 ---
 
-Meerkat's hook system provides typed extension points within the agent loop for observation, guardrails, and content rewriting. Hooks fire at deterministic points during agent execution and support three runtimes: in-process, command (subprocess), and HTTP.
+Hooks let you run custom logic at defined points in the agent lifecycle -- before/after tool execution, LLM calls, or at turn boundaries. Use them for approval workflows, audit logging, content filtering, or input rewriting.
 
 ## Hook points
 
-The `HookPoint` enum defines 8 extension points (from `meerkat-core/src/hooks.rs`):
+Eight extension points are available:
 
 | HookPoint | Classification | When it fires |
 |-----------|---------------|---------------|
@@ -31,7 +31,7 @@ Classification is determined by the `is_pre()` and `is_post()` methods on `HookP
 | `Guardrail` | Can issue `Deny` decisions to block execution | `FailClosed` |
 | `Rewrite` | Can return `HookPatch` values to mutate data | `FailClosed` |
 
-Default failure policies are determined by `default_failure_policy()` in `meerkat-core/src/hooks.rs`. They can be overridden per-hook via the `failure_policy` field.
+Default failure policies can be overridden per-hook via the `failure_policy` field.
 
 ## Execution modes
 
@@ -310,7 +310,7 @@ Disabled hooks are removed from the effective entry list. Override entries are a
 
 ## Agent events
 
-The hook engine emits `AgentEvent` variants during execution (from `meerkat-core/src/agent/hook_impl.rs`):
+The hook engine emits `AgentEvent` variants during execution:
 
 | Event | When |
 |-------|------|

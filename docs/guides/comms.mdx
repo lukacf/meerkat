@@ -4,7 +4,7 @@ description: "Built-in messaging system for coordination between multiple agent 
 icon: "tower-broadcast"
 ---
 
-Meerkat provides a built-in inter-agent communication system that allows multiple agent instances to exchange messages, delegate tasks, and coordinate work. The system is implemented in the `meerkat-comms` crate and integrated into the agent loop, CLI, and all surface crates.
+Independent agent instances can exchange messages, delegate tasks, and coordinate work over Ed25519-signed channels. Supports TCP, Unix Domain Sockets, and in-process transports. Agents only accept messages from explicitly trusted peers.
 
 <Note>
 Comms requires the `comms` Cargo feature to be compiled in.
@@ -232,7 +232,7 @@ Standard strings are parsed into their enum variants; unknown strings become `Cu
 
 ## LLM-facing tools
 
-Four tools are exposed to the LLM when comms is enabled. Tool definitions and dispatch are implemented in `meerkat-comms/src/mcp/tools.rs`.
+Four tools are exposed to the LLM when comms is enabled.
 
 <Accordion title="send_message">
 Send a fire-and-forget text message to a peer.
@@ -519,35 +519,8 @@ The current implementation does not include nonce-based replay prevention.
 - **Secret bytes are zeroized**: `Keypair::from_secret()` zeroizes the input after copying
 - **ACK validation**: ACK signatures, sender, recipient, and `in_reply_to` ID are all verified
 
-## Key source files
+## See also
 
-<Accordion title="Source file index">
-| File | Description |
-|------|-------------|
-| `meerkat-comms/src/identity.rs` | `Keypair`, `PubKey`, `Signature`, key persistence |
-| `meerkat-comms/src/trust.rs` | `TrustedPeer`, `TrustedPeers`, trust file I/O |
-| `meerkat-comms/src/types.rs` | `Envelope`, `MessageKind`, `Status`, `InboxItem` |
-| `meerkat-comms/src/router.rs` | `Router`, `CommsConfig`, `SendError` |
-| `meerkat-comms/src/inbox.rs` | `Inbox`, `InboxSender`, `InboxError` |
-| `meerkat-comms/src/inproc.rs` | `InprocRegistry`, in-process transport |
-| `meerkat-comms/src/io_task.rs` | `handle_connection()`, incoming connection handler |
-| `meerkat-comms/src/transport/mod.rs` | `PeerAddr`, `TransportError`, `MAX_PAYLOAD_SIZE` |
-| `meerkat-comms/src/transport/codec.rs` | `TransportCodec`, `EnvelopeFrame` |
-| `meerkat-comms/src/mcp/tools.rs` | MCP tool schemas and dispatch |
-| `meerkat-comms/src/agent/mod.rs` | `CommsAgent`, `CommsAgentBuilder` |
-| `meerkat-comms/src/agent/types.rs` | `CommsMessage`, `CommsContent`, `MessageIntent` |
-| `meerkat-comms/src/agent/manager.rs` | `CommsManager`, `CommsManagerConfig` |
-| `meerkat-comms/src/agent/dispatcher.rs` | `CommsToolDispatcher`, `wrap_with_comms()` |
-| `meerkat-comms/src/agent/listener.rs` | `spawn_uds_listener()`, `spawn_tcp_listener()` |
-| `meerkat-comms/src/runtime/comms_config.rs` | `CoreCommsConfig`, `ResolvedCommsConfig` |
-| `meerkat-comms/src/runtime/comms_runtime.rs` | `CommsRuntime`, `CommsRuntimeError` |
-| `meerkat-comms/src/runtime/comms_bootstrap.rs` | `CommsBootstrap`, `ParentCommsContext`, `PreparedComms` |
-| `meerkat-core/src/agent/comms_impl.rs` | `drain_comms_inbox()`, `run_host_mode()` |
-| `meerkat-core/src/config.rs` | `CommsRuntimeConfig`, `CommsRuntimeMode` |
-| `meerkat/src/sdk.rs` | `build_comms_runtime_from_config()`, `compose_tools_with_comms()` |
-| `meerkat/src/factory.rs` | `AgentFactory::build_agent()` comms wiring |
-</Accordion>
-
-## Skill and capability registration
-
-The comms crate registers a built-in skill `multi-agent-comms` via `inventory::submit!` (id: `"multi-agent-comms"`, requires: `["comms"]`). It also registers a capability `CapabilityId::Comms` (scope: `Universal`, requires feature: `"comms"`).
+- [Built-in tools reference](/reference/builtin-tools) - comms tool parameter details
+- [Configuration: comms](/concepts/configuration) - config file settings
+- [Examples: multi-agent comms](/examples/advanced) - worked example with two communicating agents

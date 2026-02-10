@@ -1,0 +1,424 @@
+---
+title: "Advanced examples"
+description: "Structured output, hooks, memory, sub-agents, inter-agent comms, and patterns for building your own."
+icon: "flask"
+---
+
+Advanced patterns covering structured output extraction, lifecycle hooks, semantic memory, sub-agents, and inter-agent communication.
+
+## Structured output
+
+Force the agent to produce validated JSON conforming to a user-provided schema. See the full [structured output guide](/guides/structured-output) for schema compatibility details across providers.
+
+<Accordion title="Schema extraction via REST">
+
+<CodeGroup>
+
+```json Request
+{
+  "prompt": "Analyze this code review and extract findings",
+  "model": "claude-opus-4-6",
+  "output_schema": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "severity": {"type": "string", "enum": ["critical", "warning", "info"]},
+              "file": {"type": "string"},
+              "line": {"type": "integer"},
+              "message": {"type": "string"}
+            },
+            "required": ["severity", "file", "message"]
+          }
+        },
+        "summary": {"type": "string"}
+      },
+      "required": ["findings", "summary"]
+    },
+    "name": "code_review",
+    "strict": false,
+    "compat": "lossy",
+    "format": "meerkat_v1"
+  },
+  "structured_output_retries": 3
+}
+```
+
+```json Response
+{
+  "session_id": "01936f8a-...",
+  "text": "{\"findings\":[{\"severity\":\"warning\",\"file\":\"main.rs\",\"line\":42,\"message\":\"Unused variable\"}],\"summary\":\"One minor issue found.\"}",
+  "structured_output": {
+    "findings": [
+      {
+        "severity": "warning",
+        "file": "main.rs",
+        "line": 42,
+        "message": "Unused variable"
+      }
+    ],
+    "summary": "One minor issue found."
+  }
+}
+```
+
+</CodeGroup>
+
+</Accordion>
+
+<Accordion title="Schema extraction via JSON-RPC">
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "Extract the key entities from: 'Apple released the iPhone 16 in Cupertino'",
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "entities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "type": {"type": "string"}
+            },
+            "required": ["name", "type"]
+          }
+        }
+      },
+      "required": ["entities"]
+    },
+    "structured_output_retries": 2
+  }
+}
+```
+
+</Accordion>
+
+## MCP tools
+
+Connect external MCP servers so the agent can call their tools. See the [MCP reference](/api/mcp) for full configuration.
+
+<Accordion title="Adding an MCP server via CLI">
+
+```bash
+# Stdio transport
+rkat mcp add filesystem -- npx @anthropic/mcp-filesystem /path/to/dir
+
+# HTTP/SSE transport
+rkat mcp add weather --url https://weather-api.example.com/mcp
+
+# Verify
+rkat mcp list
+```
+
+Once added, the agent automatically discovers tools from all configured MCP servers.
+
+</Accordion>
+
+## Hooks
+
+Lifecycle hooks run custom logic before/after tool execution or at turn boundaries. See the full [hooks guide](/guides/hooks).
+
+<Accordion title="Observer and audit logging">
+
+<Tabs>
+  <Tab title="REST">
+```json
+{
+  "prompt": "Delete the temp files in /tmp/scratch",
+  "model": "claude-sonnet-4-5",
+  "enable_builtins": true,
+  "hooks_override": {
+    "entries": [
+      {
+        "id": "audit-log",
+        "point": "pre_tool_execution",
+        "mode": "blocking",
+        "command": ["python3", "audit_log.py"],
+        "timeout_ms": 5000
+      },
+      {
+        "id": "notify-slack",
+        "point": "post_tool_execution",
+        "mode": "background",
+        "command": ["curl", "-X", "POST", "https://hooks.slack.com/..."],
+        "timeout_ms": 10000
+      }
+    ],
+    "disable": []
+  }
+}
+```
+  </Tab>
+  <Tab title="JSON-RPC">
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "Summarize today's logs",
+    "hooks_override": {
+      "entries": [
+        {
+          "id": "approve-shell",
+          "point": "pre_tool_execution",
+          "mode": "blocking",
+          "command": ["./approve.sh"],
+          "timeout_ms": 30000
+        }
+      ],
+      "disable": ["default-rate-limiter"]
+    }
+  }
+}
+```
+  </Tab>
+</Tabs>
+
+</Accordion>
+
+<Accordion title="Guardrail (blocking pre-tool hook)">
+
+A blocking `pre_tool_execution` hook that must approve every tool call before it runs. A non-zero exit code causes a `hook_denied` error.
+
+```json
+{
+  "id": "approve-dangerous-tools",
+  "point": "pre_tool_execution",
+  "mode": "blocking",
+  "command": ["./approve.sh"],
+  "timeout_ms": 30000
+}
+```
+
+<Warning>
+Blocking hooks must complete before the operation proceeds. Use a generous `timeout_ms` for interactive approval scripts.
+</Warning>
+
+</Accordion>
+
+## Memory and compaction
+
+Semantic memory indexes past conversation content so the agent can recall it later. See the full [memory guide](/guides/memory).
+
+<Accordion title="Long conversation with recall">
+
+Enable memory when creating a session, then query past context in later turns:
+
+<CodeGroup>
+
+```json Create session with memory
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "You are a research assistant. Remember everything I tell you.",
+    "model": "claude-sonnet-4-5",
+    "enable_builtins": true,
+    "enable_memory": true
+  }
+}
+```
+
+```json Query past context
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "turn/start",
+  "params": {
+    "session_id": "01936f8a-...",
+    "prompt": "What did I tell you about the Rust borrow checker last week?"
+  }
+}
+```
+
+</CodeGroup>
+
+The agent calls the `memory_search` tool internally to retrieve relevant indexed content from earlier compacted turns.
+
+</Accordion>
+
+## Sub-agents
+
+Spawn child agents for parallel work. See the full [sub-agents guide](/guides/sub-agents).
+
+<Accordion title="Parallel research via JSON-RPC">
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "Research these three topics in parallel: Rust async, Go goroutines, Erlang processes",
+    "model": "claude-opus-4-6",
+    "enable_builtins": true,
+    "enable_subagents": true
+  }
+}
+```
+
+The agent gains access to sub-agent tools (`fork`, `spawn`) and can delegate subtasks. Results are collected back into the parent session.
+
+</Accordion>
+
+## Multi-agent comms
+
+Two completely separate agent instances communicating over TCP using encrypted channels. See the full [comms guide](/guides/comms).
+
+<Accordion title="Two agents exchanging messages (comms_verbose.rs)">
+
+**Location:** `meerkat/examples/comms_verbose.rs`
+
+**Architecture:**
+
+```text
++----------------------------------------------------------------+
+|                        AGENT A                                 |
+|  +--------------+  +---------------+  +------------------+     |
+|  | CommsManager |  | TCP Listener  |  | Agent + LLM      |     |
+|  | (keypair A)  |  | (port 12345)  |  | (send_message    |     |
+|  +--------------+  +---------------+  |  list_peers)     |     |
+|                                       +------------------+     |
++----------------------------------------------------------------+
+                              |
+                              | TCP + Encryption
+                              v
++----------------------------------------------------------------+
+|                        AGENT B                                 |
+|  +--------------+  +---------------+  +------------------+     |
+|  | CommsManager |  | TCP Listener  |  | Agent + LLM      |     |
+|  | (keypair B)  |  | (port 12346)  |  | (processes inbox)|     |
+|  +--------------+  +---------------+  +------------------+     |
++----------------------------------------------------------------+
+```
+
+Each agent has a cryptographic identity (Ed25519 keypair). Messages are signed and encrypted. The LLM uses `send_message` and `list_peers` tools to communicate.
+
+**Execution flow:**
+
+```text
+Phase 1: Agent A sends message
+------------------------------
+User -> Agent A: "Send 'Hello from Agent A!' to agent-b"
+Agent A LLM: Calls send_message tool
+send_message: Encrypts + TCP sends to Agent B's port
+Agent A LLM: "I've sent the message"
+
+Phase 2: Agent B processes inbox
+--------------------------------
+Agent B: Checks inbox, finds message from agent-a
+Agent B LLM: Receives message as context
+Agent B LLM: "I received: 'Hello from Agent A!' from agent-a"
+```
+
+</Accordion>
+
+## Building your own
+
+<Accordion title="Example template">
+
+```rust
+//! Brief description of what this example demonstrates
+//!
+//! Run with:
+//! ```bash
+//! ANTHROPIC_API_KEY=your-key cargo run --example your_example
+//! ```
+
+use meerkat::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .expect("ANTHROPIC_API_KEY environment variable must be set");
+
+    let result = meerkat::with_anthropic(api_key)
+        .model("claude-sonnet-4")
+        .run("Your prompt here")
+        .await?;
+
+    println!("Response: {}", result.text);
+
+    Ok(())
+}
+```
+
+</Accordion>
+
+<Accordion title="Error handling best practices">
+
+<CodeGroup>
+
+```rust Good: descriptive error messages
+async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    let path = args["path"].as_str()
+        .ok_or("Missing required 'path' argument")?;
+
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read '{}': {}", path, e))
+}
+```
+
+```rust Bad: generic errors
+async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+    let path = args["path"].as_str().ok_or("error")?;
+    std::fs::read_to_string(path).map_err(|_| "failed".to_string())
+}
+```
+
+</CodeGroup>
+
+</Accordion>
+
+<Accordion title="Testing your agent">
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_tool_dispatch() {
+        let dispatcher = MathToolDispatcher;
+
+        let result = dispatcher.dispatch(
+            "add",
+            &json!({"a": 2, "b": 3})
+        ).await;
+        assert_eq!(result, Ok("5".to_string()));
+
+        let result = dispatcher.dispatch(
+            "add",
+            &json!({"a": 2})
+        ).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore]  // Requires API key
+    async fn test_full_agent() {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+        let result = meerkat::with_anthropic(api_key)
+            .model("claude-sonnet-4")
+            .run("Say 'hello' and nothing else")
+            .await
+            .unwrap();
+
+        assert!(result.text.to_lowercase().contains("hello"));
+    }
+}
+```
+
+</Accordion>

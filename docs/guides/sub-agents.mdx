@@ -4,7 +4,7 @@ description: "Hierarchical agent workflows where an LLM agent spawns and manages
 icon: "diagram-project"
 ---
 
-Meerkat supports hierarchical agent workflows where an LLM agent can spawn and manage independent sub-agents. Sub-agents run concurrently in background tokio tasks and can use different providers/models (e.g., a Claude parent spawning Gemini or GPT sub-agents).
+Sub-agents run concurrently in background tokio tasks with isolated budgets. They can use different providers -- a Claude parent can spawn GPT or Gemini sub-agents. The parent monitors, collects results, and cancels children as needed.
 
 ## Feature flag
 
@@ -192,7 +192,7 @@ Cancel a running sub-agent. Only agents in the `running` state can be cancelled.
 
 ## Concurrency limits
 
-Defined in `meerkat-core/src/ops.rs` as `ConcurrencyLimits`:
+Concurrency limits:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -204,7 +204,6 @@ Defined in `meerkat-core/src/ops.rs` as `ConcurrencyLimits`:
 The `SubAgentManager` enforces these limits. Attempting to spawn beyond the limits returns an error.
 
 <Accordion title="SubAgentConfig">
-Defined in `meerkat-tools/src/builtin/sub_agent/config.rs`:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -288,16 +287,9 @@ When the `comms` feature is enabled and the parent has comms configured:
 See the [comms guide](/guides/comms) for details on the inter-agent communication system.
 </Info>
 
-## Factory wiring
+## How sub-agents get wired
 
-In `meerkat/src/factory.rs`, when `enable_subagents` is true:
-
-1. The factory creates a `CompositeDispatcher` for builtin tools.
-2. A second `CompositeDispatcher` is built for sub-agent tools (with `.subagents(false)` and `.comms(false)` to prevent recursive sub-agent tools).
-3. A `SubAgentManager` is created with default `ConcurrencyLimits`.
-4. A `SubAgentToolState` bundles the manager, client factory, tool dispatcher, session store, parent session, and config.
-5. A `SubAgentToolSet` wraps all five tools with the shared state.
-6. The tool set is registered on the parent's `CompositeDispatcher` via `register_sub_agent_tools()`.
+When `enable_subagents` is true, the agent factory adds the five sub-agent tools (`agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list`) to the parent's tool set. Child agents receive a copy of the parent's tools but with sub-agent and comms tools removed to prevent recursive spawning.
 
 ## Best practices
 
@@ -319,22 +311,8 @@ In `meerkat/src/factory.rs`, when `enable_subagents` is true:
 Do NOT poll `agent_status` repeatedly -- this wastes tokens. Use `agent_list` to see all sub-agents at once (more efficient than individual status checks). Do other useful work, then check status once or twice near the end.
 </Tip>
 
-## Architecture summary
+## See also
 
-<Accordion title="Source file index">
-| File | Description |
-|------|-------------|
-| `meerkat-core/src/sub_agent.rs` | SubAgentManager, SubAgentInfo, ConcurrencyLimits enforcement |
-| `meerkat-core/src/ops.rs` | ConcurrencyLimits, SpawnSpec, ToolAccessPolicy, ForkBudgetPolicy |
-| `meerkat-tools/src/builtin/sub_agent/mod.rs` | Module root, re-exports |
-| `meerkat-tools/src/builtin/sub_agent/spawn.rs` | AgentSpawnTool (agent_spawn) |
-| `meerkat-tools/src/builtin/sub_agent/fork.rs` | AgentForkTool (agent_fork) |
-| `meerkat-tools/src/builtin/sub_agent/status.rs` | AgentStatusTool (agent_status) |
-| `meerkat-tools/src/builtin/sub_agent/cancel.rs` | AgentCancelTool (agent_cancel) |
-| `meerkat-tools/src/builtin/sub_agent/list.rs` | AgentListTool (agent_list) |
-| `meerkat-tools/src/builtin/sub_agent/runner.rs` | spawn_sub_agent(), session creation |
-| `meerkat-tools/src/builtin/sub_agent/state.rs` | SubAgentToolState (shared state) |
-| `meerkat-tools/src/builtin/sub_agent/config.rs` | SubAgentConfig, SubAgentError |
-| `meerkat-tools/src/builtin/sub_agent/tool_set.rs` | SubAgentToolSet (bundles all five tools) |
-| `meerkat/src/factory.rs` | Factory wiring (build_builtin_dispatcher) |
-</Accordion>
+- [Built-in tools reference](/reference/builtin-tools) - tool parameter details
+- [Configuration: sub-agents](/concepts/configuration) - config file settings
+- [Architecture](/reference/architecture) - how sub-agents fit into the agent loop

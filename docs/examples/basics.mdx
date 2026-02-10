@@ -1,0 +1,183 @@
+---
+title: "Basic examples"
+description: "Agent basics: simple chat, custom tools, budget limits, and streaming events."
+icon: "code"
+---
+
+From a one-liner to custom tools with budget controls. Each example runs from the repo root with `cargo run --example <name>`.
+
+<Note>
+All examples require an Anthropic API key exported as `ANTHROPIC_API_KEY`. Run any example from the repository root with `cargo run --example <name>`.
+</Note>
+
+<Accordion title="Simple chat (simple.rs)">
+
+**Location:** `meerkat/examples/simple.rs`
+
+The minimal "hello world" of Meerkat. Uses the fluent SDK API to send a single prompt and print the result.
+
+```rust
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .expect("ANTHROPIC_API_KEY environment variable must be set");
+
+    let result = meerkat::with_anthropic(api_key)
+        .model("claude-sonnet-4")
+        .system_prompt("You are a helpful assistant. Be concise in your responses.")
+        .max_tokens(1024)
+        .run("What is the capital of France? Answer in one sentence.")
+        .await?;
+
+    println!("Response: {}", result.text);
+    println!("\n--- Stats ---");
+    println!("Session ID: {}", result.session_id);
+    println!("Turns: {}", result.turns);
+    println!("Total tokens: {}", result.usage.total_tokens());
+
+    Ok(())
+}
+```
+
+**Builder chain breakdown:**
+
+```rust
+meerkat::with_anthropic(api_key)  // Start with provider + credentials
+    .model("...")                  // Required: which model
+    .system_prompt("...")          // Optional: guide behavior
+    .max_tokens(1024)              // Optional: limit response length
+    .run("...")                    // Execute with user prompt
+```
+
+**The result struct** -- `AgentResult` gives you everything you need:
+
+<ResponseField name="text" type="String">
+  The model's response.
+</ResponseField>
+
+<ResponseField name="session_id" type="String">
+  For resuming conversations later.
+</ResponseField>
+
+<ResponseField name="turns" type="u32">
+  How many LLM calls were made.
+</ResponseField>
+
+<ResponseField name="usage" type="Usage">
+  Token counts for cost tracking.
+</ResponseField>
+
+</Accordion>
+
+<Accordion title="Custom tools (with_tools.rs)">
+
+**Location:** `meerkat/examples/with_tools.rs`
+
+How to give an agent access to custom tools using the full `AgentBuilder` API with explicit components.
+
+**Step 1 -- Implement `AgentToolDispatcher`:**
+
+```rust
+struct MathToolDispatcher;
+
+#[async_trait]
+impl AgentToolDispatcher for MathToolDispatcher {
+    fn tools(&self) -> Vec<ToolDef> {
+        vec![
+            ToolDef {
+                name: "add".to_string(),
+                description: "Add two numbers together".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "number", "description": "First number"},
+                        "b": {"type": "number", "description": "Second number"}
+                    },
+                    "required": ["a", "b"]
+                }),
+            },
+            // ... multiply tool ...
+        ]
+    }
+
+    async fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
+        match name {
+            "add" => {
+                let a = args["a"].as_f64().ok_or("Missing 'a' argument")?;
+                let b = args["b"].as_f64().ok_or("Missing 'b' argument")?;
+                Ok(format!("{}", a + b))
+            }
+            // ... other tools ...
+            _ => Err(format!("Unknown tool: {}", name)),
+        }
+    }
+}
+```
+
+**Step 2 -- Build and run:**
+
+```rust
+let llm = Arc::new(AnthropicLlmAdapter::new(api_key, "claude-sonnet-4".to_string()));
+let tools = Arc::new(MathToolDispatcher);
+let store = Arc::new(MemoryStore::new());
+
+let mut agent = AgentBuilder::new()
+    .model("claude-sonnet-4")
+    .system_prompt("You are a math assistant. Use the provided tools to perform calculations.")
+    .max_tokens_per_turn(1024)
+    .build(llm, tools, store);
+
+let result = agent
+    .run("What is 25 + 17, and then multiply the result by 3?".to_string())
+    .await?;
+```
+
+<Info>
+The agent loops automatically when the LLM wants to use a tool. A prompt involving two calculations produces 3 turns: call `add`, call `multiply`, generate final response.
+</Info>
+
+</Accordion>
+
+<Accordion title="Budget limits">
+
+You can constrain agent execution with `max_turns` to prevent runaway tool loops:
+
+```rust
+let result = meerkat::with_anthropic(api_key)
+    .model("claude-sonnet-4")
+    .max_tokens(1024)
+    .max_turns(5)  // Stop after 5 LLM calls
+    .run("Solve this complex problem step by step")
+    .await?;
+```
+
+The agent will stop and return whatever it has after reaching the turn limit, even if the LLM wanted to continue.
+
+</Accordion>
+
+<Accordion title="Streaming events">
+
+The agent emits `AgentEvent` values during execution. When using the SDK directly you get the final result; when using the RPC or REST APIs, events stream to the client in real time.
+
+<Tabs>
+  <Tab title="JSON-RPC">
+Events are delivered as `session/event` notifications:
+
+```json
+{"jsonrpc":"2.0","method":"session/event","params":{"session_id":"...","event":{"type":"text_delta","content":"Hello"}}}
+{"jsonrpc":"2.0","method":"session/event","params":{"session_id":"...","event":{"type":"tool_use","name":"add","input":{"a":2,"b":3}}}}
+{"jsonrpc":"2.0","method":"session/event","params":{"session_id":"...","event":{"type":"turn_end","usage":{"input_tokens":50,"output_tokens":20}}}}
+```
+  </Tab>
+  <Tab title="REST">
+Events stream as Server-Sent Events when using the streaming endpoint:
+
+```bash
+curl -N -H "Content-Type: application/json" \
+  -d '{"prompt":"Hello","model":"claude-sonnet-4-5","stream":true}' \
+  http://localhost:3000/v1/sessions
+```
+  </Tab>
+</Tabs>
+
+</Accordion>

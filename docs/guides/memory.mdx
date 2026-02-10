@@ -4,7 +4,7 @@ description: "Automatic context compaction and semantic memory for long-running 
 icon: "brain"
 ---
 
-Meerkat provides two complementary systems for managing long-running conversations:
+Two systems handle conversations that exceed model context limits:
 
 1. **Context compaction** -- automatically summarizes conversation history when the context window fills up, preserving recent turns and discarding older ones.
 2. **Semantic memory** -- indexes discarded messages so the agent can retrieve past context on demand via the `memory_search` tool.
@@ -43,7 +43,7 @@ build_config.override_memory = Some(true);
 
 ## CompactionConfig
 
-Defined in `meerkat-core/src/compact.rs`. Controls when and how compaction runs.
+Controls when and how compaction runs.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -54,7 +54,7 @@ Defined in `meerkat-core/src/compact.rs`. Controls when and how compaction runs.
 
 ## How compaction triggers
 
-Compaction is checked at every turn boundary, just before the `CallingLlm` state in the agent loop (`meerkat-core/src/agent/state.rs`).
+Compaction is checked at every turn boundary, just before the next LLM call.
 
 The decision flow:
 
@@ -74,7 +74,7 @@ The decision flow:
 
 ## What happens during compaction
 
-When compaction triggers (`meerkat-core/src/agent/compact.rs`):
+When compaction triggers:
 
 <Steps>
   <Step title="Emit CompactionStarted event">
@@ -101,7 +101,7 @@ When compaction triggers (`meerkat-core/src/agent/compact.rs`):
 </Steps>
 
 <Accordion title="The compaction prompt">
-The `DefaultCompactor` sends this prompt to the LLM (defined in `meerkat-session/src/compactor.rs`):
+The compactor sends this prompt to the LLM:
 
 > You are performing a CONTEXT COMPACTION. Your job is to create a handoff summary so work can continue seamlessly.
 >
@@ -127,7 +127,7 @@ This means previously discarded conversation content becomes searchable via the 
 
 ## The `memory_search` tool
 
-Defined in `meerkat-memory/src/tool.rs` as `MemorySearchDispatcher`. It implements `AgentToolDispatcher` and provides a single tool.
+When memory is enabled, the agent gains a `memory_search` tool.
 
 ### Tool definition
 
@@ -181,7 +181,7 @@ Returns a JSON array of result objects:
 
 <Tabs>
   <Tab title="HnswMemoryStore (production)">
-    Defined in `meerkat-memory/src/hnsw.rs`. Uses:
+    Uses:
     - **hnsw_rs** (v0.3) for approximate nearest-neighbor search with cosine distance.
     - **redb** for persistent metadata and text storage.
 
@@ -195,7 +195,7 @@ Returns a JSON array of result objects:
     - **Constants**: `MAX_NB_CONNECTION = 16`, `MAX_LAYER = 16`, `EF_CONSTRUCTION = 200`, `DEFAULT_MAX_ELEMENTS = 100_000`.
   </Tab>
   <Tab title="SimpleMemoryStore (test-only)">
-    Defined in `meerkat-memory/src/simple.rs`. In-memory substring matching -- not suitable for production.
+    In-memory substring matching -- not suitable for production.
 
     - Stores entries in a `Vec<MemoryEntry>` behind a `RwLock`.
     - Search: lowercases both query and content, counts matching words, scores as `matching_words / total_query_words`.
@@ -203,36 +203,14 @@ Returns a JSON array of result objects:
   </Tab>
 </Tabs>
 
-## Factory wiring
+## How memory gets wired
 
-In `meerkat/src/factory.rs`, the `AgentFactory::build_agent()` method wires memory and compaction at steps 12b and 12c:
+When the `memory-store-session` feature is compiled in and memory is enabled:
 
-### Step 12b: Memory store + memory_search tool
-
-Gated behind `#[cfg(feature = "memory-store-session")]` AND `effective_memory == true`:
-
-1. Opens (or creates) an `HnswMemoryStore` at `{store_path}/memory/`.
-2. Sets it on the `AgentBuilder` via `.memory_store(store)`.
-3. Creates a `MemorySearchDispatcher` wrapping the same store.
-4. Composes it into the tool dispatcher via `ToolGatewayBuilder`, adding `memory_search` alongside all other tools.
-5. Tool guidance reaches the model via the embedded `memory-retrieval` skill (loaded in step 11), not through usage_instructions strings.
-
-### Step 12c: Compactor
-
-Gated behind `#[cfg(feature = "session-compaction")]`:
-
-1. Creates a `DefaultCompactor` with `CompactionConfig::default()`.
-2. Sets it on the `AgentBuilder` via `.compactor(compactor)`.
-
-### Skill integration
-
-The `meerkat-memory` crate registers an embedded skill via `inventory::submit!`:
-
-- **Skill ID**: `memory-retrieval`
-- **Requires capability**: `memory_store`
-- **Content**: The `SKILL.md` file explains how semantic memory works with compaction.
-
-The skill is automatically included in the system prompt when the `memory_store` capability is active.
+1. An `HnswMemoryStore` is opened at `{store_path}/memory/`.
+2. The `memory_search` tool is added to the agent's tool set.
+3. A `DefaultCompactor` is attached (if `session-compaction` is also enabled).
+4. A built-in `memory-retrieval` skill is injected into the system prompt, teaching the agent how to use memory search.
 
 ## Examples
 
@@ -279,16 +257,7 @@ let compactor = DefaultCompactor::new(CompactionConfig {
 });
 ```
 
-## Architecture summary
+## See also
 
-```text
-meerkat-core/src/compact.rs       -- Compactor trait, CompactionConfig, CompactionContext
-meerkat-core/src/memory.rs        -- MemoryStore trait, MemoryMetadata, MemoryResult
-meerkat-core/src/agent/compact.rs -- run_compaction(), estimate_tokens(), CompactionOutcome
-meerkat-core/src/agent/state.rs   -- Agent loop integration (check + trigger compaction)
-meerkat-session/src/compactor.rs  -- DefaultCompactor implementation
-meerkat-memory/src/hnsw.rs        -- HnswMemoryStore (production)
-meerkat-memory/src/simple.rs      -- SimpleMemoryStore (test-only)
-meerkat-memory/src/tool.rs        -- MemorySearchDispatcher (memory_search tool)
-meerkat/src/factory.rs            -- Factory wiring (steps 12b, 12c)
-```
+- [Configuration: memory and compaction](/concepts/configuration) - config file settings
+- [Architecture](/reference/architecture) - how compaction fits into the agent loop

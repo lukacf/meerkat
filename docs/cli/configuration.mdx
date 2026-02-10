@@ -1,0 +1,110 @@
+---
+title: "CLI configuration"
+description: "Environment variables, config files, MCP configuration, and exit codes for the rkat CLI."
+icon: "sliders"
+---
+
+## Environment variables
+
+Required API keys (at least one):
+
+| Variable | Provider |
+|----------|----------|
+| `ANTHROPIC_API_KEY` | Anthropic Claude |
+| `OPENAI_API_KEY` | OpenAI GPT |
+| `GOOGLE_API_KEY` | Google Gemini |
+
+See [providers](/concepts/providers) for the full list of environment variables and `RKAT_*` overrides.
+
+## Config files
+
+| Scope | Path |
+|-------|------|
+| User | `~/.config/rkat/config.toml` |
+| Project | `.rkat/config.toml` |
+
+Project config overrides user config. CLI flags override both.
+
+**Precedence:** defaults &rarr; user config &rarr; project config &rarr; env vars &rarr; CLI flags.
+
+<Accordion title="Example config.toml">
+```toml
+[agent]
+model = "claude-opus-4-6"
+max_tokens_per_turn = 8192
+
+[budget]
+max_tokens = 50000
+max_duration = "5m"
+
+[shell]
+program = "bash"
+timeout_secs = 30
+```
+</Accordion>
+
+## MCP configuration
+
+MCP servers are configured in TOML files:
+
+| Scope | Path |
+|-------|------|
+| User | `~/.rkat/mcp.toml` |
+| Project | `.rkat/mcp.toml` |
+
+Project servers take precedence over user servers with the same name.
+
+<Accordion title="Example mcp.toml">
+```toml
+# Stdio server (local process)
+[[servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
+
+# Stdio server with environment variables
+[[servers]]
+name = "database"
+command = "python"
+args = ["-m", "db_mcp_server"]
+env = { DATABASE_URL = "${DATABASE_URL}" }
+
+# HTTP server (streamable HTTP - default for URLs)
+[[servers]]
+name = "remote-api"
+url = "https://mcp.example.com/api"
+headers = { Authorization = "Bearer ${MCP_API_TOKEN}" }
+
+# Legacy SSE server
+[[servers]]
+name = "legacy-sse"
+url = "https://old.example.com/sse"
+transport = "sse"
+```
+
+Environment variable expansion is supported using `${VAR_NAME}` syntax.
+</Accordion>
+
+## Session storage
+
+Sessions are stored in the user's data directory:
+
+| Platform | Path |
+|----------|------|
+| macOS | `~/Library/Application Support/meerkat/sessions/` |
+| Linux | `~/.local/share/meerkat/sessions/` |
+| Windows | `%APPDATA%\meerkat\sessions\` |
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Error |
+| 2 | Budget exhausted (graceful termination) |
+
+## See also
+
+- [CLI commands](/cli/commands) - command reference
+- [Configuration](/concepts/configuration) - full configuration reference
+- [Providers](/concepts/providers) - provider setup and model tables

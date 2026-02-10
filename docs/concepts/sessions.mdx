@@ -1,0 +1,91 @@
+---
+title: "Sessions"
+description: "Persistent, surface-agnostic session lifecycle with concurrency control."
+icon: "arrows-rotate"
+---
+
+Sessions in Meerkat are surface-agnostic. The same `SessionService` trait backs the CLI, REST API, JSON-RPC server, and MCP server. A session created via REST can be resumed via RPC. Sessions can be persisted to JSONL, redb, or a custom backend -- swap the store without changing application code.
+
+## Lifecycle
+
+| Operation | What it does |
+|-----------|-------------|
+| `create_session` | Build an agent, run the first turn, return a session ID |
+| `start_turn` | Continue with a new prompt. Fails with `SESSION_BUSY` if a turn is already running |
+| `interrupt` | Cancel the in-flight turn |
+| `read` | Get session state (message count, token usage). Non-blocking during a running turn |
+| `list` | List active sessions. In persistent mode, includes stored sessions |
+| `archive` | Remove from the live map. In persistent mode, the snapshot is kept |
+
+## Multi-turn example
+
+<Tabs>
+  <Tab title="Rust">
+    ```rust
+    use meerkat::{AgentFactory, Config, build_ephemeral_service};
+    use meerkat::service::{CreateSessionRequest, StartTurnRequest, SessionService};
+
+    let config = Config::load().await?;
+    let factory = AgentFactory::new(std::env::current_dir()?);
+    let service = build_ephemeral_service(factory, config, 64);
+
+    let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4-5".into(),
+        prompt: "My name is Alice.".into(),
+        system_prompt: Some("You are a helpful assistant.".into()),
+        max_tokens: None,
+        event_tx: None,
+        host_mode: false,
+    }).await?;
+
+    let session_id = result.session_id;
+
+    let result = service.start_turn(&session_id, StartTurnRequest {
+        prompt: "What's my name?".into(),
+        event_tx: None,
+        host_mode: false,
+    }).await?;
+
+    service.archive(&session_id).await?;
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    client = MeerkatClient()
+    await client.connect()
+
+    result = await client.create_session("My name is Alice.")
+    result2 = await client.start_turn(result.session_id, "What's my name?")
+
+    await client.archive_session(result.session_id)
+    await client.close()
+    ```
+  </Tab>
+  <Tab title="CLI">
+    ```bash
+    rkat run "My name is Alice."
+    # Note the session ID from output
+    rkat resume 01936f8a-... "What's my name?"
+    ```
+  </Tab>
+</Tabs>
+
+## Persistence backends
+
+| Backend | Feature flag | Trade-off |
+|---------|-------------|-----------|
+| In-memory | (default) | No disk I/O, lost on process death |
+| JSONL | `jsonl-store` | One file per session, human-readable, no dependencies |
+| redb | `session-store` | ACID transactions, single database file, crash-safe |
+
+All three implement the same `AgentSessionStore` trait. You can also write your own.
+
+## Concurrency guarantees
+
+- One turn per session at a time, enforced with atomic compare-and-swap
+- No queueing -- callers retry on `SESSION_BUSY`
+- `read()` and `list()` never block, even during a running turn
+- `interrupt()` signals cancellation; the turn returns `AgentError::Cancelled`
+- Persistent mode saves a snapshot after each turn completes -- crash mid-turn loses only that turn
+
+See [session contracts](/reference/session-contracts) for the full specification.

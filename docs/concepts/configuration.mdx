@@ -1,0 +1,141 @@
+---
+title: "Configuration"
+description: "Layered TOML config, budget enforcement, retry policy, session persistence."
+icon: "sliders"
+---
+
+Configuration layers: defaults &rarr; global config &rarr; project config &rarr; env vars &rarr; CLI flags. Secrets (API keys) are always environment variables, never config files.
+
+## Config file
+
+Meerkat loads config from TOML files in two locations:
+
+| Location | Scope | Example path |
+|----------|-------|--------------|
+| `.rkat/config.toml` | Project (checked into repo or gitignored) | `./my-project/.rkat/config.toml` |
+| `~/.rkat/config.toml` | Global (user-wide defaults) | `~/.rkat/config.toml` |
+
+**Precedence:** defaults &rarr; global config &rarr; project config &rarr; env vars &rarr; CLI flags.
+
+### Minimal example
+
+```toml .rkat/config.toml
+[agent]
+model = "claude-opus-4-6"
+max_tokens_per_turn = 16384
+
+[shell]
+program = "bash"
+timeout_secs = 30
+```
+
+### Generating a config file
+
+```bash
+rkat config init          # Creates .rkat/config.toml with defaults
+rkat config init --global # Creates ~/.rkat/config.toml
+```
+
+## Budget controls
+
+Budget limits cap resource usage per agent run. When a limit is reached the agent completes its current turn, then stops.
+
+<ParamField path="max_tokens" type="integer">
+  Total input + output tokens across all turns.
+</ParamField>
+
+<ParamField path="max_duration" type="string">
+  Maximum wall-clock runtime. Accepts `"30s"`, `"5m"`, `"2h"`.
+</ParamField>
+
+<ParamField path="max_tool_calls" type="integer">
+  Maximum total tool invocations.
+</ParamField>
+
+```toml .rkat/config.toml
+[budget]
+max_tokens = 50000
+max_duration = "5m"
+max_tool_calls = 50
+```
+
+## Retry policy
+
+Failed LLM calls are retried automatically with exponential backoff and jitter.
+
+```toml .rkat/config.toml
+[retry]
+max_retries = 3
+initial_delay_ms = 500
+max_delay_ms = 10000
+multiplier = 2.0
+```
+
+| Error | Retried? |
+|-------|----------|
+| `RateLimited` | Yes (uses retry-after header when available) |
+| `ServerOverloaded` | Yes |
+| `NetworkTimeout` | Yes |
+| `ConnectionReset` | Yes |
+| `ServerError (5xx)` | Yes |
+| `InvalidRequest` | No |
+| `AuthenticationFailed` | No |
+| `ContentFiltered` | No |
+
+## Session persistence
+
+Sessions record conversation history so agents can resume where they left off.
+
+<Tabs>
+  <Tab title="JSONL (default)">
+    Sessions are stored as JSONL files, one per session.
+
+    ```toml .rkat/config.toml
+    [store]
+    sessions_path = "/custom/path/to/sessions"
+    ```
+
+    Requires the `jsonl-store` feature flag (enabled by default).
+  </Tab>
+  <Tab title="redb (embedded database)">
+    Durable embedded storage using [redb](https://github.com/cberner/redb). Requires the `session-store` feature flag.
+  </Tab>
+  <Tab title="In-memory (testing)">
+    Ephemeral storage that lives only in process memory. Requires the `memory-store` feature flag.
+  </Tab>
+</Tabs>
+
+### Managing sessions
+
+```bash
+rkat sessions list [--limit N]
+rkat sessions show <SESSION_ID>
+```
+
+## Logging
+
+Meerkat uses the `tracing` crate. Configure via `RUST_LOG`:
+
+```bash
+export RUST_LOG=info                    # Session lifecycle, turns, completions
+export RUST_LOG=meerkat=debug,info      # Debug Meerkat, info for dependencies
+export RUST_LOG=trace                   # Wire-level protocol details
+```
+
+## Advanced configuration
+
+These features have their own dedicated guides:
+
+| Feature | Config section | Guide |
+|---------|---------------|-------|
+| Hooks | `[hooks]` | [Hooks guide](/guides/hooks) |
+| Memory and compaction | `[compaction]` | [Memory guide](/guides/memory) |
+| Sub-agents | `[sub_agents]` | [Sub-agents guide](/guides/sub-agents) |
+| Inter-agent comms | `[comms]` | [Comms guide](/guides/comms) |
+| MCP servers | `.rkat/mcp.toml` | [MCP reference](/api/mcp) |
+| Shell security | `[shell]` | [Built-in tools](/reference/builtin-tools) |
+
+## See also
+
+- [Providers](/concepts/providers) - API key and model setup
+- [CLI configuration](/cli/configuration) - CLI-specific config details

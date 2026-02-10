@@ -4,7 +4,7 @@ description: "Force agents to produce validated JSON conforming to a user-provid
 icon: "square-code"
 ---
 
-Meerkat supports structured output extraction -- forcing the agent to produce validated JSON conforming to a user-provided schema. The extraction happens as a separate turn after the agentic work completes, with automatic retry on validation failure.
+Structured output forces the agent to produce validated JSON conforming to a schema you provide. The extraction runs as a separate turn after agentic work completes, with automatic retry on validation failure. Schemas are normalized across providers -- the same schema works with Anthropic, OpenAI, and Gemini, with provider-specific lowering handled transparently.
 
 ## How it works
 
@@ -15,7 +15,7 @@ When `output_schema` is configured on an agent, the execution flow is:
     The agent processes the prompt, calls tools, and iterates until no more tool calls remain.
   </Step>
   <Step title="Extraction turn fires">
-    `perform_extraction_turn()` (in `meerkat-core/src/agent/extraction.rs`) sends an additional LLM call with no tools (extraction is pure text generation), temperature `0.0` for deterministic output, and a prompt asking for valid JSON matching the schema.
+    An additional LLM call is made with no tools, temperature `0.0` for deterministic output, and a prompt asking for valid JSON matching the schema.
   </Step>
   <Step title="Validation">
     The response is parsed as JSON and validated against the schema using the `jsonschema` crate's `Validator`.
@@ -32,7 +32,7 @@ When `output_schema` is configured on an agent, the execution flow is:
 
 ### `OutputSchema`
 
-The primary schema type (from `meerkat-core/src/types.rs`):
+The primary schema type:
 
 ```rust
 pub struct OutputSchema {
@@ -108,7 +108,7 @@ Otherwise, the entire JSON value is treated as a raw schema.
 
 ### `MeerkatSchema`
 
-Newtype around `serde_json::Value` with normalization (from `meerkat-core/src/schema.rs`):
+Newtype around `serde_json::Value` with normalization:
 
 ```rust
 pub struct MeerkatSchema(Value);
@@ -169,7 +169,7 @@ Schema errors:
 
 ## Extraction turn details
 
-The extraction turn logic is in `perform_extraction_turn()` (in `meerkat-core/src/agent/extraction.rs`):
+The extraction turn logic:
 
 ### Attempt flow
 
@@ -219,9 +219,7 @@ Schema warnings are collected during compilation and included in `RunResult.sche
 
 ## Configuration
 
-### `AgentConfig` fields
-
-From `meerkat-core/src/config.rs`:
+### Agent config fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -292,7 +290,7 @@ From `meerkat-core/src/config.rs`:
 
 ## Wire parameters
 
-Structured output is passed per-request via `StructuredOutputParams` (from `meerkat-contracts/src/wire/params.rs`):
+Structured output is passed per-request via `StructuredOutputParams`:
 
 ```rust
 pub struct StructuredOutputParams {
@@ -303,7 +301,7 @@ pub struct StructuredOutputParams {
 
 ## `RunResult` fields
 
-When structured output extraction succeeds, the `RunResult` (from `meerkat-core/src/types.rs`) contains:
+When structured output extraction succeeds, the `RunResult` contains:
 
 ```rust
 pub struct RunResult {

@@ -27,7 +27,16 @@
         "groups": [
           {
             "group": "Getting started",
-            "pages": ["introduction", "examples"]
+            "pages": ["introduction", "quickstart"]
+          },
+          {
+            "group": "Core concepts",
+            "pages": [
+              "concepts/sessions",
+              "concepts/tools",
+              "concepts/providers",
+              "concepts/configuration"
+            ]
           },
           {
             "group": "Guides",
@@ -41,30 +50,59 @@
             ]
           },
           {
-            "group": "Configuration",
-            "pages": ["configuration"]
+            "group": "Examples",
+            "pages": [
+              "examples/basics",
+              "examples/sessions",
+              "examples/advanced"
+            ]
           }
         ]
       },
       {
-        "tab": "SDKs & CLI",
+        "tab": "SDKs",
         "groups": [
           {
-            "group": "SDKs",
-            "pages": ["SDK", "sdks/python", "sdks/typescript"]
+            "group": "Rust",
+            "pages": [
+              "rust/overview",
+              "rust/tools-and-stores",
+              "rust/advanced"
+            ]
           },
           {
-            "group": "CLI",
-            "pages": ["CLI"]
+            "group": "Python",
+            "pages": [
+              "sdks/python/overview",
+              "sdks/python/reference"
+            ]
+          },
+          {
+            "group": "TypeScript",
+            "pages": [
+              "sdks/typescript/overview",
+              "sdks/typescript/reference"
+            ]
           }
         ]
       },
       {
-        "tab": "API surfaces",
+        "tab": "CLI & APIs",
         "groups": [
           {
-            "group": "API surfaces",
-            "pages": ["surfaces/rest", "surfaces/rpc", "surfaces/mcp"]
+            "group": "CLI",
+            "pages": [
+              "cli/commands",
+              "cli/configuration"
+            ]
+          },
+          {
+            "group": "APIs",
+            "pages": [
+              "api/rest",
+              "api/rpc",
+              "api/mcp"
+            ]
           }
         ]
       },
@@ -74,14 +112,14 @@
           {
             "group": "Reference",
             "pages": [
-              "reference/builtin-tools",
               "reference/api-reference",
-              "reference/architecture"
+              "reference/builtin-tools"
             ]
           },
           {
-            "group": "Contracts",
+            "group": "Architecture",
             "pages": [
+              "reference/architecture",
               "reference/capability-matrix",
               "reference/session-contracts"
             ]

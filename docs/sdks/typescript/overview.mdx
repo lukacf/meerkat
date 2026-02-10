@@ -1,0 +1,193 @@
+---
+title: "TypeScript SDK"
+description: "Getting started with the Meerkat TypeScript SDK: sessions, turns, events, and capabilities."
+icon: "js"
+---
+
+The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, stream events, and query capabilities from TypeScript or JavaScript. It communicates with a local `rkat rpc` subprocess over JSON-RPC 2.0.
+
+## Getting started
+
+<Steps>
+  <Step title="Install the SDK">
+    ```bash
+    npm install @meerkat/sdk
+    ```
+  </Step>
+  <Step title="Install the rkat binary">
+    ```bash
+    cargo build -p meerkat-cli --release
+    # Ensure target/release/rkat is on your $PATH
+    ```
+
+    You also need an API key for at least one LLM provider (e.g. `ANTHROPIC_API_KEY`).
+  </Step>
+  <Step title="Configure tsconfig">
+    The SDK is ESM. Your `tsconfig.json` must use Node16 module resolution:
+
+    ```json
+    {
+      "compilerOptions": {
+        "target": "ES2022",
+        "module": "Node16",
+        "moduleResolution": "Node16",
+        "strict": true
+      }
+    }
+    ```
+  </Step>
+  <Step title="Connect and run">
+    ```typescript
+    import { MeerkatClient } from "@meerkat/sdk";
+
+    const client = new MeerkatClient();
+    await client.connect();
+
+    const result = await client.createSession({
+      prompt: "What is the capital of Sweden?",
+    });
+
+    console.log(result.text);
+    console.log(result.session_id);
+
+    const followUp = await client.startTurn(result.session_id, "And what is its population?");
+    console.log(followUp.text);
+
+    await client.archiveSession(result.session_id);
+    await client.close();
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Method overview
+
+| Method | Description |
+|--------|-------------|
+| `connect()` | Spawn `rkat rpc`, handshake, fetch capabilities |
+| `close()` | Kill the subprocess |
+| `createSession(params)` | Create a session and run the first turn |
+| `startTurn(sessionId, prompt)` | Continue an existing session |
+| `interrupt(sessionId)` | Cancel an in-flight turn |
+| `listSessions()` | List active sessions |
+| `readSession(sessionId)` | Read session state |
+| `archiveSession(sessionId)` | Remove a session |
+| `getCapabilities()` | Get runtime capabilities |
+| `hasCapability(id)` | Check if a capability is available |
+| `requireCapability(id)` | Guard a code path by capability |
+| `getConfig()` | Read runtime configuration |
+| `setConfig(config)` | Replace runtime configuration |
+| `patchConfig(patch)` | Merge-patch runtime configuration |
+
+---
+
+## MeerkatClient
+
+### Constructor
+
+```typescript
+new MeerkatClient(rkatPath?: string)
+```
+
+### connect()
+
+```typescript
+async connect(): Promise<this>
+```
+
+Spawns `rkat rpc`, performs `initialize` handshake, checks contract version compatibility, and fetches capabilities. Returns `this` for chaining.
+
+### createSession(params)
+
+```typescript
+async createSession(params: {
+  prompt: string;
+  model?: string;
+  provider?: string;
+  system_prompt?: string;
+  max_tokens?: number;
+  output_schema?: Record<string, unknown>;
+  structured_output_retries?: number;
+  enable_builtins?: boolean;
+  enable_shell?: boolean;
+  enable_subagents?: boolean;
+  enable_memory?: boolean;
+  host_mode?: boolean;
+  comms_name?: string;
+  provider_params?: Record<string, unknown>;
+}): Promise<WireRunResult>
+```
+
+### startTurn(sessionId, prompt)
+
+```typescript
+async startTurn(sessionId: string, prompt: string): Promise<WireRunResult>
+```
+
+### interrupt(sessionId)
+
+```typescript
+async interrupt(sessionId: string): Promise<void>
+```
+
+### Session management
+
+```typescript
+const sessions = await client.listSessions();
+const state = await client.readSession(sessionId);
+await client.archiveSession(sessionId);
+```
+
+### Config management
+
+```typescript
+const config = await client.getConfig();
+await client.setConfig({ ...config, max_tokens: 4096 });
+const updated = await client.patchConfig({ max_tokens: 8192 });
+```
+
+---
+
+## Examples
+
+<Accordion title="Structured output">
+```typescript
+const result = await client.createSession({
+  prompt: "List three European capitals",
+  output_schema: {
+    type: "object",
+    properties: {
+      capitals: { type: "array", items: { type: "string" } },
+    },
+    required: ["capitals"],
+  },
+  structured_output_retries: 3,
+});
+
+console.log(result.structured_output);
+// { capitals: ["Paris", "Berlin", "Madrid"] }
+```
+</Accordion>
+
+<Accordion title="Multi-turn conversation">
+```typescript
+const session = await client.createSession({
+  prompt: "My name is Alice.",
+  model: "claude-sonnet-4-5",
+});
+
+const turn2 = await client.startTurn(session.session_id, "What is my name?");
+console.log(turn2.text);  // Should mention "Alice"
+
+await client.archiveSession(session.session_id);
+```
+</Accordion>
+
+---
+
+## See also
+
+- [TypeScript SDK reference](/sdks/typescript/reference) - wire types, capabilities, skills, errors
+- [Rust SDK overview](/rust/overview) - Rust library API
+- [RPC reference](/api/rpc) - JSON-RPC protocol specification

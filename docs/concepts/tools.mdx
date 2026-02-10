@@ -1,0 +1,75 @@
+---
+title: "Tools"
+description: "Trait-based tool dispatch, MCP server integration, and built-in tool categories."
+icon: "wrench"
+---
+
+Meerkat's tool system is trait-based. You implement `AgentToolDispatcher`, and the engine handles dispatch, parallel execution, and result injection. MCP servers are first-class -- register them and their tools appear alongside your custom tools with no code changes.
+
+## Custom tools
+
+Implement the `AgentToolDispatcher` trait:
+
+```rust
+struct MathTools;
+
+#[async_trait]
+impl AgentToolDispatcher for MathTools {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        vec![Arc::new(ToolDef {
+            name: "add".to_string(),
+            description: "Add two numbers".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                    "b": {"type": "number"}
+                },
+                "required": ["a", "b"]
+            }),
+        })].into()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        match call.name {
+            "add" => {
+                let args: AddArgs = call.parse_args()
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                Ok(ToolResult::success(call.id, format!("{}", args.a + args.b)))
+            }
+            _ => Err(ToolError::not_found(call.name)),
+        }
+    }
+}
+```
+
+`ToolCallView` is a zero-allocation borrowed view (`{ id: &str, name: &str, args: &RawValue }`). When the model requests multiple tool calls, Meerkat dispatches them in parallel.
+
+## MCP servers
+
+Register any MCP server and its tools automatically appear in the agent's tool set:
+
+```bash
+rkat mcp add filesystem -- npx -y @anthropic/mcp-server-filesystem /tmp
+rkat mcp add api --url https://mcp.example.com/api
+```
+
+Config is stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user). Supports stdio, streamable HTTP, and SSE transports. See the [MCP reference](/api/mcp) for full details.
+
+## Built-in tools
+
+Meerkat ships with tool categories you enable per-agent. Nothing is on by default -- you choose what your agent can do.
+
+| Category | Tools | Enable with |
+|----------|-------|-------------|
+| Task management | `task_create`, `task_list`, `task_get`, `task_update` | `enable_builtins` |
+| Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` | `enable_shell` |
+| Sub-agents | `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list` | `enable_subagents` |
+| Memory | `memory_search` | `enable_memory` |
+| Comms | `send_message`, `send_request`, `send_response`, `list_peers` | `enable_comms` |
+
+Shell tools support allow/deny list security policies. Sub-agent tools enforce concurrency limits and prevent recursive spawning. See the [built-in tools reference](/reference/builtin-tools) for parameter details.
+
+## Composition
+
+Tools from different sources (custom, MCP, built-in) are composed into a single dispatcher. The agent sees one flat tool list regardless of where each tool comes from. Hooks can intercept tool calls before and after execution for guardrails, audit, or argument rewriting.

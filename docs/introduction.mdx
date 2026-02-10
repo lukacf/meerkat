@@ -1,0 +1,65 @@
+---
+title: "Introduction"
+description: "Meerkat is a library-first agent engine built in Rust. Provider-agnostic, modular, fast."
+---
+
+Meerkat is an agent engine, not an agent product. Claude Code and Codex CLI are finished applications -- Meerkat is what you'd build them on.
+
+It's a set of modular Rust crates that handle the hard parts of agentic systems: state machines, retries, budgets, streaming, tool dispatch, MCP, multi-agent coordination. You bring your own prompts, tools, and opinions. Meerkat handles execution.
+
+## Why Meerkat
+
+- **Fast.** Rust from the ground up. Single 5MB binary, &lt;10ms cold start, ~20MB memory. No runtime, no garbage collector, no dependency tree to manage.
+- **Provider-agnostic.** Same code, same tools, same sessions across Anthropic, OpenAI, and Gemini. Switch models with a config change. Run a Claude parent that spawns GPT sub-agents.
+- **Modular.** Twelve crates, all opt-in. Need just the agent loop? Pull in `meerkat-core`. Need session persistence? Add `meerkat-store`. Need inter-agent comms? Add `meerkat-comms`. Your binary includes only what you use. Disabled features return typed errors, not panics.
+- **Stable.** Deterministic state machine with defined transitions. Typed errors with compile-time guarantees. Every error code maps to a stable string across JSON-RPC, REST, and CLI exit codes.
+- **Controlled.** Hard budget limits on tokens, wall-clock time, and tool calls. Eight hook points for guardrails, audit, and content rewriting. Shell security with allow/deny lists.
+- **Multi-agent native.** Sub-agents spawn on different providers with isolated budgets. Independent agents communicate over Ed25519-signed channels. Compaction + semantic memory handles conversations that exceed any context window.
+
+### How it compares
+
+| | Meerkat | Claude Code / Codex CLI / Gemini CLI |
+|---|---|---|
+| **Design** | Library-first, modular crates | CLI-first, SDK bolted on |
+| **Modularity** | Compose only what you need | Monolithic, all-or-nothing |
+| **Performance** | Single 5MB binary, &lt;10ms startup, ~20MB RAM | Runtime + dependencies |
+| **Languages** | Rust core + Python & TypeScript SDKs | TypeScript or Python |
+| **Surfaces** | CLI, REST, JSON-RPC, MCP server, language SDKs | Rich interactive TUI |
+| **Multi-agent** | Native Ed25519-authenticated P2P messaging | No |
+| **Memory** | HNSW semantic indexing + auto-compaction | File-based context |
+
+Those tools excel at interactive development with rich terminal UIs. Meerkat has no TUI -- it's for automated pipelines, embedded agents, multi-agent systems, and anywhere you need programmatic control over an agent engine.
+
+## Use it from anywhere
+
+<CardGroup cols={3}>
+  <Card title="Rust SDK" icon="code" href="/rust/overview">
+    Embed as a library.
+  </Card>
+  <Card title="Python SDK" icon="python" href="/sdks/python/overview">
+    Drive from Python.
+  </Card>
+  <Card title="TypeScript SDK" icon="js" href="/sdks/typescript/overview">
+    Drive from TypeScript.
+  </Card>
+  <Card title="CLI" icon="terminal" href="/cli/commands">
+    Run from the terminal.
+  </Card>
+  <Card title="REST API" icon="globe" href="/api/rest">
+    HTTP endpoints.
+  </Card>
+  <Card title="JSON-RPC" icon="plug" href="/api/rpc">
+    Stateful stdio for IDEs.
+  </Card>
+</CardGroup>
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install and run your first agent in under a minute.
+  </Card>
+  <Card title="Examples" icon="code" href="/examples/basics">
+    Worked examples you can copy and run.
+  </Card>
+</CardGroup>

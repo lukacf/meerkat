@@ -1,0 +1,532 @@
+---
+title: "MCP"
+description: "Use Meerkat as an MCP client to call external tools, or expose Meerkat as MCP tools for other clients."
+icon: "plug"
+---
+
+Model Context Protocol (MCP) is the tool protocol Meerkat uses in two ways: as a **client** calling external MCP servers for tools, and as a **server** exposing itself as MCP tools for other clients.
+
+## Getting started as a client
+
+<Steps>
+  <Step title="Add an MCP server">
+    ```bash
+    rkat mcp add filesystem -- npx -y @anthropic/mcp-server-filesystem /tmp
+    ```
+  </Step>
+  <Step title="Verify it's registered">
+    ```bash
+    rkat mcp list
+    ```
+  </Step>
+  <Step title="Use it in a session">
+    The agent will automatically discover and use tools from registered MCP servers.
+  </Step>
+</Steps>
+
+## Tool overview (server mode)
+
+The `meerkat-mcp-server` crate exposes Meerkat as MCP tools that other clients can call.
+
+| Tool | Description |
+|------|-------------|
+| `meerkat_run` | Start a new agent session |
+| `meerkat_resume` | Continue a session or provide tool results |
+| `meerkat_config` | Get or update server config |
+| `meerkat_capabilities` | Query runtime capabilities |
+
+## Use MCP servers as tools (client)
+
+### CLI configuration (recommended)
+
+Use the `rkat mcp` commands to manage MCP servers:
+
+```bash
+# Add a stdio server
+rkat mcp add filesystem -- npx -y @anthropic/mcp-server-filesystem /tmp
+
+# Add a streamable HTTP server
+rkat mcp add api --url https://mcp.example.com/api
+
+# List servers
+rkat mcp list
+
+# Remove a server
+rkat mcp remove filesystem
+```
+
+### Config file format
+
+MCP servers are stored in TOML in two scopes:
+
+- **Project**: `.rkat/mcp.toml`
+- **User**: `~/.rkat/mcp.toml`
+
+Project config wins on name collisions.
+
+<Accordion title="Config file examples">
+  ```toml
+  # Stdio server (local process)
+  [[servers]]
+  name = "filesystem"
+  command = "npx"
+  args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
+
+  # Stdio server with env
+  [[servers]]
+  name = "database"
+  command = "python"
+  args = ["-m", "db_mcp_server"]
+  env = { DATABASE_URL = "${DATABASE_URL}" }
+
+  # HTTP server (streamable HTTP is default for URLs)
+  [[servers]]
+  name = "remote-api"
+  url = "https://mcp.example.com/api"
+  headers = { Authorization = "Bearer ${MCP_API_TOKEN}" }
+
+  # Legacy SSE server
+  [[servers]]
+  name = "legacy-sse"
+  url = "https://old.example.com/sse"
+  transport = "sse"
+  ```
+</Accordion>
+
+<Note>
+Supported transports: **stdio**, **streamable HTTP** (default for URLs), and **SSE**.
+Environment variables in config use `${VAR_NAME}` syntax.
+</Note>
+
+## Meerkat as an MCP server
+
+### Connecting other clients
+
+You can connect any MCP-capable client to a Meerkat MCP server. Run a server process that exposes the `meerkat_*` tools (stdio or HTTP), then point the client at it.
+
+<Tabs>
+  <Tab title="Claude Code">
+    Claude Code reads MCP servers from a `.mcp.json` file in your project root.
+    Example stdio config:
+
+    ```json
+    {
+      "mcpServers": {
+        "meerkat": {
+          "command": "meerkat-mcp-server",
+          "args": [],
+          "env": {
+            "ANTHROPIC_API_KEY": "your-key"
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Codex CLI">
+    Codex CLI supports MCP servers via a command and also via config. Example:
+
+    ```bash
+    codex mcp add meerkat --env ANTHROPIC_API_KEY=your-key -- meerkat-mcp-server
+    ```
+
+    You can also configure MCP servers in `~/.codex/config.toml` under
+    `[mcp_servers.<name>]`.
+  </Tab>
+  <Tab title="Gemini CLI">
+    Gemini CLI can add MCP servers via CLI or config. Example:
+
+    ```bash
+    # HTTP/streamable HTTP
+    gemini mcp add --scope=project --transport=http meerkat https://your-mcp-server.example.com
+    ```
+
+    Or configure in `.gemini/settings.json` (project-scoped) with an `mcpServers`
+    map that points to your server URL.
+  </Tab>
+</Tabs>
+
+### Hosting the MCP server
+
+`meerkat-mcp-server` is a library crate that provides tool schemas and handlers. If you need a standalone MCP server process, add a thin binary wrapper around its `tools_list()` and `handle_tools_call*` entrypoints, or embed it in an existing MCP host.
+
+## Tool reference
+
+### meerkat_run
+
+Start a new Meerkat agent session with the given prompt.
+
+<CodeGroup>
+```json Request (minimal)
+{
+  "prompt": "Write a haiku about Rust"
+}
+```
+
+```json Request (full)
+{
+  "prompt": "Analyze this code for bugs",
+  "system_prompt": "You are a senior code reviewer.",
+  "model": "claude-opus-4-6",
+  "max_tokens": 4096,
+  "provider": "anthropic",
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "bugs": {"type": "array", "items": {"type": "string"}},
+      "severity": {"type": "string"}
+    },
+    "required": ["bugs", "severity"]
+  },
+  "structured_output_retries": 2,
+  "stream": false,
+  "verbose": false,
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read a file from disk",
+      "input_schema": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"]
+      },
+      "handler": "callback"
+    }
+  ],
+  "enable_builtins": false,
+  "builtin_config": {
+    "enable_shell": false,
+    "shell_timeout_secs": 30
+  },
+  "host_mode": false,
+  "comms_name": null,
+  "hooks_override": null
+}
+```
+
+```json Response (success)
+{
+  "content": [{
+    "type": "text",
+    "text": "{\"content\":[{\"type\":\"text\",\"text\":\"Agent response here\"}],\"session_id\":\"01936f8a-...\",\"turns\":1,\"tool_calls\":0,\"structured_output\":null,\"schema_warnings\":null}"
+  }]
+}
+```
+</CodeGroup>
+
+#### Parameter reference
+
+<ParamField body="prompt" type="string" required>
+  User prompt for the agent.
+</ParamField>
+
+<ParamField body="system_prompt" type="string | null" default="null">
+  Override system prompt.
+</ParamField>
+
+<ParamField body="model" type="string | null" default="config default">
+  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`).
+</ParamField>
+
+<ParamField body="max_tokens" type="u32 | null" default="config default">
+  Max tokens per turn.
+</ParamField>
+
+<ParamField body="provider" type="string | null" default="inferred">
+  Provider: `"anthropic"`, `"openai"`, `"gemini"`, `"other"`.
+</ParamField>
+
+<ParamField body="output_schema" type="object | null" default="null">
+  JSON schema for structured output (wrapper or raw schema).
+</ParamField>
+
+<ParamField body="structured_output_retries" type="u32" default="2">
+  Max retries for structured output validation.
+</ParamField>
+
+<ParamField body="stream" type="bool" default="false">
+  Stream agent events via MCP notifications.
+</ParamField>
+
+<ParamField body="verbose" type="bool" default="false">
+  Enable verbose event logging (server-side).
+</ParamField>
+
+<ParamField body="tools" type="array" default="[]">
+  Tool definitions for the agent (see [McpToolDef schema](#mcptooldef-schema) below).
+</ParamField>
+
+<ParamField body="enable_builtins" type="bool" default="false">
+  Enable built-in tools (task management, etc.).
+</ParamField>
+
+<ParamField body="builtin_config" type="object | null" default="null">
+  Config for builtins (only used when `enable_builtins` is true).
+</ParamField>
+
+<ParamField body="builtin_config.enable_shell" type="bool" default="false">
+  Enable shell tools.
+</ParamField>
+
+<ParamField body="builtin_config.shell_timeout_secs" type="u64 | null" default="30">
+  Default shell command timeout.
+</ParamField>
+
+<ParamField body="host_mode" type="bool" default="false">
+  Run in host mode for inter-agent comms (requires `comms_name`).
+</ParamField>
+
+<ParamField body="comms_name" type="string | null" default="null">
+  Agent name for comms.
+</ParamField>
+
+<ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
+  Run-scoped hook overrides.
+</ParamField>
+
+#### McpToolDef schema
+
+<ParamField body="name" type="string" required>
+  Tool name.
+</ParamField>
+
+<ParamField body="description" type="string" required>
+  Tool description.
+</ParamField>
+
+<ParamField body="input_schema" type="object" required>
+  JSON Schema for tool input.
+</ParamField>
+
+<ParamField body="handler" type="string | null" default="callback">
+  Handler type (`"callback"` = result provided via `meerkat_resume`).
+</ParamField>
+
+When tools with `handler: "callback"` are provided and the agent requests a tool call, the response includes `pending_tool_calls`. The MCP client must execute the tool and provide results via `meerkat_resume`.
+
+### meerkat_resume
+
+Resume an existing session or provide tool results for pending tool calls.
+
+<CodeGroup>
+```json Request (minimal)
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "prompt": "Continue with this"
+}
+```
+
+```json Request (with tool results)
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "prompt": "",
+  "stream": false,
+  "verbose": false,
+  "tools": [],
+  "tool_results": [
+    {
+      "tool_use_id": "tc_abc123",
+      "content": "File contents here...",
+      "is_error": false
+    }
+  ],
+  "enable_builtins": false,
+  "builtin_config": null,
+  "host_mode": false,
+  "comms_name": null,
+  "model": null,
+  "max_tokens": null,
+  "provider": null,
+  "hooks_override": null
+}
+```
+
+```json Response (pending tool call)
+{
+  "content": [{
+    "type": "text",
+    "text": "{\"content\":[{\"type\":\"text\",\"text\":\"Agent is waiting for tool results\"}],\"session_id\":\"01936f8a-...\",\"status\":\"pending_tool_call\",\"pending_tool_calls\":[{\"tool_name\":\"read_file\",\"args\":{\"path\":\"/tmp/data.txt\"}}]}"
+  }]
+}
+```
+</CodeGroup>
+
+#### Parameter reference
+
+<ParamField body="session_id" type="string" required>
+  Session ID to resume.
+</ParamField>
+
+<ParamField body="prompt" type="string" required>
+  Follow-up prompt (can be empty when providing tool results).
+</ParamField>
+
+<ParamField body="stream" type="bool" default="false">
+  Stream agent events via MCP notifications.
+</ParamField>
+
+<ParamField body="verbose" type="bool" default="false">
+  Enable verbose event logging.
+</ParamField>
+
+<ParamField body="tools" type="array" default="[]">
+  Tool definitions (should match the original run).
+</ParamField>
+
+<ParamField body="tool_results" type="array" default="[]">
+  Tool results for pending tool calls.
+</ParamField>
+
+<ParamField body="tool_results[].tool_use_id" type="string" required>
+  ID of the tool call.
+</ParamField>
+
+<ParamField body="tool_results[].content" type="string" required>
+  Result content (or error message).
+</ParamField>
+
+<ParamField body="tool_results[].is_error" type="bool" default="false">
+  Whether this is an error result.
+</ParamField>
+
+<ParamField body="enable_builtins" type="bool" default="false">
+  Enable built-in tools.
+</ParamField>
+
+<ParamField body="builtin_config" type="object | null" default="null">
+  Builtin tool config.
+</ParamField>
+
+<ParamField body="host_mode" type="bool" default="false">
+  Enable host mode.
+</ParamField>
+
+<ParamField body="comms_name" type="string | null" default="from session">
+  Agent name for comms.
+</ParamField>
+
+<ParamField body="model" type="string | null" default="from session">
+  Model override.
+</ParamField>
+
+<ParamField body="max_tokens" type="u32 | null" default="from session">
+  Max tokens override.
+</ParamField>
+
+<ParamField body="provider" type="string | null" default="from session">
+  Provider override.
+</ParamField>
+
+<ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
+  Run-scoped hook overrides.
+</ParamField>
+
+### Response format
+
+Both `meerkat_run` and `meerkat_resume` return MCP-standard tool results. The inner `text` field is a JSON-encoded payload containing:
+
+<ResponseField name="content" type="array">
+  MCP content blocks with the agent's text.
+</ResponseField>
+
+<ResponseField name="session_id" type="string">
+  Session ID (save for `meerkat_resume`).
+</ResponseField>
+
+<ResponseField name="turns" type="u32">
+  Number of LLM calls made.
+</ResponseField>
+
+<ResponseField name="tool_calls" type="u32">
+  Number of tool calls executed.
+</ResponseField>
+
+<ResponseField name="structured_output" type="object | null">
+  Parsed structured output.
+</ResponseField>
+
+<ResponseField name="schema_warnings" type="array | null">
+  Schema compatibility warnings.
+</ResponseField>
+
+### meerkat_config
+
+Get or update Meerkat config for this MCP server instance.
+
+<CodeGroup>
+```json Get
+{ "action": "get" }
+```
+
+```json Set
+{ "action": "set", "config": { "agent": { "model": "gpt-5.2" } } }
+```
+
+```json Patch
+{ "action": "patch", "patch": { "agent": { "max_tokens_per_turn": 8192 } } }
+```
+</CodeGroup>
+
+<ParamField body="action" type="string" required>
+  One of `"get"`, `"set"`, `"patch"`.
+</ParamField>
+
+<ParamField body="config" type="object | null">
+  Full config to replace (for `set` action).
+</ParamField>
+
+<ParamField body="patch" type="object | null">
+  RFC 7396 merge-patch delta (for `patch` action).
+</ParamField>
+
+### meerkat_capabilities
+
+Returns the runtime capability set with status resolved against config.
+
+<CodeGroup>
+```json Request
+{}
+```
+
+```json Response
+{
+  "contract_version": {"major": 0, "minor": 1, "patch": 0},
+  "capabilities": [
+    {
+      "id": "sessions",
+      "description": "Session lifecycle management",
+      "status": "Available"
+    },
+    {
+      "id": "structured_output",
+      "description": "Structured output extraction with JSON schema",
+      "status": "Available"
+    },
+    {
+      "id": "builtins",
+      "description": "Built-in tools (task management)",
+      "status": {"DisabledByPolicy": {"description": "Disabled by config"}}
+    },
+    {
+      "id": "shell",
+      "description": "Shell command execution",
+      "status": {"DisabledByPolicy": {"description": "Disabled by config"}}
+    },
+    {
+      "id": "comms",
+      "description": "Inter-agent communication",
+      "status": {"NotCompiled": {"feature": "comms"}}
+    }
+  ]
+}
+```
+</CodeGroup>
+
+Possible `status` values:
+
+| Status | Shape | Meaning |
+|--------|-------|---------|
+| `Available` | `"Available"` | Compiled in, config-enabled |
+| `DisabledByPolicy` | `{"DisabledByPolicy": {"description": "..."}}` | Compiled in but disabled |
+| `NotCompiled` | `{"NotCompiled": {"feature": "..."}}` | Feature flag absent |
+| `NotSupportedByProtocol` | `{"NotSupportedByProtocol": {"reason": "..."}}` | Protocol does not support it |

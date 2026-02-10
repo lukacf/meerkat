@@ -1,0 +1,282 @@
+---
+title: "Rust SDK advanced"
+description: "AgentBuilder, providers, budget configuration, sub-agent spawning, and hook helpers."
+icon: "gears"
+---
+
+Advanced Rust SDK usage for fine-grained control over agent construction, provider configuration, and sub-agent management.
+
+## AgentBuilder
+
+<Note>
+For most use cases, prefer `SessionService` via `build_ephemeral_service()` (see
+[overview](/rust/overview)). `AgentBuilder` is used internally by `AgentFactory::build_agent()`.
+Direct usage is only needed when bypassing the session service entirely.
+</Note>
+
+```rust
+use meerkat::AgentBuilder;
+
+let agent = AgentBuilder::new()
+    .model("claude-sonnet-4-5")
+    .system_prompt("You are a helpful assistant.")
+    .max_tokens_per_turn(4096)
+    .temperature(0.7)
+    .build(llm_client, tool_dispatcher, session_store);
+```
+
+<Accordion title="All builder methods">
+| Method | Description | Default |
+|--------|-------------|---------|
+| `model(name)` | Set the model identifier | `"claude-opus-4-6"` |
+| `system_prompt(prompt)` | Set the system prompt | None |
+| `max_tokens_per_turn(n)` | Max tokens per LLM call | 8192 |
+| `temperature(t)` | Sampling temperature (0.0-1.0) | None (model default) |
+| `budget(limits)` | Set resource limits | Unlimited |
+| `retry_policy(policy)` | Configure retry behavior | 3 retries with backoff |
+| `resume_session(session)` | Resume from existing session | New session |
+| `provider_params(json)` | Provider-specific parameters | None |
+| `with_hook_engine(engine)` | Attach a hook engine | None |
+| `with_hook_run_overrides(overrides)` | Run-scoped hook overrides | Empty |
+</Accordion>
+
+---
+
+## Providers
+
+Built-in clients for major LLM providers:
+
+<Tabs>
+  <Tab title="Anthropic">
+    ```rust
+    use meerkat::AnthropicClient;
+
+    let client = AnthropicClient::new("sk-ant-...".to_string());
+    let client = AnthropicClient::from_env()?;
+    let client = AnthropicClient::new("key".to_string())
+        .with_base_url("https://my-proxy.example.com".to_string());
+    ```
+  </Tab>
+  <Tab title="OpenAI">
+    ```rust
+    use meerkat::OpenAiClient;
+
+    let client = OpenAiClient::new("sk-...".to_string());
+    let client = OpenAiClient::from_env()?;
+    let client = OpenAiClient::new("key".to_string())
+        .with_base_url("https://my-deployment.openai.azure.com".to_string());
+    ```
+  </Tab>
+  <Tab title="Gemini">
+    ```rust
+    use meerkat::GeminiClient;
+
+    let client = GeminiClient::new("...".to_string());
+    let client = GeminiClient::from_env()?;
+    ```
+  </Tab>
+</Tabs>
+
+### Provider parameters
+
+Pass provider-specific options via `AgentBuildConfig`:
+
+<Tabs>
+  <Tab title="Anthropic">
+    ```rust
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".into());
+    build_config.provider_params = Some(json!({"thinking_budget": 10000}));
+    ```
+  </Tab>
+  <Tab title="OpenAI">
+    ```rust
+    let mut build_config = AgentBuildConfig::new("gpt-5.2".into());
+    build_config.provider_params = Some(json!({"reasoning_effort": "high", "seed": 42}));
+    ```
+  </Tab>
+  <Tab title="Gemini">
+    ```rust
+    let mut build_config = AgentBuildConfig::new("gemini-3-flash-preview".into());
+    build_config.provider_params = Some(json!({"thinking_budget": 8000, "top_k": 40}));
+    ```
+  </Tab>
+</Tabs>
+
+<Accordion title="Implementing a custom LLM client">
+
+```rust
+use async_trait::async_trait;
+use meerkat::{AgentLlmClient, AgentError, LlmStreamResult, Message, ToolDef, StopReason, Usage};
+use serde_json::Value;
+
+struct MyCustomClient { api_key: String }
+
+#[async_trait]
+impl AgentLlmClient for MyCustomClient {
+    async fn stream_response(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&Value>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        // Call your LLM API here
+        Ok(LlmStreamResult {
+            content: "Response text".to_string(),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
+        })
+    }
+
+    fn provider(&self) -> &'static str { "my-provider" }
+}
+```
+</Accordion>
+
+---
+
+## Budget configuration
+
+```rust
+use meerkat::BudgetLimits;
+use std::time::Duration;
+
+let budget = BudgetLimits::default()
+    .with_max_tokens(100_000)
+    .with_max_duration(Duration::from_secs(300))
+    .with_max_tool_calls(50);
+
+let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".into());
+build_config.budget = Some(budget);
+```
+
+## Retry configuration
+
+```rust
+use meerkat::RetryPolicy;
+use std::time::Duration;
+
+let retry = RetryPolicy {
+    max_retries: 5,
+    initial_delay: Duration::from_millis(500),
+    max_delay: Duration::from_secs(30),
+    multiplier: 2.0,
+};
+```
+
+---
+
+## Sub-agent spawning
+
+Spawn parallel sub-agents for concurrent work:
+
+```rust
+use meerkat::{SpawnSpec, ContextStrategy, ToolAccessPolicy, BudgetLimits};
+
+let spec = SpawnSpec {
+    prompt: "Analyze this data...".to_string(),
+    system_prompt: Some("You are a data analyst.".to_string()),
+    context: ContextStrategy::LastN(5),
+    tool_access: ToolAccessPolicy::AllowList(vec!["read_file".to_string()]),
+    budget: BudgetLimits::default().with_max_tokens(10000),
+};
+
+let op_id = agent.spawn(spec).await?;
+let results = agent.collect_sub_agent_results().await;
+```
+
+<Accordion title="Forking conversations">
+```rust
+use meerkat::{ForkBranch, ForkBudgetPolicy, ToolAccessPolicy};
+
+let branches = vec![
+    ForkBranch {
+        name: "approach_a".to_string(),
+        prompt: "Try approach A...".to_string(),
+        tool_access: None,
+    },
+    ForkBranch {
+        name: "approach_b".to_string(),
+        prompt: "Try approach B...".to_string(),
+        tool_access: Some(ToolAccessPolicy::DenyList(vec!["dangerous_tool".to_string()])),
+    },
+];
+
+let op_ids = agent.fork(branches, ForkBudgetPolicy::Split).await?;
+```
+</Accordion>
+
+---
+
+## Hook helpers
+
+```rust
+use meerkat::{create_default_hook_engine, resolve_layered_hooks_config};
+
+let config = meerkat::Config::load().await?;
+let cwd = std::env::current_dir()?;
+
+// Called internally by AgentFactory::build_agent()
+let layered_hooks = resolve_layered_hooks_config(&cwd, &config).await;
+let hook_engine = create_default_hook_engine(layered_hooks);
+```
+
+---
+
+## Complete example
+
+```rust
+use meerkat::{AgentFactory, Config, build_ephemeral_service};
+use meerkat::service::{CreateSessionRequest, StartTurnRequest, SessionService};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load().await?;
+    let factory = AgentFactory::new(std::env::current_dir()?);
+    let service = build_ephemeral_service(factory, config, 64);
+
+    let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4-5".into(),
+        prompt: "What is 25 * 17?".into(),
+        system_prompt: Some("You are a helpful math assistant.".into()),
+        max_tokens: Some(2048),
+        event_tx: None,
+        host_mode: false,
+    }).await?;
+
+    println!("Response: {}", result.text);
+
+    let result = service.start_turn(&result.session_id, StartTurnRequest {
+        prompt: "Now divide that result by 5.".into(),
+        event_tx: None,
+        host_mode: false,
+    }).await?;
+
+    println!("Follow-up: {}", result.text);
+
+    let view = service.read(&result.session_id).await?;
+    println!("Total tokens: {}", view.billing.total_tokens);
+
+    Ok(())
+}
+```
+
+---
+
+## Python and TypeScript SDKs
+
+Both communicate with a local `rkat rpc` subprocess over JSON-RPC 2.0 -- no native bindings required.
+
+- **Python**: [Python SDK overview](/sdks/python/overview)
+- **TypeScript**: [TypeScript SDK overview](/sdks/typescript/overview)
+
+---
+
+## See also
+
+- [Rust SDK overview](/rust/overview) - getting started, sessions, events
+- [Tools and stores](/rust/tools-and-stores) - tool system, stores, MCP
+- [API reference](/reference/api-reference) - type index
+- [Architecture](/reference/architecture) - system design and internals

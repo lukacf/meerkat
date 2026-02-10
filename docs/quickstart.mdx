@@ -1,0 +1,110 @@
+---
+title: "Quickstart"
+description: "Install Meerkat and run your first agent. Single binary, any provider."
+---
+
+## Install
+
+<Tabs>
+  <Tab title="Rust crate">
+    ```toml Cargo.toml
+    [dependencies]
+    meerkat = "0.1"
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```bash
+    pip install meerkat-sdk
+    ```
+    <Note>Requires the `rkat` binary on your PATH.</Note>
+  </Tab>
+  <Tab title="TypeScript">
+    ```bash
+    npm install @meerkat/sdk
+    ```
+    <Note>Requires the `rkat` binary on your PATH.</Note>
+  </Tab>
+  <Tab title="CLI">
+    ```bash
+    cargo install --path meerkat-cli
+    ```
+  </Tab>
+</Tabs>
+
+## Run an agent
+
+<Tabs>
+  <Tab title="Rust">
+    ```rust
+    let result = meerkat::with_anthropic(std::env::var("ANTHROPIC_API_KEY")?)
+        .model("claude-sonnet-4-5")
+        .run("What is the capital of France?")
+        .await?;
+    println!("{}", result.text);
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    from meerkat import MeerkatClient
+
+    client = MeerkatClient()
+    await client.connect()
+    result = await client.create_session(prompt="What is the capital of France?")
+    print(result.text)
+    await client.close()
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    import { MeerkatClient } from "@meerkat/sdk";
+
+    const client = new MeerkatClient();
+    await client.connect();
+    const result = await client.createSession({ prompt: "What is the capital of France?" });
+    console.log(result.text);
+    await client.close();
+    ```
+  </Tab>
+  <Tab title="CLI">
+    ```bash
+    export ANTHROPIC_API_KEY=sk-...
+    rkat run "What is the capital of France?"
+    ```
+  </Tab>
+</Tabs>
+
+## Switch providers
+
+Same code, different model. The provider is inferred from the model name:
+
+```bash
+rkat run --model claude-sonnet-4-5 "Explain monads"
+rkat run --model gpt-5.2 "Explain monads"
+rkat run --model gemini-3-flash-preview "Explain monads"
+```
+
+## Add tools
+
+Register an MCP server and its tools are available to the agent immediately:
+
+```bash
+rkat mcp add filesystem -- npx -y @anthropic/mcp-server-filesystem /tmp
+rkat run "List the files in /tmp"
+```
+
+## Enforce budgets
+
+Cap token usage, wall-clock time, or tool calls:
+
+```bash
+rkat run --max-total-tokens 10000 --max-duration 30s --max-tool-calls 5 "Analyze this codebase"
+```
+
+The agent completes its current turn when a limit is hit, then stops.
+
+## What's next
+
+- [Examples](/examples/basics) -- worked examples with tools, sessions, structured output
+- [Providers](/concepts/providers) -- model tables and provider parameters
+- [Rust SDK](/rust/overview) / [Python SDK](/sdks/python/overview) / [TypeScript SDK](/sdks/typescript/overview) -- full API reference

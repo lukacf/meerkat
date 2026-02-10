@@ -1,0 +1,497 @@
+---
+title: "REST API"
+description: "HTTP server for running and managing agent sessions over REST endpoints."
+icon: "globe"
+---
+
+Meerkat ships a REST server for running and managing agent sessions over HTTP. This is the best fit if you want a simple, language-agnostic API for the Meerkat core.
+
+## Getting started
+
+<Steps>
+  <Step title="Build the server">
+    <CodeGroup>
+    ```bash Development
+    cargo run --package meerkat-rest
+    ```
+
+    ```bash Production
+    cargo build --release --package meerkat-rest
+    ./target/release/meerkat-rest
+    ```
+    </CodeGroup>
+  </Step>
+  <Step title="Set API keys">
+    Export the key for your chosen provider:
+
+    ```bash
+    export ANTHROPIC_API_KEY="sk-..."
+    # or OPENAI_API_KEY, GOOGLE_API_KEY
+    ```
+  </Step>
+  <Step title="Send a request">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{"prompt": "Hello, Meerkat!"}'
+    ```
+  </Step>
+</Steps>
+
+## Endpoint overview
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/sessions` | Create and run a new session |
+| `POST` | `/sessions/{id}/messages` | Continue an existing session |
+| `GET` | `/sessions/{id}` | Fetch session metadata and usage |
+| `GET` | `/sessions/{id}/events` | SSE stream for real-time updates |
+| `GET` | `/health` | Liveness check |
+| `GET` | `/capabilities` | Runtime capabilities |
+| `GET` | `/config` | Read config |
+| `PUT` | `/config` | Replace config |
+| `PATCH` | `/config` | Merge-patch config (RFC 7396) |
+
+## Configuration
+
+<Accordion title="Server configuration details">
+  The REST server reads config from its instance data directory:
+
+  - macOS: `~/Library/Application Support/meerkat/rest/config.toml`
+  - Linux: `~/.local/share/meerkat/rest/config.toml`
+  - Windows: `%APPDATA%\meerkat\rest\config.toml`
+
+  Key sections:
+
+  ```toml
+  [rest]
+  host = "127.0.0.1"
+  port = 8080
+
+  [agent]
+  model = "claude-opus-4-6"
+  max_tokens_per_turn = 8192
+
+  [tools]
+  builtins_enabled = false
+  shell_enabled = false
+  ```
+
+  API keys are provided via environment variables:
+
+  - `ANTHROPIC_API_KEY`
+  - `OPENAI_API_KEY`
+  - `GOOGLE_API_KEY`
+</Accordion>
+
+## Endpoints
+
+### POST /sessions
+
+Create and run a new session.
+
+<CodeGroup>
+```json Request (minimal)
+{
+  "prompt": "Your prompt here"
+}
+```
+
+```json Request (full)
+{
+  "prompt": "Your prompt here",
+  "system_prompt": "Optional system prompt",
+  "model": "claude-opus-4-6",
+  "provider": "anthropic",
+  "max_tokens": 4096,
+  "output_schema": {
+    "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+    "name": "answer",
+    "strict": false,
+    "compat": "lossy",
+    "format": "meerkat_v1"
+  },
+  "structured_output_retries": 2,
+  "verbose": false,
+  "host_mode": false,
+  "comms_name": null,
+  "hooks_override": null
+}
+```
+
+```json Response
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "text": "Response text",
+  "turns": 1,
+  "tool_calls": 0,
+  "usage": {
+    "input_tokens": 50,
+    "output_tokens": 200,
+    "total_tokens": 250
+  },
+  "structured_output": null,
+  "schema_warnings": null
+}
+```
+</CodeGroup>
+
+#### Request fields
+
+<ParamField body="prompt" type="string" required>
+  The user prompt to send to the agent.
+</ParamField>
+
+<ParamField body="system_prompt" type="string | null" default="null">
+  Override the system prompt for this session.
+</ParamField>
+
+<ParamField body="model" type="string | null" default="config default">
+  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`).
+</ParamField>
+
+<ParamField body="provider" type="string | null" default="inferred from model">
+  Provider: `"anthropic"`, `"openai"`, `"gemini"`, `"other"`.
+</ParamField>
+
+<ParamField body="max_tokens" type="u32 | null" default="config default">
+  Max tokens per turn.
+</ParamField>
+
+<ParamField body="output_schema" type="OutputSchema | null" default="null">
+  JSON schema for structured output extraction (wrapper or raw schema).
+</ParamField>
+
+<ParamField body="structured_output_retries" type="u32" default="2">
+  Max retries for structured output validation.
+</ParamField>
+
+<ParamField body="verbose" type="bool" default="false">
+  Enable verbose event logging (server-side).
+</ParamField>
+
+<ParamField body="host_mode" type="bool" default="false">
+  Run in host mode for inter-agent comms (requires `comms_name`).
+</ParamField>
+
+<ParamField body="comms_name" type="string | null" default="null">
+  Agent name for inter-agent communication.
+</ParamField>
+
+<ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
+  Run-scoped hook overrides (see [Hooks](/guides/hooks)).
+</ParamField>
+
+#### Response fields
+
+<ResponseField name="session_id" type="string">
+  UUID of the created session.
+</ResponseField>
+
+<ResponseField name="text" type="string">
+  The agent's response text.
+</ResponseField>
+
+<ResponseField name="turns" type="u32">
+  Number of LLM calls made.
+</ResponseField>
+
+<ResponseField name="tool_calls" type="u32">
+  Number of tool calls executed.
+</ResponseField>
+
+<ResponseField name="usage" type="WireUsage">
+  Token usage breakdown.
+</ResponseField>
+
+<ResponseField name="usage.input_tokens" type="u64">
+  Input tokens consumed.
+</ResponseField>
+
+<ResponseField name="usage.output_tokens" type="u64">
+  Output tokens generated.
+</ResponseField>
+
+<ResponseField name="usage.total_tokens" type="u64">
+  Total tokens (input + output).
+</ResponseField>
+
+<ResponseField name="usage.cache_creation_tokens" type="u64 | null">
+  Cache creation tokens (provider-specific).
+</ResponseField>
+
+<ResponseField name="usage.cache_read_tokens" type="u64 | null">
+  Cache read tokens (provider-specific).
+</ResponseField>
+
+<ResponseField name="structured_output" type="object | null">
+  Parsed structured output (when `output_schema` was provided).
+</ResponseField>
+
+<ResponseField name="schema_warnings" type="array | null">
+  Schema compatibility warnings per provider.
+</ResponseField>
+
+<Accordion title="Structured output example">
+  <CodeGroup>
+  ```json Request
+  {
+    "prompt": "Extract the capital of France",
+    "model": "claude-opus-4-6",
+    "output_schema": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "country": {"type": "string"},
+          "capital": {"type": "string"}
+        },
+        "required": ["country", "capital"]
+      },
+      "name": "capital_extraction",
+      "strict": false,
+      "compat": "lossy",
+      "format": "meerkat_v1"
+    },
+    "structured_output_retries": 2
+  }
+  ```
+
+  ```json Response
+  {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000002",
+    "text": "{\"country\":\"France\",\"capital\":\"Paris\"}",
+    "turns": 1,
+    "tool_calls": 0,
+    "usage": {
+      "input_tokens": 80,
+      "output_tokens": 30,
+      "total_tokens": 110
+    },
+    "structured_output": {
+      "country": "France",
+      "capital": "Paris"
+    },
+    "schema_warnings": [
+      {
+        "provider": "gemini",
+        "path": "/properties/choice/oneOf",
+        "message": "Removed unsupported keyword 'oneOf'"
+      }
+    ]
+  }
+  ```
+  </CodeGroup>
+
+  When `output_schema` is provided, the `text` field contains the schema-only JSON
+  string produced by the extraction turn (no extra prose). The `structured_output`
+  field contains the parsed JSON value for convenience.
+
+  `output_schema` may be provided as a wrapper object (shown above) or as a raw
+  JSON Schema object. The wrapper enables explicit `compat`/`format` settings.
+</Accordion>
+
+### POST /sessions/\{id\}/messages
+
+Continue an existing session.
+
+<CodeGroup>
+```json Request
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "prompt": "Follow-up message"
+}
+```
+
+```json Response
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "text": "Response to follow-up",
+  "turns": 1,
+  "tool_calls": 0,
+  "usage": {
+    "input_tokens": 100,
+    "output_tokens": 150,
+    "total_tokens": 250
+  },
+  "structured_output": null,
+  "schema_warnings": null
+}
+```
+</CodeGroup>
+
+#### Request fields
+
+<ParamField body="session_id" type="string" required>
+  Session ID (must match the path `{id}`).
+</ParamField>
+
+<ParamField body="prompt" type="string" required>
+  Follow-up prompt.
+</ParamField>
+
+<ParamField body="system_prompt" type="string | null" default="null">
+  Override the system prompt.
+</ParamField>
+
+<ParamField body="model" type="string | null" default="from session">
+  Model override for this turn.
+</ParamField>
+
+<ParamField body="provider" type="string | null" default="from session">
+  Provider override for this turn.
+</ParamField>
+
+<ParamField body="max_tokens" type="u32 | null" default="from session">
+  Max tokens override for this turn.
+</ParamField>
+
+<ParamField body="output_schema" type="OutputSchema | null" default="null">
+  Structured output schema for this turn.
+</ParamField>
+
+<ParamField body="structured_output_retries" type="u32" default="2">
+  Max retries for structured output validation.
+</ParamField>
+
+<ParamField body="verbose" type="bool" default="false">
+  Enable verbose event logging.
+</ParamField>
+
+<ParamField body="host_mode" type="bool" default="false">
+  Enable host mode for this turn.
+</ParamField>
+
+<ParamField body="comms_name" type="string | null" default="from session">
+  Agent name for comms.
+</ParamField>
+
+<ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
+  Run-scoped hook overrides.
+</ParamField>
+
+#### Response fields
+
+Same shape as `POST /sessions`.
+
+### GET /sessions/\{id\}
+
+Fetch session metadata and usage.
+
+```json Response
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "created_at": "2025-01-15T10:30:00Z",
+  "updated_at": "2025-01-15T10:31:00Z",
+  "message_count": 4,
+  "total_tokens": 500
+}
+```
+
+### GET /sessions/\{id\}/events
+
+Server-Sent Events (SSE) stream for real-time updates.
+
+Event types:
+
+| Event | Description |
+|-------|-------------|
+| `session_loaded` | Emitted on connect with session metadata |
+| `run_started` | Turn execution began |
+| `turn_started` | New LLM call within the turn |
+| `text_delta` | Streaming text chunk from LLM |
+| `tool_call_requested` | LLM wants to call a tool |
+| `tool_execution_started` | Tool dispatch began |
+| `tool_execution_completed` | Tool returned a result |
+| `turn_completed` | LLM call finished |
+| `run_completed` | Turn execution finished successfully |
+| `run_failed` | Turn execution failed |
+| `budget_warning` | Approaching resource limits |
+| `retrying` | Retrying after transient error |
+| `done` | Emitted when the broadcast channel closes |
+
+### GET /health
+
+Returns `"ok"` (HTTP 200). Use for liveness checks.
+
+### GET /capabilities
+
+Returns runtime capabilities with status resolved against config.
+
+```json Response
+{
+  "contract_version": {"major": 0, "minor": 1, "patch": 0},
+  "capabilities": [
+    {
+      "id": "sessions",
+      "description": "Session lifecycle management",
+      "status": "Available"
+    },
+    {
+      "id": "shell",
+      "description": "Shell command execution",
+      "status": {"DisabledByPolicy": {"description": "Disabled by config"}}
+    }
+  ]
+}
+```
+
+### GET /config
+
+Returns the current `Config` object.
+
+### PUT /config
+
+Sets the entire config. Body: full `Config` JSON.
+
+### PATCH /config
+
+RFC 7396 merge patch on the config. Body: partial JSON.
+
+## Error responses
+
+All errors are returned as JSON with an HTTP status code:
+
+```json
+{
+  "error": "Human-readable error message",
+  "code": "ERROR_CODE"
+}
+```
+
+| HTTP Status | Code | When |
+|-------------|------|------|
+| 400 | `BAD_REQUEST` | Invalid parameters, session ID mismatch, host_mode without comms |
+| 404 | `NOT_FOUND` | Session does not exist |
+| 500 | `CONFIGURATION_ERROR` | Config store read/write failure |
+| 500 | `AGENT_ERROR` | LLM provider error, tool dispatch failure, agent loop error |
+| 500 | `INTERNAL_ERROR` | Store initialization failure, unexpected server error |
+
+<CodeGroup>
+```json Session not found
+{
+  "error": "Session not found: 01936f8a-7b2c-7000-8000-000000000099",
+  "code": "NOT_FOUND"
+}
+```
+
+```json Bad request
+{
+  "error": "Session ID mismatch: path=abc body=def",
+  "code": "BAD_REQUEST"
+}
+```
+</CodeGroup>
+
+## Notes
+
+<Note>
+Host mode requires `host_mode: true` and a `comms_name`. If `host_mode` is
+requested but the binary was not compiled with comms support, the server
+returns a `BAD_REQUEST` error.
+</Note>
+
+<Note>
+`hooks_override` allows per-request hook overrides including adding extra hook
+entries and disabling specific hooks by ID. See [Hooks](/guides/hooks) for the
+`HookRunOverrides` schema.
+</Note>

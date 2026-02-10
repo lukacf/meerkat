@@ -1,0 +1,204 @@
+---
+title: "Tools and stores"
+description: "Rust SDK reference for the tool system, session stores, and MCP integration."
+icon: "screwdriver-wrench"
+---
+
+## Tool system
+
+### Defining tools
+
+Define tools using JSON Schema:
+
+```rust
+use meerkat::ToolDef;
+use serde_json::json;
+
+let tool = ToolDef {
+    name: "get_weather".to_string(),
+    description: "Get current weather for a city".to_string(),
+    input_schema: json!({
+        "type": "object",
+        "properties": {
+            "city": {
+                "type": "string",
+                "description": "City name"
+            },
+            "units": {
+                "type": "string",
+                "enum": ["celsius", "fahrenheit"],
+                "default": "celsius"
+            }
+        },
+        "required": ["city"]
+    }),
+};
+```
+
+### Implementing AgentToolDispatcher
+
+The `AgentToolDispatcher` trait connects your tools to the agent:
+
+```rust
+use async_trait::async_trait;
+use meerkat::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
+use meerkat::error::ToolError;
+use serde_json::json;
+use std::sync::Arc;
+
+struct MyToolDispatcher;
+
+#[async_trait]
+impl AgentToolDispatcher for MyToolDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        vec![
+            Arc::new(ToolDef {
+                name: "search".to_string(),
+                description: "Search the web".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }),
+            }),
+        ].into()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        match call.name {
+            "search" => {
+                #[derive(serde::Deserialize)]
+                struct Args { query: String }
+
+                let args: Args = call.parse_args()
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                Ok(ToolResult::success(call.id, format!("Results for: {}", args.query)))
+            }
+            _ => Err(ToolError::not_found(call.name)),
+        }
+    }
+}
+```
+
+<Accordion title="ToolRegistry (dynamic registration)">
+For dynamic tool registration:
+
+```rust
+use meerkat::ToolRegistry;
+
+let mut registry = ToolRegistry::new();
+
+registry.register(tool_def, Box::new(|args| {
+    Box::pin(async move {
+        Ok("result".to_string())
+    })
+}));
+
+let tools = registry.tools();
+```
+</Accordion>
+
+---
+
+## Session stores
+
+<Tabs>
+  <Tab title="JsonlStore">
+    File-based persistence using JSONL format:
+
+    ```rust
+    use meerkat::JsonlStore;
+    use std::path::PathBuf;
+
+    let store = JsonlStore::new(PathBuf::from("./sessions"));
+    store.init().await?;
+
+    store.save(&session).await?;
+    let session = store.load(&session_id).await?;
+    store.delete(&session_id).await?;
+    ```
+  </Tab>
+  <Tab title="MemoryStore">
+    In-memory storage for testing:
+
+    ```rust
+    use meerkat::MemoryStore;
+
+    let store = MemoryStore::new();
+    store.save(&session).await?;
+    let loaded = store.load(&session_id).await?;
+    ```
+  </Tab>
+</Tabs>
+
+<Accordion title="Implementing a custom store">
+Implement the `AgentSessionStore` trait:
+
+```rust
+use async_trait::async_trait;
+use meerkat::{AgentSessionStore, AgentError, Session};
+
+struct MyStore { /* your storage backend */ }
+
+#[async_trait]
+impl AgentSessionStore for MyStore {
+    async fn save(&self, session: &Session) -> Result<(), AgentError> {
+        // Persist session
+        Ok(())
+    }
+
+    async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
+        // Load session by ID
+        Ok(None)
+    }
+}
+```
+</Accordion>
+
+---
+
+## MCP integration
+
+Route tool calls across multiple MCP servers:
+
+```rust
+use meerkat::{McpRouter, McpServerConfig};
+use std::collections::HashMap;
+
+let mut router = McpRouter::new();
+
+// Add stdio-based MCP server
+let config = McpServerConfig::stdio(
+    "my-server",
+    "/path/to/mcp-server".to_string(),
+    vec!["--arg".to_string()],
+    HashMap::new(),
+);
+router.add_server(config).await?;
+
+// Add HTTP/SSE-based MCP server
+let config = McpServerConfig::http(
+    "remote-server",
+    "https://mcp.example.com/sse".to_string(),
+);
+router.add_server(config).await?;
+
+// List all available tools
+let tools = router.list_tools().await?;
+
+// Call a tool
+let result = router.call_tool("tool_name", &args).await?;
+
+// Graceful shutdown
+router.shutdown().await;
+```
+
+---
+
+## See also
+
+- [Rust SDK overview](/rust/overview) - getting started, sessions, events
+- [Rust SDK advanced](/rust/advanced) - AgentBuilder, providers, sub-agents
+- [Tools concept](/concepts/tools) - how the tool system works

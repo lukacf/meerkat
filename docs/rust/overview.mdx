@@ -1,0 +1,295 @@
+---
+title: "Rust SDK overview"
+description: "Embed Meerkat as a Rust library: the full engine with no subprocess overhead."
+icon: "code"
+---
+
+The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API servers are thin wrappers over this same engine. Using it directly means no subprocess, no JSON-RPC overhead, and full control over every component.
+
+## Method overview
+
+| Area | Method / Type | Purpose |
+|------|---------------|---------|
+| **Setup** | `Config::load()` | Load configuration from disk |
+| | `AgentFactory::new(cwd)` | Create a factory for building agents |
+| | `build_ephemeral_service(factory, config, cap)` | Build an in-memory session service |
+| **Sessions** | `service.create_session(req)` | Create a session and run the first turn |
+| | `service.start_turn(id, req)` | Continue an existing session |
+| | `service.read(id)` | Read session state |
+| | `service.list()` | List active sessions |
+| | `service.archive(id)` | Remove a session |
+| **Agent** | `agent.run(prompt)` | Run agent with a prompt |
+| | `agent.run_with_events(prompt, tx)` | Run with event streaming |
+| | `agent.cancel()` | Cancel the current run |
+
+## Installation
+
+<Steps>
+  <Step title="Add the dependency">
+    ```toml
+    [dependencies]
+    meerkat = "0.1"
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Step>
+  <Step title="Choose feature flags">
+    <CodeGroup>
+    ```toml Default (Anthropic + JSONL storage)
+    [dependencies]
+    meerkat = "0.1"
+    ```
+
+    ```toml All LLM providers
+    [dependencies]
+    meerkat = { version = "0.1", features = ["all-providers"] }
+    ```
+
+    ```toml Storage backends
+    [dependencies]
+    meerkat = { version = "0.1", features = ["jsonl-store", "memory-store"] }
+    ```
+    </CodeGroup>
+  </Step>
+</Steps>
+
+<Accordion title="Feature flag reference">
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `anthropic` | Anthropic Claude API client | Yes |
+| `openai` | OpenAI API client | No |
+| `gemini` | Google Gemini API client | No |
+| `all-providers` | All LLM providers | No |
+| `jsonl-store` | File-based session persistence | Yes |
+| `memory-store` | In-memory session storage | No |
+| `session-store` | Persistent sessions (redb-backed) | No |
+| `session-compaction` | Auto-compact long conversations | No |
+| `memory-store-session` | Semantic memory indexing | No |
+</Accordion>
+
+---
+
+## Quick start
+
+The recommended entry point is `SessionService` via `build_ephemeral_service`:
+
+```rust
+use meerkat::{AgentFactory, Config, build_ephemeral_service};
+use meerkat::service::{CreateSessionRequest, SessionService};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load().await?;
+    let factory = AgentFactory::new(std::env::current_dir()?);
+    let service = build_ephemeral_service(factory, config, 64);
+
+    let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4-5".into(),
+        prompt: "What is the capital of France?".into(),
+        system_prompt: Some("You are a helpful assistant.".into()),
+        max_tokens: Some(1024),
+        event_tx: None,
+        host_mode: false,
+    }).await?;
+
+    println!("Response: {}", result.text);
+    println!("Session ID: {}", result.session_id);
+    Ok(())
+}
+```
+
+---
+
+## Sessions
+
+`SessionService` is the canonical lifecycle API. All surfaces (CLI, REST, MCP, RPC) route through it.
+
+### Multi-turn conversations
+
+```rust
+use meerkat::service::{CreateSessionRequest, StartTurnRequest, SessionService};
+
+// Turn 1: create session
+let result = service.create_session(CreateSessionRequest {
+    model: "claude-sonnet-4-5".into(),
+    prompt: "My name is Alice.".into(),
+    system_prompt: Some("You are a helpful assistant with memory.".into()),
+    max_tokens: None,
+    event_tx: None,
+    host_mode: false,
+}).await?;
+
+let session_id = result.session_id;
+
+// Turn 2: agent remembers "Alice"
+let result = service.start_turn(&session_id, StartTurnRequest {
+    prompt: "What's my name?".into(),
+    event_tx: None,
+    host_mode: false,
+}).await?;
+
+// Read session state
+let view = service.read(&session_id).await?;
+println!("Messages: {}", view.state.message_count);
+
+// Archive when done
+service.archive(&session_id).await?;
+```
+
+### Error handling
+
+```rust
+use meerkat::service::SessionError;
+
+match service.start_turn(&id, req).await {
+    Ok(result) => println!("Response: {}", result.text),
+    Err(SessionError::NotFound { id }) => println!("Session {} not found", id),
+    Err(SessionError::Busy { id }) => println!("Session {} is busy, retry later", id),
+    Err(e) => println!("Error: {}", e),
+}
+```
+
+---
+
+## Running agents
+
+### Basic run
+
+```rust
+let result = agent.run("What is 2 + 2?".to_string()).await?;
+println!("Answer: {}", result.text);
+```
+
+### Run with event streaming
+
+```rust
+use tokio::sync::mpsc;
+use meerkat::AgentEvent;
+
+let (tx, mut rx) = mpsc::channel::<AgentEvent>(100);
+
+tokio::spawn(async move {
+    while let Some(event) = rx.recv().await {
+        match event {
+            AgentEvent::TextDelta { delta } => print!("{}", delta),
+            AgentEvent::ToolExecutionStarted { name, .. } => {
+                println!("[Calling {}...]", name);
+            }
+            AgentEvent::TurnCompleted { usage, .. } => {
+                println!("\n[Tokens: {}]", usage.total_tokens());
+            }
+            _ => {}
+        }
+    }
+});
+
+let result = agent.run_with_events("Tell me a story".to_string(), tx).await?;
+```
+
+### Agent methods
+
+| Method | Description |
+|--------|-------------|
+| `run(prompt)` | Run agent with user input |
+| `run_with_events(prompt, tx)` | Run with event streaming |
+| `session()` | Get current session (read-only) |
+| `budget()` | Get current budget tracker |
+| `state()` | Get current loop state |
+| `cancel()` | Cancel the current run |
+
+### Error handling
+
+```rust
+use meerkat::AgentError;
+
+match agent.run("prompt".to_string()).await {
+    Ok(result) => println!("Success: {}", result.text),
+    Err(AgentError::LlmError(msg)) => println!("LLM error: {}", msg),
+    Err(AgentError::TokenBudgetExceeded { used, limit }) => {
+        println!("Token budget exceeded: {} / {}", used, limit);
+    }
+    Err(e) => println!("Other error: {}", e),
+}
+```
+
+---
+
+## Events
+
+<Accordion title="All event types">
+```rust
+use meerkat::AgentEvent;
+
+match event {
+    // Session lifecycle
+    AgentEvent::RunStarted { session_id, prompt } => {}
+    AgentEvent::RunCompleted { session_id, result, usage } => {}
+    AgentEvent::RunFailed { session_id, error } => {}
+
+    // LLM interaction
+    AgentEvent::TurnStarted { turn_number } => {}
+    AgentEvent::TextDelta { delta } => {}
+    AgentEvent::TextComplete { content } => {}
+    AgentEvent::ToolCallRequested { id, name, args } => {}
+    AgentEvent::ToolResultReceived { id, name, is_error } => {}
+    AgentEvent::TurnCompleted { stop_reason, usage } => {}
+
+    // Tool execution
+    AgentEvent::ToolExecutionStarted { id, name } => {}
+    AgentEvent::ToolExecutionCompleted { id, name, result, is_error, duration_ms } => {}
+
+    // Budget
+    AgentEvent::BudgetWarning { budget_type, used, limit, percent } => {}
+
+    // Retry
+    AgentEvent::Retrying { attempt, max_attempts, error, delay_ms } => {}
+}
+```
+</Accordion>
+
+---
+
+## Core types
+
+### Message
+
+```rust
+use meerkat::{Message, UserMessage, AssistantMessage, SystemMessage, ToolResult};
+
+let system = Message::System(SystemMessage { content: "You are helpful.".to_string() });
+let user = Message::User(UserMessage { content: "Hello!".to_string() });
+```
+
+### ToolCall and ToolResult
+
+```rust
+use meerkat::{ToolCall, ToolResult};
+
+let tool_call = ToolCall {
+    id: "tc_123".to_string(),
+    name: "get_weather".to_string(),
+    args: json!({"city": "Tokyo"}),
+};
+
+let result = ToolResult::success("tc_123", "Sunny, 25C");
+let error = ToolResult::error("tc_123", "City not found");
+```
+
+### RunResult
+
+```rust
+let result: RunResult = agent.run("Hello".to_string()).await?;
+
+println!("Response: {}", result.text);
+println!("Session: {}", result.session_id);
+println!("Tokens: {}", result.usage.total_tokens());
+println!("Turns: {}", result.turns);
+println!("Tool calls: {}", result.tool_calls);
+```
+
+---
+
+## See also
+
+- [Tools and stores](/rust/tools-and-stores) - tool system, session stores, MCP integration
+- [Advanced](/rust/advanced) - AgentBuilder, providers, budget, sub-agents
+- [API reference](/reference/api-reference) - quick-lookup type index

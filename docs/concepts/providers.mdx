@@ -1,0 +1,145 @@
+---
+title: "Providers"
+description: "Provider-agnostic: same tools, same sessions across Anthropic, OpenAI, and Gemini."
+icon: "server"
+---
+
+Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration work identically across Anthropic, OpenAI, and Gemini. Switch providers by changing the model name -- no code changes. Set an API key for at least one.
+
+## Provider setup
+
+<Tabs>
+  <Tab title="Anthropic">
+    ```bash
+    export ANTHROPIC_API_KEY="sk-ant-..."
+    ```
+
+    | Model | Context | Max output | Best for |
+    |-------|---------|------------|----------|
+    | `claude-opus-4-6` | 200K / 1M (beta) | 128K | Complex reasoning, highest quality |
+    | `claude-sonnet-4-5` | 200K / 1M (beta) | 64K | Balanced performance and cost |
+    | `claude-opus-4-5` | 200K | 64K | Legacy Opus (still supported) |
+    | `claude-haiku-4-5` | 200K | 64K | Fast, simple tasks |
+
+    ```toml .rkat/config.toml
+    [agent]
+    model = "claude-opus-4-6"
+    max_tokens_per_turn = 16384
+    ```
+  </Tab>
+  <Tab title="OpenAI">
+    ```bash
+    export OPENAI_API_KEY="sk-..."
+    ```
+
+    | Model | Context | Best for |
+    |-------|---------|----------|
+    | `gpt-5.2` | 1M | General purpose, advanced reasoning |
+    | `gpt-5.2-pro` | 1M | Highest quality reasoning |
+    | `gpt-5.1-codex-max` | 1M | Code generation, agentic coding |
+
+    ```toml .rkat/config.toml
+    [agent]
+    model = "gpt-5.2"
+    max_tokens_per_turn = 8192
+    ```
+  </Tab>
+  <Tab title="Gemini">
+    ```bash
+    export GOOGLE_API_KEY="AIza..."
+    ```
+
+    | Model | Context | Best for |
+    |-------|---------|----------|
+    | `gemini-3-pro-preview` | 1M | Advanced reasoning, complex tasks |
+    | `gemini-3-flash-preview` | 1M | Fast, balanced performance |
+
+    ```toml .rkat/config.toml
+    [agent]
+    model = "gemini-3-pro-preview"
+    max_tokens_per_turn = 8192
+    ```
+  </Tab>
+</Tabs>
+
+## Environment variables
+
+| Variable | Fallback | Provider |
+|----------|----------|----------|
+| `RKAT_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` | Anthropic Claude |
+| `RKAT_OPENAI_API_KEY` | `OPENAI_API_KEY` | OpenAI GPT |
+| `RKAT_GEMINI_API_KEY` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` | Google Gemini |
+
+<Note>
+The `RKAT_*` variants take precedence over provider-native names, so you can run Meerkat with dedicated keys separate from other tools.
+</Note>
+
+## SDK feature flags
+
+When using Meerkat as a Rust library, enable only the providers you need:
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `anthropic` | Anthropic Claude support | Yes |
+| `openai` | OpenAI GPT support | No |
+| `gemini` | Google Gemini support | No |
+| `all-providers` | All LLM providers | No |
+
+<CodeGroup>
+
+```toml Anthropic only (smallest binary)
+meerkat = { version = "0.1", features = ["anthropic", "jsonl-store"] }
+```
+
+```toml All providers
+meerkat = { version = "0.1", features = ["all-providers", "jsonl-store"] }
+```
+
+</CodeGroup>
+
+## Provider parameters
+
+Provider-specific options can be passed via the `--param` CLI flag or `provider_params` in the SDK:
+
+<Tabs>
+  <Tab title="Anthropic">
+    | Parameter | Description |
+    |-----------|-------------|
+    | `thinking_budget` | Token budget for extended thinking (integer) |
+    | `top_k` | Top-k sampling parameter (integer) |
+
+    ```bash
+    rkat run --model claude-sonnet-4-5 --param thinking_budget=10000 "Solve this problem"
+    ```
+  </Tab>
+  <Tab title="OpenAI">
+    | Parameter | Values | Description |
+    |-----------|--------|-------------|
+    | `reasoning_effort` | `low`, `medium`, `high` | Reasoning effort for o-series models |
+    | `seed` | Integer | Seed for deterministic outputs |
+
+    ```bash
+    rkat run --model gpt-5.2 --param reasoning_effort=high "Prove this theorem"
+    ```
+  </Tab>
+  <Tab title="Gemini">
+    | Parameter | Description |
+    |-----------|-------------|
+    | `thinking_budget` | Token budget for extended thinking (integer) |
+    | `top_k` | Top-k sampling parameter (integer) |
+
+    ```bash
+    rkat run --model gemini-3-flash-preview --param thinking_budget=5000 "Analyze this data"
+    ```
+  </Tab>
+</Tabs>
+
+## Auto-detection
+
+The provider is automatically inferred from the model name:
+
+- `claude-*` models use Anthropic
+- `gpt-*`, `o1-*`, `o3-*`, `chatgpt-*` models use OpenAI
+- `gemini-*` models use Gemini
+
+You can override this with `--provider` on the CLI or `provider` in API requests.

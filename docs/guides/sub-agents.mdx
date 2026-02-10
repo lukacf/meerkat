@@ -1,0 +1,318 @@
+---
+title: "Sub-agents"
+description: "Hierarchical agent workflows where an LLM agent spawns and manages independent sub-agents"
+icon: "diagram-project"
+---
+
+Sub-agents run concurrently in background tokio tasks with isolated budgets. They can use different providers -- a Claude parent can spawn GPT or Gemini sub-agents. The parent monitors, collects results, and cancels children as needed.
+
+## Feature flag
+
+Sub-agents require the `sub-agents` feature flag, which is enabled by default in both the CLI and the facade crate.
+
+```toml
+# In Cargo.toml
+meerkat = { features = ["sub-agents"] }
+```
+
+At runtime, the `AgentFactory` has `enable_subagents` (default: `false`). Per-request builds can override via `AgentBuildConfig::override_subagents`.
+
+```rust
+let factory = AgentFactory::new(store_path)
+    .builtins(true)
+    .subagents(true);
+```
+
+## Available tools
+
+| Tool | Description |
+|------|-------------|
+| `agent_spawn` | Create a sub-agent with clean context (just the prompt) |
+| `agent_fork` | Create a sub-agent that inherits the full conversation history |
+| `agent_status` | Get the status and output of a sub-agent by ID |
+| `agent_cancel` | Cancel a running sub-agent |
+| `agent_list` | List all sub-agents with their current states |
+
+## Spawn vs fork
+
+<Tabs>
+  <Tab title="agent_spawn">
+    Creates a new sub-agent with a **clean context**. The sub-agent starts fresh with only the provided prompt -- it does not inherit conversation history.
+
+    **Use for**: Independent tasks that do not need the parent's context.
+
+    <Accordion title="Parameters">
+    <ParamField path="prompt" type="string" required>
+      Initial prompt/task for the sub-agent.
+    </ParamField>
+
+    <ParamField path="provider" type="string" default="anthropic">
+      LLM provider: `anthropic`, `openai`, `gemini`.
+    </ParamField>
+
+    <ParamField path="model" type="string">
+      Model name. Must be in the allowlist for the provider.
+    </ParamField>
+
+    <ParamField path="tool_access" type="object" default="inherit">
+      Tool access policy (see below).
+    </ParamField>
+
+    <ParamField path="budget" type="object" default="50,000 tokens">
+      Budget limits: `{ max_tokens, max_turns, max_tool_calls }`.
+    </ParamField>
+
+    <ParamField path="system_prompt" type="string">
+      Override the system prompt for this sub-agent.
+    </ParamField>
+
+    <ParamField path="host_mode" type="boolean" default="false">
+      Keep agent alive processing comms messages after initial prompt. Requires `comms` feature.
+    </ParamField>
+    </Accordion>
+
+    **Response**:
+
+    ```json
+    {
+      "agent_id": "019467d9-7e3a-7000-8000-000000000000",
+      "name": "sub-agent-019467d97e3a",
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "state": "running",
+      "message": "Sub-agent spawned successfully. Use agent_status to check progress."
+    }
+    ```
+  </Tab>
+  <Tab title="agent_fork">
+    Creates a sub-agent that **inherits the full conversation history** from the parent. The fork prompt is appended as a new user message to the cloned session.
+
+    **Use for**: Parallel exploration of alternatives, or delegating subtasks that need the parent's context.
+
+    <Accordion title="Parameters">
+    <ParamField path="prompt" type="string" required>
+      Additional prompt appended to the inherited conversation history.
+    </ParamField>
+
+    <ParamField path="provider" type="string" default="anthropic">
+      LLM provider.
+    </ParamField>
+
+    <ParamField path="model" type="string">
+      Model name.
+    </ParamField>
+
+    <ParamField path="tool_access" type="object" default="inherit">
+      Tool access policy.
+    </ParamField>
+
+    <ParamField path="budget_policy" type="string" default="equal">
+      Budget allocation: `equal`, `remaining`, `proportional`, or `fixed:<tokens>`.
+    </ParamField>
+    </Accordion>
+
+    **Response** includes `messages_inherited` count showing how many messages were copied from the parent.
+
+    <Note>
+    Forked agents do not run in host mode and inherit their system prompt from the session.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Tool access policies
+
+Both `agent_spawn` and `agent_fork` accept a `tool_access` parameter:
+
+| Policy | Description |
+|--------|-------------|
+| `{"policy": "inherit"}` | Inherit all tools from the parent (default). |
+| `{"policy": "allow_list", "tools": ["shell", "task_list"]}` | Only allow the specified tools. |
+| `{"policy": "deny_list", "tools": ["shell"]}` | Block the specified tools, allow everything else. |
+
+The `tool_access` value can be provided as either a JSON object or a JSON-encoded string (for LLMs that stringify nested objects).
+
+<Warning>
+Sub-agents do NOT receive sub-agent tools (`agent_spawn`, `agent_fork`, etc.) in their tool set. This is enforced by the factory, which clones itself with `.subagents(false)` when building the sub-agent's tool dispatcher. This prevents uncontrolled recursive spawning (though nested spawning can be enabled via config -- see concurrency limits).
+</Warning>
+
+## Monitoring sub-agents
+
+<Accordion title="agent_status">
+Query a single sub-agent by its UUID.
+
+**Parameters**: `{ "agent_id": "<UUID>" }`
+
+```json
+{
+  "agent_id": "019467d9-7e3a-7000-8000-000000000000",
+  "state": "completed",
+  "output": "The analysis shows...",
+  "is_final": true,
+  "duration_ms": 12500,
+  "tokens_used": 3200
+}
+```
+
+States: `running`, `completed`, `failed`, `cancelled`.
+
+When `is_final: true`, the sub-agent is done. The `output` field contains the result text (or `error` field for failures).
+</Accordion>
+
+<Accordion title="agent_list">
+List all sub-agents with summary counts.
+
+**Parameters**: None (empty object).
+
+```json
+{
+  "agents": [
+    {
+      "id": "019467d9-7e3a-7000-8000-000000000000",
+      "name": "sub-agent-019467d97e3a",
+      "state": "running",
+      "depth": 1,
+      "running_ms": 5000
+    }
+  ],
+  "running_count": 1,
+  "completed_count": 0,
+  "failed_count": 0,
+  "total_count": 1
+}
+```
+</Accordion>
+
+<Accordion title="agent_cancel">
+Cancel a running sub-agent. Only agents in the `running` state can be cancelled.
+
+**Parameters**: `{ "agent_id": "<UUID>" }`
+
+**Response**: `{ "success": true, "previous_state": "running", "message": "Sub-agent cancelled successfully" }`
+</Accordion>
+
+## Concurrency limits
+
+Concurrency limits:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_depth` | `u32` | `3` | Maximum nesting depth for sub-agents |
+| `max_concurrent_ops` | `usize` | `32` | Maximum concurrent operations (across all types) |
+| `max_concurrent_agents` | `usize` | `8` | Maximum concurrently running sub-agents |
+| `max_children_per_agent` | `usize` | `5` | Maximum children a single agent can spawn |
+
+The `SubAgentManager` enforces these limits. Attempting to spawn beyond the limits returns an error.
+
+<Accordion title="SubAgentConfig">
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default_provider` | `String` | `"anthropic"` | Default provider when not specified |
+| `default_model` | `Option<String>` | `None` | Default model (uses first in allowlist if `None`) |
+| `concurrency_limits` | `ConcurrencyLimits` | See above | Limits for this agent's sub-agents |
+| `allow_nested_spawn` | `bool` | `true` | Whether sub-agents can spawn further sub-agents |
+| `max_budget_per_agent` | `Option<u64>` | `None` | Cap on tokens for any single sub-agent |
+| `default_budget` | `Option<u64>` | `Some(50_000)` | Default token budget when not specified |
+| `inherit_system_prompt` | `bool` | `true` | Whether spawned agents inherit the parent's tool usage instructions |
+| `enable_comms` | `bool` | `false` | Whether to enable parent-child communication |
+</Accordion>
+
+## Budget allocation
+
+<Tabs>
+  <Tab title="Spawn budget">
+    For `agent_spawn`, the budget is resolved as:
+    1. If `budget.max_tokens` is specified, use it (capped by `max_budget_per_agent` if set).
+    2. Otherwise, use `default_budget` (50,000 tokens by default).
+  </Tab>
+  <Tab title="Fork budget policies">
+    For `agent_fork`, the `budget_policy` parameter controls allocation:
+
+    | Policy | Behavior |
+    |--------|----------|
+    | `equal` (default) | Each fork gets `default_budget` tokens |
+    | `remaining` | Fork gets the parent's remaining budget (currently falls back to `equal`) |
+    | `proportional` | Proportional allocation (currently falls back to `equal`) |
+    | `fixed:<N>` | Fixed budget of N tokens (capped by `max_budget_per_agent`) |
+  </Tab>
+</Tabs>
+
+## Model allowlists
+
+Sub-agents validate requested models against a per-provider allowlist. The allowlist comes from either:
+
+1. **Resolved policy** from the global `SubAgentsConfig` in the configuration file (highest precedence).
+2. **Default allowlist** from `SubAgentsConfig::default()` (hardcoded fallback).
+
+The `agent_spawn` tool definition dynamically includes the allowed models in the `model` parameter description, so the LLM can see which models are available.
+
+## Sub-agent execution lifecycle
+
+<Steps>
+  <Step title="Validation">
+    The tool validates the prompt (non-empty), provider, model (against allowlist), and concurrency limits.
+  </Step>
+  <Step title="Client creation">
+    An `LlmClient` is created via `LlmClientFactory` for the requested provider.
+  </Step>
+  <Step title="Session setup">
+    - `agent_spawn`: Creates a new session with optional system prompt + user prompt.
+    - `agent_fork`: Clones the parent session and appends the fork prompt.
+  </Step>
+  <Step title="Registration">
+    The sub-agent is registered with the `SubAgentManager` before the task is spawned.
+  </Step>
+  <Step title="Background execution">
+    A tokio task runs the agent loop (`agent.run_pending()` or `agent.run_host_mode()` for host mode).
+  </Step>
+  <Step title="Completion">
+    On success, `manager.complete()` stores the result. On failure, `manager.fail()` stores the error. Both notify listeners via a `watch` channel.
+  </Step>
+  <Step title="Result collection">
+    Completed results are stored in a bounded deque (`MAX_COMPLETED_AGENTS = 256`) and can be queried via `agent_status` or `agent_list`.
+  </Step>
+</Steps>
+
+## Comms integration
+
+When the `comms` feature is enabled and the parent has comms configured:
+
+1. Sub-agents get a comms context injected into their prompt explaining how to communicate with the parent.
+2. The sub-agent's tools are wrapped with comms tools via `wrap_with_comms`.
+3. The sub-agent is added to the parent's trusted peers so bidirectional communication works.
+4. The parent receives `comms` instructions in the spawn response explaining how to message the child.
+5. Communication uses in-process (`CommsBootstrap::for_child_inproc`) rather than network listeners.
+
+<Info>
+See the [comms guide](/guides/comms) for details on the inter-agent communication system.
+</Info>
+
+## How sub-agents get wired
+
+When `enable_subagents` is true, the agent factory adds the five sub-agent tools (`agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list`) to the parent's tool set. Child agents receive a copy of the parent's tools but with sub-agent and comms tools removed to prevent recursive spawning.
+
+## Best practices
+
+<CardGroup cols={2}>
+  <Card title="When to use sub-agents">
+    - Parallel independent tasks (e.g., analyze multiple files simultaneously).
+    - Tasks requiring different model strengths (e.g., GPT for coding, Gemini for analysis).
+    - Long-running work you want to delegate while doing other things.
+    - Breaking complex problems into specialized subtasks.
+  </Card>
+  <Card title="When NOT to use sub-agents">
+    - Simple tasks you can do directly.
+    - Tasks requiring tight coordination (use sequential steps instead).
+    - When you need immediate results (sub-agents add latency).
+  </Card>
+</CardGroup>
+
+<Tip>
+Do NOT poll `agent_status` repeatedly -- this wastes tokens. Use `agent_list` to see all sub-agents at once (more efficient than individual status checks). Do other useful work, then check status once or twice near the end.
+</Tip>
+
+## See also
+
+- [Built-in tools reference](/reference/builtin-tools) - tool parameter details
+- [Configuration: sub-agents](/concepts/configuration) - config file settings
+- [Architecture](/reference/architecture) - how sub-agents fit into the agent loop

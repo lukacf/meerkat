@@ -1,0 +1,153 @@
+---
+title: "API reference"
+description: "Index of public types, traits, and error codes in Meerkat."
+icon: "book"
+---
+
+This page is a quick-lookup index. For detailed usage with examples, see the [Rust SDK reference](/rust/overview).
+
+## Core types
+
+| Type | Module | Purpose |
+|------|--------|---------|
+| `Agent` | `meerkat_core` | Main agent execution engine |
+| `AgentBuilder` | `meerkat_core` | Builder pattern for agent construction |
+| `Session` | `meerkat_core` | Conversation state container |
+| `SessionId` | `meerkat_core` | Unique session identifier (UUIDv7) |
+| `Message` | `meerkat_core` | Conversation message enum (`System`, `User`, `Assistant`, `ToolResults`) |
+| `ToolDef` | `meerkat_core` | Tool definition (name, description, JSON Schema) |
+| `ToolCall` | `meerkat_core` | Tool invocation request from the model |
+| `ToolCallView` | `meerkat_core` | Zero-allocation borrowed view of a tool call |
+| `ToolResult` | `meerkat_core` | Tool execution result |
+| `Usage` | `meerkat_core` | Token usage tracking |
+| `StopReason` | `meerkat_core` | Why the LLM stopped (`EndTurn`, `ToolUse`, `MaxTokens`, `StopSequence`, `ContentFilter`, `Cancelled`) |
+| `RunResult` | `meerkat_core` | Agent execution result (text, session ID, usage, structured output) |
+| `AgentEvent` | `meerkat_core` | Streaming events during execution |
+| `AgentError` | `meerkat_core` | Error types (LLM, tool, budget, hook, cancellation) |
+| `BudgetLimits` | `meerkat_core` | Resource constraints (tokens, duration, tool calls) |
+| `RetryPolicy` | `meerkat_core` | Exponential backoff configuration |
+
+## Traits
+
+| Trait | Module | Purpose | Detailed docs |
+|-------|--------|---------|---------------|
+| `AgentLlmClient` | `meerkat_core` | LLM provider abstraction | [Rust SDK: providers](/rust/advanced#providers) |
+| `AgentToolDispatcher` | `meerkat_core` | Tool routing abstraction | [Rust SDK: tool system](/rust/tools-and-stores#tool-system) |
+| `AgentSessionStore` | `meerkat_core` | Session persistence abstraction | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
+| `SessionService` | `meerkat_core::service` | Session lifecycle (create/turn/interrupt/read/list/archive) | [Rust SDK: sessions](/rust/overview#sessions) |
+| `Compactor` | `meerkat_core` | Context compaction strategy | [Memory guide](/guides/memory) |
+| `MemoryStore` | `meerkat_core` | Semantic memory indexing | [Memory guide](/guides/memory) |
+| `SkillEngine` | `meerkat_core::skills` | Skill loading and injection | [Skills guide](/guides/skills) |
+| `SkillSource` | `meerkat_core::skills` | Skill discovery from various sources | [Skills guide](/guides/skills) |
+| `HookEngine` | `meerkat_core` | Hook pipeline execution | [Hooks guide](/guides/hooks) |
+
+## SDK entry points
+
+| Function / Type | Purpose | Detailed docs |
+|-----------------|---------|---------------|
+| `AgentFactory::new(cwd)` | Create a factory for building agents | [Rust SDK](/rust/overview#quick-start) |
+| `build_ephemeral_service(factory, config, cap)` | Build an in-memory session service | [Rust SDK](/rust/overview#sessions) |
+| `meerkat::with_anthropic(key)` | Quick-start builder for Anthropic | [Rust SDK](/rust/overview#quick-start) |
+| `Config::load()` | Load layered configuration from disk | [Configuration](/concepts/configuration) |
+
+## Structured output types
+
+| Type | Purpose |
+|------|---------|
+| `OutputSchema` | Schema definition with compat/strict/format options |
+| `MeerkatSchema` | Normalized JSON Schema newtype |
+| `SchemaCompat` | `Lossy` (best-effort lowering) or `Strict` (reject unsupported features) |
+| `SchemaFormat` | Schema format version (`MeerkatV1`) |
+| `SchemaWarning` | Provider-specific compilation warning |
+| `CompiledSchema` | Provider-compiled schema output |
+| `SchemaError` | `InvalidRoot` or `UnsupportedFeatures` |
+
+See the [structured output guide](/guides/structured-output) for usage details.
+
+## Hook types
+
+| Type | Purpose |
+|------|---------|
+| `HookPoint` | 8 extension points (`RunStarted` through `TurnBoundary`) |
+| `HookCapability` | `Observe`, `Guardrail`, `Rewrite` |
+| `HookExecutionMode` | `Foreground` (blocking) or `Background` (async) |
+| `HookEntryConfig` | Per-hook configuration (id, point, priority, runtime, failure policy) |
+| `HookRunOverrides` | Per-run hook customization (add entries, disable by ID) |
+| `HookDecision` | `Allow` or `Deny` with reason code |
+| `HookPatch` | Mutations: `LlmRequest`, `AssistantText`, `ToolArgs`, `ToolResult`, `RunResult` |
+| `HookFailurePolicy` | `FailOpen` or `FailClosed` |
+
+See the [hooks guide](/guides/hooks) for usage details.
+
+## Skill types
+
+| Type | Purpose |
+|------|---------|
+| `SkillId` | Newtype skill identifier |
+| `SkillScope` | `Builtin`, `Project`, `User` |
+| `SkillDescriptor` | Skill metadata (id, name, description, required capabilities) |
+| `SkillDocument` | Loaded skill with body content |
+| `SkillError` | `NotFound`, `CapabilityUnavailable`, `Ambiguous`, `Load`, `Parse` |
+
+See the [skills guide](/guides/skills) for usage details.
+
+## Wire types (meerkat-contracts)
+
+| Type | Purpose |
+|------|---------|
+| `CapabilityId` | All known capabilities (`Sessions`, `Streaming`, `Hooks`, `Shell`, etc.) |
+| `CapabilityStatus` | `Available`, `DisabledByPolicy`, `NotCompiled`, `NotSupportedByProtocol` |
+| `ErrorCode` | Stable error codes with projections to JSON-RPC, HTTP, and CLI exit codes |
+| `WireError` | Canonical error envelope (code, message, details, capability hint) |
+| `ContractVersion` | Semver version (`0.1.0` currently) |
+| `CoreCreateParams` | Session creation parameters |
+| `StructuredOutputParams` | Schema + retry count |
+| `CommsParams` | Host mode + agent name |
+| `HookParams` | Hook override entries |
+| `SkillsParams` | Skill enablement + references |
+
+## Error code reference
+
+Every `ErrorCode` maps to a stable string, JSON-RPC code, HTTP status, and CLI exit code:
+
+| Error | Code string | JSON-RPC | HTTP | CLI |
+|-------|------------|----------|------|-----|
+| Session not found | `SESSION_NOT_FOUND` | -32001 | 404 | 10 |
+| Session busy | `SESSION_BUSY` | -32002 | 409 | 11 |
+| Session not running | `SESSION_NOT_RUNNING` | -32003 | 409 | 12 |
+| Provider error | `PROVIDER_ERROR` | -32010 | 502 | 20 |
+| Budget exhausted | `BUDGET_EXHAUSTED` | -32011 | 429 | 21 |
+| Hook denied | `HOOK_DENIED` | -32012 | 403 | 22 |
+| Agent error | `AGENT_ERROR` | -32013 | 500 | 30 |
+| Capability unavailable | `CAPABILITY_UNAVAILABLE` | -32020 | 501 | 40 |
+| Skill not found | `SKILL_NOT_FOUND` | -32021 | 404 | 41 |
+| Skill resolution failed | `SKILL_RESOLUTION_FAILED` | -32022 | 422 | 42 |
+| Invalid params | `INVALID_PARAMS` | -32602 | 400 | 2 |
+| Internal error | `INTERNAL_ERROR` | -32603 | 500 | 1 |
+
+## Provider clients
+
+| Client | Provider | Detailed docs |
+|--------|----------|---------------|
+| `AnthropicClient` | Anthropic Claude | [Rust SDK: providers](/rust/advanced#providers) |
+| `OpenAiClient` | OpenAI GPT | [Rust SDK: providers](/rust/advanced#providers) |
+| `GeminiClient` | Google Gemini | [Rust SDK: providers](/rust/advanced#providers) |
+
+All implement `LlmClient` and normalize responses to `LlmEvent` (text deltas, tool call deltas, usage updates, done).
+
+`LlmError` variants: `RateLimited`, `ServerOverloaded`, `NetworkTimeout`, `ConnectionReset`, `ServerError`, `InvalidRequest`, `AuthenticationFailed`, `ContentFiltered`, `ContextLengthExceeded`, `ModelNotFound`, `InvalidApiKey`, `Unknown`. Use `error.is_retryable()` to check if an error should be retried.
+
+## Storage implementations
+
+| Store | Feature flag | Purpose | Detailed docs |
+|-------|-------------|---------|---------------|
+| `JsonlStore` | `jsonl-store` (default) | File-based JSONL persistence | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
+| `RedbSessionStore` | `session-store` | Embedded database (redb) | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
+| `MemoryStore` | `memory-store` | In-memory (testing) | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
+
+## See also
+
+- [Rust SDK reference](/rust/overview) - full API with examples
+- [Architecture](/reference/architecture) - crate structure and agent loop
+- [Capability matrix](/reference/capability-matrix) - build profiles and feature behavior
+- [Session contracts](/reference/session-contracts) - lifecycle operational contracts

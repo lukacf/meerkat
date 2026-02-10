@@ -1,0 +1,645 @@
+---
+title: "JSON-RPC stdio server"
+description: "Stateful JSON-RPC 2.0 stdio interface for IDE integration, desktop apps, and automation tools."
+icon: "terminal"
+---
+
+Meerkat exposes a JSON-RPC 2.0 stdio interface for IDE integration, desktop apps, and automation tools. Unlike REST and MCP, the RPC server keeps agents alive between turns for fast multi-turn conversations.
+
+## Getting started
+
+<Steps>
+  <Step title="Start the server">
+    ```bash
+    rkat rpc
+    ```
+
+    The server reads newline-delimited JSON (JSONL) from stdin and writes JSONL to stdout. Each line is a complete JSON-RPC 2.0 message.
+  </Step>
+  <Step title="Send the handshake">
+    ```json
+    {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+    ```
+  </Step>
+  <Step title="Create a session">
+    ```json
+    {"jsonrpc":"2.0","id":2,"method":"session/create","params":{"prompt":"Hello!"}}
+    ```
+  </Step>
+</Steps>
+
+## Method overview
+
+| Method | Category | Description |
+|--------|----------|-------------|
+| `initialize` | Handshake | Returns server capabilities |
+| `session/create` | Session | Create session and run first turn |
+| `session/list` | Session | List active sessions |
+| `session/read` | Session | Get session state |
+| `session/archive` | Session | Remove session from runtime |
+| `turn/start` | Turn | Start a new turn on existing session |
+| `turn/interrupt` | Turn | Cancel in-flight turn |
+| `capabilities/get` | Capabilities | Runtime capability report |
+| `config/get` | Config | Read current config |
+| `config/set` | Config | Replace config |
+| `config/patch` | Config | Merge-patch config (RFC 7396) |
+
+## Protocol
+
+Standard JSON-RPC 2.0 with `"jsonrpc": "2.0"` on every message. Three message types:
+
+- **Request** (client -> server): has `id`, `method`, `params`
+- **Response** (server -> client): has `id`, `result` or `error`
+- **Notification** (server -> client): has `method`, `params`, no `id`
+
+<Accordion title="Full lifecycle diagram">
+  ```text
+  Client                          Server
+    |                                |
+    |-- initialize ----------------->|
+    |<-- result { capabilities } ----|
+    |-- initialized (notification) ->|
+    |                                |
+    |-- session/create { prompt } -->|
+    |<-- session/event (notif) ------|  // AgentEvent stream
+    |<-- session/event (notif) ------|
+    |<-- result { session_id, ... } -|
+    |                                |
+    |-- turn/start { session_id } -->|
+    |<-- session/event (notif) ------|
+    |<-- result { text, usage } -----|
+    |                                |
+    |-- turn/interrupt { sid } ----->|
+    |<-- result {} ------------------|
+    |                                |
+    |-- session/archive { sid } ---->|
+    |<-- result {} ------------------|
+  ```
+</Accordion>
+
+## Session methods
+
+### initialize
+
+Handshake. Returns server capabilities.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "server_info": {
+      "name": "meerkat-rpc",
+      "version": "0.1.0"
+    },
+    "contract_version": "0.1.0",
+    "methods": [
+      "initialize", "initialized",
+      "session/create", "session/list", "session/read",
+      "session/archive", "turn/start", "turn/interrupt",
+      "capabilities/get",
+      "config/get", "config/set", "config/patch"
+    ]
+  }
+}
+```
+</CodeGroup>
+
+<ResponseField name="server_info.name" type="string">
+  Server name.
+</ResponseField>
+
+<ResponseField name="server_info.version" type="string">
+  Server version.
+</ResponseField>
+
+<ResponseField name="contract_version" type="string">
+  Protocol contract version.
+</ResponseField>
+
+<ResponseField name="methods" type="array">
+  List of supported method names.
+</ResponseField>
+
+### session/create
+
+Create a new session and run the first turn.
+
+<CodeGroup>
+```json Request (minimal)
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/create",
+  "params": {
+    "prompt": "What is Rust?"
+  }
+}
+```
+
+```json Request (full)
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/create",
+  "params": {
+    "prompt": "What is Rust?",
+    "model": "claude-sonnet-4-5",
+    "provider": "anthropic",
+    "max_tokens": 4096,
+    "system_prompt": "You are a helpful assistant.",
+    "output_schema": {
+      "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+      "name": "answer"
+    },
+    "structured_output_retries": 2,
+    "hooks_override": null,
+    "enable_builtins": false,
+    "enable_shell": false,
+    "enable_subagents": false,
+    "enable_memory": false,
+    "host_mode": false,
+    "comms_name": null,
+    "provider_params": null
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "text": "Rust is a systems programming language...",
+    "turns": 1,
+    "tool_calls": 0,
+    "usage": {
+      "input_tokens": 50,
+      "output_tokens": 200,
+      "total_tokens": 250
+    },
+    "structured_output": null,
+    "schema_warnings": null
+  }
+}
+```
+</CodeGroup>
+
+Only `prompt` is required. All other fields are optional and fall back to config defaults. During execution, `session/event` notifications are emitted (see [Notifications](#notifications)).
+
+#### Parameter reference
+
+<ParamField body="prompt" type="string" required>
+  The user prompt to send to the agent.
+</ParamField>
+
+<ParamField body="model" type="string | null" default="claude-sonnet-4-5">
+  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`).
+</ParamField>
+
+<ParamField body="provider" type="string | null" default="inferred from model">
+  Provider name: `"anthropic"`, `"openai"`, `"gemini"`, `"other"`.
+</ParamField>
+
+<ParamField body="max_tokens" type="u32 | null" default="config default">
+  Max tokens per turn.
+</ParamField>
+
+<ParamField body="system_prompt" type="string | null" default="null">
+  Override system prompt.
+</ParamField>
+
+<ParamField body="output_schema" type="object | null" default="null">
+  JSON schema for structured output extraction (wrapper or raw schema).
+</ParamField>
+
+<ParamField body="structured_output_retries" type="u32" default="2">
+  Max retries for structured output validation.
+</ParamField>
+
+<ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
+  Run-scoped hook overrides (entries to add, hook IDs to disable).
+</ParamField>
+
+<ParamField body="enable_builtins" type="bool" default="false">
+  Enable built-in tools (task management, etc.).
+</ParamField>
+
+<ParamField body="enable_shell" type="bool" default="false">
+  Enable shell tool (requires `enable_builtins`).
+</ParamField>
+
+<ParamField body="enable_subagents" type="bool" default="false">
+  Enable sub-agent tools (fork, spawn).
+</ParamField>
+
+<ParamField body="enable_memory" type="bool" default="false">
+  Enable semantic memory (`memory_search` tool + compaction indexing).
+</ParamField>
+
+<ParamField body="host_mode" type="bool" default="false">
+  Run in host mode for inter-agent comms (requires `comms_name`).
+</ParamField>
+
+<ParamField body="comms_name" type="string | null" default="null">
+  Agent name for inter-agent communication.
+</ParamField>
+
+<ParamField body="provider_params" type="object | null" default="null">
+  Provider-specific parameters (e.g., thinking config, reasoning effort).
+</ParamField>
+
+#### Response fields
+
+<ResponseField name="session_id" type="string">
+  UUID of the created session.
+</ResponseField>
+
+<ResponseField name="text" type="string">
+  The agent's response text.
+</ResponseField>
+
+<ResponseField name="turns" type="u32">
+  Number of LLM calls made.
+</ResponseField>
+
+<ResponseField name="tool_calls" type="u32">
+  Number of tool calls executed.
+</ResponseField>
+
+<ResponseField name="usage" type="WireUsage">
+  Token usage breakdown.
+</ResponseField>
+
+<ResponseField name="structured_output" type="object | null">
+  Parsed structured output.
+</ResponseField>
+
+<ResponseField name="schema_warnings" type="array | null">
+  Schema compatibility warnings.
+</ResponseField>
+
+### session/list
+
+List active sessions.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":3,"method":"session/list"}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "sessions": [
+      {"session_id": "01936f8a-...", "state": "idle"},
+      {"session_id": "01936f8b-...", "state": "running"}
+    ]
+  }
+}
+```
+</CodeGroup>
+
+### session/read
+
+Get session state.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":4,"method":"session/read","params":{"session_id":"01936f8a-..."}}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "result": {
+    "session_id": "01936f8a-...",
+    "state": "idle",
+    "message_count": 4,
+    "total_tokens": 500
+  }
+}
+```
+</CodeGroup>
+
+<ParamField body="session_id" type="string" required>
+  Session ID to read.
+</ParamField>
+
+### session/archive
+
+Remove a session from the runtime.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":5,"method":"session/archive","params":{"session_id":"01936f8a-..."}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":5,"result":{}}
+```
+</CodeGroup>
+
+<ParamField body="session_id" type="string" required>
+  Session ID to archive.
+</ParamField>
+
+## Turn methods
+
+### turn/start
+
+Start a new turn on an existing session.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "turn/start",
+  "params": {
+    "session_id": "01936f8a-...",
+    "prompt": "Can you explain ownership?"
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "result": {
+    "session_id": "01936f8a-...",
+    "text": "Ownership is Rust's approach to memory management...",
+    "turns": 1,
+    "tool_calls": 0,
+    "usage": {
+      "input_tokens": 300,
+      "output_tokens": 400,
+      "total_tokens": 700
+    },
+    "structured_output": null,
+    "schema_warnings": null
+  }
+}
+```
+</CodeGroup>
+
+Returns the same result shape as `session/create`. Fails with error code `-32001` (SESSION_BUSY) if a turn is already in progress.
+
+<ParamField body="session_id" type="string" required>
+  Session ID to continue.
+</ParamField>
+
+<ParamField body="prompt" type="string" required>
+  The follow-up prompt.
+</ParamField>
+
+### turn/interrupt
+
+Cancel an in-flight turn. No-op if the session is idle.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":7,"method":"turn/interrupt","params":{"session_id":"01936f8a-..."}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":7,"result":{}}
+```
+</CodeGroup>
+
+<ParamField body="session_id" type="string" required>
+  Session ID to interrupt.
+</ParamField>
+
+## Capabilities
+
+### capabilities/get
+
+Return runtime capabilities with status resolved against config. This lists every capability known to Meerkat with its current status (available, disabled by policy, not compiled, etc.).
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":8,"method":"capabilities/get"}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "contract_version": {"major": 0, "minor": 1, "patch": 0},
+    "capabilities": [
+      {
+        "id": "sessions",
+        "description": "Session lifecycle management",
+        "status": "Available"
+      },
+      {
+        "id": "structured_output",
+        "description": "Structured output extraction with JSON schema",
+        "status": "Available"
+      },
+      {
+        "id": "hooks",
+        "description": "Lifecycle hooks for tool and turn events",
+        "status": "Available"
+      },
+      {
+        "id": "builtins",
+        "description": "Built-in tools (task management)",
+        "status": {"DisabledByPolicy": {"description": "Disabled by config"}}
+      },
+      {
+        "id": "shell",
+        "description": "Shell command execution",
+        "status": {"DisabledByPolicy": {"description": "Disabled by config"}}
+      },
+      {
+        "id": "comms",
+        "description": "Inter-agent communication",
+        "status": {"NotCompiled": {"feature": "comms"}}
+      },
+      {
+        "id": "sub_agents",
+        "description": "Sub-agent forking and spawning",
+        "status": "Available"
+      },
+      {
+        "id": "memory_store",
+        "description": "Semantic memory indexing",
+        "status": "Available"
+      }
+    ]
+  }
+}
+```
+</CodeGroup>
+
+Possible `status` values:
+
+| Status | Shape | Meaning |
+|--------|-------|---------|
+| `Available` | `"Available"` | Compiled in, config-enabled, protocol supports it |
+| `DisabledByPolicy` | `{"DisabledByPolicy": {"description": "..."}}` | Compiled in but disabled by policy |
+| `NotCompiled` | `{"NotCompiled": {"feature": "..."}}` | Feature flag absent at compile time |
+| `NotSupportedByProtocol` | `{"NotSupportedByProtocol": {"reason": "..."}}` | This protocol surface does not support it |
+
+## Config methods
+
+### config/get
+
+Read current config.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":9,"method":"config/get"}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "agent": {
+      "model": "claude-sonnet-4-5",
+      "max_tokens_per_turn": 8192
+    },
+    "tools": {
+      "builtins_enabled": false,
+      "shell_enabled": false
+    }
+  }
+}
+```
+</CodeGroup>
+
+### config/set
+
+Replace the config.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":10,"method":"config/set","params":{"agent":{"model":"gpt-5.2"}}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":10,"result":{}}
+```
+</CodeGroup>
+
+### config/patch
+
+Merge-patch the config (RFC 7396).
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":11,"method":"config/patch","params":{"max_tokens":8192}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":11,"result":{}}
+```
+</CodeGroup>
+
+## Notifications
+
+During turn execution, the server emits `session/event` notifications containing serialized `AgentEvent` payloads:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/event",
+  "params": {
+    "session_id": "01936f8a-...",
+    "event": {
+      "type": "text_delta",
+      "delta": "Rust is"
+    }
+  }
+}
+```
+
+Event types match the `AgentEvent` enum in `meerkat-core`:
+
+| Event | Description |
+|-------|-------------|
+| `run_started` | Turn execution began |
+| `text_delta` | Streaming text chunk from LLM |
+| `text_complete` | Full text for this turn |
+| `tool_call_requested` | LLM wants to call a tool |
+| `tool_execution_started` | Tool dispatch began |
+| `tool_execution_completed` | Tool returned a result |
+| `turn_started` | New LLM call within the turn |
+| `turn_completed` | LLM call finished |
+| `run_completed` | Turn execution finished successfully |
+| `run_failed` | Turn execution failed |
+| `budget_warning` | Approaching resource limits |
+| `retrying` | Retrying after transient error |
+
+## Error codes
+
+Standard JSON-RPC codes plus Meerkat-specific application codes:
+
+| Code | Name | Description |
+|------|------|-------------|
+| -32700 | Parse error | Invalid JSON |
+| -32600 | Invalid request | Not a valid JSON-RPC request |
+| -32601 | Method not found | Unknown method |
+| -32602 | Invalid params | Missing or invalid parameters |
+| -32603 | Internal error | Server error |
+| -32000 | Session not found | Session ID does not exist |
+| -32001 | Session busy | Turn already in progress |
+| -32002 | Provider error | LLM provider issue (missing key, auth) |
+| -32003 | Budget exhausted | Resource limits reached |
+| -32004 | Hook denied | Hook blocked the operation |
+
+## Architecture
+
+The RPC server is **stateful**: agents stay alive between turns. This is the key difference from REST (stateless per-request) and MCP (callback pattern).
+
+```text
+Client (IDE, app) <--stdio JSONL--> RpcServer
+                                       |
+                                  MethodRouter
+                                       |
+                                  SessionRuntime
+                                   /    |    \
+                            Session  Session  Session
+                             Task    Task     Task
+                              |       |        |
+                            Agent   Agent    Agent
+                         (exclusive ownership)
+```
+
+Each session gets a dedicated tokio task that exclusively owns the `Agent`. This solves the `cancel(&mut self)` requirement without mutex. Commands (`StartTurn`, `Interrupt`, `Shutdown`) are sent via channels.
+
+<Note>
+**Backpressure:** The notification channel is bounded. When the client reads slowly, the agent naturally slows down.
+</Note>
+
+## Comparison with other surfaces
+
+| | CLI | REST | MCP | RPC |
+|---|---|---|---|---|
+| Stateful | No | No | No | **Yes** |
+| Streaming | stderr | SSE | Optional | JSONL notifications |
+| Multi-session | No | No | No | **Yes** |
+| Cancellation | Ctrl+C | N/A | N/A | `turn/interrupt` |
+| Bidirectional | No | No (SSE one-way) | Partial | **Yes** |
+
+## See also
+
+- [CLI reference](/cli/commands)
+- [REST API](/api/rest)
+- [MCP](/api/mcp)
+- [Architecture](/reference/architecture)

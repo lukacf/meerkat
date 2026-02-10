@@ -1,0 +1,161 @@
+---
+title: "Skills"
+description: "Domain-specific knowledge injection via markdown documents with YAML frontmatter"
+icon: "graduation-cap"
+---
+
+Skills inject domain-specific knowledge into the agent's context. A skill is a markdown document with YAML frontmatter that gets included in the system prompt or per-turn context when its required capabilities are available.
+
+## Skill sources
+
+Skills are discovered from three locations, in precedence order:
+
+1. **Project** (`.rkat/skills/`) -- highest precedence
+2. **User** (`~/.rkat/skills/`)
+3. **Embedded** (builtin skills from component crates)
+
+<Note>
+A project skill with the same ID as a builtin skill overrides the builtin (first-source-wins).
+</Note>
+
+## SKILL.md format
+
+Each skill is a markdown file with YAML frontmatter:
+
+```markdown
+---
+name: Shell Patterns
+description: "Background job workflows: patterns and tips"
+requires_capabilities: [builtins, shell]
+---
+
+# Shell Patterns
+
+When running background jobs...
+```
+
+### Frontmatter fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | `String` | Yes | Display name for the skill |
+| `description` | `String` | Yes | One-line description |
+| `requires_capabilities` | `Vec<String>` | No (default `[]`) | Capability IDs that must be available |
+
+The frontmatter is delimited by `---` markers. The body (everything after the closing `---`) is stored as the skill's `body` field.
+
+## Capability gating
+
+Skills are filtered by their `requires_capabilities` field before being shown or injected:
+
+- A skill is included only if **all** its required capabilities are available in the current build/config.
+- A skill with an empty `requires_capabilities` list is always available.
+
+## Skill resolution
+
+The resolver supports two reference formats:
+
+1. **Slash-prefix ID**: `/skill-id` -- matches against `SkillDescriptor.id`.
+2. **Exact name match** (case-insensitive): `"Shell Patterns"` or `"shell patterns"` -- matches against `SkillDescriptor.name`.
+
+Resolution returns `SkillError::NotFound` if no match, or `SkillError::Ambiguous` if multiple skills match.
+
+Resolution mode:
+
+| Mode | Behavior |
+|------|----------|
+| `Explicit` | Only explicit `/skill-id` or exact name matches |
+
+## Rendering
+
+The renderer produces two output formats:
+
+<Tabs>
+  <Tab title="Inventory section">
+    Generates a `## Available Skills` section listing all available skills for the system prompt:
+
+    ```text
+    ## Available Skills
+
+    - `/task-workflow` -- How to use task_create/task_update/task_list for structured work tracking
+    - `/shell-patterns` -- Background job patterns with shell and job management tools
+    ```
+
+    This section is injected into the system prompt via the `extra_sections` parameter of `assemble_system_prompt()` in `meerkat/src/prompt_assembly.rs`.
+  </Tab>
+  <Tab title="Injection block">
+    Wraps the skill body in XML-style tags for per-turn injection:
+
+    ```xml
+    <skill name="Shell Patterns">
+    # Shell Patterns
+
+    When running background jobs...
+    </skill>
+    ```
+  </Tab>
+</Tabs>
+
+### Size limits
+
+`MAX_INJECTION_BYTES` is set to 32 KiB (32 * 1024 bytes). If an injection block exceeds this limit, it is truncated with a warning log.
+
+## Built-in skills
+
+The following skills are embedded in component crates:
+
+| ID | Name | Crate | Required capabilities |
+|----|------|-------|----------------------|
+| `hook-authoring` | Hook Authoring | `meerkat-hooks` | `hooks` |
+| `shell-patterns` | Shell Patterns | `meerkat-tools` | `builtins`, `shell` |
+| `task-workflow` | Task Workflow | `meerkat-tools` | `builtins` |
+| `sub-agent-orchestration` | Sub-Agent Orchestration | `meerkat-tools` | `sub_agents` |
+| `mcp-server-setup` | MCP Server Setup | `meerkat-mcp` | (none) |
+| `memory-retrieval` | Memory Retrieval | `meerkat-memory` | `memory_store` |
+| `session-management` | Session Management | `meerkat-session` | `session_store` |
+| `multi-agent-comms` | Multi-Agent Comms | `meerkat-comms` | `comms` |
+
+## Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `skills.enabled` | `true` | Enable skill loading |
+| `skills.max_injection_bytes` | `32768` (32 KiB) | Maximum size of injected skill content |
+
+## Custom skills
+
+<Tabs>
+  <Tab title="Project-level">
+    Create a subdirectory under `.rkat/skills/` with a `SKILL.md` file:
+
+    ```
+    .rkat/skills/
+      my-deployment/
+        SKILL.md
+    ```
+
+    Example `.rkat/skills/my-deployment/SKILL.md`:
+
+    ```markdown
+    ---
+    name: Deployment Guide
+    description: Project-specific deployment procedures
+    requires_capabilities: []
+    ---
+
+    # Deployment Guide
+
+    1. Run `make build` to create the release binary.
+    2. Deploy via `./deploy.sh production`.
+    ```
+  </Tab>
+  <Tab title="User-level">
+    Same structure under `~/.rkat/skills/`. These are available across all projects but have lower precedence than project-level skills.
+  </Tab>
+</Tabs>
+
+## Invoking skills
+
+Include a skill reference (e.g., `/shell-patterns`) in the user prompt to invoke it. The agent resolves the reference, loads the skill, and injects its content into the turn context.
+
+See the [Python SDK](/sdks/python#skillhelper) and [TypeScript SDK](/sdks/typescript#skillhelper) for `SkillHelper` wrappers that handle this automatically.

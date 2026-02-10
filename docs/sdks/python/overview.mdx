@@ -1,0 +1,250 @@
+---
+title: "Python SDK"
+description: "Getting started with the Meerkat Python SDK: sessions, turns, events, and capabilities."
+icon: "python"
+---
+
+The Python SDK (`meerkat-sdk`) lets you manage sessions, run agent turns, stream events, and query capabilities from Python. It communicates with a local `rkat rpc` subprocess over JSON-RPC 2.0.
+
+- **Python:** `>=3.10`
+- **Dependencies:** zero runtime dependencies
+
+## Getting started
+
+<Steps>
+  <Step title="Install the SDK">
+    <CodeGroup>
+    ```bash Standard install
+    pip install sdks/python
+    ```
+
+    ```bash Development mode
+    pip install -e "sdks/python[dev]"
+    ```
+    </CodeGroup>
+  </Step>
+  <Step title="Install the rkat binary">
+    The SDK spawns `rkat rpc` as a subprocess. Build it from source:
+
+    ```bash
+    cargo build -p meerkat-cli --release
+    # Binary is at target/release/rkat
+    ```
+  </Step>
+  <Step title="Connect and run">
+    ```python
+    import asyncio
+    from meerkat import MeerkatClient
+
+    async def main():
+        client = MeerkatClient()
+        await client.connect()
+
+        result = await client.create_session("What is the capital of France?")
+        print(result.text)
+        print(result.session_id)
+
+        # Multi-turn
+        result2 = await client.start_turn(result.session_id, "And of Germany?")
+        print(result2.text)
+
+        await client.archive_session(result.session_id)
+        await client.close()
+
+    asyncio.run(main())
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+If the `rkat` binary is not on `PATH`, pass its location explicitly:
+
+```python
+client = MeerkatClient(rkat_path="/path/to/rkat")
+```
+</Tip>
+
+---
+
+## Method overview
+
+| Method | Description |
+|--------|-------------|
+| `connect()` | Spawn `rkat rpc`, handshake, fetch capabilities |
+| `close()` | Terminate the subprocess |
+| `create_session(prompt, ...)` | Create a session and run the first turn |
+| `start_turn(session_id, prompt)` | Continue an existing session |
+| `interrupt(session_id)` | Cancel an in-flight turn |
+| `list_sessions()` | List active sessions |
+| `read_session(session_id)` | Read session state |
+| `archive_session(session_id)` | Remove a session |
+| `get_capabilities()` | Get runtime capabilities |
+| `has_capability(id)` | Check if a capability is available |
+| `require_capability(id)` | Guard a code path by capability |
+| `get_config()` | Read runtime configuration |
+| `set_config(config)` | Replace runtime configuration |
+| `patch_config(patch)` | Merge-patch runtime configuration |
+
+---
+
+## MeerkatClient
+
+### Constructor
+
+```python
+MeerkatClient(rkat_path: str = "rkat")
+```
+
+Raises `MeerkatError` (code `"BINARY_NOT_FOUND"`) if the binary is not found.
+
+### connect()
+
+```python
+async def connect(self) -> MeerkatClient
+```
+
+Starts the `rkat rpc` subprocess, performs the `initialize` handshake, checks contract version compatibility, and fetches capabilities. Returns `self` for chaining.
+
+### close()
+
+```python
+async def close(self) -> None
+```
+
+Sends `SIGTERM` and waits up to 5 seconds; falls back to `SIGKILL` on timeout.
+
+### create_session()
+
+```python
+async def create_session(
+    self,
+    prompt: str,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    output_schema: Optional[dict] = None,
+    structured_output_retries: int = 2,
+    hooks_override: Optional[dict] = None,
+    enable_builtins: bool = False,
+    enable_shell: bool = False,
+    enable_subagents: bool = False,
+    enable_memory: bool = False,
+    host_mode: bool = False,
+    comms_name: Optional[str] = None,
+    provider_params: Optional[dict] = None,
+) -> WireRunResult
+```
+
+Creates a new session and runs the first turn. Returns a `WireRunResult`.
+
+### start_turn()
+
+```python
+async def start_turn(self, session_id: str, prompt: str) -> WireRunResult
+```
+
+Starts a new turn on an existing session.
+
+### interrupt()
+
+```python
+async def interrupt(self, session_id: str) -> None
+```
+
+Cancels a running turn.
+
+### Session management
+
+```python
+sessions = await client.list_sessions()
+info = await client.read_session(session_id)
+await client.archive_session(session_id)
+```
+
+### Config management
+
+```python
+config = await client.get_config()
+await client.set_config(config)
+updated = await client.patch_config({"max_tokens": 2048})
+```
+
+---
+
+## Examples
+
+<Accordion title="Multi-turn conversation">
+```python
+async def multi_turn():
+    client = MeerkatClient()
+    await client.connect()
+
+    result = await client.create_session(
+        "You are a helpful math tutor. What is 12 * 15?",
+        model="claude-sonnet-4-5",
+    )
+    print(f"Turn 1: {result.text}")
+
+    result2 = await client.start_turn(result.session_id, "Now divide that result by 3.")
+    print(f"Turn 2: {result2.text}")
+
+    await client.archive_session(result.session_id)
+    await client.close()
+```
+</Accordion>
+
+<Accordion title="Structured output">
+```python
+async def structured():
+    client = MeerkatClient()
+    await client.connect()
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string"},
+            "country": {"type": "string"},
+            "population": {"type": "integer"},
+        },
+        "required": ["city", "country", "population"],
+    }
+
+    result = await client.create_session(
+        "Give me information about Tokyo.",
+        output_schema=schema,
+        structured_output_retries=3,
+    )
+    print(f"Structured: {result.structured_output}")
+
+    await client.archive_session(result.session_id)
+    await client.close()
+```
+</Accordion>
+
+<Accordion title="Using with tools enabled">
+```python
+async def with_tools():
+    client = MeerkatClient()
+    await client.connect()
+
+    result = await client.create_session(
+        "Create a file called hello.txt with 'Hello World' in it",
+        enable_builtins=True,
+        enable_shell=True,
+    )
+    print(f"Response: {result.text}")
+    print(f"Tool calls made: {result.tool_calls}")
+
+    await client.archive_session(result.session_id)
+    await client.close()
+```
+</Accordion>
+
+---
+
+## See also
+
+- [Python SDK reference](/sdks/python/reference) - wire types, capabilities, skills, errors
+- [Rust SDK overview](/rust/overview) - Rust library API
+- [RPC reference](/api/rpc) - JSON-RPC protocol specification

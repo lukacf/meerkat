@@ -1,0 +1,103 @@
+---
+title: "Session examples"
+description: "Multi-turn conversations and session lifecycle management."
+icon: "arrows-rotate"
+---
+
+Session lifecycle and multi-turn conversations using a single agent instance.
+
+<Accordion title="Multi-turn with stateful tools (multi_turn_tools.rs)">
+
+**Location:** `meerkat/examples/multi_turn_tools.rs`
+
+Demonstrates stateful tools that persist data across conversation turns and multiple `run()` calls on the same agent.
+
+**Stateful tool dispatcher:**
+
+```rust
+struct MultiToolDispatcher {
+    state: std::sync::Mutex<AppState>,
+}
+
+struct AppState {
+    notes: Vec<String>,        // Persists across turns
+    calculations: Vec<f64>,    // History of calculations
+}
+```
+
+**Conversation flow:**
+
+```rust
+// Turn 1: Calculate and save
+let result = agent
+    .run("Calculate 15 * 8, then save a note about the result.".to_string())
+    .await?;
+// LLM calls calculate("15 * 8") -> "120"
+// LLM calls save_note("The calculation 15 * 8 equals 120")
+
+// Turn 2: More calculations
+let result = agent
+    .run("Now calculate 100 / 4 and 25 + 37.".to_string())
+    .await?;
+
+// Turn 3: Review history (proves state persists)
+let result = agent
+    .run("Show me all the calculations we've done and any notes we've saved.".to_string())
+    .await?;
+// LLM calls get_calculation_history() -> "[120.0, 25.0, 62.0]"
+// LLM calls get_notes() -> "1. The calculation 15 * 8 equals 120"
+```
+
+**Key pattern -- reusing the same agent instance:**
+
+```rust
+let mut agent = AgentBuilder::new()
+    // ... configuration ...
+    .build(llm, tools, store);
+
+// Reuse the SAME agent instance
+let result1 = agent.run("First message".to_string()).await?;
+let result2 = agent.run("Second message".to_string()).await?;  // Remembers result1
+let result3 = agent.run("Third message".to_string()).await?;   // Remembers result1 + result2
+```
+
+Each `run()` call adds the user message to the session, calls the LLM with the full conversation history, adds the assistant response, and saves via the store.
+
+</Accordion>
+
+<Accordion title="Session lifecycle via JSON-RPC">
+
+Create a session, run multiple turns, then archive it:
+
+```json
+// 1. Create session + first turn
+{
+  "jsonrpc": "2.0", "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "You are a research assistant.",
+    "model": "claude-sonnet-4-5"
+  }
+}
+
+// 2. Continue with a follow-up turn
+{
+  "jsonrpc": "2.0", "id": 2,
+  "method": "turn/start",
+  "params": {
+    "session_id": "01936f8a-...",
+    "prompt": "Summarize what we discussed."
+  }
+}
+
+// 3. Archive when done
+{
+  "jsonrpc": "2.0", "id": 3,
+  "method": "session/archive",
+  "params": { "session_id": "01936f8a-..." }
+}
+```
+
+See the [JSON-RPC API reference](/api/rpc) for the full method reference.
+
+</Accordion>

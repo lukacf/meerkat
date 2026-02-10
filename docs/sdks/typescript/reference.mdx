@@ -1,0 +1,205 @@
+---
+title: "TypeScript SDK reference"
+description: "Wire types, capability checking, skill helpers, event streaming, and error handling for the TypeScript SDK."
+icon: "book"
+---
+
+## Wire types
+
+<Accordion title="WireRunResult">
+```typescript
+interface WireRunResult {
+  session_id: string;
+  text: string;
+  turns: number;
+  tool_calls: number;
+  usage: WireUsage;
+  structured_output?: unknown;
+  schema_warnings?: Array<{ provider: string; path: string; message: string }>;
+}
+```
+</Accordion>
+
+<Accordion title="WireUsage">
+```typescript
+interface WireUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cache_creation_tokens?: number;
+  cache_read_tokens?: number;
+}
+```
+</Accordion>
+
+<Accordion title="WireEvent">
+```typescript
+interface WireEvent {
+  session_id: string;
+  sequence: number;
+  event: Record<string, unknown>;
+  contract_version: string;
+}
+```
+</Accordion>
+
+<Accordion title="CapabilitiesResponse">
+```typescript
+interface CapabilitiesResponse {
+  contract_version: string;
+  capabilities: CapabilityEntry[];
+}
+
+interface CapabilityEntry {
+  id: string;
+  description: string;
+  status: string;  // "Available", "DisabledByPolicy", "NotCompiled", etc.
+}
+```
+</Accordion>
+
+---
+
+## CapabilityChecker
+
+Standalone helper for checking runtime capabilities:
+
+```typescript
+import { MeerkatClient, CapabilityChecker } from "@meerkat/sdk";
+
+const caps = await client.getCapabilities();
+const checker = new CapabilityChecker(caps);
+
+if (checker.has("comms")) {
+  console.log("Comms is available");
+}
+
+checker.require("skills");  // throws CapabilityUnavailableError if unavailable
+
+console.log(checker.available);  // ["sessions", "streaming", ...]
+```
+
+| Method | Description |
+|--------|-------------|
+| `has(capabilityId)` | Returns `true` if status is `"Available"` |
+| `require(capabilityId)` | Throws if capability not available |
+| `available` | Getter returning all available capability IDs |
+
+<Accordion title="Known capability IDs">
+| ID | Description |
+|---|-------------|
+| `sessions` | Session lifecycle |
+| `streaming` | Real-time event streaming |
+| `structured_output` | JSON schema structured output |
+| `hooks` | Lifecycle hooks |
+| `builtins` | Built-in tools |
+| `shell` | Shell tool |
+| `comms` | Inter-agent communication |
+| `sub_agents` | Sub-agent tools |
+| `memory_store` | Semantic memory |
+| `session_store` | Session persistence |
+| `session_compaction` | Context compaction |
+| `skills` | Skill loading |
+</Accordion>
+
+---
+
+## SkillHelper
+
+Convenience wrapper for invoking Meerkat skills:
+
+```typescript
+import { MeerkatClient, SkillHelper } from "@meerkat/sdk";
+
+const helper = new SkillHelper(client);
+
+if (helper.isAvailable()) {
+  const result = await helper.invoke(sessionId, "/shell-patterns", "How do I run a background job?");
+  console.log(result.text);
+}
+
+const result = await helper.invokeNewSession(
+  "/code-review",
+  "Review this function",
+  "claude-opus-4-6",
+);
+```
+
+| Method | Description |
+|--------|-------------|
+| `isAvailable()` | Returns `true` if `"skills"` capability is available |
+| `requireSkills()` | Throws if skills not available |
+| `invoke(sessionId, skillRef, prompt)` | Invoke skill in existing session |
+| `invokeNewSession(skillRef, prompt, model?)` | Create session and invoke skill |
+
+---
+
+## EventStream
+
+Async iterator that yields `WireEvent` objects from JSON-RPC notifications:
+
+```typescript
+import { createInterface } from "node:readline";
+import { EventStream } from "@meerkat/sdk";
+
+const rl = createInterface({ input: process.stdin });
+const stream = new EventStream(rl);
+
+for await (const event of stream) {
+  console.log(event.session_id, event.sequence, event.event);
+}
+```
+
+<Note>
+`MeerkatClient` handles JSON-RPC response/notification multiplexing internally. `EventStream` is a lower-level primitive for advanced use cases.
+</Note>
+
+---
+
+## Error handling
+
+All errors extend `MeerkatError`:
+
+```typescript
+import { MeerkatError, CapabilityUnavailableError } from "@meerkat/sdk";
+
+try {
+  await client.connect();
+  const result = await client.createSession({ prompt: "Hello" });
+} catch (err) {
+  if (err instanceof CapabilityUnavailableError) {
+    console.error("Missing capability:", err.message);
+  } else if (err instanceof MeerkatError) {
+    console.error(`[${err.code}]: ${err.message}`);
+  }
+} finally {
+  await client.close();
+}
+```
+
+| Class | Description |
+|-------|-------------|
+| `MeerkatError` | Base error with `code`, `details`, `capabilityHint` |
+| `CapabilityUnavailableError` | Required capability not available |
+| `SessionNotFoundError` | Session ID does not exist |
+| `SkillNotFoundError` | Skill reference cannot be found |
+
+---
+
+## Version compatibility
+
+```typescript
+import { CONTRACT_VERSION } from "@meerkat/sdk";
+console.log(CONTRACT_VERSION);  // "0.1.0"
+```
+
+- While major version is `0`, minor versions must match exactly
+- Once `1.0.0` is reached, major versions must match (standard semver)
+
+---
+
+## See also
+
+- [TypeScript SDK overview](/sdks/typescript/overview) - getting started and MeerkatClient API
+- [Python SDK](/sdks/python/overview) - Python SDK
+- [RPC reference](/api/rpc) - JSON-RPC protocol specification

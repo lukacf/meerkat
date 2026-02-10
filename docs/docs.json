@@ -1,40 +1,136 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "name": "Meerkat",
-  "theme": "mint",
+  "description": "A modular, high-performance agent harness built in Rust",
+  "theme": "maple",
   "colors": {
-    "primary": "#16a34a"
+    "primary": "#D4882B",
+    "light": "#E8A84C",
+    "dark": "#B5711E"
+  },
+  "logo": {
+    "light": "/logo.png",
+    "dark": "/logo.png"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/lukacf/meerkat"
+      }
+    ]
   },
   "navigation": {
     "tabs": [
       {
-        "tab": "Getting Started",
-        "pages": ["quickstart", "configuration", "examples"]
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting started",
+            "pages": ["introduction", "quickstart"]
+          },
+          {
+            "group": "Core concepts",
+            "pages": [
+              "concepts/sessions",
+              "concepts/tools",
+              "concepts/providers",
+              "concepts/configuration"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/structured-output",
+              "guides/memory",
+              "guides/hooks",
+              "guides/skills",
+              "guides/sub-agents",
+              "guides/comms"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/basics",
+              "examples/sessions",
+              "examples/advanced"
+            ]
+          }
+        ]
       },
       {
-        "tab": "CLI",
-        "pages": ["CLI"]
+        "tab": "SDKs",
+        "groups": [
+          {
+            "group": "Rust",
+            "pages": [
+              "rust/overview",
+              "rust/tools-and-stores",
+              "rust/advanced"
+            ]
+          },
+          {
+            "group": "Python",
+            "pages": [
+              "sdks/python/overview",
+              "sdks/python/reference"
+            ]
+          },
+          {
+            "group": "TypeScript",
+            "pages": [
+              "sdks/typescript/overview",
+              "sdks/typescript/reference"
+            ]
+          }
+        ]
       },
       {
-        "tab": "SDK",
-        "pages": ["SDK", "api-reference", "future_sdks"]
+        "tab": "CLI & APIs",
+        "groups": [
+          {
+            "group": "CLI",
+            "pages": [
+              "cli/commands",
+              "cli/configuration"
+            ]
+          },
+          {
+            "group": "APIs",
+            "pages": [
+              "api/rest",
+              "api/rpc",
+              "api/mcp"
+            ]
+          }
+        ]
       },
       {
-        "tab": "MCP",
-        "pages": ["mcp"]
-      },
-      {
-        "tab": "REST",
-        "pages": ["rest"]
-      },
-      {
-        "tab": "RPC",
-        "pages": ["rpc"]
-      },
-      {
-        "tab": "Architecture",
-        "pages": ["architecture"]
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/api-reference",
+              "reference/builtin-tools"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "reference/architecture",
+              "reference/capability-matrix",
+              "reference/session-contracts"
+            ]
+          }
+        ]
       }
     ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/lukacf/meerkat"
+    }
   }
 }

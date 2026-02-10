@@ -1,0 +1,214 @@
+---
+title: "Python SDK reference"
+description: "Wire types, capability checking, skill helpers, event streaming, and error handling for the Python SDK."
+icon: "book"
+---
+
+## Wire types
+
+<Accordion title="WireRunResult">
+```python
+from meerkat import WireRunResult
+```
+
+Returned by `create_session()` and `start_turn()`.
+
+<ResponseField name="session_id" type="str">Session UUID.</ResponseField>
+<ResponseField name="text" type="str">Agent response text.</ResponseField>
+<ResponseField name="turns" type="int">Number of turns completed.</ResponseField>
+<ResponseField name="tool_calls" type="int">Number of tool calls made.</ResponseField>
+<ResponseField name="usage" type="Optional[WireUsage]">Token usage breakdown.</ResponseField>
+<ResponseField name="structured_output" type="Optional[Any]">Parsed structured output.</ResponseField>
+<ResponseField name="schema_warnings" type="Optional[list]">Schema validation warnings.</ResponseField>
+</Accordion>
+
+<Accordion title="WireUsage">
+```python
+from meerkat import WireUsage
+```
+
+<ResponseField name="input_tokens" type="int">Input tokens consumed.</ResponseField>
+<ResponseField name="output_tokens" type="int">Output tokens generated.</ResponseField>
+<ResponseField name="total_tokens" type="int">Total tokens.</ResponseField>
+<ResponseField name="cache_creation_tokens" type="Optional[int]">Cache creation tokens.</ResponseField>
+<ResponseField name="cache_read_tokens" type="Optional[int]">Cache read tokens.</ResponseField>
+</Accordion>
+
+<Accordion title="WireEvent">
+```python
+from meerkat import WireEvent
+```
+
+<ResponseField name="session_id" type="str">Session this event belongs to.</ResponseField>
+<ResponseField name="sequence" type="int">Monotonic sequence number.</ResponseField>
+<ResponseField name="event" type="Optional[dict]">The agent event payload.</ResponseField>
+<ResponseField name="contract_version" type="str">Contract version of the server.</ResponseField>
+</Accordion>
+
+<Accordion title="CapabilitiesResponse">
+```python
+from meerkat import CapabilitiesResponse, CapabilityEntry
+```
+
+<ResponseField name="contract_version" type="str">Server contract version.</ResponseField>
+<ResponseField name="capabilities" type="list[CapabilityEntry]">List of capability entries.</ResponseField>
+
+Each `CapabilityEntry` has `id`, `description`, and `status` fields.
+</Accordion>
+
+---
+
+## CapabilityChecker
+
+Standalone capability-checking helper:
+
+```python
+from meerkat import CapabilityChecker
+
+caps = await client.get_capabilities()
+checker = CapabilityChecker(caps)
+
+if checker.has("shell"):
+    print("Shell tool is available")
+
+checker.require("comms")  # raises CapabilityUnavailableError if unavailable
+
+print(checker.available)  # e.g. ["sessions", "streaming", "builtins"]
+```
+
+| Method | Description |
+|--------|-------------|
+| `has(capability_id)` | Returns `True` if status is `"Available"` |
+| `require(capability_id)` | Raises `CapabilityUnavailableError` if not available |
+| `available` | List of all available capability IDs |
+
+---
+
+## SkillHelper
+
+Helpers for invoking Meerkat skills:
+
+```python
+from meerkat import SkillHelper
+
+helper = SkillHelper(client)
+
+if helper.is_available():
+    result = await helper.invoke(session_id, "/shell-patterns", "How do I run a background job?")
+    print(result.text)
+
+    result = await helper.invoke_new_session("/code-review", "Review this function", model="claude-sonnet-4-5")
+```
+
+| Method | Description |
+|--------|-------------|
+| `is_available()` | Returns `True` if `"skills"` capability is available |
+| `require_skills()` | Raises error if skills not available |
+| `invoke(session_id, skill_ref, prompt)` | Invoke skill in existing session |
+| `invoke_new_session(skill_ref, prompt, model?)` | Create session and invoke skill |
+
+---
+
+## EventStream
+
+Async iterator that yields `WireEvent` objects from the `rkat rpc` notification stream:
+
+```python
+from meerkat import EventStream
+
+stream = EventStream(client._process.stdout)
+async for event in stream:
+    print(f"[{event.session_id}] seq={event.sequence}: {event.event}")
+```
+
+<Note>
+`EventStream` implements `__aiter__` and `__anext__`. It yields `WireEvent` instances until the stream closes.
+</Note>
+
+---
+
+## Error handling
+
+All errors inherit from `MeerkatError`:
+
+```python
+from meerkat import MeerkatError, CapabilityUnavailableError, SessionNotFoundError, SkillNotFoundError
+```
+
+| Class | Description |
+|-------|-------------|
+| `MeerkatError` | Base error with `code`, `message`, `details`, `capability_hint` |
+| `CapabilityUnavailableError` | Required capability not available |
+| `SessionNotFoundError` | Session not found |
+| `SkillNotFoundError` | Skill reference cannot be resolved |
+
+### Client-side error codes
+
+| Code | Description |
+|------|-------------|
+| `BINARY_NOT_FOUND` | `rkat` binary not found on PATH |
+| `NOT_CONNECTED` | Operation attempted before `connect()` |
+| `CONNECTION_CLOSED` | `rkat rpc` process closed unexpectedly |
+| `VERSION_MISMATCH` | Server contract version incompatible |
+| `CAPABILITY_UNAVAILABLE` | Capability check failed |
+
+### Server-side error codes
+
+| Code | JSON-RPC code | Description |
+|------|---------------|-------------|
+| `SESSION_NOT_FOUND` | -32001 | Session does not exist |
+| `SESSION_BUSY` | -32002 | Turn already in progress |
+| `PROVIDER_ERROR` | -32010 | LLM provider error |
+| `BUDGET_EXHAUSTED` | -32011 | Budget exceeded |
+| `HOOK_DENIED` | -32012 | Hook blocked operation |
+| `AGENT_ERROR` | -32013 | Internal agent error |
+| `INVALID_PARAMS` | -32602 | Invalid method parameters |
+
+### Example
+
+```python
+try:
+    result = await client.start_turn("nonexistent-session-id", "hello")
+except MeerkatError as e:
+    print(f"Error code: {e.code}")
+    print(f"Message: {e.message}")
+```
+
+---
+
+## Version compatibility
+
+The SDK negotiates version compatibility during `connect()`:
+
+- **0.x:** Requires exact minor version match (SDK `0.1.0` works with server `0.1.x`)
+- **1.0+:** Requires same major version
+
+```python
+from meerkat import CONTRACT_VERSION
+print(CONTRACT_VERSION)  # "0.1.0"
+```
+
+---
+
+## Running tests
+
+```bash
+pip install -e "sdks/python[dev]"
+
+# Type conformance tests (no rkat binary needed)
+pytest sdks/python/tests/test_types.py -v
+
+# E2E tests (requires rkat on PATH)
+pytest sdks/python/tests/test_e2e.py -v
+
+# E2E smoke tests (requires rkat + ANTHROPIC_API_KEY)
+pytest sdks/python/tests/test_e2e_smoke.py -v
+```
+
+---
+
+## See also
+
+- [Python SDK overview](/sdks/python/overview) - getting started and MeerkatClient API
+- [TypeScript SDK](/sdks/typescript/overview) - TypeScript SDK
+- [RPC reference](/api/rpc) - JSON-RPC protocol specification

@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+skills-http = ["dep:reqwest", "dep:urlencoding"]
+
 [dependencies]
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
@@ -19,10 +23,15 @@ strum = { workspace = true }
 serde_yml = { workspace = true }
 indexmap = "2"
 regex = "1"
+reqwest = { workspace = true, optional = true }
+urlencoding = { version = "2", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
+wiremock = "0.6"
+reqwest = { workspace = true }
+urlencoding = "2"
 
 [lints]
 workspace = true

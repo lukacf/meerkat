@@ -3,6 +3,8 @@
 pub mod composite;
 pub mod embedded;
 pub mod filesystem;
+#[cfg(any(feature = "skills-http", test))]
+pub mod http;
 pub mod memory;
 
 pub use composite::{CompositeSkillSource, NamedSource};

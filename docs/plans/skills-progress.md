@@ -1,6 +1,6 @@
 # Skills System Redesign — Progress
 
-## Current Phase: 10
+## Current Phase: 11
 ## Current Status: implementing
 
 ---
@@ -252,22 +252,30 @@
 ## Phase 10: HttpSkillSource
 
 ### Tests
-- [ ] test_list_skills_from_http
-- [ ] test_load_skill_from_http
-- [ ] test_list_collections_from_http
-- [ ] test_cache_serves_on_second_call
-- [ ] test_cache_expires_after_ttl
-- [ ] test_cache_refresh_always_unfiltered
-- [ ] test_auth_bearer_header
-- [ ] test_auth_custom_header
-- [ ] test_url_encoding_slash_ids
-- [ ] test_collection_filter_applied_client_side
+- [x] test_list_skills_from_http
+- [x] test_load_skill_from_http
+- [x] test_list_collections_from_http
+- [x] test_cache_serves_on_second_call
+- [x] test_cache_expires_after_ttl
+- [x] test_cache_refresh_always_unfiltered
+- [x] test_auth_bearer_header
+- [x] test_auth_custom_header
+- [x] test_url_encoding_slash_ids
+- [x] test_collection_filter_applied_client_side
 
 ### Implementation
-- [ ] HttpSkillSource + HttpSkillAuth
-- [ ] SkillCache with TTL
-- [ ] Unfiltered cache refresh
-- [ ] URL construction + wire format
+- [x] HttpSkillSource + HttpSkillAuth
+- [x] SkillCache with TTL-based expiry
+- [x] Unfiltered cache refresh (always fetches full list)
+- [x] URL construction ({base_url}/skills, /skills/{encoded_id}, /skill-collections)
+- [x] Meerkat Skills API wire format
+- [x] Feature-gated behind skills-http
+- [x] wiremock for mock HTTP server testing
+
+### Gate Results — Attempt 1
+- build-gate: PASS
+- test-gate: PASS (10 HTTP source tests, full suite clean)
+- performance-gate: PASS
 
 ## Phase 11: GitSkillSource
 

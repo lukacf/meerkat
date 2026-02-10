@@ -4,11 +4,13 @@
 
 set -e
 
+FAST_TARGET_DIR="${FAST_TARGET_DIR:-target/fast}"
+
 echo "=== Running Meerkat FAST Tests ==="
 echo ""
 
 echo "Running fast suite (unit + integration-fast)..."
-cargo test --workspace --lib --bins --tests
+CARGO_TARGET_DIR="$FAST_TARGET_DIR" cargo test --workspace --lib --bins --tests
 
 echo ""
 echo "=== Fast Tests Complete ==="

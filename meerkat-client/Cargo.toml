@@ -39,5 +39,10 @@ name = "e2e_system_proxy"
 path = "tests/e2e_system_proxy.rs"
 required-features = ["integration-real-tests"]
 
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+required-features = ["integration-real-tests"]
+
 [lints]
 workspace = true

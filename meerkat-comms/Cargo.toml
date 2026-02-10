@@ -58,5 +58,10 @@ name = "router_integration"
 path = "tests/router_integration.rs"
 required-features = ["integration-real-tests"]
 
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+required-features = ["integration-real-tests"]
+
 [lints]
 workspace = true

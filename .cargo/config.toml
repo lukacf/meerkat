@@ -2,14 +2,14 @@
 
 [alias]
 # Fast test suite (unit + integration-fast, skips doctests)
-fast = "test --workspace --lib --bins --tests"
-rct = "test --workspace --lib --bins --tests"
+fast = "test --target-dir target/fast --workspace --lib --bins --tests"
+rct = "test --target-dir target/fast --workspace --lib --bins --tests"
 
 # Unit tests only (no integration tests, skips doctests)
-unit = "test --workspace --lib --bins"
+unit = "test --target-dir target/fast --workspace --lib --bins"
 
 # Integration-fast tests only (ignored tests are not run)
-int = "test --workspace --tests"
+int = "test --target-dir target/fast --workspace --tests"
 
 # Integration tests that spawn real processes / need binaries (ignored by default)
 int-real = "test --workspace integration_real -- --ignored --test-threads=1"

@@ -2,6 +2,7 @@
 # Single source of truth for all build, test, and lint commands
 
 CRATE_NAME := meerkat
+FAST_TARGET_DIR ?= target/fast
 
 # Colors for terminal output
 GREEN := \033[0;32m
@@ -28,17 +29,17 @@ release:
 # Unit + integration-fast, skips doctests and ignored tests
 test:
 	@echo "$(GREEN)Running fast tests (unit + integration-fast)...$(NC)"
-	cargo test --workspace --lib --bins --tests
+	cargo test --target-dir $(FAST_TARGET_DIR) --workspace --lib --bins --tests
 
 # Unit tests only
 test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
-	cargo test --workspace --lib --bins
+	cargo test --target-dir $(FAST_TARGET_DIR) --workspace --lib --bins
 
 # Integration-fast tests only (no unit tests)
 test-int:
 	@echo "$(GREEN)Running integration-fast tests...$(NC)"
-	cargo test --workspace --tests
+	cargo test --target-dir $(FAST_TARGET_DIR) --workspace --tests
 
 # Integration-real tests (ignored by default)
 test-int-real:

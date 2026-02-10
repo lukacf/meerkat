@@ -122,15 +122,23 @@
 
 - spec-accuracy-gate: FAIL — AgentBuilder missing skill_engine/memory_store setters, factory not wiring skills
 
-### Phase 3 — Attempt 2 (fixes applied)
+### Phase 3 — Attempt 2
 
 - Fixed: AgentBuilder::skill_engine() and memory_store() setters added
 - Fixed: Factory wires DefaultSkillEngine with composite sources when skills feature enabled
 - Fixed: Skill inventory section injected into system prompt via extra_sections
+- spec-accuracy-gate: FAIL — Agent struct missing memory_store field (build() drops it), agent loop still has deferral comment, active_skills hardcoded to None
+
+### Phase 3 — Attempt 3 (fixes applied)
+
+- Fixed: Agent struct gains memory_store field, build() passes it through
+- Fixed: Agent loop indexes discarded messages into memory store after compaction
+- Fixed: Factory populates active_skills with actual skill IDs from EmbeddedSkillSource
+- Fixed: Test updated to expect active_skills populated when skills feature enabled
 - build-gate: PASS
-- test-gate: PASS
+- test-gate: PASS (0 failures)
 - performance-gate: PASS
-- spec-accuracy-gate: PASS (AgentBuilder setters, factory wiring, skill inventory injection all verified)
+- spec-accuracy-gate: pending re-verification
 - rust-quality-gate: PASS
 
 ### Phase 4 — Attempt 1

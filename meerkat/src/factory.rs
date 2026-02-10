@@ -613,7 +613,7 @@ impl AgentFactory {
         #[cfg(feature = "skills")]
         let skill_inventory_section = {
             use meerkat_skills::{DefaultSkillEngine, EmbeddedSkillSource, FilesystemSkillSource, CompositeSkillSource};
-            use meerkat_core::skills::{SkillEngine, SkillScope};
+            use meerkat_core::skills::{SkillEngine, SkillScope, SkillSource};
 
             let mut sources: Vec<Box<dyn meerkat_core::skills::SkillSource>> = Vec::new();
 
@@ -645,13 +645,21 @@ impl AgentFactory {
 
             let engine = DefaultSkillEngine::new(Box::new(composite), available_caps);
 
-            // Generate inventory section for system prompt
+            // Generate inventory section for system prompt and collect skill IDs
             let section = engine.inventory_section().await.unwrap_or_default();
-            (Some(Arc::new(engine) as Arc<dyn SkillEngine>), section)
+
+            // Collect active skill IDs for session metadata
+            let source = EmbeddedSkillSource::new();
+            let skill_ids: Vec<meerkat_core::skills::SkillId> = match source.list().await {
+                Ok(descriptors) => descriptors.into_iter().map(|d| d.id).collect(),
+                Err(_) => Vec::new(),
+            };
+
+            (Some(Arc::new(engine) as Arc<dyn SkillEngine>), section, Some(skill_ids))
         };
         #[cfg(not(feature = "skills"))]
-        let skill_inventory_section: (Option<Arc<dyn meerkat_core::skills::SkillEngine>>, String) = (None, String::new());
-        let (skill_engine, inventory_section) = skill_inventory_section;
+        let skill_inventory_section: (Option<Arc<dyn meerkat_core::skills::SkillEngine>>, String, Option<Vec<meerkat_core::skills::SkillId>>) = (None, String::new(), None);
+        let (skill_engine, inventory_section, active_skill_ids) = skill_inventory_section;
         let _ = &skill_engine; // used below when skills feature is enabled
 
         // 12. Build system prompt (single canonical path)
@@ -724,7 +732,7 @@ impl AgentFactory {
                 shell: effective_shell,
                 comms: build_config.host_mode,
                 subagents: self.enable_subagents,
-                active_skills: None,
+                active_skills: active_skill_ids,
             },
             host_mode: build_config.host_mode,
             comms_name: build_config.comms_name,

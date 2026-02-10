@@ -27,18 +27,22 @@
         "groups": [
           {
             "group": "Getting started",
-            "pages": ["introduction", "configuration", "examples"]
+            "pages": ["introduction", "examples"]
           },
           {
             "group": "Guides",
             "pages": [
               "guides/structured-output",
               "guides/memory",
+              "guides/hooks",
               "guides/skills",
               "guides/sub-agents",
-              "guides/hooks",
               "guides/comms"
             ]
+          },
+          {
+            "group": "Configuration",
+            "pages": ["configuration"]
           }
         ]
       },

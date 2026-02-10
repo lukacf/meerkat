@@ -24,3 +24,6 @@
 nohup.out
 .rct/
 test-project/
+
+# Vendored deps (local symlink, not portable)
+vendor

@@ -460,6 +460,7 @@ impl AgentFactory {
                 builder.store, &builder.config, builder.shell_config,
                 builder.external, builder.session_id,
             )?;
+            #[cfg(feature = "skills")]
             if let Some(engine) = skill_engine {
                 composite.register_skill_tools(
                     meerkat_tools::builtin::skills::SkillToolSet::new(engine),
@@ -474,6 +475,7 @@ impl AgentFactory {
                 builder.store, &builder.config, builder.shell_config,
                 builder.external, builder.session_id,
             )?;
+            #[cfg(feature = "skills")]
             if let Some(engine) = skill_engine {
                 composite.register_skill_tools(
                     meerkat_tools::builtin::skills::SkillToolSet::new(engine),
@@ -553,6 +555,7 @@ impl AgentFactory {
             let tool_set = SubAgentToolSet::new(state);
             composite.register_sub_agent_tools(tool_set, &config)?;
 
+            #[cfg(feature = "skills")]
             if let Some(engine) = skill_engine {
                 composite.register_skill_tools(
                     meerkat_tools::builtin::skills::SkillToolSet::new(engine),

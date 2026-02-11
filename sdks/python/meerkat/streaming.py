@@ -125,13 +125,11 @@ class _StdoutDispatcher:
                 queue = self._event_queues.get(session_id)
                 if queue is not None:
                     await queue.put(event)
-                elif (
-                    self._catchall_queue is not None
-                    and len(self._event_queues) == 0
-                ):
-                    # Only route to catchall when no other sessions are
-                    # subscribed — prevents cross-session contamination
-                    # under concurrency.
+                elif self._catchall_queue is not None:
+                    # Route unmatched events to catchall (used by
+                    # create_session_streaming before session_id is known).
+                    # Promotion to session-specific queue happens when
+                    # the response arrives (keyed by request_id).
                     await self._catchall_queue.put(event)
 
     def _fail_all(self, code: str, message: str) -> None:

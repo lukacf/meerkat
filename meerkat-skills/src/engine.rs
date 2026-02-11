@@ -60,6 +60,18 @@ impl SkillEngine for DefaultSkillEngine {
         let mut results = Vec::new();
         for id in ids {
             let doc = self.source.load(id).await?;
+
+            // Enforce capability gating: reject skills whose required
+            // capabilities are not available, even if the caller knows the ID.
+            let missing: Vec<_> = doc.descriptor.requires_capabilities.iter()
+                .filter(|cap| !self.available_capabilities.contains(*cap))
+                .collect();
+            if !missing.is_empty() {
+                return Err(SkillError::Load(
+                    format!("skill '{}' requires unavailable capabilities: {:?}", id.0, missing).into(),
+                ));
+            }
+
             let rendered = renderer::render_injection(&id.0, &doc.body);
             let byte_size = rendered.len();
             results.push(ResolvedSkill {

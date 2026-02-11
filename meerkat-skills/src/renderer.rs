@@ -50,6 +50,20 @@ pub fn render_inventory(
     }
 }
 
+/// Escape XML-special characters in text content.
+fn escape_xml(s: &str) -> Cow<'_, str> {
+    if s.contains('&') || s.contains('<') || s.contains('>') || s.contains('"') {
+        Cow::Owned(
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;"),
+        )
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
 /// Flat XML listing of all skills.
 fn render_inventory_flat(skills: &[SkillDescriptor]) -> String {
     let mut output = String::from("<available_skills>\n");
@@ -57,7 +71,7 @@ fn render_inventory_flat(skills: &[SkillDescriptor]) -> String {
         let _ = write!(
             output,
             "  <skill id=\"{}\">\n    <description>{}</description>\n  </skill>\n",
-            skill.id, skill.description,
+            escape_xml(&skill.id.0), escape_xml(&skill.description),
         );
     }
     output.push_str("</available_skills>");
@@ -71,7 +85,7 @@ fn render_inventory_collections(collections: &[SkillCollection]) -> String {
         let _ = writeln!(
             output,
             "  <collection path=\"{}\" count=\"{}\">{}</collection>",
-            coll.path, coll.count, coll.description,
+            escape_xml(&coll.path), coll.count, escape_xml(&coll.description),
         );
     }
     output.push('\n');

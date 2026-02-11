@@ -145,21 +145,24 @@ impl SkillsConfig {
         user_path: Option<&Path>,
         project_path: Option<&Path>,
     ) -> Result<Self, SkillsConfigError> {
-        let user_cfg = read_skills_file(user_path).await?;
-        let project_cfg = read_skills_file(project_path).await?;
-        Ok(merge_project_over_user(user_cfg, project_cfg))
+        let user_cfg = read_skills_file(user_path).await?.unwrap_or_else(SkillsConfig::default);
+        let (project_cfg, project_has_file) = match read_skills_file(project_path).await? {
+            Some(cfg) => (cfg, true),
+            None => (SkillsConfig::default(), false),
+        };
+        Ok(merge_project_over_user(user_cfg, project_cfg, project_has_file))
     }
 }
 
-async fn read_skills_file(path: Option<&Path>) -> Result<SkillsConfig, SkillsConfigError> {
+async fn read_skills_file(path: Option<&Path>) -> Result<Option<SkillsConfig>, SkillsConfigError> {
     let Some(path) = path else {
-        return Ok(SkillsConfig::default());
+        return Ok(None);
     };
     if !tokio::fs::try_exists(path)
         .await
         .map_err(|e| SkillsConfigError::Io(e.to_string()))?
     {
-        return Ok(SkillsConfig::default());
+        return Ok(None);
     }
     let contents = tokio::fs::read_to_string(path)
         .await
@@ -170,10 +173,10 @@ async fn read_skills_file(path: Option<&Path>) -> Result<SkillsConfig, SkillsCon
             message: e.to_string(),
         })?;
     expand_env_in_config(&mut parsed)?;
-    Ok(parsed)
+    Ok(Some(parsed))
 }
 
-fn merge_project_over_user(user: SkillsConfig, project: SkillsConfig) -> SkillsConfig {
+fn merge_project_over_user(user: SkillsConfig, project: SkillsConfig, project_has_file: bool) -> SkillsConfig {
     let mut seen: HashSet<String> = HashSet::new();
     let mut merged_repos: Vec<SkillRepositoryConfig> = Vec::new();
 
@@ -190,11 +193,13 @@ fn merge_project_over_user(user: SkillsConfig, project: SkillsConfig) -> SkillsC
         }
     }
 
-    // Use project's scalar settings (they take precedence)
+    // Project scalars take precedence only when a project file was present.
+    // `project_has_file` is true when the project config was loaded from disk
+    // (not a default placeholder).
     SkillsConfig {
-        enabled: project.enabled,
-        max_injection_bytes: project.max_injection_bytes,
-        inventory_threshold: project.inventory_threshold,
+        enabled: if project_has_file { project.enabled } else { user.enabled },
+        max_injection_bytes: if project_has_file { project.max_injection_bytes } else { user.max_injection_bytes },
+        inventory_threshold: if project_has_file { project.inventory_threshold } else { user.inventory_threshold },
         repositories: merged_repos,
     }
 }
@@ -436,7 +441,7 @@ auth_token = "ghp_token"
             ..Default::default()
         };
 
-        let merged = merge_project_over_user(user, project);
+        let merged = merge_project_over_user(user, project, true);
         assert_eq!(merged.repositories.len(), 3);
         assert_eq!(merged.repositories[0].name, "project");
         assert_eq!(merged.repositories[1].name, "company");
@@ -473,7 +478,7 @@ auth_token = "ghp_token"
             ..Default::default()
         };
 
-        let merged = merge_project_over_user(user, project);
+        let merged = merge_project_over_user(user, project, true);
         assert_eq!(merged.repositories.len(), 1);
         match &merged.repositories[0].transport {
             SkillRepoTransport::Filesystem { path } => {

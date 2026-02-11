@@ -158,33 +158,54 @@ impl GitSkillSource {
     }
 
     async fn git_clone(&self) -> Result<(), SkillError> {
-        let mut args = vec![
-            "clone".to_string(),
-            "--single-branch".to_string(),
-            "--branch".to_string(),
-            self.config.git_ref.ref_str().to_string(),
-        ];
+        let cache_dir_str = self.config.cache_dir.to_str()
+            .ok_or_else(|| SkillError::Load("non-UTF-8 cache dir path".into()))?
+            .to_string();
+
+        let is_commit = matches!(self.config.git_ref, GitRef::Commit(_));
+
+        let mut args = vec!["clone".to_string()];
+
+        // --branch works for branches and tags but NOT for commit SHAs.
+        // For commits, clone the default branch and checkout the SHA after.
+        if !is_commit {
+            args.push("--single-branch".to_string());
+            args.push("--branch".to_string());
+            args.push(self.config.git_ref.ref_str().to_string());
+        }
 
         if let Some(depth) = self.config.depth {
-            args.push("--depth".into());
-            args.push(depth.to_string());
+            if !is_commit {
+                // Shallow clone is incompatible with arbitrary commit checkout
+                args.push("--depth".into());
+                args.push(depth.to_string());
+            }
         }
 
         let url = self.auth_url();
         args.push(url);
-        args.push(
-            self.config
-                .cache_dir
-                .to_str()
-                .ok_or_else(|| SkillError::Load("non-UTF-8 cache dir path".into()))?
-                .to_string(),
-        );
+        args.push(cache_dir_str);
 
         run_git(&args).await.map_err(|e| {
             SkillError::Load(
                 format!("git clone failed for '{}': {e}", self.config.repo_url).into(),
             )
-        })
+        })?;
+
+        // For commit refs, checkout the exact SHA after cloning.
+        if is_commit {
+            let checkout_args = vec![
+                "checkout".to_string(),
+                self.config.git_ref.ref_str().to_string(),
+            ];
+            run_git_in_dir(&self.config.cache_dir, &checkout_args).await.map_err(|e| {
+                SkillError::Load(
+                    format!("git checkout commit failed for '{}': {e}", self.config.repo_url).into(),
+                )
+            })?;
+        }
+
+        Ok(())
     }
 
     async fn git_pull(&self) -> Result<(), SkillError> {

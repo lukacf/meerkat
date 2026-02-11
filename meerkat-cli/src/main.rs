@@ -1173,6 +1173,7 @@ async fn run_agent(
             max_tokens: Some(max_tokens),
             event_tx: event_tx.clone(),
             host_mode,
+                skill_references: None,
         })
         .await
         .map_err(|e| match e {
@@ -1362,6 +1363,7 @@ async fn resume_session(
             max_tokens: Some(max_tokens),
             event_tx: None,
             host_mode,
+                skill_references: None,
         })
         .await
         .map_err(|e| match e {

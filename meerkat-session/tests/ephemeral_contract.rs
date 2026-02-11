@@ -71,6 +71,10 @@ impl SessionAgent for MockAgent {
         self.run_with_events(prompt, event_tx).await
     }
 
+    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillId>>) {
+        // No-op for mock
+    }
+
     fn cancel(&mut self) {
         // No-op for mock
     }
@@ -160,6 +164,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         max_tokens: None,
         event_tx: None,
         host_mode: false,
+                skill_references: None,
     }
 }
 
@@ -191,6 +196,7 @@ async fn test_start_turn_on_existing_session() {
             &session_id,
             StartTurnRequest {
                 host_mode: false,
+                skill_references: None,
                 prompt: "Follow up".to_string(),
                 event_tx: None,
             },
@@ -288,6 +294,7 @@ async fn test_turn_on_archived_session_returns_not_found() {
             &session_id,
             StartTurnRequest {
                 host_mode: false,
+                skill_references: None,
                 prompt: "After archive".to_string(),
                 event_tx: None,
             },
@@ -320,6 +327,7 @@ async fn test_concurrent_turns_return_busy() {
                 &sid_clone,
                 StartTurnRequest {
                     host_mode: false,
+                skill_references: None,
                     prompt: "Slow".to_string(),
                     event_tx: None,
                 },
@@ -336,6 +344,7 @@ async fn test_concurrent_turns_return_busy() {
             &session_id,
             StartTurnRequest {
                 host_mode: false,
+                skill_references: None,
                 prompt: "Fast".to_string(),
                 event_tx: None,
             },
@@ -368,6 +377,7 @@ async fn test_interrupt_cancels_inflight_turn() {
                 &sid_clone,
                 StartTurnRequest {
                     host_mode: false,
+                skill_references: None,
                     prompt: "Slow".to_string(),
                     event_tx: None,
                 },

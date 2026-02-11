@@ -701,36 +701,69 @@ where
     /// If the message starts with `/skill-id`, resolves the skill body via the
     /// skill engine and prepends it to the user message. Returns the original
     /// message unchanged if no skill ref is found or no engine is configured.
-    async fn apply_skill_ref(&self, user_input: String) -> String {
+    /// Detect `/skill-ref` in user input AND consume any pending
+    /// `skill_references` staged by the surface. Returns the user input
+    /// with resolved skill bodies prepended.
+    async fn apply_skill_ref(&mut self, user_input: String) -> String {
         let engine = match &self.skill_engine {
-            Some(e) => e,
+            Some(e) => e.clone(),
             None => return user_input,
         };
 
-        let (skill_id, remaining) = match super::skills::detect_skill_ref(&user_input) {
-            Some(pair) => pair,
-            None => return user_input,
-        };
+        let mut prefix_parts: Vec<String> = Vec::new();
 
-        let skill_id_owned = crate::skills::SkillId(skill_id.to_string());
-        match engine.resolve_and_render(&[skill_id_owned]).await {
-            Ok(resolved) if !resolved.is_empty() => {
-                tracing::info!(skill_id, "Per-turn skill activation via /skill-ref");
-                let body = &resolved[0].rendered_body;
-                if remaining.is_empty() {
-                    body.clone()
-                } else {
-                    format!("{body}\n\n{remaining}")
+        // 1. Consume pending_skill_references (from wire format / API)
+        if let Some(refs) = self.pending_skill_references.take() {
+            if !refs.is_empty() {
+                match engine.resolve_and_render(&refs).await {
+                    Ok(resolved) => {
+                        for skill in &resolved {
+                            tracing::info!(
+                                skill_id = %skill.id.0,
+                                "Per-turn skill activation via skill_references"
+                            );
+                            prefix_parts.push(skill.rendered_body.clone());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to resolve skill_references");
+                    }
                 }
             }
-            Ok(_) => {
-                tracing::warn!(skill_id, "Skill ref detected but resolved to empty");
-                user_input
-            }
-            Err(e) => {
-                tracing::warn!(skill_id, error = %e, "Failed to resolve skill ref");
-                user_input
-            }
+        }
+
+        // 2. Detect /skill-ref at start of message
+        let (remaining_input, detected_ref) =
+            if let Some((skill_id, remaining)) = super::skills::detect_skill_ref(&user_input) {
+                let skill_id_owned = crate::skills::SkillId(skill_id.to_string());
+                match engine.resolve_and_render(&[skill_id_owned]).await {
+                    Ok(resolved) if !resolved.is_empty() => {
+                        tracing::info!(skill_id, "Per-turn skill activation via /skill-ref");
+                        prefix_parts.push(resolved[0].rendered_body.clone());
+                        (remaining.to_string(), true)
+                    }
+                    Ok(_) => {
+                        tracing::warn!(skill_id, "Skill ref detected but resolved to empty");
+                        (user_input.clone(), false)
+                    }
+                    Err(e) => {
+                        tracing::warn!(skill_id, error = %e, "Failed to resolve skill ref");
+                        (user_input.clone(), false)
+                    }
+                }
+            } else {
+                (user_input.clone(), false)
+            };
+
+        if prefix_parts.is_empty() {
+            return user_input;
+        }
+
+        let text = if detected_ref { remaining_input } else { user_input };
+        if text.is_empty() {
+            prefix_parts.join("\n\n")
+        } else {
+            format!("{}\n\n{text}", prefix_parts.join("\n\n"))
         }
     }
 }

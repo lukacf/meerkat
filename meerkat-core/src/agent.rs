@@ -219,4 +219,7 @@ where
     pub(crate) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     /// Optional skill engine for per-turn `/skill-ref` activation.
     pub(crate) skill_engine: Option<Arc<dyn crate::skills::SkillEngine>>,
+    /// Skill references to resolve and inject for the next turn.
+    /// Set by surfaces before calling `run()`, consumed on run start.
+    pub pending_skill_references: Option<Vec<crate::skills::SkillId>>,
 }

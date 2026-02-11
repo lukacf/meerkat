@@ -53,6 +53,10 @@ impl SessionAgent for FactoryAgent {
             .await
     }
 
+    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillId>>) {
+        self.agent.pending_skill_references = refs;
+    }
+
     fn cancel(&mut self) {
         self.agent.cancel();
     }

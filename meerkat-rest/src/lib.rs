@@ -493,6 +493,7 @@ async fn create_session(
             max_tokens: Some(max_tokens),
             event_tx: Some(caller_event_tx),
             host_mode,
+                skill_references: None,
         };
 
         state.session_service.create_session(svc_req).await
@@ -573,6 +574,7 @@ async fn continue_session(
         prompt: req.prompt.clone(),
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
+                skill_references: None,
     };
 
     let result = state
@@ -673,6 +675,7 @@ async fn continue_session(
                 max_tokens: Some(max_tokens),
                 event_tx: Some(caller_event_tx.clone()),
                 host_mode: continue_host_mode,
+                skill_references: None,
             };
 
             let r = state

@@ -152,6 +152,7 @@ impl SessionRuntime {
         session_id: &SessionId,
         prompt: String,
         event_tx: mpsc::Sender<AgentEvent>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillId>>,
     ) -> Result<RunResult, RpcError> {
         // Check if this is a pending (not-yet-materialized) session.
         let pending_config = {
@@ -184,6 +185,7 @@ impl SessionRuntime {
                 max_tokens: None,
                 event_tx: Some(event_tx),
                 host_mode: false, // host_mode is encoded in the staged AgentBuildConfig
+                skill_references: None,
             };
 
             let result = self
@@ -200,6 +202,7 @@ impl SessionRuntime {
             prompt,
             event_tx: Some(event_tx),
             host_mode: false,
+            skill_references,
         };
 
         self.service
@@ -503,7 +506,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(100);
 
         let result = runtime
-            .start_turn(&session_id, "Hello".to_string(), event_tx)
+            .start_turn(&session_id, "Hello".to_string(), event_tx, None)
             .await
             .unwrap();
 
@@ -539,7 +542,7 @@ mod tests {
 
         let turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "Hello".to_string(), event_tx)
+                .start_turn(&sid_clone, "Hello".to_string(), event_tx, None)
                 .await
         });
 
@@ -583,7 +586,7 @@ mod tests {
         let sid_clone = session_id.clone();
         let _turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "First".to_string(), event_tx1)
+                .start_turn(&sid_clone, "First".to_string(), event_tx1, None)
                 .await
         });
 
@@ -593,7 +596,7 @@ mod tests {
         // Try to start a second turn
         let (event_tx2, _rx2) = mpsc::channel(100);
         let result = runtime
-            .start_turn(&session_id, "Second".to_string(), event_tx2)
+            .start_turn(&session_id, "Second".to_string(), event_tx2, None)
             .await;
 
         assert!(result.is_err(), "Second turn should fail");
@@ -616,7 +619,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(100);
 
         let _result = runtime
-            .start_turn(&session_id, "Hello".to_string(), event_tx)
+            .start_turn(&session_id, "Hello".to_string(), event_tx, None)
             .await
             .unwrap();
 

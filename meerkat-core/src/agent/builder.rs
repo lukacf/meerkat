@@ -200,6 +200,7 @@ impl AgentBuilder {
             last_compaction_turn: None,
             memory_store: self.memory_store,
             skill_engine: self.skill_engine,
+            pending_skill_references: None,
         }
     }
 

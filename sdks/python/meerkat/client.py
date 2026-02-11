@@ -114,9 +114,17 @@ class MeerkatClient:
         result = await self._request("session/create", params)
         return self._parse_run_result(result)
 
-    async def start_turn(self, session_id: str, prompt: str) -> WireRunResult:
+    async def start_turn(
+        self,
+        session_id: str,
+        prompt: str,
+        skill_references: Optional[list] = None,
+    ) -> WireRunResult:
         """Start a new turn on an existing session."""
-        result = await self._request("turn/start", {"session_id": session_id, "prompt": prompt})
+        params: dict = {"session_id": session_id, "prompt": prompt}
+        if skill_references:
+            params["skill_references"] = skill_references
+        result = await self._request("turn/start", params)
         return self._parse_run_result(result)
 
     # --- Session lifecycle (streaming) ---

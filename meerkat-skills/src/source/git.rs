@@ -1,9 +1,13 @@
 //! Git-backed skill source.
 //!
-//! Clones/pulls a git repo into a local cache directory, then delegates
-//! to `FilesystemSkillSource` for parsing and collection derivation.
+//! Clones/pulls a git repo into a local cache directory using `gix` (gitoxide),
+//! then delegates to `FilesystemSkillSource` for parsing and collection derivation.
+//!
+//! Pure Rust — no runtime dependency on the `git` CLI binary.
 
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -33,6 +37,7 @@ impl Default for GitRef {
 }
 
 impl GitRef {
+    #[cfg_attr(not(test), allow(dead_code))]
     fn ref_str(&self) -> &str {
         match self {
             GitRef::Branch(s) | GitRef::Tag(s) | GitRef::Commit(s) => s,
@@ -47,7 +52,7 @@ impl GitRef {
 /// Authentication for git operations.
 #[derive(Debug, Clone)]
 pub enum GitSkillAuth {
-    /// HTTPS token (used as password with empty username).
+    /// HTTPS token (injected as Authorization header via gix credential callback).
     HttpsToken(String),
 }
 
@@ -86,8 +91,9 @@ impl GitSkillConfig {
 
 /// Git-backed skill source.
 ///
-/// Clones a git repo on first access, then delegates to `FilesystemSkillSource`.
-/// For Branch refs, pulls on TTL expiry. For Tag/Commit refs, no refresh.
+/// Clones a git repo on first access using gitoxide, then delegates to
+/// `FilesystemSkillSource`. For Branch refs, fetches on TTL expiry.
+/// For Tag/Commit refs, no refresh after initial clone.
 pub struct GitSkillSource {
     config: GitSkillConfig,
     inner: RwLock<Option<FilesystemSkillSource>>,
@@ -122,14 +128,14 @@ impl GitSkillSource {
         let repo_dir = &self.config.cache_dir;
 
         if repo_dir.join(".git").exists() {
-            // Already cloned — pull if branch
+            // Already cloned — fetch if branch
             if !self.config.git_ref.is_immutable() {
-                if let Err(e) = self.git_pull().await {
-                    // Pull failed — serve stale if we have data
+                if let Err(e) = self.gix_fetch().await {
+                    // Fetch failed — serve stale if we have data
                     let has_data = self.inner.read().await.is_some();
                     if has_data {
                         tracing::warn!(
-                            "Git pull failed for '{}', serving stale cache: {e}",
+                            "Git fetch failed for '{}', serving stale cache: {e}",
                             self.config.repo_url
                         );
                         let mut last = self.last_sync.write().await;
@@ -141,7 +147,7 @@ impl GitSkillSource {
             }
         } else {
             // First access — clone
-            self.git_clone().await?;
+            self.gix_clone().await?;
         }
 
         // Rebuild the inner FilesystemSkillSource
@@ -157,145 +163,230 @@ impl GitSkillSource {
         Ok(())
     }
 
-    async fn git_clone(&self) -> Result<(), SkillError> {
-        let cache_dir_str = self.config.cache_dir.to_str()
-            .ok_or_else(|| SkillError::Load("non-UTF-8 cache dir path".into()))?
-            .to_string();
+    /// Clone the repository using gix (gitoxide).
+    async fn gix_clone(&self) -> Result<(), SkillError> {
+        let url = self.config.repo_url.clone();
+        let cache_dir = self.config.cache_dir.clone();
+        let git_ref = self.config.git_ref.clone();
+        let depth = self.config.depth;
+        let auth = self.config.auth.clone();
 
-        let is_commit = matches!(self.config.git_ref, GitRef::Commit(_));
-
-        let mut args = vec!["clone".to_string()];
-
-        // --branch works for branches and tags but NOT for commit SHAs.
-        // For commits, clone the default branch and checkout the SHA after.
-        if !is_commit {
-            args.push("--single-branch".to_string());
-            args.push("--branch".to_string());
-            args.push(self.config.git_ref.ref_str().to_string());
-        }
-
-        if let Some(depth) = self.config.depth {
-            if !is_commit {
-                // Shallow clone is incompatible with arbitrary commit checkout
-                args.push("--depth".into());
-                args.push(depth.to_string());
-            }
-        }
-
-        // Use the plain URL in CLI args (visible in /proc/cmdline) and pass
-        // credentials via environment to avoid leaking tokens to process lists.
-        args.push(self.config.repo_url.clone());
-        args.push(cache_dir_str);
-
-        let env = self.auth_env();
-        run_git_with_env(&args, &env).await.map_err(|e| {
-            SkillError::Load(
-                format!("git clone failed for '{}': {e}", self.config.repo_url).into(),
-            )
-        })?;
-
-        // For commit refs, checkout the exact SHA after cloning.
-        if is_commit {
-            let checkout_args = vec![
-                "checkout".to_string(),
-                self.config.git_ref.ref_str().to_string(),
-            ];
-            run_git_in_dir(&self.config.cache_dir, &checkout_args).await.map_err(|e| {
-                SkillError::Load(
-                    format!("git checkout commit failed for '{}': {e}", self.config.repo_url).into(),
-                )
-            })?;
-        }
-
-        Ok(())
-    }
-
-    async fn git_pull(&self) -> Result<(), SkillError> {
-        let args = vec!["pull".to_string(), "--ff-only".to_string()];
-
-        run_git_in_dir(&self.config.cache_dir, &args).await.map_err(|e| {
-            SkillError::Load(
-                format!("git pull failed for '{}': {e}", self.config.repo_url).into(),
-            )
+        tokio::task::spawn_blocking(move || {
+            gix_clone_blocking(&url, &cache_dir, &git_ref, depth, auth.as_ref())
         })
+        .await
+        .map_err(|e| SkillError::Load(format!("clone task panicked: {e}").into()))?
     }
 
-    /// Build environment variables for git authentication.
-    ///
-    /// Returns `(key, value)` pairs to inject via `Command::env()`.
-    /// Uses `-c http.extraHeader` via env to avoid leaking tokens in
-    /// process argument lists (visible via `/proc/*/cmdline` and `ps`).
-    fn auth_env(&self) -> Vec<(String, String)> {
-        match &self.config.auth {
-            Some(GitSkillAuth::HttpsToken(token)) => {
-                // Use git's http.extraHeader to inject the Authorization header
-                // via environment variables (GIT_CONFIG_COUNT + GIT_CONFIG_KEY_N/VALUE_N).
-                vec![
-                    ("GIT_CONFIG_COUNT".into(), "1".into()),
-                    ("GIT_CONFIG_KEY_0".into(), "http.extraHeader".into()),
-                    (
-                        "GIT_CONFIG_VALUE_0".into(),
-                        format!("Authorization: Bearer {token}"),
-                    ),
-                    ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-                ]
-            }
-            None => vec![("GIT_TERMINAL_PROMPT".into(), "0".into())],
+    /// Fetch latest from remote for branch refs using gix.
+    async fn gix_fetch(&self) -> Result<(), SkillError> {
+        let cache_dir = self.config.cache_dir.clone();
+        let repo_url = self.config.repo_url.clone();
+
+        tokio::task::spawn_blocking(move || gix_fetch_blocking(&cache_dir, &repo_url))
+            .await
+            .map_err(|e| SkillError::Load(format!("fetch task panicked: {e}").into()))?
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blocking gix operations (run inside spawn_blocking)
+// ---------------------------------------------------------------------------
+
+/// Clone a repository using gix. Blocking — must be called via spawn_blocking.
+fn gix_clone_blocking(
+    url: &str,
+    dest: &Path,
+    git_ref: &GitRef,
+    depth: Option<usize>,
+    auth: Option<&GitSkillAuth>,
+) -> Result<(), SkillError> {
+    let interrupt = AtomicBool::new(false);
+
+    // Ensure the parent directory exists (git CLI creates it implicitly, gix does not)
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| SkillError::Load(format!("cannot create cache dir: {e}").into()))?;
+    }
+
+    let mut prepare = gix::prepare_clone(url, dest)
+        .map_err(|e| SkillError::Load(format!("gix clone prepare failed for '{url}': {e}").into()))?;
+
+    // Set branch/tag ref (not applicable for commit — clone default then checkout)
+    match git_ref {
+        GitRef::Branch(name) | GitRef::Tag(name) => {
+            prepare = prepare
+                .with_ref_name(Some(name.as_str()))
+                .map_err(|e| SkillError::Load(
+                    format!("invalid ref name '{name}': {e}").into(),
+                ))?;
+        }
+        GitRef::Commit(_) => {
+            // Clone default branch, checkout commit after
         }
     }
-}
 
-/// Run a git command with extra environment variables and check for success.
-async fn run_git_with_env(args: &[String], env: &[(String, String)]) -> Result<(), String> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    for (k, v) in env {
-        cmd.env(k, v);
+    // Shallow clone
+    if !matches!(git_ref, GitRef::Commit(_)) {
+        if let Some(d) = depth.and_then(NonZeroU32::try_from_u32) {
+            prepare = prepare.with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(d));
+        }
     }
-    let output = cmd.output().await.map_err(|e| format!("failed to spawn git: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git exited with {}: {stderr}", output.status));
+
+    // Authentication: inject token via gix credential callback
+    if let Some(GitSkillAuth::HttpsToken(token)) = auth {
+        let token = token.clone();
+        prepare = prepare.configure_connection(move |conn| {
+            let t = token.clone();
+            conn.set_credentials(move |action| match action {
+                gix::credentials::helper::Action::Get(ctx) => {
+                    Ok(Some(gix::credentials::protocol::Outcome {
+                        identity: gix::sec::identity::Account {
+                            username: "x-access-token".into(),
+                            password: t.clone(),
+                            oauth_refresh_token: None,
+                        },
+                        next: gix::credentials::helper::NextAction::from(ctx),
+                    }))
+                }
+                _ => Ok(None),
+            });
+            Ok(())
+        });
     }
+
+    // Execute clone
+    let (mut checkout, _outcome) = prepare
+        .fetch_then_checkout(gix::progress::Discard, &interrupt)
+        .map_err(|e| SkillError::Load(format!("gix fetch failed for '{url}': {e}").into()))?;
+
+    // Checkout working tree
+    let (_repo, _) = checkout
+        .main_worktree(gix::progress::Discard, &interrupt)
+        .map_err(|e| SkillError::Load(format!("gix checkout failed for '{url}': {e}").into()))?;
+
+    // For commit refs, detach HEAD to the specific SHA and update worktree
+    if let GitRef::Commit(sha) = git_ref {
+        checkout_tree_at_rev(dest, sha, &interrupt)?;
+    }
+
     Ok(())
 }
 
-/// Run a git command and check for success.
-#[cfg_attr(not(test), allow(dead_code))]
-async fn run_git(args: &[String]) -> Result<(), String> {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| format!("failed to spawn git: {e}"))?;
+/// Fetch latest from origin using gix. Blocking — must be called via spawn_blocking.
+fn gix_fetch_blocking(repo_dir: &Path, repo_url: &str) -> Result<(), SkillError> {
+    let interrupt = AtomicBool::new(false);
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git exited with {}: {stderr}", output.status));
+    let repo = gix::open(repo_dir)
+        .map_err(|e| SkillError::Load(format!("gix open failed for '{repo_url}': {e}").into()))?;
+
+    let remote = repo
+        .find_default_remote(gix::remote::Direction::Fetch)
+        .ok_or_else(|| SkillError::Load(format!("no fetch remote for '{repo_url}'").into()))?
+        .map_err(|e| SkillError::Load(format!("bad remote for '{repo_url}': {e}").into()))?;
+
+    let _outcome = remote
+        .connect(gix::remote::Direction::Fetch)
+        .map_err(|e| SkillError::Load(format!("connect failed for '{repo_url}': {e}").into()))?
+        .prepare_fetch(gix::progress::Discard, Default::default())
+        .map_err(|e| SkillError::Load(format!("prepare fetch failed for '{repo_url}': {e}").into()))?
+        .receive(gix::progress::Discard, &interrupt)
+        .map_err(|e| SkillError::Load(format!("fetch failed for '{repo_url}': {e}").into()))?;
+
+    // Fast-forward the local branch to match the remote tracking branch
+    let head = repo
+        .head()
+        .map_err(|e| SkillError::Load(format!("cannot read HEAD: {e}").into()))?;
+
+    if let Some(referent) = head.referent_name() {
+        let branch_name = referent
+            .as_bstr()
+            .to_string()
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&referent.as_bstr().to_string())
+            .to_string();
+        let tracking_name = format!("refs/remotes/origin/{branch_name}");
+
+        if let Ok(tracking_ref) = repo.find_reference(&tracking_name) {
+            let target = tracking_ref.id();
+            repo.reference(
+                referent.as_bstr().to_string(),
+                target,
+                gix::refs::transaction::PreviousValue::Any,
+                "skills fetch: fast-forward",
+            )
+            .map_err(|e| SkillError::Load(format!("fast-forward failed: {e}").into()))?;
+
+            // Update the working tree to match the new HEAD
+            let target_str = target.to_string();
+            checkout_tree_at_rev(repo_dir, &target_str, &interrupt)?;
+        }
     }
+
     Ok(())
 }
 
-/// Run a git command in a specific directory.
-async fn run_git_in_dir(dir: &Path, args: &[String]) -> Result<(), String> {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| format!("failed to spawn git: {e}"))?;
+/// Checkout the working tree to match a specific revision.
+///
+/// Uses `repo.objects.into_arc()` to convert the `Rc`-backed object store
+/// into an `Arc`-backed one, satisfying the `Send` bound required by
+/// `gix::worktree::state::checkout`.
+fn checkout_tree_at_rev(
+    repo_dir: &Path,
+    rev: &str,
+    interrupt: &AtomicBool,
+) -> Result<(), SkillError> {
+    let repo = gix::open(repo_dir)
+        .map_err(|e| SkillError::Load(format!("gix open failed: {e}").into()))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git exited with {}: {stderr}", output.status));
-    }
+    // Resolve rev → tree ID and build index state while borrowing repo,
+    // then convert objects to Arc-backed for the checkout (which requires Send).
+    let (tree_id, workdir) = {
+        let oid = repo
+            .rev_parse_single(rev)
+            .map_err(|e| SkillError::Load(format!("rev '{rev}' not found: {e}").into()))?;
+        let commit = oid
+            .object()
+            .map_err(|e| SkillError::Load(format!("cannot read '{rev}': {e}").into()))?
+            .try_into_commit()
+            .map_err(|e| SkillError::Load(format!("'{rev}' is not a commit: {e}").into()))?;
+        let tree = commit
+            .tree()
+            .map_err(|e| SkillError::Load(format!("cannot read tree for '{rev}': {e}").into()))?;
+        (tree.id, repo.workdir().unwrap_or(repo_dir).to_path_buf())
+    };
+
+    // Build index from tree (borrows repo.objects temporarily)
+    let mut state = gix::index::State::from_tree(&tree_id, &repo.objects, Default::default())
+        .map_err(|e| SkillError::Load(format!("index from tree failed: {e}").into()))?;
+
+    // Now move repo.objects into Arc-backed form for Send (required by checkout)
+    let objects = repo.objects.into_arc()
+        .map_err(|e| SkillError::Load(format!("object store conversion failed: {e}").into()))?;
+
+    gix::worktree::state::checkout(
+        &mut state,
+        workdir,
+        objects,
+        &gix::progress::Discard,
+        &gix::progress::Discard,
+        interrupt,
+        gix::worktree::state::checkout::Options::default(),
+    )
+    .map_err(|e| SkillError::Load(format!("worktree checkout failed: {e}").into()))?;
+
     Ok(())
+}
+
+/// Helper to convert `Option<usize>` to `NonZeroU32` for shallow clone depth.
+trait TryFromU32 {
+    fn try_from_u32(v: usize) -> Option<NonZeroU32>;
+}
+
+impl TryFromU32 for NonZeroU32 {
+    fn try_from_u32(v: usize) -> Option<NonZeroU32> {
+        u32::try_from(v).ok().and_then(NonZeroU32::new)
+    }
 }
 
 #[async_trait]
@@ -326,6 +417,45 @@ impl SkillSource for GitSkillSource {
             .ok_or_else(|| SkillError::Load("Git source not initialized".into()))?;
         source.collections().await
     }
+}
+
+// ===========================================================================
+// Test helpers — use git CLI for fixture setup only (creating bare repos, pushing)
+// ===========================================================================
+
+/// Run a git CLI command (test fixtures only).
+#[cfg(test)]
+async fn run_git(args: &[String]) -> Result<(), String> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("failed to spawn git: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git exited with {}: {stderr}", output.status));
+    }
+    Ok(())
+}
+
+/// Run a git CLI command in a directory (test fixtures only).
+#[cfg(test)]
+async fn run_git_in_dir(dir: &Path, args: &[String]) -> Result<(), String> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("failed to spawn git: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git exited with {}: {stderr}", output.status));
+    }
+    Ok(())
 }
 
 /// Test support utilities for creating local bare repos.
@@ -397,7 +527,6 @@ mod tests {
         let repo_dir = tmp.join("test-repo");
         let work_dir = tmp.join("work");
 
-        // Init bare repo
         tokio::fs::create_dir_all(&repo_dir).await.unwrap();
         run_git(&[
             "init".into(),
@@ -407,7 +536,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Clone it to a work dir, add files, push
         run_git(&[
             "clone".into(),
             repo_dir.to_str().unwrap().into(),
@@ -416,7 +544,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Create skill files
         let skill_dir = work_dir.join("extraction/email");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
         tokio::fs::write(
@@ -426,7 +553,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Create COLLECTION.md
         let coll_dir = work_dir.join("extraction");
         tokio::fs::write(
             coll_dir.join("COLLECTION.md"),
@@ -435,7 +561,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Git add, commit, push
         run_git_in_dir(&work_dir, &["add".into(), "-A".into()])
             .await
             .unwrap();
@@ -468,7 +593,6 @@ mod tests {
             &cache_dir,
         ));
 
-        // Cache dir should not exist — no clone on construction
         assert!(!cache_dir.exists());
     }
 
@@ -487,7 +611,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_clone_on_first_access() {
+    #[ignore] // integration_real: spawns git CLI for fixture setup
+    async fn test_integration_real_clone_on_first_access() {
         let tmp = TempDir::new().unwrap();
         let repo_path = create_test_repo(tmp.path()).await;
         let cache_dir = tmp.path().join("clone-cache");
@@ -496,17 +621,18 @@ mod tests {
             repo_url: format!("file://{}", repo_path.display()),
             cache_dir: cache_dir.clone(),
             git_ref: GitRef::Branch("main".into()),
-            depth: None, // file:// protocol doesn't support shallow clone well
+            depth: None,
             ..GitSkillConfig::new("", "")
         });
 
         let skills = source.list(&SkillFilter::default()).await.unwrap();
         assert!(!skills.is_empty());
-        assert!(cache_dir.exists()); // Clone happened
+        assert!(cache_dir.exists());
     }
 
     #[tokio::test]
-    async fn test_namespaced_ids_from_repo_structure() {
+    #[ignore] // integration_real: spawns git CLI for fixture setup
+    async fn test_integration_real_namespaced_ids() {
         let tmp = TempDir::new().unwrap();
         let repo_path = create_test_repo(tmp.path()).await;
         let cache_dir = tmp.path().join("ns-cache");
@@ -524,7 +650,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_collection_md_from_repo() {
+    #[ignore] // integration_real: spawns git CLI for fixture setup
+    async fn test_integration_real_collection_md() {
         let tmp = TempDir::new().unwrap();
         let repo_path = create_test_repo(tmp.path()).await;
         let cache_dir = tmp.path().join("coll-cache");
@@ -544,7 +671,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tag_ref_no_refresh() {
+    #[ignore] // integration_real: spawns git CLI for fixture setup
+    async fn test_integration_real_tag_ref_no_refresh() {
         let tmp = TempDir::new().unwrap();
         let repo_path = create_test_repo(tmp.path()).await;
 
@@ -569,28 +697,25 @@ mod tests {
             repo_url: format!("file://{}", repo_path.display()),
             cache_dir,
             git_ref: GitRef::Tag("v1.0".into()),
-            refresh_interval: Duration::from_millis(1), // Very short — but immutable, so no refresh
+            refresh_interval: Duration::from_millis(1),
             depth: None,
             ..GitSkillConfig::new("", "")
         });
 
-        // First access — clones
         let skills1 = source.list(&SkillFilter::default()).await.unwrap();
         assert!(!skills1.is_empty());
 
-        // Wait past "refresh interval"
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Second access — should NOT pull (tag is immutable)
         let skills2 = source.list(&SkillFilter::default()).await.unwrap();
         assert_eq!(skills1.len(), skills2.len());
     }
 
     #[tokio::test]
-    async fn test_skills_root_subdirectory() {
+    #[ignore] // integration_real: spawns git CLI for fixture setup
+    async fn test_integration_real_skills_root_subdirectory() {
         let tmp = TempDir::new().unwrap();
 
-        // Create a repo with skills in a subdirectory
         let repo_dir = tmp.path().join("subdir-repo");
         let work_dir = tmp.path().join("subdir-work");
 
@@ -606,7 +731,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Skills in a subdirectory
         let skill_dir = work_dir.join("my-skills/test-skill");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
         tokio::fs::write(

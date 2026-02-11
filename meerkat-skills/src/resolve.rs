@@ -272,6 +272,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // integration-real: spawns git CLI for test fixture setup
     async fn test_resolve_git_repo() {
         let tmp = TempDir::new().unwrap();
 

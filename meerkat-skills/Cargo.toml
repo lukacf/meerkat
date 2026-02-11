@@ -7,8 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = []
+default = ["skills-git"]
 skills-http = ["dep:reqwest", "dep:urlencoding"]
+skills-git = ["dep:gix"]
 
 [dependencies]
 meerkat-core = { workspace = true }
@@ -25,6 +26,7 @@ indexmap = "2"
 regex = "1"
 reqwest = { workspace = true, optional = true }
 urlencoding = { version = "2", optional = true }
+gix = { version = "0.79", default-features = false, features = ["blocking-network-client", "worktree-mutation", "revision"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

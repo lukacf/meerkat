@@ -2433,7 +2433,6 @@ dependencies = [
  "meerkat-core",
  "meerkat-hooks",
  "meerkat-mcp",
- "meerkat-mcp-server",
  "meerkat-memory",
  "meerkat-session",
  "meerkat-skills",

@@ -1199,6 +1199,7 @@ mod scenario_09_session_service {
             max_tokens: Some(256),
             event_tx: None,
             host_mode: false,
+                skill_references: None,
         };
 
         let create_result = service
@@ -1235,6 +1236,7 @@ mod scenario_09_session_service {
             prompt: "What did I just say to you?".to_string(),
             event_tx: None,
             host_mode: false,
+                skill_references: None,
         };
 
         let turn_result = service

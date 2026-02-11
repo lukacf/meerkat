@@ -12,12 +12,14 @@ from .generated.types import (
     WireRunResult,
     WireUsage,
 )
+from .streaming import StreamingTurn, _StdoutDispatcher
 
 
 class MeerkatClient:
     """Async client that communicates with a Meerkat runtime via rkat rpc.
 
-    Uses ``asyncio.create_subprocess_exec`` for non-blocking I/O.
+    A background dispatcher multiplexes stdout so that JSON-RPC responses
+    and streaming event notifications can be consumed concurrently.
 
     Usage::
 
@@ -26,6 +28,14 @@ class MeerkatClient:
         result = await client.create_session("Hello!")
         print(result.text)
         await client.close()
+
+    Streaming::
+
+        async with client.create_session_streaming("Hello!") as stream:
+            async for event in stream:
+                if event["type"] == "text_delta":
+                    print(event["delta"], end="", flush=True)
+            result = stream.result
     """
 
     def __init__(self, rkat_path: str = "rkat"):
@@ -35,6 +45,7 @@ class MeerkatClient:
         self._process: Optional[asyncio.subprocess.Process] = None
         self._request_id = 0
         self._capabilities: Optional[CapabilitiesResponse] = None
+        self._dispatcher: Optional[_StdoutDispatcher] = None
 
         if not shutil.which(self._rkat_path):
             raise MeerkatError(
@@ -46,40 +57,35 @@ class MeerkatClient:
     async def connect(self) -> "MeerkatClient":
         """Start the rkat rpc subprocess and perform handshake."""
         self._process = await asyncio.create_subprocess_exec(
-            self._rkat_path,
-            "rpc",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
+            self._rkat_path, "rpc",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._dispatcher = _StdoutDispatcher(self._process.stdout)
+        self._dispatcher.start()
 
-        # Initialize handshake
         result = await self._request("initialize", {})
         server_version = result.get("contract_version", "")
         if not self._check_version_compatible(server_version, CONTRACT_VERSION):
-            raise MeerkatError(
-                "VERSION_MISMATCH",
-                f"Server version {server_version} incompatible with SDK {CONTRACT_VERSION}",
-            )
+            raise MeerkatError("VERSION_MISMATCH",
+                f"Server version {server_version} incompatible with SDK {CONTRACT_VERSION}")
 
-        # Fetch capabilities
         caps_result = await self._request("capabilities/get", {})
         self._capabilities = CapabilitiesResponse(
             contract_version=caps_result.get("contract_version", ""),
             capabilities=[
-                CapabilityEntry(
-                    id=c.get("id", ""),
-                    description=c.get("description", ""),
-                    status=self._normalize_status(c.get("status", "Available")),
-                )
+                CapabilityEntry(id=c.get("id", ""), description=c.get("description", ""),
+                    status=self._normalize_status(c.get("status", "Available")))
                 for c in caps_result.get("capabilities", [])
             ],
         )
-
         return self
 
     async def close(self) -> None:
         """Terminate the rkat rpc subprocess."""
+        if self._dispatcher:
+            await self._dispatcher.stop()
+            self._dispatcher = None
         if self._process:
             if self._process.stdin:
                 self._process.stdin.close()
@@ -90,73 +96,21 @@ class MeerkatClient:
                 self._process.kill()
             self._process = None
 
-    async def create_session(
-        self,
-        prompt: str,
-        model: Optional[str] = None,
-        provider: Optional[str] = None,
-        system_prompt: Optional[str] = None,
-        max_tokens: Optional[int] = None,
-        output_schema: Optional[dict] = None,
-        structured_output_retries: int = 2,
-        hooks_override: Optional[dict] = None,
-        enable_builtins: bool = False,
-        enable_shell: bool = False,
-        enable_subagents: bool = False,
-        enable_memory: bool = False,
-        host_mode: bool = False,
-        comms_name: Optional[str] = None,
-        provider_params: Optional[dict] = None,
-    ) -> WireRunResult:
-        """Create a new session and run the first turn.
+    # --- Session lifecycle (non-streaming) ---
 
-        Args:
-            prompt: Initial user prompt.
-            model: Model name (e.g. "claude-sonnet-4-5").
-            provider: Provider name ("anthropic", "openai", "gemini").
-            system_prompt: Custom system prompt override.
-            max_tokens: Max tokens per turn.
-            output_schema: JSON schema for structured output extraction.
-            structured_output_retries: Retries for structured output validation.
-            hooks_override: Run-scoped hook overrides.
-            enable_builtins: Enable built-in tools (task management, etc.).
-            enable_shell: Enable shell tool (requires enable_builtins).
-            enable_subagents: Enable sub-agent tools (fork, spawn).
-            enable_memory: Enable semantic memory (memory_search tool).
-            host_mode: Run in host mode for inter-agent comms.
-            comms_name: Agent name for comms (required when host_mode is True).
-            provider_params: Provider-specific parameters.
-        """
-        params: dict = {"prompt": prompt}
-        if model:
-            params["model"] = model
-        if provider:
-            params["provider"] = provider
-        if system_prompt:
-            params["system_prompt"] = system_prompt
-        if max_tokens:
-            params["max_tokens"] = max_tokens
-        if output_schema:
-            params["output_schema"] = output_schema
-        if structured_output_retries != 2:
-            params["structured_output_retries"] = structured_output_retries
-        if hooks_override:
-            params["hooks_override"] = hooks_override
-        if enable_builtins:
-            params["enable_builtins"] = True
-        if enable_shell:
-            params["enable_shell"] = True
-        if enable_subagents:
-            params["enable_subagents"] = True
-        if enable_memory:
-            params["enable_memory"] = True
-        if host_mode:
-            params["host_mode"] = True
-        if comms_name:
-            params["comms_name"] = comms_name
-        if provider_params:
-            params["provider_params"] = provider_params
-
+    async def create_session(self, prompt: str, model: Optional[str] = None,
+            provider: Optional[str] = None, system_prompt: Optional[str] = None,
+            max_tokens: Optional[int] = None, output_schema: Optional[dict] = None,
+            structured_output_retries: int = 2, hooks_override: Optional[dict] = None,
+            enable_builtins: bool = False, enable_shell: bool = False,
+            enable_subagents: bool = False, enable_memory: bool = False,
+            host_mode: bool = False, comms_name: Optional[str] = None,
+            provider_params: Optional[dict] = None) -> WireRunResult:
+        """Create a new session and run the first turn."""
+        params = self._build_create_params(prompt, model, provider, system_prompt,
+            max_tokens, output_schema, structured_output_retries, hooks_override,
+            enable_builtins, enable_shell, enable_subagents, enable_memory,
+            host_mode, comms_name, provider_params)
         result = await self._request("session/create", params)
         return self._parse_run_result(result)
 
@@ -164,12 +118,81 @@ class MeerkatClient:
         self,
         session_id: str,
         prompt: str,
+        skill_references: Optional[list] = None,
     ) -> WireRunResult:
         """Start a new turn on an existing session."""
-        result = await self._request(
-            "turn/start", {"session_id": session_id, "prompt": prompt}
-        )
+        params: dict = {"session_id": session_id, "prompt": prompt}
+        if skill_references:
+            params["skill_references"] = skill_references
+        result = await self._request("turn/start", params)
         return self._parse_run_result(result)
+
+    # --- Session lifecycle (streaming) ---
+
+    def create_session_streaming(self, prompt: str, model: Optional[str] = None,
+            provider: Optional[str] = None, system_prompt: Optional[str] = None,
+            max_tokens: Optional[int] = None, output_schema: Optional[dict] = None,
+            structured_output_retries: int = 2, hooks_override: Optional[dict] = None,
+            enable_builtins: bool = False, enable_shell: bool = False,
+            enable_subagents: bool = False, enable_memory: bool = False,
+            host_mode: bool = False, comms_name: Optional[str] = None,
+            provider_params: Optional[dict] = None) -> StreamingTurn:
+        """Create a new session and stream events from the first turn.
+
+        Returns a StreamingTurn async context manager. The request is sent
+        when entering the context. Events are raw dicts matching the Rust
+        ``AgentEvent`` serde-tagged enum.
+
+        Usage::
+
+            async with client.create_session_streaming("Hello!") as stream:
+                async for event in stream:
+                    if event["type"] == "text_delta":
+                        print(event["delta"], end="", flush=True)
+                result = stream.result
+        """
+        if not self._dispatcher or not self._process or not self._process.stdin:
+            raise MeerkatError("NOT_CONNECTED", "Client not connected")
+        params = self._build_create_params(prompt, model, provider, system_prompt,
+            max_tokens, output_schema, structured_output_retries, hooks_override,
+            enable_builtins, enable_shell, enable_subagents, enable_memory,
+            host_mode, comms_name, provider_params)
+        self._request_id += 1
+        request_id = self._request_id
+        event_queue = self._dispatcher.subscribe_pending_stream(request_id)
+        response_future = self._dispatcher.expect_response(request_id)
+        request = {"jsonrpc": "2.0", "id": request_id, "method": "session/create", "params": params}
+        data = (json.dumps(request) + "\n").encode()
+        return StreamingTurn(session_id="", event_queue=event_queue,
+            response_future=response_future, dispatcher=self._dispatcher,
+            parse_result=self._parse_run_result,
+            pending_send=(self._process.stdin, data))
+
+    def start_turn_streaming(self, session_id: str, prompt: str) -> StreamingTurn:
+        """Start a new turn on an existing session and stream events.
+
+        Usage::
+
+            async with client.start_turn_streaming(session_id, "Follow up") as stream:
+                async for event in stream:
+                    print(event)
+                result = stream.result
+        """
+        if not self._dispatcher or not self._process or not self._process.stdin:
+            raise MeerkatError("NOT_CONNECTED", "Client not connected")
+        self._request_id += 1
+        request_id = self._request_id
+        event_queue = self._dispatcher.subscribe_events(session_id)
+        response_future = self._dispatcher.expect_response(request_id)
+        request = {"jsonrpc": "2.0", "id": request_id, "method": "turn/start",
+                   "params": {"session_id": session_id, "prompt": prompt}}
+        data = (json.dumps(request) + "\n").encode()
+        return StreamingTurn(session_id=session_id, event_queue=event_queue,
+            response_future=response_future, dispatcher=self._dispatcher,
+            parse_result=self._parse_run_result,
+            pending_send=(self._process.stdin, data))
+
+    # --- Other operations ---
 
     async def interrupt(self, session_id: str) -> None:
         """Interrupt a running turn."""
@@ -232,10 +255,14 @@ class MeerkatClient:
     # --- Internal ---
 
     async def _request(self, method: str, params: dict) -> dict:
-        """Send a JSON-RPC request and return the result."""
-        if not self._process or not self._process.stdin or not self._process.stdout:
-            raise MeerkatError("NOT_CONNECTED", "Client not connected")
+        """Send a JSON-RPC request and return the result.
 
+        Uses the background dispatcher to wait for the matching response.
+        Any notifications that arrive during the wait are routed to their
+        respective event queues (or silently dropped if no subscriber).
+        """
+        if not self._process or not self._process.stdin or not self._dispatcher:
+            raise MeerkatError("NOT_CONNECTED", "Client not connected")
         self._request_id += 1
         request_id = self._request_id
         request = {
@@ -244,27 +271,60 @@ class MeerkatClient:
             "method": method,
             "params": params,
         }
-
-        line = json.dumps(request) + "\n"
-        self._process.stdin.write(line.encode())
+        response_future = self._dispatcher.expect_response(request_id)
+        self._process.stdin.write((json.dumps(request) + "\n").encode())
         await self._process.stdin.drain()
+        return await response_future
 
-        # Read response lines asynchronously (skip notifications)
-        while True:
-            response_line = await self._process.stdout.readline()
-            if not response_line:
-                raise MeerkatError("CONNECTION_CLOSED", "rkat rpc process closed")
-
-            response = json.loads(response_line)
-            if "id" in response and response["id"] == request_id:
-                if "error" in response and response["error"]:
-                    err = response["error"]
-                    raise MeerkatError(
-                        str(err.get("code", "UNKNOWN")),
-                        err.get("message", "Unknown error"),
-                        err.get("data"),
-                    )
-                return response.get("result", {})
+    @staticmethod
+    def _build_create_params(
+        prompt: str,
+        model: Optional[str],
+        provider: Optional[str],
+        system_prompt: Optional[str],
+        max_tokens: Optional[int],
+        output_schema: Optional[dict],
+        structured_output_retries: int,
+        hooks_override: Optional[dict],
+        enable_builtins: bool,
+        enable_shell: bool,
+        enable_subagents: bool,
+        enable_memory: bool,
+        host_mode: bool,
+        comms_name: Optional[str],
+        provider_params: Optional[dict],
+    ) -> dict:
+        """Build the params dict for session/create."""
+        params: dict = {"prompt": prompt}
+        if model:
+            params["model"] = model
+        if provider:
+            params["provider"] = provider
+        if system_prompt:
+            params["system_prompt"] = system_prompt
+        if max_tokens:
+            params["max_tokens"] = max_tokens
+        if output_schema:
+            params["output_schema"] = output_schema
+        if structured_output_retries != 2:
+            params["structured_output_retries"] = structured_output_retries
+        if hooks_override:
+            params["hooks_override"] = hooks_override
+        if enable_builtins:
+            params["enable_builtins"] = True
+        if enable_shell:
+            params["enable_shell"] = True
+        if enable_subagents:
+            params["enable_subagents"] = True
+        if enable_memory:
+            params["enable_memory"] = True
+        if host_mode:
+            params["host_mode"] = True
+        if comms_name:
+            params["comms_name"] = comms_name
+        if provider_params:
+            params["provider_params"] = provider_params
+        return params
 
     @staticmethod
     def _normalize_status(raw) -> str:
@@ -277,7 +337,6 @@ class MeerkatClient:
         if isinstance(raw, str):
             return raw
         if isinstance(raw, dict):
-            # Externally-tagged enum — the single key is the variant name
             return next(iter(raw), "Unknown")
         return str(raw)
 

@@ -65,6 +65,12 @@ pub struct CreateSessionParams {
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
+    /// Skill IDs to preload into the system prompt.
+    #[serde(default)]
+    pub preload_skills: Option<Vec<String>>,
+    /// Skill IDs to resolve and inject for the first turn.
+    #[serde(default)]
+    pub skill_references: Option<Vec<String>>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -161,6 +167,9 @@ pub async fn handle_create(
     build_config.override_subagents = Some(params.enable_subagents);
     build_config.override_memory = Some(params.enable_memory);
     build_config.provider_params = params.provider_params;
+    build_config.preload_skills = params.preload_skills.map(|ids| {
+        ids.into_iter().map(meerkat_core::skills::SkillId).collect()
+    });
 
     // Create the session
     let session_id = match runtime.create_session(build_config).await {
@@ -182,8 +191,11 @@ pub async fn handle_create(
     });
 
     // Start the initial turn
+    let skill_refs = params.skill_references.map(|ids| {
+        ids.into_iter().map(meerkat_core::skills::SkillId).collect()
+    });
     let result = match runtime
-        .start_turn(&session_id, params.prompt, event_tx)
+        .start_turn(&session_id, params.prompt, event_tx, skill_refs)
         .await
     {
         Ok(r) => r,

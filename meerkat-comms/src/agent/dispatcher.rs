@@ -75,7 +75,8 @@ const COMMS_TOOL_NAMES: &[&str] = &[
     "list_peers",
 ];
 
-fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
+/// Canonical JSON-to-ToolDef conversion for comms tools.
+pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
     tools_list()
         .into_iter()
         .map(|t| {

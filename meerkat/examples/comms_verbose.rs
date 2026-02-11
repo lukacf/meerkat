@@ -370,7 +370,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create separate LLM clients for each agent
     let model =
-        std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-3-sonnet-20240229".to_string());
+        std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
     println!("\n=== LLM SETUP ===");
     println!("Model: {}", model);
     println!("Each agent has its own AnthropicClient instance");

@@ -8,6 +8,7 @@ pub mod compact;
 mod extraction;
 mod hook_impl;
 mod runner;
+pub mod skills;
 mod state;
 
 use crate::budget::Budget;
@@ -182,6 +183,10 @@ pub trait CommsRuntime: Send + Sync {
     async fn drain_messages(&self) -> Vec<String>;
     /// Get a notification when new messages arrive
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify>;
+    /// Returns true if a DISMISS signal was seen during the last `drain_messages` call.
+    fn dismiss_received(&self) -> bool {
+        false
+    }
 }
 
 /// The main Agent struct
@@ -212,4 +217,9 @@ where
     pub(crate) last_compaction_turn: Option<u32>,
     /// Optional memory store for indexing compaction discards.
     pub(crate) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
+    /// Optional skill engine for per-turn `/skill-ref` activation.
+    pub(crate) skill_engine: Option<Arc<dyn crate::skills::SkillEngine>>,
+    /// Skill references to resolve and inject for the next turn.
+    /// Set by surfaces before calling `run()`, consumed on run start.
+    pub pending_skill_references: Option<Vec<crate::skills::SkillId>>,
 }

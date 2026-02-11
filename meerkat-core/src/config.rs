@@ -41,6 +41,7 @@ pub struct Config {
     pub rest: RestServerConfig,
     pub sub_agents: SubAgentsConfig,
     pub hooks: HooksConfig,
+    pub skills: crate::skills_config::SkillsConfig,
 }
 
 impl Default for Config {
@@ -68,6 +69,7 @@ impl Default for Config {
             rest: RestServerConfig::default(),
             sub_agents: SubAgentsConfig::default(),
             hooks: HooksConfig::default(),
+            skills: crate::skills_config::SkillsConfig::default(),
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Comms tool surface - provides comms tools as a ToolDispatcher
 
 use async_trait::async_trait;
-use meerkat_comms::{Router, ToolContext, TrustedPeers, handle_tools_call, tools_list};
+use meerkat_comms::{Router, ToolContext, TrustedPeers, comms_tool_defs, handle_tools_call};
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::gateway::Availability;
@@ -47,19 +47,6 @@ impl CommsToolSurface {
     pub fn usage_instructions() -> &'static str {
         "# Inter-agent Communication\n\nYou can communicate with other agents using these tools:\n\n- send_message: Send a simple text message\n- send_request: Send a request and wait for a response\n- send_response: Respond to a previous request\n- list_peers: See which agents are available to talk to\n\nAlways check list_peers first to see who is online."
     }
-}
-
-fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
-    tools_list()
-        .into_iter()
-        .map(|t| {
-            Arc::new(ToolDef {
-                name: t["name"].as_str().unwrap_or_default().to_string(),
-                description: t["description"].as_str().unwrap_or_default().to_string(),
-                input_schema: t["inputSchema"].clone(),
-            })
-        })
-        .collect()
 }
 
 #[async_trait]

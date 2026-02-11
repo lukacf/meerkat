@@ -47,13 +47,12 @@ def test_wire_event_defaults():
     """WireEvent should have sensible defaults."""
     event = WireEvent()
     assert event.session_id == ""
-    assert event.sequence == 0
     assert event.event is None
 
 
 def test_capabilities_response():
     """CapabilitiesResponse should work with entries."""
-    entry = CapabilityEntry(id="sessions", description="Session lifecycle", status="available")
+    entry = CapabilityEntry(id="sessions", description="Session lifecycle", status="Available")
     response = CapabilitiesResponse(contract_version="0.1.0", capabilities=[entry])
     assert response.contract_version == "0.1.0"
     assert len(response.capabilities) == 1

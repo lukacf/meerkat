@@ -35,7 +35,7 @@ use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, FileTaskStore, MemoryTaskStore, TaskStore,
     ToolPolicyLayer,
 };
-use meerkat_tools::{BuiltinDispatcherConfig, CompositeDispatcherError, build_builtin_dispatcher};
+use meerkat_tools::{BuiltinDispatcherConfig, CompositeDispatcherError};
 use tokio::sync::{RwLock, mpsc};
 
 #[cfg(feature = "comms")]
@@ -156,6 +156,11 @@ pub struct AgentBuildConfig {
     /// Per-build override for factory-level `enable_memory`.
     /// When `Some`, takes precedence over `AgentFactory::enable_memory`.
     pub override_memory: Option<bool>,
+    /// Skills to pre-load at build time (full body injected into system prompt).
+    /// `None` = metadata-only inventory (agent discovers and loads via tools).
+    /// `Some(ids)` = pre-load these skills into the system prompt.
+    /// `Some(vec![])` is normalized to `None`.
+    pub preload_skills: Option<Vec<meerkat_core::skills::SkillId>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -212,6 +217,7 @@ impl AgentBuildConfig {
             override_shell: None,
             override_subagents: None,
             override_memory: None,
+            preload_skills: None,
         }
     }
 }
@@ -256,7 +262,7 @@ pub fn provider_key(provider: Provider) -> &'static str {
 }
 
 /// Factory for creating agents with standard configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentFactory {
     pub store_path: PathBuf,
     pub project_root: Option<PathBuf>,
@@ -266,6 +272,27 @@ pub struct AgentFactory {
     #[cfg(feature = "comms")]
     pub enable_comms: bool,
     pub enable_memory: bool,
+    /// Optional skill source override. When set, bypasses config-driven
+    /// repository resolution. For SDK users who wire sources programmatically.
+    #[cfg(feature = "skills")]
+    pub skill_source: Option<std::sync::Arc<dyn meerkat_core::skills::SkillSource>>,
+}
+
+impl std::fmt::Debug for AgentFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("AgentFactory");
+        d.field("store_path", &self.store_path)
+            .field("project_root", &self.project_root)
+            .field("enable_builtins", &self.enable_builtins)
+            .field("enable_shell", &self.enable_shell)
+            .field("enable_subagents", &self.enable_subagents)
+            .field("enable_memory", &self.enable_memory);
+        #[cfg(feature = "comms")]
+        d.field("enable_comms", &self.enable_comms);
+        #[cfg(feature = "skills")]
+        d.field("skill_source", &self.skill_source.as_ref().map(|_| ".."));
+        d.finish()
+    }
 }
 
 impl AgentFactory {
@@ -280,7 +307,16 @@ impl AgentFactory {
             #[cfg(feature = "comms")]
             enable_comms: false,
             enable_memory: false,
+            #[cfg(feature = "skills")]
+            skill_source: None,
         }
+    }
+
+    /// Set a custom skill source (bypasses config-driven repository resolution).
+    #[cfg(feature = "skills")]
+    pub fn skill_source(mut self, source: std::sync::Arc<dyn meerkat_core::skills::SkillSource>) -> Self {
+        self.skill_source = Some(source);
+        self
     }
 
     /// Set the project root used for tool persistence.
@@ -398,6 +434,19 @@ impl AgentFactory {
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
+        self.build_builtin_dispatcher_with_skills(store, config, shell_config, external, session_id, None).await
+    }
+
+    /// Build a shared builtin dispatcher, optionally including skill tools.
+    pub async fn build_builtin_dispatcher_with_skills(
+        &self,
+        store: Arc<dyn TaskStore>,
+        config: BuiltinToolConfig,
+        shell_config: Option<ShellConfig>,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
+        session_id: Option<String>,
+        skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let builder = BuiltinDispatcherConfig {
             store,
             config,
@@ -407,12 +456,32 @@ impl AgentFactory {
         };
         #[cfg(not(feature = "sub-agents"))]
         {
-            return build_builtin_dispatcher(builder);
+            let mut composite = CompositeDispatcher::new(
+                builder.store, &builder.config, builder.shell_config,
+                builder.external, builder.session_id,
+            )?;
+            #[cfg(feature = "skills")]
+            if let Some(engine) = skill_engine {
+                composite.register_skill_tools(
+                    meerkat_tools::builtin::skills::SkillToolSet::new(engine),
+                );
+            }
+            return Ok(Arc::new(composite));
         }
 
         #[cfg(feature = "sub-agents")]
         if !self.enable_subagents {
-            return build_builtin_dispatcher(builder);
+            let mut composite = CompositeDispatcher::new(
+                builder.store, &builder.config, builder.shell_config,
+                builder.external, builder.session_id,
+            )?;
+            #[cfg(feature = "skills")]
+            if let Some(engine) = skill_engine {
+                composite.register_skill_tools(
+                    meerkat_tools::builtin::skills::SkillToolSet::new(engine),
+                );
+            }
+            return Ok(Arc::new(composite));
         }
 
         #[cfg(feature = "sub-agents")]
@@ -486,6 +555,13 @@ impl AgentFactory {
             let tool_set = SubAgentToolSet::new(state);
             composite.register_sub_agent_tools(tool_set, &config)?;
 
+            #[cfg(feature = "skills")]
+            if let Some(engine) = skill_engine {
+                composite.register_skill_tools(
+                    meerkat_tools::builtin::skills::SkillToolSet::new(engine),
+                );
+            }
+
             Ok(Arc::new(composite))
         }
     }
@@ -555,8 +631,48 @@ impl AgentFactory {
         // 5. Resolve max_tokens
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
 
-        // 6. Build tool dispatcher (with optional external tools and per-build overrides)
-        //    Extract system_prompt before build_config is partially moved.
+        // 6a. Build skill engine early so it can be passed to the tool dispatcher.
+        #[cfg(feature = "skills")]
+        let skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>> = {
+            let skill_source: Option<std::sync::Arc<dyn meerkat_core::skills::SkillSource>> =
+                if self.skill_source.is_some() {
+                    self.skill_source.clone()
+                } else if !config.skills.enabled {
+                    None
+                } else {
+                    match meerkat_skills::resolve_repositories(
+                        &config.skills,
+                        self.project_root.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(source) => source,
+                        Err(e) => {
+                            tracing::warn!("Failed to resolve skill repositories: {e}");
+                            None
+                        }
+                    }
+                };
+
+            skill_source.map(|source| {
+                let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
+                    .into_iter()
+                    .map(|c| c.id.to_string())
+                    .collect();
+                Arc::new(
+                    meerkat_skills::DefaultSkillEngine::new(
+                        Box::new(ArcSkillSourceAdapter(source)),
+                        available_caps,
+                    )
+                    .with_inventory_threshold(config.skills.inventory_threshold)
+                    .with_max_injection_bytes(config.skills.max_injection_bytes),
+                ) as Arc<dyn meerkat_core::skills::SkillEngine>
+            })
+        };
+        #[cfg(not(feature = "skills"))]
+        let skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>> = None;
+
+        // 6b. Build tool dispatcher (with optional external tools, per-build overrides, skill tools)
         let per_request_prompt = build_config.system_prompt.take();
         let effective_builtins = build_config
             .override_builtins
@@ -572,6 +688,7 @@ impl AgentFactory {
                 effective_builtins,
                 effective_shell,
                 effective_subagents,
+                skill_engine.clone(),
             )
             .await?;
 
@@ -632,69 +749,69 @@ impl AgentFactory {
         let layered_hooks = resolve_layered_hooks_config(hooks_root, config).await;
         let hook_engine = create_default_hook_engine(layered_hooks);
 
-        // 11. Build skill engine and inventory section (if skills feature enabled)
+        // 11. Generate skill inventory section using the engine created in step 6a
         #[cfg(feature = "skills")]
         let skill_inventory_section = {
-            use meerkat_skills::{DefaultSkillEngine, EmbeddedSkillSource, FilesystemSkillSource, CompositeSkillSource};
-            use meerkat_core::skills::{SkillEngine, SkillScope, SkillSource};
+            if let Some(ref engine) = skill_engine {
+                // Generate inventory section for system prompt
+                let inventory = match engine.inventory_section().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("Failed to generate skill inventory section: {e}");
+                        String::new()
+                    }
+                };
 
-            let mut sources: Vec<Box<dyn meerkat_core::skills::SkillSource>> = Vec::new();
+                // Normalize preload_skills: Some([]) → None
+                let preload = build_config.preload_skills.take().and_then(|ids| {
+                    if ids.is_empty() { None } else { Some(ids) }
+                });
 
-            // Project-level skills (highest precedence)
-            let project_root = self.project_root.as_deref().unwrap_or_else(|| std::path::Path::new("."));
-            sources.push(Box::new(FilesystemSkillSource::new(
-                project_root.join(".rkat/skills"),
-                SkillScope::Project,
-            )));
-
-            // User-level skills
-            if let Some(home) = std::env::var_os("HOME") {
-                sources.push(Box::new(FilesystemSkillSource::new(
-                    std::path::PathBuf::from(home).join(".rkat/skills"),
-                    SkillScope::User,
-                )));
-            }
-
-            // Embedded skills (lowest precedence)
-            sources.push(Box::new(EmbeddedSkillSource::new()));
-
-            let composite = CompositeSkillSource::new(sources);
-
-            // Collect active skill IDs from all sources (project, user, embedded)
-            let skill_ids: Vec<meerkat_core::skills::SkillId> = match composite.list().await {
-                Ok(descriptors) => descriptors.into_iter().map(|d| d.id).collect(),
-                Err(_) => Vec::new(),
-            };
-
-            // Collect available capability strings for filtering
-            let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
-                .into_iter()
-                .map(|c| c.id.to_string())
-                .collect();
-
-            let engine = DefaultSkillEngine::new(Box::new(composite), available_caps);
-
-            // Generate inventory section for system prompt
-            let section = match engine.inventory_section().await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("Failed to generate skill inventory section: {e}");
-                    String::new()
+                // Pre-load requested skills into system prompt (Level 2)
+                let mut preloaded_sections = Vec::new();
+                if let Some(ref ids) = preload {
+                    match engine.resolve_and_render(ids).await {
+                        Ok(resolved) => {
+                            for skill in &resolved {
+                                preloaded_sections.push(skill.rendered_body.clone());
+                            }
+                        }
+                        Err(e) => {
+                            return Err(BuildAgentError::Config(format!(
+                                "Failed to preload skill: {e}"
+                            )));
+                        }
+                    }
                 }
-            };
 
-            (section, Some(skill_ids))
+                // Collect active skill IDs
+                let skill_ids: Vec<meerkat_core::skills::SkillId> =
+                    match engine.list_skills(&meerkat_core::skills::SkillFilter::default()).await {
+                        Ok(descs) => descs.into_iter().map(|d| d.id).collect(),
+                        Err(_) => Vec::new(),
+                    };
+
+                (inventory, preloaded_sections, Some(skill_ids))
+            } else {
+                // Skills disabled or no source
+                (String::new(), Vec::new(), None)
+            }
         };
         #[cfg(not(feature = "skills"))]
-        let skill_inventory_section: (String, Option<Vec<meerkat_core::skills::SkillId>>) = (String::new(), None);
-        let (inventory_section, active_skill_ids) = skill_inventory_section;
+        let skill_inventory_section: (String, Vec<String>, Option<Vec<meerkat_core::skills::SkillId>>) =
+            (String::new(), Vec::new(), None);
+        let (inventory_section, preloaded_skill_sections, active_skill_ids) = skill_inventory_section;
 
         // 12. Build system prompt (single canonical path)
-        let extra_sections: Vec<&str> = if inventory_section.is_empty() {
-            vec![]
-        } else {
-            vec![inventory_section.as_str()]
-        };
+        let mut extra_sections: Vec<&str> = Vec::new();
+        // Only inject skill inventory (with tool guidance) when builtins are
+        // enabled — otherwise browse_skills/load_skill don't exist.
+        if !inventory_section.is_empty() && effective_builtins {
+            extra_sections.push(inventory_section.as_str());
+        }
+        for section in &preloaded_skill_sections {
+            extra_sections.push(section.as_str());
+        }
         let system_prompt = crate::assemble_system_prompt(
             config,
             per_request_prompt.as_deref(),
@@ -783,6 +900,11 @@ impl AgentFactory {
             builder = builder.compactor(compactor);
         }
 
+        // 12d. Wire skill engine for per-turn /skill-ref activation
+        if let Some(engine) = skill_engine {
+            builder = builder.with_skill_engine(engine);
+        }
+
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
 
@@ -807,7 +929,43 @@ impl AgentFactory {
 
         Ok(agent)
     }
+}
 
+// ---------------------------------------------------------------------------
+// Adapter: Arc<dyn SkillSource> → Box<dyn SkillSource>
+// ---------------------------------------------------------------------------
+
+/// Adapter to forward `SkillSource` calls from a `Box` to an inner `Arc`.
+/// Needed because `DefaultSkillEngine` takes `Box<dyn SkillSource>` but the
+/// factory resolves to `Arc<dyn SkillSource>`.
+#[cfg(feature = "skills")]
+struct ArcSkillSourceAdapter(std::sync::Arc<dyn meerkat_core::skills::SkillSource>);
+
+#[cfg(feature = "skills")]
+#[async_trait::async_trait]
+impl meerkat_core::skills::SkillSource for ArcSkillSourceAdapter {
+    async fn list(
+        &self,
+        filter: &meerkat_core::skills::SkillFilter,
+    ) -> Result<Vec<meerkat_core::skills::SkillDescriptor>, meerkat_core::skills::SkillError> {
+        self.0.list(filter).await
+    }
+
+    async fn load(
+        &self,
+        id: &meerkat_core::skills::SkillId,
+    ) -> Result<meerkat_core::skills::SkillDocument, meerkat_core::skills::SkillError> {
+        self.0.load(id).await
+    }
+
+    async fn collections(
+        &self,
+    ) -> Result<Vec<meerkat_core::skills::SkillCollection>, meerkat_core::skills::SkillError> {
+        self.0.collections().await
+    }
+}
+
+impl AgentFactory {
     /// Build the tool dispatcher and usage instructions.
     ///
     /// `effective_builtins`, `effective_shell`, and `effective_subagents` override
@@ -820,6 +978,7 @@ impl AgentFactory {
         effective_builtins: bool,
         effective_shell: bool,
         effective_subagents: bool,
+        skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -866,7 +1025,9 @@ impl AgentFactory {
         let mut temp_factory = self.clone();
         temp_factory.enable_subagents = effective_subagents;
         let dispatcher = temp_factory
-            .build_builtin_dispatcher(task_store, builtin_config, shell_config, external, None)
+            .build_builtin_dispatcher_with_skills(
+                task_store, builtin_config, shell_config, external, None, skill_engine,
+            )
             .await?;
 
         // Extract usage instructions from the dispatcher

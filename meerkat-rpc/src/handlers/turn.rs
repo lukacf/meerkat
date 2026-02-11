@@ -22,6 +22,9 @@ use crate::session_runtime::SessionRuntime;
 pub struct StartTurnParams {
     pub session_id: String,
     pub prompt: String,
+    /// Skill IDs to resolve and inject for this turn.
+    #[serde(default)]
+    pub skill_references: Option<Vec<String>>,
 }
 
 /// Parameters for `turn/interrupt`.
@@ -75,8 +78,11 @@ pub async fn handle_start(
         }
     });
 
+    let skill_refs = params.skill_references.map(|ids| {
+        ids.into_iter().map(meerkat_core::skills::SkillId).collect()
+    });
     let result = match runtime
-        .start_turn(&session_id, params.prompt, event_tx)
+        .start_turn(&session_id, params.prompt, event_tx, skill_refs)
         .await
     {
         Ok(r) => r,

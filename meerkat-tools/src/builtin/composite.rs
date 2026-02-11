@@ -1,6 +1,8 @@
 //! Composite dispatcher that combines multiple dispatchers into one.
 
 use crate::builtin::shell::{JobManager, ShellConfig};
+#[cfg(feature = "skills")]
+use crate::builtin::skills::SkillToolSet;
 use crate::builtin::store::TaskStore;
 #[cfg(feature = "sub-agents")]
 use crate::builtin::sub_agent::SubAgentToolSet;
@@ -31,6 +33,8 @@ pub struct CompositeDispatcher {
     builtin_tools: Vec<Arc<dyn BuiltinTool>>,
     #[cfg(feature = "sub-agents")]
     sub_agent_tools: Option<SubAgentToolSet>,
+    #[cfg(feature = "skills")]
+    skill_tools: Option<SkillToolSet>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
     #[allow(dead_code)]
     task_store: Arc<dyn TaskStore>,
@@ -103,6 +107,8 @@ impl CompositeDispatcher {
             builtin_tools,
             #[cfg(feature = "sub-agents")]
             sub_agent_tools: None,
+            #[cfg(feature = "skills")]
+            skill_tools: None,
             external,
             task_store,
             job_manager,
@@ -133,6 +139,15 @@ impl CompositeDispatcher {
         }
         self.sub_agent_tools = Some(tool_set);
         Ok(())
+    }
+
+    /// Register skill discovery tools (browse_skills, load_skill).
+    #[cfg(feature = "skills")]
+    pub fn register_skill_tools(&mut self, tool_set: SkillToolSet) {
+        for tool in tool_set.tools() {
+            self.allowed_tools.insert(tool.name().to_string());
+        }
+        self.skill_tools = Some(tool_set);
     }
 
     /// Get usage instructions for all enabled tools.
@@ -173,6 +188,17 @@ impl AgentToolDispatcher for CompositeDispatcher {
         #[cfg(feature = "sub-agents")]
         if let Some(ref sub) = self.sub_agent_tools {
             for tool in sub.tools() {
+                if self.allowed_tools.contains(tool.name()) {
+                    seen_names.insert(tool.name().to_string());
+                    tools.push(Arc::new(tool.def()));
+                }
+            }
+        }
+
+        // Add skill tools
+        #[cfg(feature = "skills")]
+        if let Some(ref skill) = self.skill_tools {
+            for tool in skill.tools() {
                 if self.allowed_tools.contains(tool.name()) {
                     seen_names.insert(tool.name().to_string());
                     tools.push(Arc::new(tool.def()));
@@ -242,6 +268,36 @@ impl AgentToolDispatcher for CompositeDispatcher {
         #[cfg(feature = "sub-agents")]
         if let Some(ref sub) = self.sub_agent_tools {
             for tool in sub.tools() {
+                if tool.name() == call.name {
+                    let value = tool.call(args.clone()).await.map_err(|e| match e {
+                        BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
+                            name: call.name.to_string(),
+                            reason: msg,
+                        },
+                        BuiltinToolError::ExecutionFailed(msg) => {
+                            ToolError::ExecutionFailed { message: msg }
+                        }
+                        BuiltinToolError::TaskError(te) => {
+                            ToolError::ExecutionFailed { message: te }
+                        }
+                    })?;
+                    let content = match &value {
+                        Value::String(s) => s.clone(),
+                        _ => serde_json::to_string(&value).unwrap_or_default(),
+                    };
+                    return Ok(ToolResult {
+                        tool_use_id: call.id.to_string(),
+                        content,
+                        is_error: false,
+                    });
+                }
+            }
+        }
+
+        // Check skill tools
+        #[cfg(feature = "skills")]
+        if let Some(ref skill) = self.skill_tools {
+            for tool in skill.tools() {
                 if tool.name() == call.name {
                     let value = tool.call(args.clone()).await.map_err(|e| match e {
                         BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {

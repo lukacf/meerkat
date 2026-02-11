@@ -34,11 +34,14 @@ class WireRunResult:
 
 @dataclass
 class WireEvent:
-    """Event from agent execution stream."""
+    """Event notification from the RPC server.
+
+    .. deprecated::
+        The streaming API (``StreamingTurn``) yields raw event dicts directly.
+        This type is retained for backward compatibility only.
+    """
     session_id: str = ''
-    sequence: int = 0
     event: Optional[dict] = None
-    contract_version: str = ''
 
 
 @dataclass
@@ -46,7 +49,7 @@ class CapabilityEntry:
     """A single capability status."""
     id: str = ''
     description: str = ''
-    status: str = 'available'
+    status: str = 'Available'
 
 
 @dataclass

@@ -76,6 +76,8 @@ pub struct CreateSessionRequest {
     /// Run in host mode: process prompt then stay alive for comms messages.
     /// This is a session-level property applied to all turns.
     pub host_mode: bool,
+    /// Skill IDs to resolve and inject for the first turn.
+    pub skill_references: Option<Vec<crate::skills::SkillId>>,
 }
 
 /// Request to start a new turn on an existing session.
@@ -87,6 +89,8 @@ pub struct StartTurnRequest {
     pub event_tx: Option<mpsc::Sender<AgentEvent>>,
     /// Run this turn in host mode.
     pub host_mode: bool,
+    /// Skill IDs to resolve and inject for this turn.
+    pub skill_references: Option<Vec<crate::skills::SkillId>>,
 }
 
 /// Query parameters for listing sessions.

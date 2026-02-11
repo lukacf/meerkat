@@ -232,6 +232,18 @@ pub struct CreateSessionRequest {
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
+    /// Enable built-in tools. Omit to use factory defaults.
+    #[serde(default)]
+    pub enable_builtins: Option<bool>,
+    /// Enable shell tool. Omit to use factory defaults.
+    #[serde(default)]
+    pub enable_shell: Option<bool>,
+    /// Enable sub-agent tools. Omit to use factory defaults.
+    #[serde(default)]
+    pub enable_subagents: Option<bool>,
+    /// Enable semantic memory. Omit to use factory defaults.
+    #[serde(default)]
+    pub enable_memory: Option<bool>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -461,10 +473,11 @@ async fn create_session(
         llm_client_override: state.llm_client_override.clone(),
         provider_params: None,
         external_tools: None,
-        override_builtins: None,
-        override_shell: None,
-        override_subagents: None,
-        override_memory: None,
+        override_builtins: req.enable_builtins,
+        override_shell: req.enable_shell,
+        override_subagents: req.enable_subagents,
+        override_memory: req.enable_memory,
+        preload_skills: None,
     };
 
     // Hold the slot lock across staging + create to prevent concurrent
@@ -480,6 +493,7 @@ async fn create_session(
             max_tokens: Some(max_tokens),
             event_tx: Some(caller_event_tx),
             host_mode,
+                skill_references: None,
         };
 
         state.session_service.create_session(svc_req).await
@@ -560,6 +574,7 @@ async fn continue_session(
         prompt: req.prompt.clone(),
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
+                skill_references: None,
     };
 
     let result = state
@@ -646,6 +661,7 @@ async fn continue_session(
                 override_shell: Some(tooling.shell),
                 override_subagents: Some(tooling.subagents),
                 override_memory: None,
+                preload_skills: None,
             };
 
             // Hold slot lock across staging + create to prevent races.
@@ -659,6 +675,7 @@ async fn continue_session(
                 max_tokens: Some(max_tokens),
                 event_tx: Some(caller_event_tx.clone()),
                 host_mode: continue_host_mode,
+                skill_references: None,
             };
 
             let r = state

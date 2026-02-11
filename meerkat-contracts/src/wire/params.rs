@@ -50,12 +50,83 @@ pub struct HookParams {
     pub hooks_override: Option<HookRunOverrides>,
 }
 
-/// Skills parameters (Phase 3).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Skills parameters for session/turn requests.
+///
+/// `preload_skills`: Pre-load these skills at session creation.
+/// `None` or empty = inventory-only mode (no pre-loading).
+/// `Some([])` is normalized to `None` to prevent silent misconfiguration.
+///
+/// `skill_references`: Skill IDs to resolve and inject for this turn.
+/// `None` or empty = no per-turn skill injection.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SkillsParams {
-    #[serde(default)]
-    pub skills_enabled: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skill_references: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preload_skills: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_references: Option<Vec<String>>,
+}
+
+impl SkillsParams {
+    /// Normalize: `Some([])` → `None` for both fields.
+    pub fn normalize(&mut self) {
+        if let Some(ref v) = self.preload_skills {
+            if v.is_empty() {
+                self.preload_skills = None;
+            }
+        }
+        if let Some(ref v) = self.skill_references {
+            if v.is_empty() {
+                self.skill_references = None;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_skills_params_none_serde() {
+        let params = SkillsParams {
+            preload_skills: None,
+            skill_references: None,
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        assert_eq!(json, "{}");
+
+        let parsed: SkillsParams = serde_json::from_str("{}").unwrap();
+        assert!(parsed.preload_skills.is_none());
+        assert!(parsed.skill_references.is_none());
+    }
+
+    #[test]
+    fn test_skills_params_empty_normalizes() {
+        let mut params = SkillsParams {
+            preload_skills: Some(vec![]),
+            skill_references: Some(vec![]),
+        };
+        params.normalize();
+        assert!(params.preload_skills.is_none());
+        assert!(params.skill_references.is_none());
+    }
+
+    #[test]
+    fn test_skills_params_with_ids() {
+        let params = SkillsParams {
+            preload_skills: Some(vec!["a/b".into()]),
+            skill_references: Some(vec!["c/d".into()]),
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let parsed: SkillsParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.preload_skills,
+            Some(vec!["a/b".to_string()])
+        );
+        assert_eq!(
+            parsed.skill_references,
+            Some(vec!["c/d".to_string()])
+        );
+    }
 }

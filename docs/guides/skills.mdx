@@ -8,15 +8,44 @@ Skills inject domain-specific knowledge into the agent's context. A skill is a m
 
 ## Skill sources
 
-Skills are discovered from three locations, in precedence order:
+Skills are discovered from multiple sources, in precedence order:
 
-1. **Project** (`.rkat/skills/`) -- highest precedence
+1. **Project** (`.rkat/skills/`) — highest precedence
 2. **User** (`~/.rkat/skills/`)
-3. **Embedded** (builtin skills from component crates)
+3. **Git repositories** — cloned to local cache, refreshed on TTL
+4. **HTTP endpoints** — fetched from remote skill servers
+5. **Embedded** (builtin skills from component crates)
 
 <Note>
 A project skill with the same ID as a builtin skill overrides the builtin (first-source-wins).
 </Note>
+
+### Git sources
+
+Configured in `.rkat/skills.toml`. Uses gitoxide (pure Rust, no git CLI dependency):
+
+```toml
+[[repositories]]
+name = "company"
+transport = "git"
+url = "https://github.com/company/meerkat-skills.git"
+git_ref = "main"
+ref_type = "branch"    # "branch", "tag", or "commit"
+refresh_seconds = 300  # TTL for branch refs (tags/commits are immutable)
+depth = 1              # shallow clone depth
+# auth_token = "${GITHUB_TOKEN}"  # optional, env vars expanded
+```
+
+### HTTP sources
+
+```toml
+[[repositories]]
+name = "remote"
+transport = "http"
+url = "https://skills.example.com/api"
+# auth_bearer = "${SKILLS_API_KEY}"
+cache_ttl_seconds = 300
+```
 
 ## SKILL.md format
 
@@ -115,12 +144,13 @@ The following skills are embedded in component crates:
 | `session-management` | Session Management | `meerkat-session` | `session_store` |
 | `multi-agent-comms` | Multi-Agent Comms | `meerkat-comms` | `comms` |
 
-## Configuration
+## Configuration reference
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `skills.enabled` | `true` | Enable skill loading |
 | `skills.max_injection_bytes` | `32768` (32 KiB) | Maximum size of injected skill content |
+| `skills.inventory_threshold` | `12` | Flat listing below, collection mode above |
 
 ## Custom skills
 
@@ -154,8 +184,76 @@ The following skills are embedded in component crates:
   </Tab>
 </Tabs>
 
+## Discovery tools
+
+When skills are active and builtins are enabled, two tools are registered:
+
+| Tool | Description |
+|------|-------------|
+| `browse_skills` | List skill collections and search by name/description |
+| `load_skill` | Load a skill's full instructions into the conversation |
+
+In collection mode (when there are more than 12 skills), the system prompt shows collection summaries. The LLM can use `browse_skills` to explore collections and `load_skill` to activate specific skills.
+
 ## Invoking skills
 
-Include a skill reference (e.g., `/shell-patterns`) in the user prompt to invoke it. The agent resolves the reference, loads the skill, and injects its content into the turn context.
+Skills can be activated in three ways:
 
-See the [Python SDK](/sdks/python#skillhelper) and [TypeScript SDK](/sdks/typescript#skillhelper) for `SkillHelper` wrappers that handle this automatically.
+### 1. Slash reference in user message
+
+Include `/skill-id` at the start of a message:
+
+```
+/extraction/email Extract the sender from this email
+```
+
+The agent detects the reference, resolves the skill, and injects its body before running the LLM.
+
+### 2. Programmatic skill_references (per-turn)
+
+Pass `skill_references` in the API request to resolve and inject skills for a specific turn:
+
+```json
+{
+  "method": "turn/start",
+  "params": {
+    "session_id": "...",
+    "prompt": "Extract emails from this text",
+    "skill_references": ["extraction/email"]
+  }
+}
+```
+
+### 3. Preloading at session creation
+
+Pass `preload_skills` to inject skills into the system prompt at session creation:
+
+```json
+{
+  "method": "session/create",
+  "params": {
+    "prompt": "Hello!",
+    "preload_skills": ["extraction/email", "formatting/markdown"]
+  }
+}
+```
+
+See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript SDK](/sdks/typescript/reference#skills-parameters) for SDK wrappers.
+
+## Configuration
+
+Skills are configured in `.rkat/skills.toml` with user/project layering:
+
+```toml
+# ~/.config/rkat/skills.toml (user) or .rkat/skills.toml (project)
+enabled = true
+max_injection_bytes = 32768    # max size of injected skill content
+inventory_threshold = 12       # flat listing below, collection mode above
+
+[[repositories]]
+name = "company"
+transport = "git"
+url = "https://github.com/company/skills.git"
+```
+
+Project settings override user settings when the project file exists. Repositories are merged (project repos take precedence over user repos with the same name).

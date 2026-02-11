@@ -9,7 +9,7 @@ from .errors import (
     SkillNotFoundError,
 )
 from .skills import SkillHelper
-from .streaming import EventStream
+from .streaming import StreamingTurn
 from .types import (
     CONTRACT_VERSION,
     CapabilitiesResponse,
@@ -22,7 +22,7 @@ from .types import (
 __all__ = [
     "MeerkatClient",
     "CapabilityChecker",
-    "EventStream",
+    "StreamingTurn",
     "SkillHelper",
     "MeerkatError",
     "CapabilityUnavailableError",

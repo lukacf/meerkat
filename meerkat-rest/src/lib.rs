@@ -232,6 +232,18 @@ pub struct CreateSessionRequest {
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
+    /// Enable built-in tools.
+    #[serde(default)]
+    pub enable_builtins: bool,
+    /// Enable shell tool.
+    #[serde(default)]
+    pub enable_shell: bool,
+    /// Enable sub-agent tools.
+    #[serde(default)]
+    pub enable_subagents: bool,
+    /// Enable semantic memory.
+    #[serde(default)]
+    pub enable_memory: bool,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -461,10 +473,10 @@ async fn create_session(
         llm_client_override: state.llm_client_override.clone(),
         provider_params: None,
         external_tools: None,
-        override_builtins: None,
-        override_shell: None,
-        override_subagents: None,
-        override_memory: None,
+        override_builtins: Some(req.enable_builtins),
+        override_shell: Some(req.enable_shell),
+        override_subagents: Some(req.enable_subagents),
+        override_memory: Some(req.enable_memory),
             preload_skills: None,
     };
 

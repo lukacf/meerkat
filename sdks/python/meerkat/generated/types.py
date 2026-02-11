@@ -34,11 +34,9 @@ class WireRunResult:
 
 @dataclass
 class WireEvent:
-    """Event from agent execution stream."""
+    """Event notification from the RPC server."""
     session_id: str = ''
-    sequence: int = 0
     event: Optional[dict] = None
-    contract_version: str = ''
 
 
 @dataclass
@@ -46,7 +44,7 @@ class CapabilityEntry:
     """A single capability status."""
     id: str = ''
     description: str = ''
-    status: str = 'available'
+    status: str = 'Available'
 
 
 @dataclass

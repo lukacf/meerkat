@@ -183,6 +183,10 @@ pub trait CommsRuntime: Send + Sync {
     async fn drain_messages(&self) -> Vec<String>;
     /// Get a notification when new messages arrive
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify>;
+    /// Returns true if a DISMISS signal was seen during the last `drain_messages` call.
+    fn dismiss_received(&self) -> bool {
+        false
+    }
 }
 
 /// The main Agent struct

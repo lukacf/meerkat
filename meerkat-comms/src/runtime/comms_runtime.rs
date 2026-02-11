@@ -1,7 +1,7 @@
 //! CommsRuntime - Full lifecycle manager for agent-to-agent communication.
 
 use super::comms_config::ResolvedCommsConfig;
-use crate::agent::types::CommsMessage;
+use crate::agent::types::{CommsContent, CommsMessage};
 use crate::{
     InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeers, handle_connection,
 };
@@ -9,20 +9,35 @@ use async_trait::async_trait;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
+fn is_dismiss(msg: &CommsMessage) -> bool {
+    matches!(&msg.content, CommsContent::Message { body } if body.trim().eq_ignore_ascii_case("DISMISS"))
+}
+
 #[async_trait]
 impl CoreCommsRuntime for CommsRuntime {
     async fn drain_messages(&self) -> Vec<String> {
         let messages = self.drain_messages().await;
-        messages.iter().map(|m| m.to_user_message_text()).collect()
+        if messages.iter().any(is_dismiss) {
+            self.dismiss_flag.store(true, Ordering::SeqCst);
+        }
+        messages
+            .iter()
+            .filter(|m| !is_dismiss(m))
+            .map(|m| m.to_user_message_text())
+            .collect()
     }
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
         self.inbox_notify.clone()
+    }
+    fn dismiss_received(&self) -> bool {
+        self.dismiss_flag.swap(false, Ordering::SeqCst)
     }
 }
 
@@ -48,6 +63,7 @@ pub struct CommsRuntime {
     listener_handles: Vec<ListenerHandle>,
     listeners_started: bool,
     keypair: Arc<Keypair>,
+    dismiss_flag: AtomicBool,
 }
 
 impl CommsRuntime {
@@ -77,6 +93,7 @@ impl CommsRuntime {
             listener_handles: Vec::new(),
             listeners_started: false,
             keypair: Arc::new(keypair),
+            dismiss_flag: AtomicBool::new(false),
         };
         InprocRegistry::global().register(config.name, runtime.public_key, inbox_sender);
         Ok(runtime)
@@ -114,6 +131,7 @@ impl CommsRuntime {
             listener_handles: Vec::new(),
             listeners_started: false,
             keypair: Arc::new(keypair),
+            dismiss_flag: AtomicBool::new(false),
         };
         InprocRegistry::global().register(name, runtime.public_key, inbox_sender);
         Ok(runtime)

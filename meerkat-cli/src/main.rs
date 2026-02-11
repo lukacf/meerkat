@@ -8,6 +8,8 @@ use meerkat::{AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAg
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::service::{CreateSessionRequest, SessionService};
 use meerkat_core::{AgentEvent, SchemaCompat, format_verbose_event};
+#[cfg(feature = "comms")]
+use meerkat_core::CommsRuntimeMode;
 use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
 use meerkat_store::SessionStore;
 use meerkat_tools::find_project_root;
@@ -482,10 +484,9 @@ async fn main() -> anyhow::Result<ExitCode> {
             verbose,
             host,
         } => {
-            // Note: comms_listen_tcp is handled by the factory via config settings.
-            let _ = comms_listen_tcp;
             let comms_overrides = CommsOverrides {
                 name: comms_name,
+                listen_tcp: comms_listen_tcp,
                 disabled: no_comms,
             };
 
@@ -771,6 +772,7 @@ fn parse_hook_run_overrides(
 #[derive(Debug, Clone, Default)]
 struct CommsOverrides {
     name: Option<String>,
+    listen_tcp: Option<String>,
     disabled: bool,
 }
 
@@ -1140,8 +1142,16 @@ async fn run_agent(
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
 
+    // Apply --comms-listen-tcp override to the config
+    let mut config = config.clone();
+    #[cfg(feature = "comms")]
+    if let Some(ref addr) = comms_overrides.listen_tcp {
+        config.comms.mode = CommsRuntimeMode::Tcp;
+        config.comms.address = Some(addr.clone());
+    }
+
     // Build the session service and stage the build config
-    let (service, config_slot) = build_cli_service(factory, config.clone());
+    let (service, config_slot) = build_cli_service(factory, config);
     {
         let mut slot = config_slot.lock().await;
         *slot = Some(build_config);

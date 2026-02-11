@@ -35,7 +35,7 @@ pub use runtime::comms_runtime::{CommsRuntime, CommsRuntimeError};
 
 pub use agent::CommsAgent;
 pub use agent::dispatcher::{
-    CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, wrap_with_comms,
+    CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, comms_tool_defs, wrap_with_comms,
 };
 pub use mcp::tools::{ToolContext, handle_tools_call, tools_list};
 

@@ -82,6 +82,11 @@ where
 
             let messages = comms.drain_messages().await;
 
+            if comms.dismiss_received() {
+                tracing::info!("Host mode: DISMISS received, exiting");
+                return Ok(last_result);
+            }
+
             if !messages.is_empty() {
                 let combined_input = messages.join("\n\n");
                 tracing::debug!("Host mode: processing {} comms message(s)", messages.len());
@@ -173,6 +178,11 @@ where
             let notified = inbox_notify.notified();
 
             let messages = comms.drain_messages().await;
+
+            if comms.dismiss_received() {
+                tracing::info!("Host mode: DISMISS received, exiting");
+                return Ok(last_result);
+            }
 
             if !messages.is_empty() {
                 let combined_input = messages.join("\n\n");

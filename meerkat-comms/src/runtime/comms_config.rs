@@ -15,7 +15,7 @@ pub struct CoreCommsConfig {
     pub identity_dir: PathBuf,
     pub trusted_peers_path: PathBuf,
     pub ack_timeout_secs: u64,
-    pub max_message_bytes: usize,
+    pub max_message_bytes: u32,
 }
 
 impl Default for CoreCommsConfig {
@@ -67,7 +67,7 @@ impl CoreCommsConfig {
             trusted_peers_path: resolve(&self.trusted_peers_path),
             comms_config: CommsConfig {
                 ack_timeout_secs: self.ack_timeout_secs,
-                max_message_bytes: self.max_message_bytes as u32,
+                max_message_bytes: self.max_message_bytes,
             },
         }
     }

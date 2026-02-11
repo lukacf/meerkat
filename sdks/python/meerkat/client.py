@@ -12,12 +12,14 @@ from .generated.types import (
     WireRunResult,
     WireUsage,
 )
+from .streaming import StreamingTurn, _StdoutDispatcher
 
 
 class MeerkatClient:
     """Async client that communicates with a Meerkat runtime via rkat rpc.
 
-    Uses ``asyncio.create_subprocess_exec`` for non-blocking I/O.
+    A background dispatcher multiplexes stdout so that JSON-RPC responses
+    and streaming event notifications can be consumed concurrently.
 
     Usage::
 
@@ -26,6 +28,14 @@ class MeerkatClient:
         result = await client.create_session("Hello!")
         print(result.text)
         await client.close()
+
+    Streaming::
+
+        async with client.create_session_streaming("Hello!") as stream:
+            async for event in stream:
+                if event["type"] == "text_delta":
+                    print(event["delta"], end="", flush=True)
+            result = stream.result
     """
 
     def __init__(self, rkat_path: str = "rkat"):
@@ -35,6 +45,7 @@ class MeerkatClient:
         self._process: Optional[asyncio.subprocess.Process] = None
         self._request_id = 0
         self._capabilities: Optional[CapabilitiesResponse] = None
+        self._dispatcher: Optional[_StdoutDispatcher] = None
 
         if not shutil.which(self._rkat_path):
             raise MeerkatError(
@@ -46,40 +57,35 @@ class MeerkatClient:
     async def connect(self) -> "MeerkatClient":
         """Start the rkat rpc subprocess and perform handshake."""
         self._process = await asyncio.create_subprocess_exec(
-            self._rkat_path,
-            "rpc",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
+            self._rkat_path, "rpc",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._dispatcher = _StdoutDispatcher(self._process.stdout)
+        self._dispatcher.start()
 
-        # Initialize handshake
         result = await self._request("initialize", {})
         server_version = result.get("contract_version", "")
         if not self._check_version_compatible(server_version, CONTRACT_VERSION):
-            raise MeerkatError(
-                "VERSION_MISMATCH",
-                f"Server version {server_version} incompatible with SDK {CONTRACT_VERSION}",
-            )
+            raise MeerkatError("VERSION_MISMATCH",
+                f"Server version {server_version} incompatible with SDK {CONTRACT_VERSION}")
 
-        # Fetch capabilities
         caps_result = await self._request("capabilities/get", {})
         self._capabilities = CapabilitiesResponse(
             contract_version=caps_result.get("contract_version", ""),
             capabilities=[
-                CapabilityEntry(
-                    id=c.get("id", ""),
-                    description=c.get("description", ""),
-                    status=self._normalize_status(c.get("status", "Available")),
-                )
+                CapabilityEntry(id=c.get("id", ""), description=c.get("description", ""),
+                    status=self._normalize_status(c.get("status", "Available")))
                 for c in caps_result.get("capabilities", [])
             ],
         )
-
         return self
 
     async def close(self) -> None:
         """Terminate the rkat rpc subprocess."""
+        if self._dispatcher:
+            await self._dispatcher.stop()
+            self._dispatcher = None
         if self._process:
             if self._process.stdin:
                 self._process.stdin.close()
@@ -90,226 +96,195 @@ class MeerkatClient:
                 self._process.kill()
             self._process = None
 
-    async def create_session(
-        self,
-        prompt: str,
-        model: Optional[str] = None,
-        provider: Optional[str] = None,
-        system_prompt: Optional[str] = None,
-        max_tokens: Optional[int] = None,
-        output_schema: Optional[dict] = None,
-        structured_output_retries: int = 2,
-        hooks_override: Optional[dict] = None,
-        enable_builtins: bool = False,
-        enable_shell: bool = False,
-        enable_subagents: bool = False,
-        enable_memory: bool = False,
-        host_mode: bool = False,
-        comms_name: Optional[str] = None,
-        provider_params: Optional[dict] = None,
-    ) -> WireRunResult:
-        """Create a new session and run the first turn.
+    # --- Session lifecycle (non-streaming) ---
 
-        Args:
-            prompt: Initial user prompt.
-            model: Model name (e.g. "claude-sonnet-4-5").
-            provider: Provider name ("anthropic", "openai", "gemini").
-            system_prompt: Custom system prompt override.
-            max_tokens: Max tokens per turn.
-            output_schema: JSON schema for structured output extraction.
-            structured_output_retries: Retries for structured output validation.
-            hooks_override: Run-scoped hook overrides.
-            enable_builtins: Enable built-in tools (task management, etc.).
-            enable_shell: Enable shell tool (requires enable_builtins).
-            enable_subagents: Enable sub-agent tools (fork, spawn).
-            enable_memory: Enable semantic memory (memory_search tool).
-            host_mode: Run in host mode for inter-agent comms.
-            comms_name: Agent name for comms (required when host_mode is True).
-            provider_params: Provider-specific parameters.
-        """
-        params: dict = {"prompt": prompt}
-        if model:
-            params["model"] = model
-        if provider:
-            params["provider"] = provider
-        if system_prompt:
-            params["system_prompt"] = system_prompt
-        if max_tokens:
-            params["max_tokens"] = max_tokens
-        if output_schema:
-            params["output_schema"] = output_schema
-        if structured_output_retries != 2:
-            params["structured_output_retries"] = structured_output_retries
-        if hooks_override:
-            params["hooks_override"] = hooks_override
-        if enable_builtins:
-            params["enable_builtins"] = True
-        if enable_shell:
-            params["enable_shell"] = True
-        if enable_subagents:
-            params["enable_subagents"] = True
-        if enable_memory:
-            params["enable_memory"] = True
-        if host_mode:
-            params["host_mode"] = True
-        if comms_name:
-            params["comms_name"] = comms_name
-        if provider_params:
-            params["provider_params"] = provider_params
-
+    async def create_session(self, prompt: str, model: Optional[str] = None,
+            provider: Optional[str] = None, system_prompt: Optional[str] = None,
+            max_tokens: Optional[int] = None, output_schema: Optional[dict] = None,
+            structured_output_retries: int = 2, hooks_override: Optional[dict] = None,
+            enable_builtins: bool = False, enable_shell: bool = False,
+            enable_subagents: bool = False, enable_memory: bool = False,
+            host_mode: bool = False, comms_name: Optional[str] = None,
+            provider_params: Optional[dict] = None) -> WireRunResult:
+        """Create a new session and run the first turn."""
+        params = self._build_create_params(prompt, model, provider, system_prompt,
+            max_tokens, output_schema, structured_output_retries, hooks_override,
+            enable_builtins, enable_shell, enable_subagents, enable_memory,
+            host_mode, comms_name, provider_params)
         result = await self._request("session/create", params)
         return self._parse_run_result(result)
 
-    async def start_turn(
-        self,
-        session_id: str,
-        prompt: str,
-    ) -> WireRunResult:
+    async def start_turn(self, session_id: str, prompt: str) -> WireRunResult:
         """Start a new turn on an existing session."""
-        result = await self._request(
-            "turn/start", {"session_id": session_id, "prompt": prompt}
-        )
+        result = await self._request("turn/start", {"session_id": session_id, "prompt": prompt})
         return self._parse_run_result(result)
 
+    # --- Session lifecycle (streaming) ---
+
+    async def create_session_streaming(self, prompt: str, model: Optional[str] = None,
+            provider: Optional[str] = None, system_prompt: Optional[str] = None,
+            max_tokens: Optional[int] = None, output_schema: Optional[dict] = None,
+            structured_output_retries: int = 2, hooks_override: Optional[dict] = None,
+            enable_builtins: bool = False, enable_shell: bool = False,
+            enable_subagents: bool = False, enable_memory: bool = False,
+            host_mode: bool = False, comms_name: Optional[str] = None,
+            provider_params: Optional[dict] = None) -> StreamingTurn:
+        """Create a new session and stream events from the first turn.
+
+        Returns a StreamingTurn context manager. Events are raw dicts matching
+        the Rust AgentEvent serde-tagged enum.
+
+        Usage::
+
+            async with client.create_session_streaming("Hello!") as stream:
+                async for event in stream:
+                    if event["type"] == "text_delta":
+                        print(event["delta"], end="", flush=True)
+                result = stream.result
+        """
+        if not self._dispatcher or not self._process or not self._process.stdin:
+            raise MeerkatError("NOT_CONNECTED", "Client not connected")
+        params = self._build_create_params(prompt, model, provider, system_prompt,
+            max_tokens, output_schema, structured_output_retries, hooks_override,
+            enable_builtins, enable_shell, enable_subagents, enable_memory,
+            host_mode, comms_name, provider_params)
+        self._request_id += 1
+        request_id = self._request_id
+        event_queue = self._dispatcher.subscribe_catchall()
+        response_future = self._dispatcher.expect_response(request_id)
+        request = {"jsonrpc": "2.0", "id": request_id, "method": "session/create", "params": params}
+        self._process.stdin.write((json.dumps(request) + "\n").encode())
+        await self._process.stdin.drain()
+        return StreamingTurn(session_id="", event_queue=event_queue,
+            response_future=response_future, dispatcher=self._dispatcher,
+            parse_result=self._parse_run_result)
+
+    async def start_turn_streaming(self, session_id: str, prompt: str) -> StreamingTurn:
+        """Start a new turn on an existing session and stream events.
+
+        Usage::
+
+            async with client.start_turn_streaming(session_id, "Follow up") as stream:
+                async for event in stream:
+                    print(event)
+                result = stream.result
+        """
+        if not self._dispatcher or not self._process or not self._process.stdin:
+            raise MeerkatError("NOT_CONNECTED", "Client not connected")
+        self._request_id += 1
+        request_id = self._request_id
+        event_queue = self._dispatcher.subscribe_events(session_id)
+        response_future = self._dispatcher.expect_response(request_id)
+        request = {"jsonrpc": "2.0", "id": request_id, "method": "turn/start",
+                   "params": {"session_id": session_id, "prompt": prompt}}
+        self._process.stdin.write((json.dumps(request) + "\n").encode())
+        await self._process.stdin.drain()
+        return StreamingTurn(session_id=session_id, event_queue=event_queue,
+            response_future=response_future, dispatcher=self._dispatcher,
+            parse_result=self._parse_run_result)
+
+    # --- Other operations ---
+
     async def interrupt(self, session_id: str) -> None:
-        """Interrupt a running turn."""
         await self._request("turn/interrupt", {"session_id": session_id})
 
     async def list_sessions(self) -> list:
-        """List active sessions."""
         result = await self._request("session/list", {})
         return result.get("sessions", [])
 
     async def read_session(self, session_id: str) -> dict:
-        """Read session state."""
         return await self._request("session/read", {"session_id": session_id})
 
     async def archive_session(self, session_id: str) -> None:
-        """Archive (remove) a session."""
         await self._request("session/archive", {"session_id": session_id})
 
     async def get_capabilities(self) -> CapabilitiesResponse:
-        """Get runtime capabilities."""
         if self._capabilities:
             return self._capabilities
         result = await self._request("capabilities/get", {})
-        return CapabilitiesResponse(
-            contract_version=result.get("contract_version", ""),
-            capabilities=[],
-        )
+        return CapabilitiesResponse(contract_version=result.get("contract_version", ""), capabilities=[])
 
     def has_capability(self, capability_id: str) -> bool:
-        """Check if a capability is available."""
         if not self._capabilities:
             return False
-        return any(
-            c.id == capability_id and c.status == "Available"
-            for c in self._capabilities.capabilities
-        )
+        return any(c.id == capability_id and c.status == "Available"
+                   for c in self._capabilities.capabilities)
 
     def require_capability(self, capability_id: str) -> None:
-        """Raise CapabilityUnavailableError if capability is not available."""
         if not self.has_capability(capability_id):
-            raise CapabilityUnavailableError(
-                "CAPABILITY_UNAVAILABLE",
-                f"Capability '{capability_id}' is not available",
-            )
-
-    # --- Config ---
+            raise CapabilityUnavailableError("CAPABILITY_UNAVAILABLE",
+                f"Capability '{capability_id}' is not available")
 
     async def get_config(self) -> dict:
-        """Get runtime configuration."""
         return await self._request("config/get", {})
 
     async def set_config(self, config: dict) -> None:
-        """Replace runtime configuration."""
         await self._request("config/set", {"config": config})
 
     async def patch_config(self, patch: dict) -> dict:
-        """Merge-patch runtime configuration. Returns updated config."""
         return await self._request("config/patch", {"patch": patch})
 
     # --- Internal ---
 
     async def _request(self, method: str, params: dict) -> dict:
-        """Send a JSON-RPC request and return the result."""
-        if not self._process or not self._process.stdin or not self._process.stdout:
+        """Send a JSON-RPC request via the dispatcher and await the response."""
+        if not self._process or not self._process.stdin or not self._dispatcher:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
-
         self._request_id += 1
         request_id = self._request_id
-        request = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": params,
-        }
-
-        line = json.dumps(request) + "\n"
-        self._process.stdin.write(line.encode())
+        request = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        response_future = self._dispatcher.expect_response(request_id)
+        self._process.stdin.write((json.dumps(request) + "\n").encode())
         await self._process.stdin.drain()
+        return await response_future
 
-        # Read response lines asynchronously (skip notifications)
-        while True:
-            response_line = await self._process.stdout.readline()
-            if not response_line:
-                raise MeerkatError("CONNECTION_CLOSED", "rkat rpc process closed")
-
-            response = json.loads(response_line)
-            if "id" in response and response["id"] == request_id:
-                if "error" in response and response["error"]:
-                    err = response["error"]
-                    raise MeerkatError(
-                        str(err.get("code", "UNKNOWN")),
-                        err.get("message", "Unknown error"),
-                        err.get("data"),
-                    )
-                return response.get("result", {})
+    @staticmethod
+    def _build_create_params(prompt, model, provider, system_prompt, max_tokens,
+            output_schema, structured_output_retries, hooks_override,
+            enable_builtins, enable_shell, enable_subagents, enable_memory,
+            host_mode, comms_name, provider_params) -> dict:
+        params: dict = {"prompt": prompt}
+        if model: params["model"] = model
+        if provider: params["provider"] = provider
+        if system_prompt: params["system_prompt"] = system_prompt
+        if max_tokens: params["max_tokens"] = max_tokens
+        if output_schema: params["output_schema"] = output_schema
+        if structured_output_retries != 2: params["structured_output_retries"] = structured_output_retries
+        if hooks_override: params["hooks_override"] = hooks_override
+        if enable_builtins: params["enable_builtins"] = True
+        if enable_shell: params["enable_shell"] = True
+        if enable_subagents: params["enable_subagents"] = True
+        if enable_memory: params["enable_memory"] = True
+        if host_mode: params["host_mode"] = True
+        if comms_name: params["comms_name"] = comms_name
+        if provider_params: params["provider_params"] = provider_params
+        return params
 
     @staticmethod
     def _normalize_status(raw) -> str:
-        """Normalize a CapabilityStatus from the wire.
-
-        On the wire, Available is the string ``"Available"`` but other variants
-        are externally-tagged objects like ``{"DisabledByPolicy": {"description": "..."}}``.
-        We normalize to the variant name string for simple comparison.
-        """
-        if isinstance(raw, str):
-            return raw
-        if isinstance(raw, dict):
-            # Externally-tagged enum — the single key is the variant name
-            return next(iter(raw), "Unknown")
+        if isinstance(raw, str): return raw
+        if isinstance(raw, dict): return next(iter(raw), "Unknown")
         return str(raw)
 
     @staticmethod
     def _check_version_compatible(server: str, client: str) -> bool:
-        """Check version compatibility (same major for 1.0+, same minor for 0.x)."""
         try:
-            s_parts = [int(x) for x in server.split(".")]
-            c_parts = [int(x) for x in client.split(".")]
-            if s_parts[0] == 0 and c_parts[0] == 0:
-                return s_parts[1] == c_parts[1]
-            return s_parts[0] == c_parts[0]
+            s = [int(x) for x in server.split(".")]
+            c = [int(x) for x in client.split(".")]
+            if s[0] == 0 and c[0] == 0: return s[1] == c[1]
+            return s[0] == c[0]
         except (ValueError, IndexError):
             return False
 
     @staticmethod
     def _parse_run_result(data: dict) -> WireRunResult:
-        """Parse a run result from JSON-RPC response."""
-        usage_data = data.get("usage", {})
-        usage = WireUsage(
-            input_tokens=usage_data.get("input_tokens", 0),
-            output_tokens=usage_data.get("output_tokens", 0),
-            total_tokens=usage_data.get("total_tokens", 0),
-            cache_creation_tokens=usage_data.get("cache_creation_tokens"),
-            cache_read_tokens=usage_data.get("cache_read_tokens"),
-        )
+        u = data.get("usage", {})
         return WireRunResult(
-            session_id=data.get("session_id", ""),
-            text=data.get("text", ""),
-            turns=data.get("turns", 0),
-            tool_calls=data.get("tool_calls", 0),
-            usage=usage,
+            session_id=data.get("session_id", ""), text=data.get("text", ""),
+            turns=data.get("turns", 0), tool_calls=data.get("tool_calls", 0),
+            usage=WireUsage(input_tokens=u.get("input_tokens", 0),
+                output_tokens=u.get("output_tokens", 0), total_tokens=u.get("total_tokens", 0),
+                cache_creation_tokens=u.get("cache_creation_tokens"),
+                cache_read_tokens=u.get("cache_read_tokens")),
             structured_output=data.get("structured_output"),
-            schema_warnings=data.get("schema_warnings"),
-        )
+            schema_warnings=data.get("schema_warnings"))

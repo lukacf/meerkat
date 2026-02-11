@@ -39,6 +39,7 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
             "config/get".to_string(),
             "config/set".to_string(),
             "config/patch".to_string(),
+            "capabilities/get".to_string(),
         ],
     };
     RpcResponse::success(id, caps)

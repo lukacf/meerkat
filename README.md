@@ -13,11 +13,11 @@
   <a href="#core-capabilities">Capabilities</a> &bull;
   <a href="#surfaces">Surfaces</a> &bull;
   <a href="#architecture">Architecture</a> &bull;
-  <a href="#documentation">Docs</a>
+  <a href="https://docs.rkat.ai">Docs</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust-1.89+-orange?logo=rust" alt="Rust 1.89+">
+  <img src="https://img.shields.io/badge/Rust-1.85+-orange?logo=rust" alt="Rust 1.85+">
   <img src="https://img.shields.io/badge/License-MIT%2FApache--2.0-blue" alt="License">
   <img src="https://img.shields.io/badge/MCP-Native-green" alt="MCP Native">
   <img src="https://img.shields.io/badge/Multi--Agent-Ed25519-purple" alt="Multi-Agent">
@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### As a CLI
 
 ```bash
-cargo install --path meerkat-cli
+cargo install rkat
 
 export ANTHROPIC_API_KEY=sk-...
 rkat run "What is the capital of France?"
@@ -90,13 +90,13 @@ rkat run --model gemini-3-flash-preview "Explain async/await"
 | **MCP Native** | Connect to any Model Context Protocol server |
 | **Budget Controls** | Strict token limits, time limits, tool call caps |
 | **Session Persistence** | Resume conversations from disk (JSONL or redb) |
-| **Hooks** | 8 hook points with observe/rewrite/guardrail semantics ([guide](docs/hooks.md)) |
-| **Structured Output** | JSON-schema-validated extraction from any provider ([guide](docs/structured-output.md)) |
-| **Semantic Memory** | Auto-compact long conversations, recall via `memory_search` ([guide](docs/memory.md)) |
-| **Sub-Agents** | Spawn/fork child agents with budget and tool isolation ([guide](docs/sub-agents.md)) |
-| **Multi-Agent Comms** | Ed25519-authenticated peer-to-peer messaging ([guide](docs/comms.md)) |
-| **Skills** | Composable knowledge packs with capability gating ([guide](docs/skills.md)) |
-| **Built-in Tools** | Task management, shell, datetime, and more ([reference](docs/builtin-tools.md)) |
+| **Hooks** | 8 hook points with observe/rewrite/guardrail semantics |
+| **Structured Output** | JSON-schema-validated extraction from any provider |
+| **Semantic Memory** | Auto-compact long conversations, recall via `memory_search` |
+| **Sub-Agents** | Spawn/fork child agents with budget and tool isolation |
+| **Multi-Agent Comms** | Ed25519-authenticated peer-to-peer messaging |
+| **Skills** | Composable knowledge packs with capability gating |
+| **Built-in Tools** | Task management, shell, datetime, and more |
 | **Streaming** | Real-time token output via event channels |
 
 ### Modularity
@@ -122,13 +122,13 @@ All surfaces share the same `SessionService` lifecycle and `AgentFactory` constr
 
 | Surface | Use Case | Docs |
 |---------|----------|------|
-| **Rust crate** | Embed agents in your Rust application | [SDK guide](docs/SDK.md) |
-| **Python SDK** | Script agents from Python (`pip install meerkat-sdk`) | [README](sdks/python/README.md) |
-| **TypeScript SDK** | Script agents from Node.js (`npm i @meerkat/sdk`) | [README](sdks/typescript/README.md) |
-| **CLI (`rkat`)** | Terminal, CI/CD, cron jobs, shell scripts | [CLI guide](docs/CLI.md) |
-| **REST API** | HTTP integration for web services | [REST guide](docs/rest.md) |
-| **JSON-RPC** | Stateful IDE/desktop integration over stdio | [RPC guide](docs/rpc.md) |
-| **MCP Server** | Expose Meerkat as tools to other AI agents | [MCP guide](docs/mcp.md) |
+| **Rust crate** | Embed agents in your Rust application | [SDK guide](https://docs.rkat.ai/rust/overview) |
+| **Python SDK** | Script agents from Python | [Python SDK](https://docs.rkat.ai/sdks/python/overview) |
+| **TypeScript SDK** | Script agents from Node.js | [TypeScript SDK](https://docs.rkat.ai/sdks/typescript/overview) |
+| **CLI (`rkat`)** | Terminal, CI/CD, cron jobs, shell scripts | [CLI guide](https://docs.rkat.ai/cli/commands) |
+| **REST API** | HTTP integration for web services | [REST guide](https://docs.rkat.ai/api/rest) |
+| **JSON-RPC** | Stateful IDE/desktop integration over stdio | [RPC guide](https://docs.rkat.ai/api/rpc) |
+| **MCP Server** | Expose Meerkat as tools to other AI agents | [MCP guide](https://docs.rkat.ai/api/mcp) |
 
 ## Architecture
 
@@ -157,23 +157,6 @@ All surfaces share the same `SessionService` lifecycle and `AgentFactory` constr
                          └───────────────┘
 ```
 
-### State Machine
-
-The agent loop follows a strict state machine for predictable behavior:
-
-```
-CallingLlm ─────► WaitingForOps ─────► DrainingEvents
-    │                  │                     │
-    │                  ▼                     ▼
-    ├────────────► Completed ◄───────────────┤
-    │                  ▲                     │
-    ▼                  │                     │
-ErrorRecovery ────────►│                     │
-    │                                        │
-    ▼                                        │
-Cancelling ◄─────────────────────────────────┘
-```
-
 ### Crates
 
 | Crate | Purpose |
@@ -190,7 +173,7 @@ Cancelling ◄──────────────────────
 | `meerkat-mcp` | MCP protocol client and tool router |
 | `meerkat-comms` | Ed25519 encrypted P2P messaging |
 | `meerkat-contracts` | Wire types, error codes, capability registry |
-| `meerkat-cli` | CLI binary (`rkat`) |
+| `rkat` | CLI binary |
 | `meerkat-rest` | REST API server |
 | `meerkat-rpc` | JSON-RPC stdio server |
 | `meerkat-mcp-server` | MCP server (expose Meerkat as tools) |
@@ -241,19 +224,6 @@ impl AgentToolDispatcher for Calculator {
 }
 ```
 
-### Budget Limits
-
-```rust
-let result = meerkat::with_anthropic(api_key)
-    .budget(BudgetLimits {
-        max_tokens: Some(10_000),
-        max_duration: Some(Duration::from_secs(60)),
-        max_tool_calls: Some(20),
-    })
-    .run("Solve this complex problem...")
-    .await?;
-```
-
 ### Streaming
 
 ```rust
@@ -270,12 +240,11 @@ tokio::spawn(async move {
 agent.run_with_events("Write a poem".into(), tx).await?;
 ```
 
-See [docs/examples.md](docs/examples.md) for more: MCP tools, session lifecycle, structured output, hooks, sub-agents, and multi-agent comms.
+See the [full documentation](https://docs.rkat.ai) for more: MCP tools, session lifecycle, structured output, hooks, sub-agents, skills, and multi-agent comms.
 
 ## Configuration
 
 ```bash
-# Environment variables
 export ANTHROPIC_API_KEY=sk-...
 export OPENAI_API_KEY=sk-...
 export GOOGLE_API_KEY=...
@@ -288,29 +257,20 @@ model = "claude-opus-4-6"
 max_tokens = 4096
 ```
 
-See [docs/configuration.md](docs/configuration.md) for the full reference (providers, budgets, hooks, memory, sub-agents, comms, shell security).
+See the [configuration guide](https://docs.rkat.ai/concepts/configuration) for the full reference.
 
 ## Documentation
 
-| Guide | Description |
-|-------|-------------|
-| [Configuration](docs/configuration.md) | All config options, environment variables, feature flags |
-| [CLI Reference](docs/CLI.md) | Full `rkat` command reference |
-| [Rust SDK](docs/SDK.md) | Library API guide |
-| [API Reference](docs/api-reference.md) | Complete type reference |
-| [Architecture](docs/architecture.md) | Design deep-dive |
-| [Hooks](docs/hooks.md) | Hook system guide |
-| [Skills](docs/skills.md) | Skill system guide |
-| [Structured Output](docs/structured-output.md) | Schema-validated extraction |
-| [Memory & Compaction](docs/memory.md) | Semantic memory guide |
-| [Sub-Agents](docs/sub-agents.md) | Agent spawning and orchestration |
-| [Comms](docs/comms.md) | Inter-agent communication |
-| [Built-in Tools](docs/builtin-tools.md) | Tool reference |
-| [REST API](docs/rest.md) | HTTP API reference |
-| [JSON-RPC](docs/rpc.md) | Stdio RPC reference |
-| [MCP Server](docs/mcp.md) | MCP integration guide |
-| [Capability Matrix](docs/CAPABILITY_MATRIX.md) | Build profiles, error codes, feature behavior |
-| [Examples](docs/examples.md) | Worked examples |
+Full documentation is available at **[docs.rkat.ai](https://docs.rkat.ai)**.
+
+| Section | Topics |
+|---------|--------|
+| [Getting Started](https://docs.rkat.ai/introduction) | Introduction, quickstart |
+| [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, tools, providers, configuration |
+| [Guides](https://docs.rkat.ai/guides/hooks) | Hooks, skills, memory, sub-agents, comms, structured output |
+| [CLI & APIs](https://docs.rkat.ai/cli/commands) | CLI reference, REST, JSON-RPC, MCP |
+| [SDKs](https://docs.rkat.ai/rust/overview) | Rust, Python, TypeScript |
+| [Reference](https://docs.rkat.ai/reference/architecture) | Architecture, capability matrix, built-in tools |
 
 ## Development
 
@@ -321,14 +281,11 @@ cargo unit                          # Unit tests only
 cargo int                           # Integration-fast only
 cargo int-real                      # Integration-real (ignored by default)
 cargo e2e                           # E2E tests (ignored; requires API keys)
-make ci                             # Full CI pipeline (fmt + lint + test + audit)
 ```
-
-Rust version pinned to `1.89.0` via `rust-toolchain.toml`.
 
 ## Contributing
 
-1. Run `make ci` to verify all checks pass
+1. Run `cargo rct` to verify all checks pass
 2. Add tests for new functionality
 3. Submit PRs to `main`
 

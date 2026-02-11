@@ -93,22 +93,22 @@ rmcp = "0.14"
 tempfile = "3.14"
 
 # Internal crates
-meerkat-core = { path = "meerkat-core" }
-meerkat-client = { path = "meerkat-client", default-features = false }
-meerkat-store = { path = "meerkat-store", default-features = false }
-meerkat-tools = { path = "meerkat-tools", default-features = false }
-meerkat-mcp = { path = "meerkat-mcp" }
-meerkat-mcp-server = { path = "meerkat-mcp-server" }
-meerkat-cli = { path = "meerkat-cli" }
-meerkat-rest = { path = "meerkat-rest" }
-meerkat = { path = "meerkat", default-features = false }
-meerkat-comms = { path = "meerkat-comms" }
-meerkat-hooks = { path = "meerkat-hooks" }
-meerkat-rpc = { path = "meerkat-rpc" }
-meerkat-session = { path = "meerkat-session", default-features = false }
-meerkat-memory = { path = "meerkat-memory", default-features = false }
-meerkat-contracts = { path = "meerkat-contracts", default-features = false }
-meerkat-skills = { path = "meerkat-skills" }
+meerkat-core = { version = "0.1.0", path = "meerkat-core" }
+meerkat-client = { version = "0.1.0", path = "meerkat-client", default-features = false }
+meerkat-store = { version = "0.1.0", path = "meerkat-store", default-features = false }
+meerkat-tools = { version = "0.1.0", path = "meerkat-tools", default-features = false }
+meerkat-mcp = { version = "0.1.0", path = "meerkat-mcp" }
+meerkat-mcp-server = { version = "0.1.0", path = "meerkat-mcp-server" }
+meerkat-cli = { version = "0.1.0", path = "meerkat-cli" }
+meerkat-rest = { version = "0.1.0", path = "meerkat-rest" }
+meerkat = { version = "0.1.0", path = "meerkat", default-features = false }
+meerkat-comms = { version = "0.1.0", path = "meerkat-comms" }
+meerkat-hooks = { version = "0.1.0", path = "meerkat-hooks" }
+meerkat-rpc = { version = "0.1.0", path = "meerkat-rpc" }
+meerkat-session = { version = "0.1.0", path = "meerkat-session", default-features = false }
+meerkat-memory = { version = "0.1.0", path = "meerkat-memory", default-features = false }
+meerkat-contracts = { version = "0.1.0", path = "meerkat-contracts", default-features = false }
+meerkat-skills = { version = "0.1.0", path = "meerkat-skills" }
 
 
 [workspace.lints.rust]

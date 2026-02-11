@@ -34,15 +34,17 @@ from meerkat import WireUsage
 <ResponseField name="cache_read_tokens" type="Optional[int]">Cache read tokens.</ResponseField>
 </Accordion>
 
-<Accordion title="WireEvent">
+<Accordion title="WireEvent (deprecated)">
 ```python
 from meerkat import WireEvent
 ```
 
 <ResponseField name="session_id" type="str">Session this event belongs to.</ResponseField>
-<ResponseField name="sequence" type="int">Monotonic sequence number.</ResponseField>
 <ResponseField name="event" type="Optional[dict]">The agent event payload.</ResponseField>
-<ResponseField name="contract_version" type="str">Contract version of the server.</ResponseField>
+
+<Warning>
+`WireEvent` is deprecated. The streaming API (`StreamingTurn`) yields raw event dicts directly. This type is retained for backward compatibility only.
+</Warning>
 </Accordion>
 
 <Accordion title="CapabilitiesResponse">
@@ -109,21 +111,80 @@ if helper.is_available():
 
 ---
 
-## EventStream
+## Streaming API
 
-Async iterator that yields `WireEvent` objects from the `rkat rpc` notification stream:
+`StreamingTurn` provides real-time event streaming during agent execution. Events are yielded as raw dicts matching the Rust `AgentEvent` serde-tagged enum (e.g. `{"type": "text_delta", "delta": "..."}`).
+
+### create_session_streaming
 
 ```python
-from meerkat import EventStream
-
-stream = EventStream(client._process.stdout)
-async for event in stream:
-    print(f"[{event.session_id}] seq={event.sequence}: {event.event}")
+async with client.create_session_streaming("Hello!") as stream:
+    async for event in stream:
+        if event["type"] == "text_delta":
+            print(event["delta"], end="", flush=True)
+    result = stream.result  # WireRunResult
 ```
 
+Accepts all the same parameters as `create_session()` plus `preload_skills` and `skill_references`.
+
+### start_turn_streaming
+
+```python
+async with client.start_turn_streaming(session_id, "Follow up") as stream:
+    async for event in stream:
+        print(event)
+    result = stream.result
+```
+
+### Convenience methods
+
+```python
+# Consume all events, return result
+async with client.create_session_streaming("Hello!") as stream:
+    result = await stream.collect()
+
+# Accumulate text deltas
+async with client.create_session_streaming("Hello!") as stream:
+    full_text, result = await stream.collect_text()
+```
+
+### Event types
+
+Events have a `type` field discriminating the variant:
+
+| Type | Description |
+|------|-------------|
+| `run_started` | Agent run began |
+| `turn_started` | New LLM turn |
+| `text_delta` | Incremental text chunk (`delta` field) |
+| `text_complete` | Full text available |
+| `tool_call_requested` | Agent wants to call a tool |
+| `tool_result_received` | Tool returned a result |
+| `turn_completed` | LLM turn finished |
+| `run_completed` | Agent run finished |
+
 <Note>
-`EventStream` implements `__aiter__` and `__anext__`. It yields `WireEvent` instances until the stream closes.
+The streaming methods are synchronous (not `async def`) — they return a `StreamingTurn` directly. The request is sent when entering the `async with` block.
 </Note>
+
+### Skills parameters
+
+Both `create_session()` and `start_turn()` accept skill-related parameters:
+
+```python
+# Preload skills into the system prompt at session creation
+result = await client.create_session(
+    "Hello!",
+    preload_skills=["extraction/email", "formatting/markdown"],
+)
+
+# Inject skills for a specific turn
+result = await client.start_turn(
+    session_id,
+    "Extract emails from this text",
+    skill_references=["extraction/email"],
+)
+```
 
 ---
 

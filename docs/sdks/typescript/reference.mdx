@@ -36,11 +36,13 @@ interface WireUsage {
 ```typescript
 interface WireEvent {
   session_id: string;
-  sequence: number;
   event: Record<string, unknown>;
-  contract_version: string;
 }
 ```
+
+<Warning>
+The `sequence` and `contract_version` fields have been removed — they were never sent by the server. The streaming API uses raw event dicts directly.
+</Warning>
 </Accordion>
 
 <Accordion title="CapabilitiesResponse">
@@ -134,25 +136,22 @@ const result = await helper.invokeNewSession(
 
 ---
 
-## EventStream
+## Skills parameters
 
-Async iterator that yields `WireEvent` objects from JSON-RPC notifications:
+Both `createSession()` and `startTurn()` accept skill-related parameters:
 
 ```typescript
-import { createInterface } from "node:readline";
-import { EventStream } from "@meerkat/sdk";
+// Preload skills into the system prompt at session creation
+const result = await client.createSession({
+  prompt: "Hello!",
+  preload_skills: ["extraction/email", "formatting/markdown"],
+});
 
-const rl = createInterface({ input: process.stdin });
-const stream = new EventStream(rl);
-
-for await (const event of stream) {
-  console.log(event.session_id, event.sequence, event.event);
-}
+// Inject skills for a specific turn
+const result = await client.startTurn(sessionId, "Extract emails", {
+  skill_references: ["extraction/email"],
+});
 ```
-
-<Note>
-`MeerkatClient` handles JSON-RPC response/notification multiplexing internally. `EventStream` is a lower-level primitive for advanced use cases.
-</Note>
 
 ---
 

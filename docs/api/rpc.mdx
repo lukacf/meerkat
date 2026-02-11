@@ -165,7 +165,9 @@ Create a new session and run the first turn.
     "enable_memory": false,
     "host_mode": false,
     "comms_name": null,
-    "provider_params": null
+    "provider_params": null,
+    "preload_skills": ["extraction/email"],
+    "skill_references": ["formatting/markdown"]
   }
 }
 ```
@@ -367,7 +369,8 @@ Start a new turn on an existing session.
   "method": "turn/start",
   "params": {
     "session_id": "01936f8a-...",
-    "prompt": "Can you explain ownership?"
+    "prompt": "Can you explain ownership?",
+    "skill_references": ["rust-patterns/ownership"]
   }
 }
 ```

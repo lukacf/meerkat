@@ -68,6 +68,8 @@ struct WireSkillDescriptor {
     #[serde(default)]
     scope: String,
     #[serde(default)]
+    requires_capabilities: Vec<String>,
+    #[serde(default)]
     metadata: std::collections::HashMap<String, String>,
 }
 
@@ -79,6 +81,8 @@ struct WireSkillDocument {
     description: String,
     #[serde(default)]
     scope: String,
+    #[serde(default)]
+    requires_capabilities: Vec<String>,
     #[serde(default)]
     metadata: std::collections::HashMap<String, String>,
     body: String,
@@ -162,6 +166,7 @@ impl HttpSkillSource {
                     name: w.name,
                     description: w.description,
                     scope,
+                    requires_capabilities: w.requires_capabilities,
                     metadata,
                     ..Default::default()
                 }

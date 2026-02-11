@@ -801,7 +801,9 @@ impl AgentFactory {
 
         // 12. Build system prompt (single canonical path)
         let mut extra_sections: Vec<&str> = Vec::new();
-        if !inventory_section.is_empty() {
+        // Only inject skill inventory (with tool guidance) when builtins are
+        // enabled — otherwise browse_skills/load_skill don't exist.
+        if !inventory_section.is_empty() && effective_builtins {
             extra_sections.push(inventory_section.as_str());
         }
         for section in &preloaded_skill_sections {

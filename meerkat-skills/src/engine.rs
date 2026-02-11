@@ -61,7 +61,9 @@ impl SkillEngine for DefaultSkillEngine {
     async fn inventory_section(&self) -> Result<String, SkillError> {
         let all_skills = self.source.list(&SkillFilter::default()).await?;
         let available = filter_by_capabilities(all_skills, &self.available_capabilities);
-        let collections = self.source.collections().await?;
+        // Derive collections from capability-filtered skills so counts and
+        // descriptions only reflect actually-usable skills.
+        let collections = meerkat_core::skills::derive_collections(&available);
         Ok(renderer::render_inventory(
             &available,
             &collections,

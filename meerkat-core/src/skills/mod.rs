@@ -203,7 +203,11 @@ pub fn derive_collections(skills: &[SkillDescriptor]) -> Vec<SkillCollection> {
     counts
         .into_iter()
         .map(|(path, count)| SkillCollection {
-            description: format!("{count} skills"),
+            description: if count == 1 {
+                "1 skill".to_string()
+            } else {
+                format!("{count} skills")
+            },
             path,
             count,
         })
@@ -211,21 +215,30 @@ pub fn derive_collections(skills: &[SkillDescriptor]) -> Vec<SkillCollection> {
 }
 
 /// Apply a `SkillFilter` to a slice of descriptors.
+///
+/// Filters by iterating once instead of cloning the entire slice upfront.
 pub fn apply_filter(skills: &[SkillDescriptor], filter: &SkillFilter) -> Vec<SkillDescriptor> {
-    let mut result: Vec<SkillDescriptor> = skills.to_vec();
+    let query_lower = filter.query.as_ref().map(|q| q.to_lowercase());
 
-    if let Some(ref prefix) = filter.collection {
-        result.retain(|s| collection_matches_prefix(s.id.collection(), prefix));
-    }
-
-    if let Some(ref query) = filter.query {
-        let q = query.to_lowercase();
-        result.retain(|s| {
-            s.name.to_lowercase().contains(&q) || s.description.to_lowercase().contains(&q)
-        });
-    }
-
-    result
+    skills
+        .iter()
+        .filter(|s| {
+            if let Some(ref prefix) = filter.collection {
+                if !collection_matches_prefix(s.id.collection(), prefix) {
+                    return false;
+                }
+            }
+            if let Some(ref q) = query_lower {
+                if !s.name.to_lowercase().contains(q)
+                    && !s.description.to_lowercase().contains(q)
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

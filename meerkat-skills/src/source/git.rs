@@ -182,11 +182,13 @@ impl GitSkillSource {
             }
         }
 
-        let url = self.auth_url();
-        args.push(url);
+        // Use the plain URL in CLI args (visible in /proc/cmdline) and pass
+        // credentials via environment to avoid leaking tokens to process lists.
+        args.push(self.config.repo_url.clone());
         args.push(cache_dir_str);
 
-        run_git(&args).await.map_err(|e| {
+        let env = self.auth_env();
+        run_git_with_env(&args, &env).await.map_err(|e| {
             SkillError::Load(
                 format!("git clone failed for '{}': {e}", self.config.repo_url).into(),
             )
@@ -218,23 +220,50 @@ impl GitSkillSource {
         })
     }
 
-    fn auth_url(&self) -> String {
+    /// Build environment variables for git authentication.
+    ///
+    /// Returns `(key, value)` pairs to inject via `Command::env()`.
+    /// Uses `-c http.extraHeader` via env to avoid leaking tokens in
+    /// process argument lists (visible via `/proc/*/cmdline` and `ps`).
+    fn auth_env(&self) -> Vec<(String, String)> {
         match &self.config.auth {
             Some(GitSkillAuth::HttpsToken(token)) => {
-                // Insert token into URL: https://token@host/path
-                if let Some(rest) = self.config.repo_url.strip_prefix("https://") {
-                    format!("https://x-access-token:{token}@{rest}")
-                } else {
-                    self.config.repo_url.clone()
-                }
+                // Use git's http.extraHeader to inject the Authorization header
+                // via environment variables (GIT_CONFIG_COUNT + GIT_CONFIG_KEY_N/VALUE_N).
+                vec![
+                    ("GIT_CONFIG_COUNT".into(), "1".into()),
+                    ("GIT_CONFIG_KEY_0".into(), "http.extraHeader".into()),
+                    (
+                        "GIT_CONFIG_VALUE_0".into(),
+                        format!("Authorization: Bearer {token}"),
+                    ),
+                    ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                ]
             }
-            None => self.config.repo_url.clone(),
+            None => vec![("GIT_TERMINAL_PROMPT".into(), "0".into())],
         }
     }
+}
 
+/// Run a git command with extra environment variables and check for success.
+async fn run_git_with_env(args: &[String], env: &[(String, String)]) -> Result<(), String> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().await.map_err(|e| format!("failed to spawn git: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git exited with {}: {stderr}", output.status));
+    }
+    Ok(())
 }
 
 /// Run a git command and check for success.
+#[cfg_attr(not(test), allow(dead_code))]
 async fn run_git(args: &[String]) -> Result<(), String> {
     let output = tokio::process::Command::new("git")
         .args(args)

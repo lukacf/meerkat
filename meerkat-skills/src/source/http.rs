@@ -151,10 +151,12 @@ impl HttpSkillSource {
                     .metadata
                     .into_iter()
                     .collect::<indexmap::IndexMap<_, _>>();
+                let scope = w.scope.parse().unwrap_or_default();
                 SkillDescriptor {
                     id: SkillId(w.id),
                     name: w.name,
                     description: w.description,
+                    scope,
                     metadata,
                     ..Default::default()
                 }

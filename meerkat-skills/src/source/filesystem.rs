@@ -283,7 +283,7 @@ mod tests {
 
         assert_eq!(collections.len(), 1);
         assert_eq!(collections[0].path, "extraction");
-        assert_eq!(collections[0].description, "1 skills");
+        assert_eq!(collections[0].description, "1 skill");
     }
 
     #[tokio::test]

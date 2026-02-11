@@ -510,6 +510,9 @@ where
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
 
+        // Detect /skill-ref at start of message for per-turn activation
+        let user_input = self.apply_skill_ref(user_input).await;
+
         // Add user message
         self.session.push(Message::User(crate::types::UserMessage {
             content: user_input.clone(),
@@ -539,6 +542,9 @@ where
     ) -> Result<RunResult, AgentError> {
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
+
+        // Detect /skill-ref at start of message for per-turn activation
+        let user_input = self.apply_skill_ref(user_input).await;
 
         let session_id = self.session.id().clone();
         let run_prompt = user_input.clone();
@@ -687,6 +693,44 @@ where
     pub fn cancel(&mut self) {
         if !self.state.is_terminal() {
             let _ = self.state.transition(LoopState::Cancelling);
+        }
+    }
+
+    /// Detect and resolve `/skill-ref` patterns in user input.
+    ///
+    /// If the message starts with `/skill-id`, resolves the skill body via the
+    /// skill engine and prepends it to the user message. Returns the original
+    /// message unchanged if no skill ref is found or no engine is configured.
+    async fn apply_skill_ref(&self, user_input: String) -> String {
+        let engine = match &self.skill_engine {
+            Some(e) => e,
+            None => return user_input,
+        };
+
+        let (skill_id, remaining) = match super::skills::detect_skill_ref(&user_input) {
+            Some(pair) => pair,
+            None => return user_input,
+        };
+
+        let skill_id_owned = crate::skills::SkillId(skill_id.to_string());
+        match engine.resolve_and_render(&[skill_id_owned]).await {
+            Ok(resolved) if !resolved.is_empty() => {
+                tracing::info!(skill_id, "Per-turn skill activation via /skill-ref");
+                let body = &resolved[0].rendered_body;
+                if remaining.is_empty() {
+                    body.clone()
+                } else {
+                    format!("{body}\n\n{remaining}")
+                }
+            }
+            Ok(_) => {
+                tracing::warn!(skill_id, "Skill ref detected but resolved to empty");
+                user_input
+            }
+            Err(e) => {
+                tracing::warn!(skill_id, error = %e, "Failed to resolve skill ref");
+                user_input
+            }
         }
     }
 }

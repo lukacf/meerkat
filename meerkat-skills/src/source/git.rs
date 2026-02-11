@@ -37,13 +37,6 @@ impl Default for GitRef {
 }
 
 impl GitRef {
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn ref_str(&self) -> &str {
-        match self {
-            GitRef::Branch(s) | GitRef::Tag(s) | GitRef::Commit(s) => s,
-        }
-    }
-
     fn is_immutable(&self) -> bool {
         matches!(self, GitRef::Tag(_) | GitRef::Commit(_))
     }
@@ -98,6 +91,9 @@ pub struct GitSkillSource {
     config: GitSkillConfig,
     inner: RwLock<Option<FilesystemSkillSource>>,
     last_sync: RwLock<Option<Instant>>,
+    /// Serializes clone/fetch operations to prevent concurrent callers from
+    /// triggering duplicate git operations.
+    sync_mutex: tokio::sync::Mutex<()>,
 }
 
 impl GitSkillSource {
@@ -106,12 +102,13 @@ impl GitSkillSource {
             config,
             inner: RwLock::new(None),
             last_sync: RwLock::new(None),
+            sync_mutex: tokio::sync::Mutex::new(()),
         }
     }
 
     /// Ensure the repo is cloned and up to date. Lazy init.
     async fn ensure_synced(&self) -> Result<(), SkillError> {
-        // Check if we have a fresh clone
+        // Fast path: check freshness without lock
         {
             let last = self.last_sync.read().await;
             if let Some(synced_at) = *last {
@@ -120,6 +117,21 @@ impl GitSkillSource {
                 }
                 if synced_at.elapsed() < self.config.refresh_interval {
                     return Ok(()); // Still fresh
+                }
+            }
+        }
+
+        // Serialize concurrent sync operations
+        let _sync_guard = self.sync_mutex.lock().await;
+
+        // Re-check after acquiring lock (another caller may have synced)
+        {
+            let last = self.last_sync.read().await;
+            if let Some(synced_at) = *last {
+                if self.config.git_ref.is_immutable()
+                    || synced_at.elapsed() < self.config.refresh_interval
+                {
+                    return Ok(());
                 }
             }
         }
@@ -147,12 +159,27 @@ impl GitSkillSource {
             }
         } else {
             // First access — clone
-            self.gix_clone().await?;
+            if let Err(e) = self.gix_clone().await {
+                // Clean up partial clone directory to prevent stale .git
+                let _ = tokio::fs::remove_dir_all(repo_dir).await;
+                return Err(e);
+            }
         }
 
         // Rebuild the inner FilesystemSkillSource
         let skills_dir = match &self.config.skills_root {
-            Some(root) => repo_dir.join(root),
+            Some(root) => {
+                let joined = repo_dir.join(root);
+                // Validate skills_root doesn't escape the repo directory
+                let canonical = joined.canonicalize().unwrap_or_else(|_| joined.clone());
+                let repo_canonical = repo_dir.canonicalize().unwrap_or_else(|_| repo_dir.clone());
+                if !canonical.starts_with(&repo_canonical) {
+                    return Err(SkillError::Load(
+                        format!("skills_root '{}' escapes repository directory", root).into(),
+                    ));
+                }
+                joined
+            }
             None => repo_dir.clone(),
         };
 
@@ -299,11 +326,10 @@ fn gix_fetch_blocking(repo_dir: &Path, repo_url: &str) -> Result<(), SkillError>
         .map_err(|e| SkillError::Load(format!("cannot read HEAD: {e}").into()))?;
 
     if let Some(referent) = head.referent_name() {
-        let branch_name = referent
-            .as_bstr()
-            .to_string()
+        let referent_str = referent.as_bstr().to_string();
+        let branch_name = referent_str
             .strip_prefix("refs/heads/")
-            .unwrap_or(&referent.as_bstr().to_string())
+            .unwrap_or(&referent_str)
             .to_string();
         let tracking_name = format!("refs/remotes/origin/{branch_name}");
 

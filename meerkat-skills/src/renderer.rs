@@ -51,6 +51,9 @@ pub fn render_inventory(
 }
 
 /// Escape XML-special characters in text content.
+/// Note: O(5n) worst case — five sequential replace() calls, each allocating.
+/// Acceptable for short strings (skill names/descriptions). For large content,
+/// consider a single-pass escaper.
 fn escape_xml(s: &str) -> Cow<'_, str> {
     if s.contains('&') || s.contains('<') || s.contains('>') || s.contains('"') || s.contains('\'')
     {
@@ -114,8 +117,9 @@ pub fn render_injection_with_limit(id: &str, body: &str, max_bytes: usize) -> St
     // 1. Escape closing tags in the body BEFORE wrapping/truncating.
     let escaped_body = escape_closing_tags(body);
 
-    // 2. Wrap in <skill> tags.
-    let mut content = format!("<skill id=\"{id}\">\n{escaped_body}\n</skill>");
+    // 2. Wrap in <skill> tags (escape id to prevent attribute breakout).
+    let escaped_id = escape_xml(id);
+    let mut content = format!("<skill id=\"{escaped_id}\">\n{escaped_body}\n</skill>");
 
     // 3. Truncate if needed (after escaping). Use char boundary to avoid UTF-8 split.
     if content.len() > max_bytes {

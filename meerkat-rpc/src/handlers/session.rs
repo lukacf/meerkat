@@ -65,6 +65,9 @@ pub struct CreateSessionParams {
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
+    /// Skill IDs to preload into the system prompt.
+    #[serde(default)]
+    pub preload_skills: Option<Vec<String>>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -161,6 +164,9 @@ pub async fn handle_create(
     build_config.override_subagents = Some(params.enable_subagents);
     build_config.override_memory = Some(params.enable_memory);
     build_config.provider_params = params.provider_params;
+    build_config.preload_skills = params.preload_skills.map(|ids| {
+        ids.into_iter().map(meerkat_core::skills::SkillId).collect()
+    });
 
     // Create the session
     let session_id = match runtime.create_session(build_config).await {

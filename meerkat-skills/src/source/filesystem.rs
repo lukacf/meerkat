@@ -44,7 +44,10 @@ async fn find_skill_files(root: &Path, dir: &Path) -> Vec<(String, PathBuf)> {
     while let Some(current) = stack.pop() {
         let mut entries = match tokio::fs::read_dir(&current).await {
             Ok(entries) => entries,
-            Err(_) => continue,
+            Err(e) => {
+                tracing::warn!("Failed to read skill directory {}: {e}", current.display());
+                continue;
+            }
         };
 
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -101,14 +104,19 @@ async fn load_collection_descriptions_recursive(
         .await
         .unwrap_or(false)
     {
-        if let Ok(content) = tokio::fs::read_to_string(&collection_file).await {
-            if let Ok(relative) = dir.strip_prefix(root) {
-                if let Some(rel_str) = relative.to_str() {
-                    let path = rel_str.replace(std::path::MAIN_SEPARATOR, "/");
-                    if !path.is_empty() {
-                        descriptions.insert(path, content.trim().to_string());
+        match tokio::fs::read_to_string(&collection_file).await {
+            Ok(content) => {
+                if let Ok(relative) = dir.strip_prefix(root) {
+                    if let Some(rel_str) = relative.to_str() {
+                        let path = rel_str.replace(std::path::MAIN_SEPARATOR, "/");
+                        if !path.is_empty() {
+                            descriptions.insert(path, content.trim().to_string());
+                        }
                     }
                 }
+            }
+            Err(e) => {
+                tracing::debug!("Failed to read {}: {e}", collection_file.display());
             }
         }
     }
@@ -168,7 +176,23 @@ impl SkillSource for FilesystemSkillSource {
     }
 
     async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError> {
+        // Validate the ID doesn't escape the skills root via path traversal.
         let skill_dir = self.root.join(&id.0);
+        let canonical = skill_dir
+            .canonicalize()
+            .or_else(|_| {
+                // canonicalize fails if path doesn't exist — use the parent to check
+                skill_dir.parent()
+                    .map(|p| p.canonicalize().map(|c| c.join(skill_dir.file_name().unwrap_or_default())))
+                    .unwrap_or(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve")))
+            })
+            .unwrap_or_else(|_| skill_dir.clone());
+        let root_canonical = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        if !canonical.starts_with(&root_canonical) {
+            return Err(SkillError::Load(
+                format!("skill ID '{}' resolves outside skills root", id.0).into(),
+            ));
+        }
         let skill_file = skill_dir.join("SKILL.md");
 
         let content = tokio::fs::read_to_string(&skill_file)

@@ -151,7 +151,12 @@ impl HttpSkillSource {
                     .metadata
                     .into_iter()
                     .collect::<indexmap::IndexMap<_, _>>();
-                let scope = w.scope.parse().unwrap_or_default();
+                let scope = w.scope.parse().unwrap_or_else(|_| {
+                    if !w.scope.is_empty() {
+                        tracing::debug!(scope = %w.scope, skill = %w.id, "Unknown scope, defaulting to Builtin");
+                    }
+                    Default::default()
+                });
                 SkillDescriptor {
                     id: SkillId(w.id),
                     name: w.name,

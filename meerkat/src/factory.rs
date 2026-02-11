@@ -897,6 +897,11 @@ impl AgentFactory {
             builder = builder.compactor(compactor);
         }
 
+        // 12d. Wire skill engine for per-turn /skill-ref activation
+        if let Some(engine) = skill_engine {
+            builder = builder.with_skill_engine(engine);
+        }
+
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
 

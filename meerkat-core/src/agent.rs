@@ -217,4 +217,6 @@ where
     pub(crate) last_compaction_turn: Option<u32>,
     /// Optional memory store for indexing compaction discards.
     pub(crate) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
+    /// Optional skill engine for per-turn `/skill-ref` activation.
+    pub(crate) skill_engine: Option<Arc<dyn crate::skills::SkillEngine>>,
 }

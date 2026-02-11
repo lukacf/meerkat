@@ -31,14 +31,15 @@ class _StdoutDispatcher:
     async def stop(self) -> None:
         """Stop the background reader, fail pending futures, and cancel the task."""
         self._closed = True
-        # Fail all pending futures so callers don't hang
-        self._fail_all("CLIENT_CLOSED", "client stopped")
+        # Cancel the task first so _read_loop stops mutating shared state
         if self._task:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        # Now safe to fail remaining futures (no concurrent _read_loop)
+        self._fail_all("CLIENT_CLOSED", "client stopped")
 
     def expect_response(self, request_id: int) -> "asyncio.Future[dict]":
         """Register a future that will be resolved when a response with this ID arrives."""
@@ -85,6 +86,10 @@ class _StdoutDispatcher:
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
+                import logging
+                logging.getLogger("meerkat.streaming").warning(
+                    "Malformed JSON from rkat rpc: %s", line[:200]
+                )
                 continue
             if "id" in data:
                 request_id = data["id"]

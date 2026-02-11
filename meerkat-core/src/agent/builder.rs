@@ -30,6 +30,7 @@ pub struct AgentBuilder {
     pub(super) hook_run_overrides: HookRunOverrides,
     pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
+    pub(super) skill_engine: Option<Arc<dyn crate::skills::SkillEngine>>,
 }
 
 impl AgentBuilder {
@@ -48,6 +49,7 @@ impl AgentBuilder {
             hook_run_overrides: HookRunOverrides::default(),
             compactor: None,
             memory_store: None,
+            skill_engine: None,
         }
     }
 
@@ -197,7 +199,14 @@ impl AgentBuilder {
             last_input_tokens: 0,
             last_compaction_turn: None,
             memory_store: self.memory_store,
+            skill_engine: self.skill_engine,
         }
+    }
+
+    /// Set the skill engine for per-turn `/skill-ref` activation.
+    pub fn with_skill_engine(mut self, engine: Arc<dyn crate::skills::SkillEngine>) -> Self {
+        self.skill_engine = Some(engine);
+        self
     }
 }
 

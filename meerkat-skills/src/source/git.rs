@@ -278,6 +278,64 @@ impl SkillSource for GitSkillSource {
     }
 }
 
+/// Test support utilities for creating local bare repos.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    /// Create a local bare git repo with a sample skill and push initial commit.
+    pub async fn init_test_repo(repo_dir: &std::path::Path, work_dir: &std::path::Path) {
+        run_git(&[
+            "init".into(),
+            "--bare".into(),
+            repo_dir.to_str().unwrap().into(),
+        ])
+        .await
+        .unwrap();
+
+        run_git(&[
+            "clone".into(),
+            repo_dir.to_str().unwrap().into(),
+            work_dir.to_str().unwrap().into(),
+        ])
+        .await
+        .unwrap();
+
+        let skill_dir = work_dir.join("extraction/email");
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        tokio::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: email\ndescription: Extract from emails\n---\n\n# Email\n\nBody.",
+        )
+        .await
+        .unwrap();
+
+        let coll_dir = work_dir.join("extraction");
+        tokio::fs::write(coll_dir.join("COLLECTION.md"), "Entity extraction skills")
+            .await
+            .unwrap();
+
+        run_git_in_dir(work_dir, &["add".into(), "-A".into()])
+            .await
+            .unwrap();
+        run_git_in_dir(
+            work_dir,
+            &[
+                "commit".into(),
+                "-m".into(),
+                "Initial skills".into(),
+                "--author".into(),
+                "Test <test@test.com>".into(),
+            ],
+        )
+        .await
+        .unwrap();
+        run_git_in_dir(work_dir, &["push".into()])
+            .await
+            .unwrap();
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

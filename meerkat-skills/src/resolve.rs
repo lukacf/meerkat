@@ -67,21 +67,96 @@ pub async fn resolve_repositories(
                         )),
                     });
                 }
-                SkillRepoTransport::Http { .. } => {
-                    // HTTP source requires `skills-http` feature (Phase 10).
-                    // For now, log a warning and skip.
-                    tracing::warn!(
-                        "Skill repository '{}' uses HTTP transport which is not yet supported. Skipping.",
-                        repo.name
-                    );
+                SkillRepoTransport::Http {
+                    url,
+                    auth_header,
+                    auth_token,
+                    refresh_seconds,
+                } => {
+                    #[cfg(feature = "skills-http")]
+                    {
+                        use crate::source::http::{HttpSkillAuth, HttpSkillSource};
+
+                        let auth = match (auth_header.as_deref(), auth_token.as_deref()) {
+                            (Some(header), Some(token)) => {
+                                Some(HttpSkillAuth::Header {
+                                    name: header.to_string(),
+                                    value: token.to_string(),
+                                })
+                            }
+                            (None, Some(token)) => {
+                                Some(HttpSkillAuth::Bearer(token.to_string()))
+                            }
+                            _ => None,
+                        };
+
+                        sources.push(NamedSource {
+                            name: repo.name.clone(),
+                            source: Box::new(HttpSkillSource::new(
+                                url.clone(),
+                                auth,
+                                std::time::Duration::from_secs(*refresh_seconds),
+                            )),
+                        });
+                    }
+                    #[cfg(not(feature = "skills-http"))]
+                    {
+                        let _ = (url, auth_header, auth_token, refresh_seconds);
+                        tracing::warn!(
+                            "Skill repository '{}' uses HTTP transport. \
+                             Compile with `skills-http` feature to enable. Skipping.",
+                            repo.name
+                        );
+                    }
                 }
-                SkillRepoTransport::Git { .. } => {
-                    // Git source requires `skills-git` feature (Phase 11).
-                    // For now, log a warning and skip.
-                    tracing::warn!(
-                        "Skill repository '{}' uses Git transport which is not yet supported. Skipping.",
-                        repo.name
-                    );
+                SkillRepoTransport::Git {
+                    url,
+                    git_ref,
+                    ref_type,
+                    skills_root,
+                    auth_token,
+                    refresh_seconds,
+                    depth,
+                    ..
+                } => {
+                    use crate::source::git::{GitRef, GitSkillAuth, GitSkillConfig, GitSkillSource};
+
+                    let git_ref_enum = match ref_type {
+                        meerkat_core::skills_config::GitRefType::Branch => {
+                            GitRef::Branch(git_ref.clone())
+                        }
+                        meerkat_core::skills_config::GitRefType::Tag => {
+                            GitRef::Tag(git_ref.clone())
+                        }
+                        meerkat_core::skills_config::GitRefType::Commit => {
+                            GitRef::Commit(git_ref.clone())
+                        }
+                    };
+
+                    // Derive cache dir from repo URL hash
+                    let cache_dir = project_root
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(".rkat/skill-repos")
+                        .join(sanitize_repo_name(url));
+
+                    let auth = auth_token
+                        .as_ref()
+                        .map(|t| GitSkillAuth::HttpsToken(t.clone()));
+
+                    let config = GitSkillConfig {
+                        repo_url: url.clone(),
+                        git_ref: git_ref_enum,
+                        cache_dir,
+                        skills_root: skills_root.clone(),
+                        refresh_interval: std::time::Duration::from_secs(*refresh_seconds),
+                        auth,
+                        depth: *depth,
+                    };
+
+                    sources.push(NamedSource {
+                        name: repo.name.clone(),
+                        source: Box::new(GitSkillSource::new(config)),
+                    });
                 }
             }
         }
@@ -94,6 +169,13 @@ pub async fn resolve_repositories(
     });
 
     Ok(Some(Arc::new(CompositeSkillSource::from_named(sources))))
+}
+
+/// Sanitize a repo URL into a valid directory name.
+fn sanitize_repo_name(url: &str) -> String {
+    url.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
 }
 
 #[cfg(test)]
@@ -187,5 +269,131 @@ mod tests {
 
         let source = resolve_repositories(&config, None).await.unwrap();
         assert!(source.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_git_repo() {
+        let tmp = TempDir::new().unwrap();
+
+        // Create a local bare repo with a skill
+        let repo_dir = tmp.path().join("test-repo");
+        let work_dir = tmp.path().join("work");
+
+        tokio::fs::create_dir_all(&repo_dir).await.unwrap();
+        crate::source::git::tests_support::init_test_repo(&repo_dir, &work_dir).await;
+
+        let config = SkillsConfig {
+            repositories: vec![meerkat_core::skills_config::SkillRepositoryConfig {
+                name: "git-test".into(),
+                transport: SkillRepoTransport::Git {
+                    url: format!("file://{}", repo_dir.display()),
+                    git_ref: "main".into(),
+                    ref_type: meerkat_core::skills_config::GitRefType::Branch,
+                    skills_root: None,
+                    auth_token: None,
+                    ssh_key: None,
+                    refresh_seconds: 300,
+                    depth: None,
+                },
+            }],
+            ..Default::default()
+        };
+
+        let source = resolve_repositories(&config, Some(tmp.path()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let skills = source.list(&SkillFilter::default()).await.unwrap();
+        assert!(skills.iter().any(|s| s.id.0 == "extraction/email"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_mixed_repos() {
+        let tmp = TempDir::new().unwrap();
+
+        // Create filesystem skills
+        let fs_dir = tmp.path().join("fs-skills/test-skill");
+        tokio::fs::create_dir_all(&fs_dir).await.unwrap();
+        tokio::fs::write(
+            fs_dir.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: FS skill\n---\n\nBody.",
+        )
+        .await
+        .unwrap();
+
+        let config = SkillsConfig {
+            repositories: vec![
+                meerkat_core::skills_config::SkillRepositoryConfig {
+                    name: "filesystem".into(),
+                    transport: SkillRepoTransport::Filesystem {
+                        path: tmp.path().join("fs-skills").to_str().unwrap().into(),
+                    },
+                },
+                // HTTP repo would require a server — skip in this test
+            ],
+            ..Default::default()
+        };
+
+        let source = resolve_repositories(&config, Some(tmp.path()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let skills = source.list(&SkillFilter::default()).await.unwrap();
+        assert!(skills.iter().any(|s| s.id.0 == "test-skill"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_precedence_matches_config() {
+        let tmp = TempDir::new().unwrap();
+
+        // Create two filesystem sources with the same skill ID
+        let fs1_dir = tmp.path().join("fs1/shared-skill");
+        tokio::fs::create_dir_all(&fs1_dir).await.unwrap();
+        tokio::fs::write(
+            fs1_dir.join("SKILL.md"),
+            "---\nname: shared-skill\ndescription: From first source\n---\n\nFirst.",
+        )
+        .await
+        .unwrap();
+
+        let fs2_dir = tmp.path().join("fs2/shared-skill");
+        tokio::fs::create_dir_all(&fs2_dir).await.unwrap();
+        tokio::fs::write(
+            fs2_dir.join("SKILL.md"),
+            "---\nname: shared-skill\ndescription: From second source\n---\n\nSecond.",
+        )
+        .await
+        .unwrap();
+
+        let config = SkillsConfig {
+            repositories: vec![
+                meerkat_core::skills_config::SkillRepositoryConfig {
+                    name: "first".into(),
+                    transport: SkillRepoTransport::Filesystem {
+                        path: tmp.path().join("fs1").to_str().unwrap().into(),
+                    },
+                },
+                meerkat_core::skills_config::SkillRepositoryConfig {
+                    name: "second".into(),
+                    transport: SkillRepoTransport::Filesystem {
+                        path: tmp.path().join("fs2").to_str().unwrap().into(),
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+
+        let source = resolve_repositories(&config, Some(tmp.path()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let skills = source.list(&SkillFilter::default()).await.unwrap();
+        // First source wins
+        let shared = skills.iter().find(|s| s.id.0 == "shared-skill").unwrap();
+        assert_eq!(shared.description, "From first source");
+        assert_eq!(shared.source_name, "first");
     }
 }

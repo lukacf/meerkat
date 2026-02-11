@@ -68,9 +68,9 @@ fn render_inventory_flat(skills: &[SkillDescriptor]) -> String {
 fn render_inventory_collections(collections: &[SkillCollection]) -> String {
     let mut output = String::from("<available_skills mode=\"collections\">\n");
     for coll in collections {
-        let _ = write!(
+        let _ = writeln!(
             output,
-            "  <collection path=\"{}\" count=\"{}\">{}</collection>\n",
+            "  <collection path=\"{}\" count=\"{}\">{}</collection>",
             coll.path, coll.count, coll.description,
         );
     }

@@ -28,8 +28,8 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["Luka Crnkovic-Friis"]
 repository = "https://github.com/lukacf/meerkat"
-homepage = "https://meerkat.mintlify.app"
-documentation = "https://meerkat.mintlify.app"
+homepage = "https://docs.rkat.ai"
+documentation = "https://docs.rkat.ai"
 keywords = ["agent", "llm", "ai", "meerkat"]
 categories = ["development-tools", "api-bindings"]
 

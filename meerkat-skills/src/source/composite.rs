@@ -75,11 +75,13 @@ impl SkillSource for CompositeSkillSource {
     }
 
     async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError> {
-        let empty_filter = SkillFilter::default();
+        // Try each source directly — avoids listing every source (expensive
+        // for HTTP/git) just to check membership.
         for named in &self.sources {
-            let descriptors = named.source.list(&empty_filter).await?;
-            if descriptors.iter().any(|d| &d.id == id) {
-                return named.source.load(id).await;
+            match named.source.load(id).await {
+                Ok(doc) => return Ok(doc),
+                Err(SkillError::NotFound { .. }) => continue,
+                Err(e) => return Err(e),
             }
         }
         Err(SkillError::NotFound { id: id.clone() })

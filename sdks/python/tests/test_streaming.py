@@ -163,24 +163,26 @@ class TestStdoutDispatcher:
 
     @pytest.mark.asyncio
     async def test_catchall_captures_unknown_session(self):
-        """Catchall captures events before session_id is known, then auto-promotes."""
+        """Catchall captures events before session_id is known, promotes on response."""
         ev1 = {"type": "run_started", "session_id": "new-id", "prompt": "hi"}
         ev2 = {"type": "text_delta", "delta": "hello"}
         reader = make_reader([
             event_notification("new-id", ev1),
-            event_notification("new-id", ev2),  # sent after promotion
-            response(1, {}),
+            event_notification("new-id", ev2),
+            response(1, {"session_id": "new-id", "text": "done"}),
         ])
         d = _StdoutDispatcher(reader)
         d.start()
-        catchall = d.subscribe_catchall()
+        catchall = d.subscribe_catchall(request_id=1)
         _ = d.expect_response(1)
-        # First event arrives via catchall
+        # Events arrive via catchall before response
         e1 = await asyncio.wait_for(catchall.get(), timeout=1.0)
         assert e1["type"] == "run_started"
-        # Second event arrives on the same queue (now promoted to session-keyed)
         e2 = await asyncio.wait_for(catchall.get(), timeout=1.0)
         assert e2["type"] == "text_delta"
+        # After response, catchall is promoted to session "new-id"
+        await asyncio.sleep(0.05)  # let dispatcher process response
+        assert d._catchall_queue is None
         await d.stop()
 
     @pytest.mark.asyncio

@@ -52,12 +52,14 @@ pub fn render_inventory(
 
 /// Escape XML-special characters in text content.
 fn escape_xml(s: &str) -> Cow<'_, str> {
-    if s.contains('&') || s.contains('<') || s.contains('>') || s.contains('"') {
+    if s.contains('&') || s.contains('<') || s.contains('>') || s.contains('"') || s.contains('\'')
+    {
         Cow::Owned(
             s.replace('&', "&amp;")
                 .replace('<', "&lt;")
                 .replace('>', "&gt;")
-                .replace('"', "&quot;"),
+                .replace('"', "&quot;")
+                .replace('\'', "&apos;"),
         )
     } else {
         Cow::Borrowed(s)
@@ -104,6 +106,11 @@ fn render_inventory_collections(collections: &[SkillCollection]) -> String {
 /// Escapes `</skill>` variants in the body (case-insensitive, optional whitespace)
 /// before truncation. Returns the `<skill id="...">body</skill>` XML block.
 pub fn render_injection(id: &str, body: &str) -> String {
+    render_injection_with_limit(id, body, MAX_INJECTION_BYTES)
+}
+
+/// Render a per-turn skill injection block with a configurable size limit.
+pub fn render_injection_with_limit(id: &str, body: &str, max_bytes: usize) -> String {
     // 1. Escape closing tags in the body BEFORE wrapping/truncating.
     let escaped_body = escape_closing_tags(body);
 
@@ -111,15 +118,15 @@ pub fn render_injection(id: &str, body: &str) -> String {
     let mut content = format!("<skill id=\"{id}\">\n{escaped_body}\n</skill>");
 
     // 3. Truncate if needed (after escaping). Use char boundary to avoid UTF-8 split.
-    if content.len() > MAX_INJECTION_BYTES {
+    if content.len() > max_bytes {
         tracing::warn!(
             "Skill injection for '{}' truncated from {} to {} bytes",
             id,
             content.len(),
-            MAX_INJECTION_BYTES,
+            max_bytes,
         );
         let marker = "[truncated]";
-        let target = MAX_INJECTION_BYTES - marker.len();
+        let target = max_bytes - marker.len();
         // Find a valid char boundary at or before the target position.
         let boundary = floor_char_boundary(&content, target);
         content.truncate(boundary);

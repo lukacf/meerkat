@@ -115,9 +115,9 @@ pub async fn resolve_repositories(
                     ref_type,
                     skills_root,
                     auth_token,
+                    ssh_key,
                     refresh_seconds,
                     depth,
-                    ..
                 } => {
                     use crate::source::git::{GitRef, GitSkillAuth, GitSkillConfig, GitSkillSource};
 
@@ -138,6 +138,13 @@ pub async fn resolve_repositories(
                         .unwrap_or_else(|| Path::new("."))
                         .join(".rkat/skill-repos")
                         .join(sanitize_repo_name(url));
+
+                    if ssh_key.is_some() {
+                        tracing::warn!(
+                            repo = %repo.name,
+                            "ssh_key is not yet supported for git skill repos; use auth_token instead"
+                        );
+                    }
 
                     let auth = auth_token
                         .as_ref()

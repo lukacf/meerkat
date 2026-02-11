@@ -31,6 +31,12 @@ impl FilesystemSkillSource {
 
 /// Recursively find all `SKILL.md` files under `dir`.
 /// Returns pairs of (relative_path_from_root, absolute_skill_md_path).
+/// Recursively find `SKILL.md` files under `dir`, returning `(id, path)` pairs.
+///
+/// Directories containing `SKILL.md` are treated as leaf skill directories —
+/// their subdirectories are NOT recursed into. This means a skill cannot
+/// contain nested skills. Only directories without `SKILL.md` are explored
+/// further (they act as collection/namespace directories).
 async fn find_skill_files(root: &Path, dir: &Path) -> Vec<(String, PathBuf)> {
     let mut results = Vec::new();
     let mut stack = vec![dir.to_path_buf()];

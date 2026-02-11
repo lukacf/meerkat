@@ -14,6 +14,8 @@ use crate::renderer;
 pub struct DefaultSkillEngine {
     source: Box<dyn SkillSource>,
     available_capabilities: HashSet<String>,
+    inventory_threshold: usize,
+    max_injection_bytes: usize,
 }
 
 impl DefaultSkillEngine {
@@ -21,7 +23,21 @@ impl DefaultSkillEngine {
         Self {
             source,
             available_capabilities: available_capabilities.into_iter().collect(),
+            inventory_threshold: renderer::DEFAULT_INVENTORY_THRESHOLD,
+            max_injection_bytes: renderer::MAX_INJECTION_BYTES,
         }
+    }
+
+    /// Set the inventory threshold from config (overrides default).
+    pub fn with_inventory_threshold(mut self, threshold: usize) -> Self {
+        self.inventory_threshold = threshold;
+        self
+    }
+
+    /// Set the max injection bytes from config (overrides default).
+    pub fn with_max_injection_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_injection_bytes = max_bytes;
+        self
     }
 }
 
@@ -49,7 +65,7 @@ impl SkillEngine for DefaultSkillEngine {
         Ok(renderer::render_inventory(
             &available,
             &collections,
-            renderer::DEFAULT_INVENTORY_THRESHOLD,
+            self.inventory_threshold,
         ))
     }
 
@@ -72,7 +88,9 @@ impl SkillEngine for DefaultSkillEngine {
                 ));
             }
 
-            let rendered = renderer::render_injection(&id.0, &doc.body);
+            let rendered = renderer::render_injection_with_limit(
+                &id.0, &doc.body, self.max_injection_bytes,
+            );
             let byte_size = rendered.len();
             results.push(ResolvedSkill {
                 id: id.clone(),

@@ -19,6 +19,8 @@ class _StdoutDispatcher:
         self._pending_responses: dict[int, asyncio.Future] = {}
         self._event_queues: dict[str, asyncio.Queue] = {}
         self._catchall_queue: Optional[asyncio.Queue] = None
+        # request_id that owns the catchall (for validation)
+        self._catchall_request_id: Optional[int] = None
         self._task: Optional[asyncio.Task] = None
         self._closed = False
 
@@ -27,8 +29,10 @@ class _StdoutDispatcher:
         self._task = asyncio.get_running_loop().create_task(self._read_loop())
 
     async def stop(self) -> None:
-        """Stop the background reader and cancel pending work."""
+        """Stop the background reader, fail pending futures, and cancel the task."""
         self._closed = True
+        # Fail all pending futures so callers don't hang
+        self._fail_all("CLIENT_CLOSED", "client stopped")
         if self._task:
             self._task.cancel()
             try:
@@ -52,20 +56,24 @@ class _StdoutDispatcher:
         """Remove the event queue for a session."""
         self._event_queues.pop(session_id, None)
 
-    def subscribe_catchall(self) -> asyncio.Queue:
+    def subscribe_catchall(self, request_id: int) -> asyncio.Queue:
         """Subscribe a catch-all queue for events with no dedicated subscriber.
 
         Only one catchall can be active at a time. Used by
         ``create_session_streaming`` before the session_id is known.
+        The ``request_id`` is used to correlate the catchall with the
+        response that will reveal the session_id.
         """
         if self._catchall_queue is not None:
             raise RuntimeError("Only one catchall subscriber at a time")
         self._catchall_queue = asyncio.Queue()
+        self._catchall_request_id = request_id
         return self._catchall_queue
 
     def unsubscribe_catchall(self) -> None:
         """Remove the catchall queue without promoting it."""
         self._catchall_queue = None
+        self._catchall_request_id = None
 
     async def _read_loop(self) -> None:
         """Main loop: read lines, dispatch to responses or event queues."""
@@ -92,7 +100,19 @@ class _StdoutDispatcher:
                             )
                         )
                     else:
-                        future.set_result(data.get("result", {}))
+                        result = data.get("result", {})
+                        future.set_result(result)
+                        # If this is the response for the catchall owner,
+                        # promote the catchall queue to the real session_id.
+                        if (
+                            request_id == self._catchall_request_id
+                            and self._catchall_queue is not None
+                        ):
+                            sid = result.get("session_id", "")
+                            if sid:
+                                self._event_queues[sid] = self._catchall_queue
+                            self._catchall_queue = None
+                            self._catchall_request_id = None
             elif "method" in data:
                 params = data.get("params", {})
                 session_id = params.get("session_id", "")
@@ -102,8 +122,6 @@ class _StdoutDispatcher:
                     await queue.put(event)
                 elif self._catchall_queue is not None:
                     await self._catchall_queue.put(event)
-                    self._event_queues[session_id] = self._catchall_queue
-                    self._catchall_queue = None
 
     def _fail_all(self, code: str, message: str) -> None:
         """Fail all pending response futures and close all event queues.
@@ -120,6 +138,7 @@ class _StdoutDispatcher:
         if self._catchall_queue is not None:
             self._catchall_queue.put_nowait(None)
             self._catchall_queue = None
+            self._catchall_request_id = None
 
 
 class StreamingTurn:
@@ -187,40 +206,47 @@ class StreamingTurn:
 
     async def _iter_events(self) -> AsyncIterator[dict]:
         """Yield events until the response future resolves, then drain remaining."""
-        queue_get = None
-        while True:
-            if self._response_future.done():
-                # Drain any remaining queued events
-                while not self._event_queue.empty():
-                    event = self._event_queue.get_nowait()
-                    if event is None:
-                        break
-                    yield event
-                self._result = self._parse_result(await self._response_future)
-                if not self._session_id:
-                    self._session_id = getattr(self._result, "session_id", "")
-                return
-
-            # Wait for either an event or the response, whichever comes first.
-            if queue_get is None or queue_get.done():
-                queue_get = asyncio.ensure_future(self._event_queue.get())
-
-            done, _ = await asyncio.wait(
-                [queue_get, asyncio.ensure_future(self._response_future)],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            # If the queue produced a result, yield it
-            if queue_get in done:
-                event = queue_get.result()
-                queue_get = None  # will be recreated next iteration
-                if event is None:
-                    self._result = self._parse_result(await self._response_future)
+        queue_get: Optional[asyncio.Task] = None
+        # Wrap the response future once (not per-iteration)
+        response_task = asyncio.ensure_future(self._response_future)
+        try:
+            while True:
+                if response_task.done():
+                    # Drain any remaining queued events
+                    while not self._event_queue.empty():
+                        event = self._event_queue.get_nowait()
+                        if event is None:
+                            break
+                        yield event
+                    self._result = self._parse_result(await response_task)
                     if not self._session_id:
                         self._session_id = getattr(self._result, "session_id", "")
                     return
-                yield event
-            # If the response resolved, loop back to the top which handles it
+
+                # Wait for either an event or the response, whichever comes first.
+                if queue_get is None or queue_get.done():
+                    queue_get = asyncio.ensure_future(self._event_queue.get())
+
+                done, _ = await asyncio.wait(
+                    [queue_get, response_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                # If the queue produced a result, yield it
+                if queue_get in done:
+                    event = queue_get.result()
+                    queue_get = None  # will be recreated next iteration
+                    if event is None:
+                        self._result = self._parse_result(await response_task)
+                        if not self._session_id:
+                            self._session_id = getattr(self._result, "session_id", "")
+                        return
+                    yield event
+                # If the response resolved, loop back to the top which handles it
+        finally:
+            # Cancel any pending queue_get task to avoid orphaned task warnings
+            if queue_get is not None and not queue_get.done():
+                queue_get.cancel()
 
     async def collect(self):
         """Consume all events silently and return the final result."""

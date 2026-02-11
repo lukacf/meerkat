@@ -34,7 +34,12 @@ class WireRunResult:
 
 @dataclass
 class WireEvent:
-    """Event notification from the RPC server."""
+    """Event notification from the RPC server.
+
+    .. deprecated::
+        The streaming API (``StreamingTurn``) yields raw event dicts directly.
+        This type is retained for backward compatibility only.
+    """
     session_id: str = ''
     event: Optional[dict] = None
 

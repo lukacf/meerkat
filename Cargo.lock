@@ -2452,36 +2452,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "meerkat-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "dirs",
- "futures",
- "humantime",
- "meerkat",
- "meerkat-client",
- "meerkat-comms",
- "meerkat-core",
- "meerkat-mcp",
- "meerkat-rpc",
- "meerkat-store",
- "meerkat-tools",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "toml_edit",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "meerkat-client"
 version = "0.1.0"
 dependencies = [
@@ -3460,6 +3430,36 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rkat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dirs",
+ "futures",
+ "humantime",
+ "meerkat",
+ "meerkat-client",
+ "meerkat-comms",
+ "meerkat-core",
+ "meerkat-mcp",
+ "meerkat-rpc",
+ "meerkat-store",
+ "meerkat-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

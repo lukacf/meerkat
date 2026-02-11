@@ -1,6 +1,7 @@
 [package]
 name = "mcp-test-server"
 description = "MCP test server for Meerkat testing"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -7,7 +7,7 @@ members = [
     "meerkat-tools",
     "meerkat-mcp",
     "meerkat-mcp-server",
-    "meerkat-cli",
+    "meerkat-cli",  # publishes as "rkat" on crates.io
     "meerkat-rest",
     "meerkat",
     "meerkat-comms",
@@ -28,6 +28,10 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["Meerkat Contributors"]
 repository = "https://github.com/lukacf/meerkat"
+homepage = "https://meerkat.mintlify.app"
+documentation = "https://meerkat.mintlify.app"
+keywords = ["agent", "llm", "ai", "meerkat"]
+categories = ["development-tools", "api-bindings"]
 
 [workspace.dependencies]
 # Async runtime

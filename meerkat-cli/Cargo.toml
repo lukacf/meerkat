@@ -1,12 +1,16 @@
 [package]
-name = "meerkat-cli"
-description = "Headless CLI for Meerkat"
+name = "rkat"
+description = "CLI for the Meerkat agent platform — run LLM agents from the terminal"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "rkat"

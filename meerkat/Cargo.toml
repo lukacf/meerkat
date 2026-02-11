@@ -1,12 +1,16 @@
 [package]
 name = "meerkat"
-description = "Meerkat - Rust Agentic Interface Kit"
+description = "Modular, high-performance agent harness for LLM-powered applications"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }

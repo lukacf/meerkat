@@ -18,9 +18,13 @@ class _StdoutDispatcher:
         self._stdout = stdout
         self._pending_responses: dict[int, asyncio.Future] = {}
         self._event_queues: dict[str, asyncio.Queue] = {}
-        self._catchall_queue: Optional[asyncio.Queue] = None
-        # request_id that owns the catchall (for validation)
-        self._catchall_request_id: Optional[int] = None
+        # Pending create_session_streaming: request_id → queue.
+        # Events are buffered per session_id internally; when the response
+        # reveals the real session_id, buffered events are flushed to the queue.
+        self._pending_stream_queue: Optional[asyncio.Queue] = None
+        self._pending_stream_request_id: Optional[int] = None
+        # Events arriving before the session_id is known, keyed by session_id
+        self._unmatched_buffer: dict[str, list] = {}
         self._task: Optional[asyncio.Task] = None
         self._closed = False
 
@@ -57,24 +61,24 @@ class _StdoutDispatcher:
         """Remove the event queue for a session."""
         self._event_queues.pop(session_id, None)
 
-    def subscribe_catchall(self, request_id: int) -> asyncio.Queue:
-        """Subscribe a catch-all queue for events with no dedicated subscriber.
+    def subscribe_pending_stream(self, request_id: int) -> asyncio.Queue:
+        """Register a queue for a pending ``create_session_streaming`` call.
 
-        Only one catchall can be active at a time. Used by
-        ``create_session_streaming`` before the session_id is known.
-        The ``request_id`` is used to correlate the catchall with the
-        response that will reveal the session_id.
+        Events are buffered internally until the response reveals the
+        session_id, then flushed to the queue. Only events for the correct
+        session are delivered — events from other sessions are never mixed in.
         """
-        if self._catchall_queue is not None:
-            raise RuntimeError("Only one catchall subscriber at a time")
-        self._catchall_queue = asyncio.Queue()
-        self._catchall_request_id = request_id
-        return self._catchall_queue
+        if self._pending_stream_queue is not None:
+            raise RuntimeError("Only one pending stream at a time")
+        self._pending_stream_queue = asyncio.Queue()
+        self._pending_stream_request_id = request_id
+        return self._pending_stream_queue
 
-    def unsubscribe_catchall(self) -> None:
-        """Remove the catchall queue without promoting it."""
-        self._catchall_queue = None
-        self._catchall_request_id = None
+    def unsubscribe_pending_stream(self) -> None:
+        """Remove the pending stream queue."""
+        self._pending_stream_queue = None
+        self._pending_stream_request_id = None
+        self._unmatched_buffer.clear()
 
     async def _read_loop(self) -> None:
         """Main loop: read lines, dispatch to responses or event queues."""
@@ -107,17 +111,22 @@ class _StdoutDispatcher:
                     else:
                         result = data.get("result", {})
                         future.set_result(result)
-                        # If this is the response for the catchall owner,
-                        # promote the catchall queue to the real session_id.
+                        # If this is the response for the pending stream,
+                        # bind the queue to the real session_id and flush
+                        # any buffered events for that session only.
                         if (
-                            request_id == self._catchall_request_id
-                            and self._catchall_queue is not None
+                            request_id == self._pending_stream_request_id
+                            and self._pending_stream_queue is not None
                         ):
                             sid = result.get("session_id", "")
                             if sid:
-                                self._event_queues[sid] = self._catchall_queue
-                            self._catchall_queue = None
-                            self._catchall_request_id = None
+                                # Flush buffered events for this session
+                                for evt in self._unmatched_buffer.pop(sid, []):
+                                    await self._pending_stream_queue.put(evt)
+                                self._event_queues[sid] = self._pending_stream_queue
+                            self._pending_stream_queue = None
+                            self._pending_stream_request_id = None
+                            self._unmatched_buffer.clear()
             elif "method" in data:
                 params = data.get("params", {})
                 session_id = params.get("session_id", "")
@@ -125,12 +134,12 @@ class _StdoutDispatcher:
                 queue = self._event_queues.get(session_id)
                 if queue is not None:
                     await queue.put(event)
-                elif self._catchall_queue is not None:
-                    # Route unmatched events to catchall (used by
-                    # create_session_streaming before session_id is known).
-                    # Promotion to session-specific queue happens when
-                    # the response arrives (keyed by request_id).
-                    await self._catchall_queue.put(event)
+                elif self._pending_stream_queue is not None:
+                    # Buffer events by session_id until the response
+                    # reveals which session belongs to our pending stream.
+                    # Events from other sessions stay in the buffer and
+                    # are discarded when the response arrives.
+                    self._unmatched_buffer.setdefault(session_id, []).append(event)
 
     def _fail_all(self, code: str, message: str) -> None:
         """Fail all pending response futures and close all event queues.
@@ -144,10 +153,11 @@ class _StdoutDispatcher:
         for queue in self._event_queues.values():
             queue.put_nowait(None)
         self._event_queues.clear()
-        if self._catchall_queue is not None:
-            self._catchall_queue.put_nowait(None)
-            self._catchall_queue = None
-            self._catchall_request_id = None
+        if self._pending_stream_queue is not None:
+            self._pending_stream_queue.put_nowait(None)
+            self._pending_stream_queue = None
+            self._pending_stream_request_id = None
+            self._unmatched_buffer.clear()
 
 
 class StreamingTurn:
@@ -208,7 +218,7 @@ class StreamingTurn:
         if self._session_id:
             self._dispatcher.unsubscribe_events(self._session_id)
         else:
-            self._dispatcher.unsubscribe_catchall()
+            self._dispatcher.unsubscribe_pending_stream()
 
     def __aiter__(self) -> AsyncIterator[dict]:
         return self._iter_events()

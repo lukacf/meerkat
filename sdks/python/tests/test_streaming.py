@@ -162,8 +162,8 @@ class TestStdoutDispatcher:
         await d.stop()
 
     @pytest.mark.asyncio
-    async def test_catchall_captures_unknown_session(self):
-        """Catchall captures events before session_id is known, promotes on response."""
+    async def test_pending_stream_buffers_then_flushes(self):
+        """Events buffered by session_id before response, flushed on response."""
         ev1 = {"type": "run_started", "session_id": "new-id", "prompt": "hi"}
         ev2 = {"type": "text_delta", "delta": "hello"}
         reader = make_reader([
@@ -173,16 +173,35 @@ class TestStdoutDispatcher:
         ])
         d = _StdoutDispatcher(reader)
         d.start()
-        catchall = d.subscribe_catchall(request_id=1)
+        queue = d.subscribe_pending_stream(request_id=1)
         _ = d.expect_response(1)
-        # Events arrive via catchall before response
-        e1 = await asyncio.wait_for(catchall.get(), timeout=1.0)
+        # Events are buffered internally, then flushed when response arrives
+        e1 = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert e1["type"] == "run_started"
-        e2 = await asyncio.wait_for(catchall.get(), timeout=1.0)
+        e2 = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert e2["type"] == "text_delta"
-        # After response, catchall is promoted to session "new-id"
-        await asyncio.sleep(0.05)  # let dispatcher process response
-        assert d._catchall_queue is None
+        await d.stop()
+
+    @pytest.mark.asyncio
+    async def test_pending_stream_rejects_other_session_events(self):
+        """Events from other sessions are NOT delivered to the pending stream."""
+        ev_other = {"type": "text_delta", "delta": "wrong"}
+        ev_ours = {"type": "text_delta", "delta": "right"}
+        reader = make_reader([
+            event_notification("other-session", ev_other),
+            event_notification("our-session", ev_ours),
+            response(1, {"session_id": "our-session", "text": "done"}),
+        ])
+        d = _StdoutDispatcher(reader)
+        d.start()
+        queue = d.subscribe_pending_stream(request_id=1)
+        _ = d.expect_response(1)
+        # Only our-session's event should be delivered
+        e = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert e["delta"] == "right"
+        # Next item should be None sentinel (EOF), not the other-session event
+        sentinel = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert sentinel is None
         await d.stop()
 
     @pytest.mark.asyncio

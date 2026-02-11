@@ -151,7 +151,7 @@ class MeerkatClient:
             host_mode, comms_name, provider_params)
         self._request_id += 1
         request_id = self._request_id
-        event_queue = self._dispatcher.subscribe_catchall(request_id)
+        event_queue = self._dispatcher.subscribe_pending_stream(request_id)
         response_future = self._dispatcher.expect_response(request_id)
         request = {"jsonrpc": "2.0", "id": request_id, "method": "session/create", "params": params}
         data = (json.dumps(request) + "\n").encode()

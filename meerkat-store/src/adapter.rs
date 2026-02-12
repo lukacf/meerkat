@@ -10,18 +10,18 @@ use std::sync::Arc;
 use crate::SessionStore;
 
 /// Adapter that wraps a SessionStore to implement AgentSessionStore.
-pub struct StoreAdapter<S: SessionStore> {
+pub struct StoreAdapter<S: SessionStore + ?Sized> {
     store: Arc<S>,
 }
 
-impl<S: SessionStore> StoreAdapter<S> {
+impl<S: SessionStore + ?Sized> StoreAdapter<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self { store }
     }
 }
 
 #[async_trait]
-impl<S: SessionStore + 'static> AgentSessionStore for StoreAdapter<S> {
+impl<S: SessionStore + ?Sized + 'static> AgentSessionStore for StoreAdapter<S> {
     async fn save(&self, session: &Session) -> Result<(), AgentError> {
         self.store.save(session).await.map_err(store_error)
     }

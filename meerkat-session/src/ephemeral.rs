@@ -90,9 +90,9 @@ struct SessionHandle {
     turn_lock: Arc<AtomicBool>,
     _capacity_permit: OwnedSemaphorePermit,
     created_at: SystemTime,
-    /// Transport-agnostic event injector for pushing external events.
+    /// Subscribable event injector for pushing external events.
     /// Extracted from the agent before it moves into its task.
-    event_injector: Option<Arc<dyn meerkat_core::EventInjector>>,
+    event_injector: Option<Arc<dyn meerkat_core::SubscribableInjector>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -149,11 +149,13 @@ pub trait SessionAgent: Send {
     /// after each turn.
     fn session_clone(&self) -> meerkat_core::Session;
 
-    /// Get a transport-agnostic event injector for pushing external events.
+    /// Get a subscribable event injector for pushing external events.
     ///
     /// Called once before the agent moves into its dedicated task. The returned
     /// injector is stored in the session handle for surfaces to access.
-    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+    /// Callers can use `inject()` for fire-and-forget or
+    /// `inject_with_subscription()` for interaction-scoped streaming.
+    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
         None
     }
 }
@@ -218,14 +220,17 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
-    /// Get the event injector for a session, if available.
+    /// Get the subscribable event injector for a session, if available.
     ///
     /// Returns `None` if the session doesn't exist, has no comms runtime,
     /// or the comms runtime doesn't support event injection.
+    ///
+    /// Use `inject()` for fire-and-forget or `inject_with_subscription()`
+    /// for interaction-scoped streaming.
     pub async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
         let sessions = self.sessions.read().await;
         sessions
             .get(session_id)

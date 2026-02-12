@@ -62,7 +62,7 @@ impl CoreCommsRuntime for CommsRuntime {
         self.dismiss_flag.swap(false, Ordering::SeqCst)
     }
 
-    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
         Some(self.event_injector())
     }
 
@@ -348,10 +348,11 @@ impl CommsRuntime {
         self.inbox_notify.clone()
     }
 
-    /// Get a transport-agnostic event injector for this runtime's inbox.
+    /// Get a subscribable event injector for this runtime's inbox.
     ///
-    /// Surfaces use this to push external events without depending on comms types.
-    pub fn event_injector(&self) -> Arc<dyn meerkat_core::EventInjector> {
+    /// Surfaces use this to push external events and optionally subscribe to
+    /// interaction-scoped streaming responses.
+    pub fn event_injector(&self) -> Arc<dyn meerkat_core::SubscribableInjector> {
         Arc::new(crate::CommsEventInjector::new(
             self.router.inbox_sender().clone(),
             self.subscriber_registry.clone(),

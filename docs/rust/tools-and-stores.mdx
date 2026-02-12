@@ -134,27 +134,54 @@ let tools = registry.tools();
 </Tabs>
 
 <Accordion title="Implementing a custom store">
-Implement the `AgentSessionStore` trait:
+Implement the `SessionStore` trait and pass it to `AgentFactory::session_store()`:
 
 ```rust
 use async_trait::async_trait;
-use meerkat::{AgentSessionStore, AgentError, Session};
+use meerkat::{AgentFactory, SessionStore, SessionFilter, StoreError, Session, SessionId};
+use meerkat_core::SessionMeta;
+use std::sync::Arc;
 
-struct MyStore { /* your storage backend */ }
+struct BigQueryStore { /* your storage backend */ }
 
 #[async_trait]
-impl AgentSessionStore for MyStore {
-    async fn save(&self, session: &Session) -> Result<(), AgentError> {
-        // Persist session
+impl SessionStore for BigQueryStore {
+    async fn save(&self, session: &Session) -> Result<(), StoreError> {
+        // Persist session to BigQuery
         Ok(())
     }
 
-    async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
+    async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
         // Load session by ID
         Ok(None)
     }
+
+    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
+        Ok(vec![])
+    }
+
+    async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
+
+// Wire into AgentFactory — all factory features (comms, hooks, skills, etc.) work unchanged
+let store: Arc<dyn SessionStore> = Arc::new(BigQueryStore { /* ... */ });
+let factory = AgentFactory::new(".rkat/sessions")
+    .session_store(store)
+    .builtins(true)
+    .shell(true);
+
+let mut agent = factory.build_agent(build_config, &config).await?;
+// Agent auto-saves to BigQuery after each turn
 ```
+
+<Note>
+Prefer `SessionStore` + `session_store()` over implementing `AgentSessionStore` directly.
+`SessionStore` is the richer trait (with `list`, `delete`, `exists`) and `AgentFactory`
+automatically wraps it via `StoreAdapter`. Implementing `AgentSessionStore` directly
+bypasses the factory and loses comms, hooks, skills, and sub-agent wiring.
+</Note>
 </Accordion>
 
 ---

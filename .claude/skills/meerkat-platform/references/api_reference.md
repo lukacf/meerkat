@@ -428,6 +428,13 @@ let factory = AgentFactory::new(".rkat/sessions")
     .memory(true)
     .comms(true);
 
+// Or with a custom session store (e.g. BigQuery, DynamoDB):
+let custom_store: Arc<dyn SessionStore> = Arc::new(MySessionStore::new());
+let factory = AgentFactory::new(".rkat/sessions")
+    .session_store(custom_store)  // overrides feature-flag default
+    .builtins(true)
+    .shell(true);
+
 let build = AgentBuildConfig {
     model: "claude-opus-4-6".into(),
     provider: Some(Provider::Anthropic),

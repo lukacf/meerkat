@@ -28,7 +28,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
   <Step title="Add the dependency">
     ```toml
     [dependencies]
-    meerkat = "0.1"
+    meerkat = "0.2"
     tokio = { version = "1", features = ["full"] }
     ```
   </Step>
@@ -36,17 +36,17 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
     <CodeGroup>
     ```toml Default (Anthropic + JSONL storage)
     [dependencies]
-    meerkat = "0.1"
+    meerkat = "0.2"
     ```
 
     ```toml All LLM providers
     [dependencies]
-    meerkat = { version = "0.1", features = ["all-providers"] }
+    meerkat = { version = "0.2", features = ["all-providers"] }
     ```
 
     ```toml Storage backends
     [dependencies]
-    meerkat = { version = "0.1", features = ["jsonl-store", "memory-store"] }
+    meerkat = { version = "0.2", features = ["jsonl-store", "memory-store"] }
     ```
     </CodeGroup>
   </Step>

@@ -46,6 +46,7 @@ This page is a quick-lookup index. For detailed usage with examples, see the [Ru
 | Function / Type | Purpose | Detailed docs |
 |-----------------|---------|---------------|
 | `AgentFactory::new(cwd)` | Create a factory for building agents | [Rust SDK](/rust/overview#quick-start) |
+| `AgentFactory::session_store(store)` | Override session store (e.g. BigQuery, DynamoDB) | [Rust SDK: custom stores](/rust/tools-and-stores#session-stores) |
 | `build_ephemeral_service(factory, config, cap)` | Build an in-memory session service | [Rust SDK](/rust/overview#sessions) |
 | `meerkat::with_anthropic(key)` | Quick-start builder for Anthropic | [Rust SDK](/rust/overview#quick-start) |
 | `Config::load()` | Load layered configuration from disk | [Configuration](/concepts/configuration) |
@@ -144,6 +145,7 @@ All implement `LlmClient` and normalize responses to `LlmEvent` (text deltas, to
 | `JsonlStore` | `jsonl-store` (default) | File-based JSONL persistence | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
 | `RedbSessionStore` | `session-store` | Embedded database (redb) | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
 | `MemoryStore` | `memory-store` | In-memory (testing) | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
+| Custom (`dyn SessionStore`) | — | User-provided via `AgentFactory::session_store()` | [Rust SDK: custom stores](/rust/tools-and-stores#session-stores) |
 
 ## See also
 

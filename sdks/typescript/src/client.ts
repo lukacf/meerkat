@@ -199,11 +199,11 @@ export class MeerkatClient {
   }
 
   async setConfig(config: Record<string, unknown>): Promise<void> {
-    await this.request("config/set", { config });
+    await this.request("config/set", config);
   }
 
   async patchConfig(patch: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return (await this.request("config/patch", { patch })) as Record<
+    return (await this.request("config/patch", patch)) as Record<
       string,
       unknown
     >;

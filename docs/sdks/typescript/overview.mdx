@@ -79,7 +79,7 @@ The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, s
 | `getConfig()` | Read runtime configuration |
 | `setConfig(config)` | Replace runtime configuration |
 | `patchConfig(patch)` | Merge-patch runtime configuration |
-| `pushEvent(sessionId, params)` | Push an external event into a session |
+| `pushEvent(sessionId, payload, source?)` | Push an external event into a session |
 
 ---
 
@@ -148,22 +148,24 @@ await client.setConfig({ ...config, max_tokens: 4096 });
 const updated = await client.patchConfig({ max_tokens: 8192 });
 ```
 
-### pushEvent(sessionId, params)
+### pushEvent(sessionId, payload, source?)
 
 ```typescript
-async pushEvent(sessionId: string, params: {
-  payload: unknown;
-  source?: string;
-}): Promise<{ queued: boolean }>
+async pushEvent(
+  sessionId: string,
+  payload: unknown,
+  source?: string,
+): Promise<{ queued: boolean }>
 ```
 
 Push an external event into a running session's inbox. Queued and processed at the next turn boundary.
 
 ```typescript
-await client.pushEvent(sessionId, {
-  payload: { alert: "build failed", repo: "main" },
-  source: "ci",
-});
+await client.pushEvent(
+  sessionId,
+  { alert: "build failed", repo: "main" },
+  "ci",
+);
 ```
 
 ---

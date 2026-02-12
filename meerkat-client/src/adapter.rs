@@ -23,6 +23,8 @@ pub struct LlmClientAdapter {
     event_tx: Option<mpsc::Sender<AgentEvent>>,
     /// Provider-specific parameters to pass with every request.
     provider_params: Option<Value>,
+    /// Per-interaction event tap for streaming events to subscribers.
+    event_tap: meerkat_core::EventTap,
 }
 
 impl LlmClientAdapter {
@@ -32,6 +34,7 @@ impl LlmClientAdapter {
             model,
             event_tx: None,
             provider_params: None,
+            event_tap: meerkat_core::new_event_tap(),
         }
     }
 
@@ -46,12 +49,19 @@ impl LlmClientAdapter {
             model,
             event_tx: Some(event_tx),
             provider_params: None,
+            event_tap: meerkat_core::new_event_tap(),
         }
     }
 
     /// Set provider-specific parameters to pass with every request.
     pub fn with_provider_params(mut self, params: Option<Value>) -> Self {
         self.provider_params = params;
+        self
+    }
+
+    /// Set the event tap for interaction-scoped streaming.
+    pub fn with_event_tap(mut self, tap: meerkat_core::EventTap) -> Self {
+        self.event_tap = tap;
         self
     }
 }
@@ -97,6 +107,10 @@ impl AgentLlmClient for LlmClientAdapter {
                 Ok(event) => match event {
                     LlmEvent::TextDelta { delta, meta } => {
                         assembler.on_text_delta(&delta, meta);
+                        meerkat_core::tap_try_send(
+                            &self.event_tap,
+                            AgentEvent::TextDelta { delta: delta.clone() },
+                        );
                         if let Some(ref tx) = self.event_tx {
                             let _ = tx.send(AgentEvent::TextDelta { delta }).await;
                         }

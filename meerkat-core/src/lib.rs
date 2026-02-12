@@ -11,7 +11,9 @@ pub mod config_store;
 pub mod error;
 pub mod event;
 pub mod event_injector;
+pub mod event_tap;
 pub mod gateway;
+pub mod interaction;
 pub mod hooks;
 pub mod mcp_config;
 pub mod memory;
@@ -45,7 +47,11 @@ pub use config::{
     ResolvedSubAgentConfig, RetryConfig, ShellDefaults, StorageConfig, StoreConfig,
     SubAgentsConfig, ToolsConfig,
 };
-pub use event_injector::{EventInjector, EventInjectorError};
+pub use event_injector::{
+    EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
+};
+pub use event_tap::{EventTap, EventTapState, new_event_tap, tap_emit, tap_send_terminal, tap_try_send};
+pub use interaction::{InboxInteraction, InteractionContent, InteractionId};
 pub use config_store::{ConfigStore, FileConfigStore, MemoryConfigStore};
 pub use error::{AgentError, ToolError};
 pub use event::{

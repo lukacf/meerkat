@@ -31,6 +31,7 @@ pub struct AgentBuilder {
     pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     pub(super) skill_engine: Option<Arc<dyn crate::skills::SkillEngine>>,
+    pub(super) event_tap: Option<crate::event_tap::EventTap>,
 }
 
 impl AgentBuilder {
@@ -50,6 +51,7 @@ impl AgentBuilder {
             compactor: None,
             memory_store: None,
             skill_engine: None,
+            event_tap: None,
         }
     }
 
@@ -201,12 +203,20 @@ impl AgentBuilder {
             memory_store: self.memory_store,
             skill_engine: self.skill_engine,
             pending_skill_references: None,
+            event_tap: self.event_tap.unwrap_or_else(crate::event_tap::new_event_tap),
+            host_drain_active: false,
         }
     }
 
     /// Set the skill engine for per-turn `/skill-ref` activation.
     pub fn with_skill_engine(mut self, engine: Arc<dyn crate::skills::SkillEngine>) -> Self {
         self.skill_engine = Some(engine);
+        self
+    }
+
+    /// Set the event tap for interaction-scoped streaming.
+    pub fn with_event_tap(mut self, tap: crate::event_tap::EventTap) -> Self {
+        self.event_tap = Some(tap);
         self
     }
 }

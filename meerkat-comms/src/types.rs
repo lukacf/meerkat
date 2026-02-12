@@ -141,6 +141,10 @@ pub enum InboxItem {
     PlainEvent {
         body: String,
         source: meerkat_core::PlainEventSource,
+        /// Optional interaction ID for subscription correlation.
+        /// Set by `inject_with_subscription`, `None` for untracked events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interaction_id: Option<Uuid>,
     },
 }
 
@@ -453,6 +457,7 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "New email from john@example.com".to_string(),
             source: PlainEventSource::Tcp,
+            interaction_id: None,
         };
 
         // JSON round-trip
@@ -475,18 +480,22 @@ mod tests {
             InboxItem::PlainEvent {
                 body: "hello".to_string(),
                 source: PlainEventSource::Tcp,
+                interaction_id: None,
             },
             InboxItem::PlainEvent {
                 body: r#"{"event":"email"}"#.to_string(),
                 source: PlainEventSource::Stdin,
+                interaction_id: None,
             },
             InboxItem::PlainEvent {
                 body: "webhook payload".to_string(),
                 source: PlainEventSource::Webhook,
+                interaction_id: None,
             },
             InboxItem::PlainEvent {
                 body: "rpc event".to_string(),
                 source: PlainEventSource::Rpc,
+                interaction_id: None,
             },
         ];
         for item in items {
@@ -495,5 +504,59 @@ mod tests {
             let decoded: InboxItem = ciborium::from_reader(&buf[..]).unwrap();
             assert_eq!(item, decoded);
         }
+    }
+
+    #[test]
+    fn test_inbox_item_plain_event_backward_compat_json() {
+        // Old format (no interaction_id) should deserialize with interaction_id: None
+        let old_json = r#"{"type":"plain_event","body":"hello","source":"tcp"}"#;
+        let parsed: InboxItem = serde_json::from_str(old_json).unwrap();
+        match parsed {
+            InboxItem::PlainEvent {
+                body,
+                source,
+                interaction_id,
+            } => {
+                assert_eq!(body, "hello");
+                assert_eq!(source, meerkat_core::PlainEventSource::Tcp);
+                assert_eq!(interaction_id, None);
+            }
+            other => panic!("Expected PlainEvent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_inbox_item_plain_event_with_interaction_id_json_roundtrip() {
+        let id = Uuid::new_v4();
+        let item = InboxItem::PlainEvent {
+            body: "tracked event".to_string(),
+            source: meerkat_core::PlainEventSource::Rpc,
+            interaction_id: Some(id),
+        };
+
+        let json = serde_json::to_string(&item).unwrap();
+        let parsed: InboxItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(item, parsed);
+
+        // Verify interaction_id is present in JSON
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["interaction_id"], id.to_string());
+    }
+
+    #[test]
+    fn test_inbox_item_plain_event_none_interaction_id_skipped_in_json() {
+        let item = InboxItem::PlainEvent {
+            body: "untracked".to_string(),
+            source: meerkat_core::PlainEventSource::Tcp,
+            interaction_id: None,
+        };
+
+        let json = serde_json::to_string(&item).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // interaction_id should not be present (skip_serializing_if = "Option::is_none")
+        assert!(
+            value.get("interaction_id").is_none(),
+            "interaction_id: None should not be serialized"
+        );
     }
 }

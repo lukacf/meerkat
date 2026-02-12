@@ -73,6 +73,11 @@ where
         self.depth
     }
 
+    /// Get the event tap for interaction-scoped streaming.
+    pub fn event_tap(&self) -> &crate::event_tap::EventTap {
+        &self.event_tap
+    }
+
     /// Spawn a new sub-agent with minimal context
     ///
     /// The sub-agent runs independently with its own budget and tool access.
@@ -425,15 +430,16 @@ where
         for outcome in &report.outcomes {
             for patch in &outcome.patches {
                 if let HookPatch::RunResult { text } = patch {
-                    if let Some(tx) = event_tx {
-                        let _ = tx
-                            .send(AgentEvent::HookRewriteApplied {
-                                hook_id: outcome.hook_id.to_string(),
-                                point: HookPoint::RunCompleted,
-                                patch: HookPatch::RunResult { text: text.clone() },
-                            })
-                            .await;
-                    }
+                    crate::event_tap::tap_emit(
+                        &self.event_tap,
+                        event_tx,
+                        AgentEvent::HookRewriteApplied {
+                            hook_id: outcome.hook_id.to_string(),
+                            point: HookPoint::RunCompleted,
+                            patch: HookPatch::RunResult { text: text.clone() },
+                        },
+                    )
+                    .await;
                     result.text = text.clone();
                     self.apply_run_result_text_patch(text);
                 }
@@ -554,12 +560,15 @@ where
             content: user_input,
         }));
 
-        let _ = event_tx
-            .send(AgentEvent::RunStarted {
+        let _ = crate::event_tap::tap_emit(
+            &self.event_tap,
+            Some(&event_tx),
+            AgentEvent::RunStarted {
                 session_id,
                 prompt: run_prompt.clone(),
-            })
-            .await;
+            },
+        )
+        .await;
 
         self.run_started_hooks(&run_prompt, Some(&event_tx)).await?;
 
@@ -573,12 +582,15 @@ where
                 if let Err(hook_err) = self.run_failed_hooks(&err, Some(&event_tx)).await {
                     tracing::warn!(?hook_err, "run_failed hook execution failed");
                 }
-                let _ = event_tx
-                    .send(AgentEvent::RunFailed {
+                let _ = crate::event_tap::tap_emit(
+                    &self.event_tap,
+                    Some(&event_tx),
+                    AgentEvent::RunFailed {
                         session_id: self.session.id().clone(),
                         error: err.to_string(),
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 Err(err)
             }
         }
@@ -659,12 +671,15 @@ where
 
         let session_id = self.session.id().clone();
 
-        let _ = event_tx
-            .send(AgentEvent::RunStarted {
+        let _ = crate::event_tap::tap_emit(
+            &self.event_tap,
+            Some(&event_tx),
+            AgentEvent::RunStarted {
                 session_id,
                 prompt: prompt.clone(),
-            })
-            .await;
+            },
+        )
+        .await;
 
         self.run_started_hooks(&prompt, Some(&event_tx)).await?;
 
@@ -678,12 +693,15 @@ where
                 if let Err(hook_err) = self.run_failed_hooks(&err, Some(&event_tx)).await {
                     tracing::warn!(?hook_err, "run_failed hook execution failed");
                 }
-                let _ = event_tx
-                    .send(AgentEvent::RunFailed {
+                let _ = crate::event_tap::tap_emit(
+                    &self.event_tap,
+                    Some(&event_tx),
+                    AgentEvent::RunFailed {
                         session_id: self.session.id().clone(),
                         error: err.to_string(),
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 Err(err)
             }
         }

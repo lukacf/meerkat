@@ -649,12 +649,14 @@ impl AgentFactory {
             }
         };
 
-        // 4. Create LLM adapter (with optional provider_params and event channel)
+        // 4. Create LLM adapter (with optional provider_params, event channel, and shared event tap)
         let model = build_config.model.clone();
+        let event_tap = meerkat_core::new_event_tap();
         let mut llm_adapter_inner = match build_config.event_tx.clone() {
             Some(tx) => LlmClientAdapter::with_event_channel(llm_client, model.clone(), tx),
             None => LlmClientAdapter::new(llm_client, model.clone()),
         };
+        llm_adapter_inner = llm_adapter_inner.with_event_tap(event_tap.clone());
         if let Some(params) = build_config.provider_params.clone() {
             llm_adapter_inner = llm_adapter_inner.with_provider_params(Some(params));
         }
@@ -945,6 +947,9 @@ impl AgentFactory {
         if let Some(engine) = skill_engine {
             builder = builder.with_skill_engine(engine);
         }
+
+        // 12e. Wire shared event tap (shared with LLM adapter)
+        builder = builder.with_event_tap(event_tap);
 
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;

@@ -177,6 +177,23 @@ pub enum AgentEvent {
 
     /// A skill reference could not be resolved.
     SkillResolutionFailed { reference: String, error: String },
+
+    // === Interaction-Scoped Streaming ===
+    /// An interaction completed successfully (terminal event for tap subscribers).
+    InteractionComplete {
+        interaction_id: crate::interaction::InteractionId,
+        result: String,
+    },
+
+    /// An interaction failed (terminal event for tap subscribers).
+    InteractionFailed {
+        interaction_id: crate::interaction::InteractionId,
+        error: String,
+    },
+
+    /// Some streaming events were dropped due to channel backpressure.
+    /// Best-effort marker — the terminal event is authoritative.
+    StreamTruncated { reason: String },
 }
 
 /// Type of budget being tracked

@@ -194,6 +194,34 @@ pub trait CommsRuntime: Send + Sync {
     fn event_injector(&self) -> Option<Arc<dyn crate::EventInjector>> {
         None
     }
+
+    /// Drain comms inbox and return structured interactions.
+    ///
+    /// Default implementation wraps `drain_messages()` results as `InteractionContent::Message`
+    /// with generated IDs.
+    async fn drain_interactions(&self) -> Vec<crate::interaction::InboxInteraction> {
+        self.drain_messages()
+            .await
+            .into_iter()
+            .map(|text| crate::interaction::InboxInteraction {
+                id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                from: "unknown".into(),
+                content: crate::interaction::InteractionContent::Message { body: text.clone() },
+                rendered_text: text,
+            })
+            .collect()
+    }
+
+    /// Look up and remove a one-shot subscriber for the given interaction.
+    ///
+    /// Returns the event sender if a subscriber was registered (via `inject_with_subscription`).
+    /// The entry is removed from the registry on lookup (one-shot).
+    fn interaction_subscriber(
+        &self,
+        _id: &crate::interaction::InteractionId,
+    ) -> Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>> {
+        None
+    }
 }
 
 /// The main Agent struct
@@ -229,4 +257,10 @@ where
     /// Skill references to resolve and inject for the next turn.
     /// Set by surfaces before calling `run()`, consumed on run start.
     pub pending_skill_references: Option<Vec<crate::skills::SkillId>>,
+    /// Per-interaction event tap for streaming events to subscribers.
+    pub(crate) event_tap: crate::event_tap::EventTap,
+    /// When true, the host loop owns the inbox drain cycle.
+    /// `drain_comms_inbox()` becomes a no-op to avoid stealing
+    /// interaction-scoped messages through the legacy path.
+    pub(crate) host_drain_active: bool,
 }

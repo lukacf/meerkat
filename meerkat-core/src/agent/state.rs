@@ -75,16 +75,21 @@ where
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
 
-        // Helper to conditionally emit events (only when listener exists)
+        // Helper to conditionally emit events (only when listener exists).
+        // Also forwards to the event tap for interaction-scoped subscribers.
         macro_rules! emit_event {
             ($event:expr) => {
-                if event_stream_open {
-                    if let Some(ref tx) = event_tx {
-                        if tx.send($event).await.is_err() {
-                            event_stream_open = false;
-                            tracing::warn!(
-                                "agent event stream receiver dropped; continuing without streaming events"
-                            );
+                {
+                    let event = $event;
+                    crate::event_tap::tap_try_send(&self.event_tap, event.clone());
+                    if event_stream_open {
+                        if let Some(ref tx) = event_tx {
+                            if tx.send(event).await.is_err() {
+                                event_stream_open = false;
+                                tracing::warn!(
+                                    "agent event stream receiver dropped; continuing without streaming events"
+                                );
+                            }
                         }
                     }
                 }
@@ -92,9 +97,16 @@ where
         }
 
         loop {
+            // Drain comms inbox at top of loop when entering CallingLlm.
+            // Catches messages during ErrorRecovery -> CallingLlm transitions
+            // and the window between turn-boundary drain and next LLM call.
+            if self.state == LoopState::CallingLlm {
+                self.drain_comms_inbox().await;
+            }
+
             // Check turn limit
             if turn_count >= max_turns {
-                self.state = LoopState::Completed;
+                self.state.force_transition(LoopState::Completed);
                 return Ok(self.build_result(turn_count, tool_call_count));
             }
 
@@ -106,7 +118,7 @@ where
                     limit: self.budget.remaining(),
                     percent: 1.0,
                 });
-                self.state = LoopState::Completed;
+                self.state.force_transition(LoopState::Completed);
                 return Ok(self.build_result(turn_count, tool_call_count));
             }
 
@@ -127,6 +139,7 @@ where
                             self.last_input_tokens,
                             turn_count,
                             &event_tx,
+                            &self.event_tap,
                         )
                         .await;
 

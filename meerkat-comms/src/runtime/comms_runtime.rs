@@ -65,6 +65,91 @@ impl CoreCommsRuntime for CommsRuntime {
     fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         Some(self.event_injector())
     }
+
+    async fn drain_interactions(&self) -> Vec<meerkat_core::InboxInteraction> {
+        let mut inbox = self.inbox.lock().await;
+        let items = inbox.try_drain();
+        let trusted = self.trusted_peers.read().await;
+
+        let drained: Vec<DrainedMessage> = items
+            .iter()
+            .filter_map(|item| drain_inbox_item(item, &trusted))
+            .collect();
+
+        // Check for DISMISS in authenticated messages
+        for msg in &drained {
+            if let DrainedMessage::Authenticated(m) = msg {
+                if is_dismiss(m) {
+                    self.dismiss_flag.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+
+        drained
+            .into_iter()
+            .filter(|m| !matches!(m, DrainedMessage::Authenticated(m) if is_dismiss(m)))
+            .map(|m| match m {
+                DrainedMessage::Authenticated(msg) => {
+                    let rendered_text = msg.to_user_message_text();
+                    let content = match msg.content {
+                        CommsContent::Message { body } => {
+                            meerkat_core::InteractionContent::Message { body }
+                        }
+                        CommsContent::Request {
+                            request_id: _,
+                            intent,
+                            params,
+                        } => meerkat_core::InteractionContent::Request {
+                            intent: intent.to_string(),
+                            params,
+                        },
+                        CommsContent::Response {
+                            in_reply_to,
+                            status,
+                            result,
+                        } => {
+                            let status_str = match status {
+                                crate::agent::types::CommsStatus::Accepted => "accepted",
+                                crate::agent::types::CommsStatus::Completed => "completed",
+                                crate::agent::types::CommsStatus::Failed => "failed",
+                            };
+                            meerkat_core::InteractionContent::Response {
+                                in_reply_to: meerkat_core::InteractionId(in_reply_to),
+                                status: status_str.to_string(),
+                                result,
+                            }
+                        }
+                    };
+                    meerkat_core::InboxInteraction {
+                        id: meerkat_core::InteractionId(msg.envelope_id),
+                        from: msg.from_peer,
+                        content,
+                        rendered_text,
+                    }
+                }
+                DrainedMessage::Plain(msg) => {
+                    let rendered_text = msg.to_user_message_text();
+                    meerkat_core::InboxInteraction {
+                        id: meerkat_core::InteractionId(
+                            msg.interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
+                        ),
+                        from: format!("event:{}", msg.source),
+                        content: meerkat_core::InteractionContent::Message {
+                            body: msg.body,
+                        },
+                        rendered_text,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn interaction_subscriber(
+        &self,
+        id: &meerkat_core::InteractionId,
+    ) -> Option<tokio::sync::mpsc::Sender<meerkat_core::AgentEvent>> {
+        self.subscriber_registry.lock().remove(&id.0)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -92,6 +177,7 @@ pub struct CommsRuntime {
     listeners_started: bool,
     keypair: Arc<Keypair>,
     dismiss_flag: AtomicBool,
+    subscriber_registry: crate::event_injector::SubscriberRegistry,
 }
 
 impl CommsRuntime {
@@ -125,6 +211,7 @@ impl CommsRuntime {
             listeners_started: false,
             keypair: Arc::new(keypair),
             dismiss_flag: AtomicBool::new(false),
+            subscriber_registry: crate::event_injector::new_subscriber_registry(),
         };
         InprocRegistry::global().register(config.name, runtime.public_key, inbox_sender);
         Ok(runtime)
@@ -168,6 +255,7 @@ impl CommsRuntime {
             listeners_started: false,
             keypair: Arc::new(keypair),
             dismiss_flag: AtomicBool::new(false),
+            subscriber_registry: crate::event_injector::new_subscriber_registry(),
         };
         InprocRegistry::global().register(name, runtime.public_key, inbox_sender);
         Ok(runtime)
@@ -260,6 +348,7 @@ impl CommsRuntime {
     pub fn event_injector(&self) -> Arc<dyn meerkat_core::EventInjector> {
         Arc::new(crate::CommsEventInjector::new(
             self.router.inbox_sender().clone(),
+            self.subscriber_registry.clone(),
         ))
     }
 

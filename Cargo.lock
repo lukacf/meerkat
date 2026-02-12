@@ -2525,6 +2525,7 @@ dependencies = [
  "humantime-serde",
  "indexmap",
  "jsonschema",
+ "parking_lot",
  "regex",
  "schemars",
  "serde",

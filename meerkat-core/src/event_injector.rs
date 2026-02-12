@@ -39,6 +39,38 @@ pub trait EventInjector: Send + Sync {
     fn inject(&self, body: String, source: PlainEventSource) -> Result<(), EventInjectorError>;
 }
 
+/// A subscription handle returned by `SubscribableInjector::inject_with_subscription`.
+///
+/// The caller reads `events` to receive streaming `AgentEvent`s scoped to this interaction.
+/// The terminal event (`InteractionComplete` or `InteractionFailed`) signals end-of-stream.
+pub struct InteractionSubscription {
+    /// Unique ID for this interaction (correlates with events).
+    pub id: crate::interaction::InteractionId,
+    /// Receiver for streaming events scoped to this interaction (buffer: 4096).
+    pub events: tokio::sync::mpsc::Receiver<crate::event::AgentEvent>,
+}
+
+/// Extended injector that returns a subscription for streaming events.
+///
+/// Implementors register a subscriber in the registry keyed by interaction ID,
+/// then inject the event into the inbox. The host loop looks up the subscriber
+/// during `drain_interactions()` and wires it to the event tap.
+pub trait SubscribableInjector: EventInjector {
+    /// Inject an event and return a subscription for streaming events.
+    ///
+    /// 1. Generates a unique `InteractionId`
+    /// 2. Creates a channel (buffer: 4096) and stores the sender in the subscriber registry
+    /// 3. Injects the event into the inbox with the interaction ID
+    /// 4. Returns the subscription handle with the receiver
+    ///
+    /// On inbox send failure: removes the subscriber from the registry and returns the error.
+    fn inject_with_subscription(
+        &self,
+        body: String,
+        source: PlainEventSource,
+    ) -> Result<InteractionSubscription, EventInjectorError>;
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -60,11 +92,7 @@ mod tests {
     }
 
     impl EventInjector for MockEventInjector {
-        fn inject(
-            &self,
-            body: String,
-            source: PlainEventSource,
-        ) -> Result<(), EventInjectorError> {
+        fn inject(&self, body: String, source: PlainEventSource) -> Result<(), EventInjectorError> {
             self.events.lock().unwrap().push((body, source));
             Ok(())
         }

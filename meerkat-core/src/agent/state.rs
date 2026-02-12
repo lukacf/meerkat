@@ -75,16 +75,21 @@ where
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
 
-        // Helper to conditionally emit events (only when listener exists)
+        // Helper to conditionally emit events (only when listener exists).
+        // Also forwards to the event tap for interaction-scoped subscribers.
         macro_rules! emit_event {
             ($event:expr) => {
-                if event_stream_open {
-                    if let Some(ref tx) = event_tx {
-                        if tx.send($event).await.is_err() {
-                            event_stream_open = false;
-                            tracing::warn!(
-                                "agent event stream receiver dropped; continuing without streaming events"
-                            );
+                {
+                    let event = $event;
+                    crate::event_tap::tap_try_send(&self.event_tap, &event);
+                    if event_stream_open {
+                        if let Some(ref tx) = event_tx {
+                            if tx.send(event).await.is_err() {
+                                event_stream_open = false;
+                                tracing::warn!(
+                                    "agent event stream receiver dropped; continuing without streaming events"
+                                );
+                            }
                         }
                     }
                 }
@@ -92,9 +97,16 @@ where
         }
 
         loop {
+            // Drain comms inbox at top of loop when entering CallingLlm.
+            // Catches messages during ErrorRecovery -> CallingLlm transitions
+            // and the window between turn-boundary drain and next LLM call.
+            if self.state == LoopState::CallingLlm {
+                self.drain_comms_inbox().await;
+            }
+
             // Check turn limit
             if turn_count >= max_turns {
-                self.state = LoopState::Completed;
+                self.state.transition(LoopState::Completed)?;
                 return Ok(self.build_result(turn_count, tool_call_count));
             }
 
@@ -106,7 +118,7 @@ where
                     limit: self.budget.remaining(),
                     percent: 1.0,
                 });
-                self.state = LoopState::Completed;
+                self.state.transition(LoopState::Completed)?;
                 return Ok(self.build_result(turn_count, tool_call_count));
             }
 
@@ -127,6 +139,7 @@ where
                             self.last_input_tokens,
                             turn_count,
                             &event_tx,
+                            &self.event_tap,
                         )
                         .await;
 
@@ -831,7 +844,17 @@ fn fallback_raw_value() -> Box<RawValue> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::rewrite_assistant_text;
-    use crate::types::AssistantBlock;
+    use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
+    use crate::budget::{Budget, BudgetLimits};
+    use crate::error::{AgentError, ToolError};
+    use crate::state::LoopState;
+    use crate::types::{
+        AssistantBlock, Message, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
+    };
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
 
     #[test]
     fn rewrite_assistant_text_rewrites_all_text_blocks() {
@@ -863,5 +886,227 @@ mod tests {
             .collect();
 
         assert_eq!(text_blocks, vec!["redacted"]);
+    }
+
+    struct StaticLlmClient;
+
+    #[async_trait]
+    impl AgentLlmClient for StaticLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    struct RecordingLlmClient {
+        seen_user_messages: Mutex<Vec<String>>,
+    }
+
+    impl RecordingLlmClient {
+        fn new() -> Self {
+            Self {
+                seen_user_messages: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen(&self) -> Vec<String> {
+            self.seen_user_messages.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for RecordingLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let mut seen = self.seen_user_messages.lock().unwrap();
+            for msg in messages {
+                if let Message::User(user) = msg {
+                    seen.push(user.content.clone());
+                }
+            }
+            drop(seen);
+
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    struct NoTools;
+
+    #[async_trait]
+    impl AgentToolDispatcher for NoTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::new([])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            Err(ToolError::NotFound {
+                name: call.name.to_string(),
+            })
+        }
+    }
+
+    struct NoopStore;
+
+    #[async_trait]
+    impl AgentSessionStore for NoopStore {
+        async fn save(&self, _session: &crate::session::Session) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        async fn load(&self, _id: &str) -> Result<Option<crate::session::Session>, AgentError> {
+            Ok(None)
+        }
+    }
+
+    struct MockDrainCommsRuntime {
+        queued: tokio::sync::Mutex<Vec<String>>,
+        notify: Arc<Notify>,
+    }
+
+    impl MockDrainCommsRuntime {
+        fn with_messages(messages: Vec<String>) -> Self {
+            Self {
+                queued: tokio::sync::Mutex::new(messages),
+                notify: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::agent::CommsRuntime for MockDrainCommsRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            let mut guard = self.queued.lock().await;
+            std::mem::take(&mut *guard)
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            self.notify.clone()
+        }
+    }
+
+    async fn build_agent<C>(client: Arc<C>) -> crate::agent::Agent<C, NoTools, NoopStore>
+    where
+        C: AgentLlmClient + ?Sized + 'static,
+    {
+        AgentBuilder::new()
+            .build(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await
+    }
+
+    #[tokio::test]
+    async fn calling_llm_with_max_turns_zero_completes_with_zero_turns() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        agent.config.max_turns = Some(0);
+        agent.state = LoopState::CallingLlm;
+
+        let result = agent.run_loop(None).await.unwrap();
+        assert_eq!(result.turns, 0);
+        assert_eq!(agent.state, LoopState::Completed);
+    }
+
+    #[tokio::test]
+    async fn calling_llm_with_budget_exhausted_completes_with_zero_turns() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        agent.config.max_turns = Some(10);
+        agent.state = LoopState::CallingLlm;
+        agent.budget = Budget::new(BudgetLimits {
+            max_tokens: Some(0),
+            max_duration: None,
+            max_tool_calls: None,
+        });
+
+        let result = agent.run_loop(None).await.unwrap();
+        assert_eq!(result.turns, 0);
+        assert_eq!(agent.state, LoopState::Completed);
+    }
+
+    #[tokio::test]
+    async fn completed_with_max_turns_zero_returns_invalid_transition() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        agent.config.max_turns = Some(0);
+        agent.state = LoopState::Completed;
+
+        let err = agent
+            .run_loop(None)
+            .await
+            .expect_err("expected transition error");
+        match err {
+            AgentError::InvalidStateTransition { from, to } => {
+                assert_eq!(from, "Completed");
+                assert_eq!(to, "Completed");
+            }
+            other => panic!("expected InvalidStateTransition, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn error_recovery_with_max_turns_zero_completes() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        agent.config.max_turns = Some(0);
+        agent.state = LoopState::ErrorRecovery;
+
+        let result = agent.run_loop(None).await.unwrap();
+        assert_eq!(result.turns, 0);
+        assert_eq!(agent.state, LoopState::Completed);
+    }
+
+    #[tokio::test]
+    async fn error_recovery_drains_comms_message_when_transitioning_to_calling_llm() {
+        let client = Arc::new(RecordingLlmClient::new());
+        let comms = Arc::new(MockDrainCommsRuntime::with_messages(vec![
+            "queued during recovery".to_string(),
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms)
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.config.max_turns = Some(1);
+        agent.state = LoopState::ErrorRecovery;
+
+        let result = agent.run_loop(None).await.unwrap();
+        assert_eq!(result.turns, 1);
+
+        let seen = client.seen();
+        assert!(
+            seen.iter().any(|m| m.contains("queued during recovery")),
+            "expected queued comms message to be drained into LLM input, saw: {:?}",
+            seen
+        );
     }
 }

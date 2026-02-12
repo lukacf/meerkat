@@ -41,6 +41,15 @@ pub use meerkat_core::{
     AgentError,
     // Events
     AgentEvent,
+    // Event injection
+    EventInjector,
+    EventInjectorError,
+    InteractionSubscription,
+    SubscribableInjector,
+    // Interaction types
+    InteractionContent,
+    InteractionId,
+    ResponseStatus,
     AgentLlmClient,
     AgentSessionStore,
     AgentToolDispatcher,

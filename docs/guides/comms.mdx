@@ -622,6 +622,58 @@ Events are injected into the agent's context with source tagging:
 - **RPC**: `[EVENT via rpc] <body>` (with optional `[source: name]` prefix)
 - **TCP/UDS**: `[EVENT via tcp] <body>` or `[EVENT via uds] <body>`
 
+### Interaction-scoped event streaming (Rust SDK)
+
+When injecting events from application code, you can subscribe to the streaming events produced by that specific interaction. This gives you a clean `start -> stream -> done` lifecycle scoped to exactly one injected message, without cross-talk from other concurrent interactions.
+
+The service's `event_injector()` returns an `Arc<dyn SubscribableInjector>`. Use `inject()` for fire-and-forget (existing behavior), or `inject_with_subscription()` to get a dedicated event channel:
+
+```rust
+use meerkat::{SubscribableInjector, AgentEvent, PlainEventSource};
+
+let injector = service.event_injector(&session_id).await
+    .expect("comms must be enabled");
+
+// Fire-and-forget (existing behavior)
+injector.inject("hello".into(), PlainEventSource::Rpc)?;
+
+// With subscription — returns a dedicated event stream
+let sub = injector.inject_with_subscription(
+    "review PR #42".into(),
+    PlainEventSource::Rpc,
+)?;
+
+// sub.id     — unique InteractionId for logging/correlation
+// sub.events — mpsc::Receiver<AgentEvent>, scoped to this interaction
+
+while let Some(event) = sub.events.recv().await {
+    match event {
+        AgentEvent::TextDelta { delta } => print!("{delta}"),
+        AgentEvent::InteractionComplete { result, .. } => {
+            println!("\n{result}");
+            break; // terminal event — stream is done
+        }
+        AgentEvent::InteractionFailed { error, .. } => {
+            eprintln!("error: {error}");
+            break; // terminal event
+        }
+        _ => {} // other lifecycle events flow through too
+    }
+}
+```
+
+**Guarantees:**
+
+- Events on `sub.events` come only from the turn processing your message. No cross-talk from concurrent interactions.
+- Exactly one terminal event (`InteractionComplete` or `InteractionFailed`) is sent before the channel closes.
+- If the subscriber can't keep up (channel buffer: 4096), intermediate events are dropped and a one-time `StreamTruncated` marker is sent. The terminal event is always delivered.
+- The agent's primary `event_tx` channel continues to receive all events from all interactions as before.
+
+**Requirements:**
+
+- The agent must be running in **host mode** with events (`run_host_mode_with_events`).
+- **Comms must be enabled.** Without comms, `event_injector()` returns `None`.
+
 ## Security
 
 <Warning>

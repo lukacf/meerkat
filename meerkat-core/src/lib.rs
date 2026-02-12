@@ -11,8 +11,10 @@ pub mod config_store;
 pub mod error;
 pub mod event;
 pub mod event_injector;
+pub mod event_tap;
 pub mod gateway;
 pub mod hooks;
+pub mod interaction;
 pub mod mcp_config;
 pub mod memory;
 pub mod ops;
@@ -45,12 +47,17 @@ pub use config::{
     ResolvedSubAgentConfig, RetryConfig, ShellDefaults, StorageConfig, StoreConfig,
     SubAgentsConfig, ToolsConfig,
 };
-pub use event_injector::{EventInjector, EventInjectorError};
 pub use config_store::{ConfigStore, FileConfigStore, MemoryConfigStore};
 pub use error::{AgentError, ToolError};
 pub use event::{
     AgentEvent, BudgetType, VerboseEventConfig, format_verbose_event,
     format_verbose_event_with_config,
+};
+pub use event_injector::{
+    EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
+};
+pub use event_tap::{
+    EventTap, EventTapState, new_event_tap, tap_emit, tap_send_terminal, tap_try_send,
 };
 pub use gateway::{Availability, AvailabilityCheck, ToolGateway, ToolGatewayBuilder};
 pub use hooks::{
@@ -59,6 +66,7 @@ pub use hooks::{
     HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
     HookRevision, HookToolCall, HookToolResult, default_failure_policy,
 };
+pub use interaction::{InboxInteraction, InteractionContent, InteractionId, ResponseStatus};
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use ops::{
     ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent, OperationId,

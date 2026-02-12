@@ -103,9 +103,7 @@ impl MethodRouter {
             }
             "turn/interrupt" => handlers::turn::handle_interrupt(id, params, &self.runtime).await,
             #[cfg(feature = "comms")]
-            "event/push" => {
-                handlers::event::handle_push(id, params, &self.runtime).await
-            }
+            "event/push" => handlers::event::handle_push(id, params, &self.runtime).await,
             "capabilities/get" => {
                 let config = self.config_store.get().await.unwrap_or_default();
                 handlers::capabilities::handle_get(id, &config)

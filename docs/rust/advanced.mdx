@@ -225,6 +225,93 @@ let hook_engine = create_default_hook_engine(layered_hooks);
 
 ---
 
+## Interaction-scoped event streaming
+
+When injecting events into a host-mode agent from application code (HTTP handler, Slack bot, debug UI), you can subscribe to the streaming events produced by that specific interaction.
+
+```rust
+use meerkat::{SubscribableInjector, AgentEvent, PlainEventSource};
+
+let injector = service.event_injector(&session_id).await
+    .expect("comms must be enabled");
+
+let sub = injector.inject_with_subscription(
+    "review PR #42".into(),
+    PlainEventSource::Rpc,
+)?;
+
+while let Some(event) = sub.events.recv().await {
+    match event {
+        AgentEvent::TextDelta { delta } => print!("{delta}"),
+        AgentEvent::ToolCallRequested { name, .. } => {
+            println!("[calling {name}]");
+        }
+        AgentEvent::InteractionComplete { result, .. } => {
+            println!("\n---\n{result}");
+            break;
+        }
+        AgentEvent::InteractionFailed { error, .. } => {
+            eprintln!("error: {error}");
+            break;
+        }
+        AgentEvent::StreamTruncated { .. } => {
+            // Some intermediate events were dropped (backpressure).
+            // The terminal event is still guaranteed.
+        }
+        _ => {}
+    }
+}
+```
+
+<Accordion title="How it works">
+
+1. `inject_with_subscription()` generates a unique `InteractionId`, creates a channel (buffer: 4096), registers the sender in a subscriber registry, and injects the message into the inbox with the ID attached.
+2. When the host loop drains the inbox, it finds the subscriber by interaction ID (one-shot: removed on lookup).
+3. The subscriber's sender is installed into the agent's **event tap** — a shared mutex checked by both the LLM streaming adapter (for `TextDelta`) and the agent loop (for lifecycle events).
+4. All events emitted during that turn are mirrored to the subscriber channel.
+5. When the turn completes, `InteractionComplete` (or `InteractionFailed`) is sent and the tap is cleared.
+
+**Guarantees:**
+- No cross-talk between concurrent interactions
+- Exactly one terminal event per subscription
+- Terminal delivery uses a 5-second timeout (not best-effort `try_send`)
+- Backpressure drops intermediate events with a `StreamTruncated` marker; the terminal event is never dropped
+- The primary `event_tx` channel is unaffected
+
+**Requirements:**
+- Agent must be in host mode with events
+- Comms must be enabled
+</Accordion>
+
+<Accordion title="SSE streaming example">
+
+```rust
+async fn handle_chat(session_id: SessionId, user_msg: String) -> impl IntoResponse {
+    let injector = service.event_injector(&session_id).await.unwrap();
+    let sub = injector.inject_with_subscription(user_msg, PlainEventSource::Rpc)?;
+
+    Sse::new(async_stream::stream! {
+        while let Some(event) = sub.events.recv().await {
+            match event {
+                AgentEvent::TextDelta { delta } => yield sse_event("delta", &delta),
+                AgentEvent::InteractionComplete { result, .. } => {
+                    yield sse_event("done", &result);
+                    break;
+                }
+                AgentEvent::InteractionFailed { error, .. } => {
+                    yield sse_event("error", &error);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+}
+```
+</Accordion>
+
+---
+
 ## Complete example
 
 ```rust

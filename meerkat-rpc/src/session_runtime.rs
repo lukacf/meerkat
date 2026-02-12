@@ -309,11 +309,14 @@ impl SessionRuntime {
         result
     }
 
-    /// Get the event injector for a session, if available.
+    /// Get the subscribable event injector for a session, if available.
+    ///
+    /// Use `inject()` for fire-and-forget or `inject_with_subscription()`
+    /// for interaction-scoped streaming.
     pub async fn event_injector(
         &self,
         session_id: &meerkat_core::SessionId,
-    ) -> Option<std::sync::Arc<dyn meerkat_core::EventInjector>> {
+    ) -> Option<std::sync::Arc<dyn meerkat_core::SubscribableInjector>> {
         self.service.event_injector(session_id).await
     }
 

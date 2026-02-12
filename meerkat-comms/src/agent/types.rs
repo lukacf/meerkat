@@ -17,6 +17,8 @@ pub struct PlainMessage {
     pub body: String,
     /// Where the event originated from.
     pub source: PlainEventSource,
+    /// Optional interaction ID for subscription correlation.
+    pub interaction_id: Option<uuid::Uuid>,
 }
 
 impl PlainMessage {
@@ -50,9 +52,14 @@ pub fn drain_inbox_item(item: &InboxItem, trusted_peers: &TrustedPeers) -> Optio
         InboxItem::External { .. } => {
             CommsMessage::from_inbox_item(item, trusted_peers).map(DrainedMessage::Authenticated)
         }
-        InboxItem::PlainEvent { body, source } => Some(DrainedMessage::Plain(PlainMessage {
+        InboxItem::PlainEvent {
+            body,
+            source,
+            interaction_id,
+        } => Some(DrainedMessage::Plain(PlainMessage {
             body: body.clone(),
             source: *source,
+            interaction_id: *interaction_id,
         })),
         InboxItem::SubagentResult { .. } => None,
     }
@@ -753,6 +760,7 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "New email arrived".to_string(),
             source: PlainEventSource::Tcp,
+            interaction_id: None,
         };
         let drained = drain_inbox_item(&item, &trusted);
 
@@ -761,6 +769,7 @@ mod tests {
             DrainedMessage::Plain(msg) => {
                 assert_eq!(msg.body, "New email arrived");
                 assert_eq!(msg.source, PlainEventSource::Tcp);
+                assert_eq!(msg.interaction_id, None);
             }
             DrainedMessage::Authenticated(_) => panic!("Expected Plain"),
         }
@@ -773,6 +782,7 @@ mod tests {
         let msg = PlainMessage {
             body: "CPU > 95% on prod-3".to_string(),
             source: PlainEventSource::Webhook,
+            interaction_id: None,
         };
         let text = msg.to_user_message_text();
         assert_eq!(text, "[EVENT via webhook] CPU > 95% on prod-3");
@@ -792,6 +802,7 @@ mod tests {
             let msg = PlainMessage {
                 body: "test".to_string(),
                 source,
+                interaction_id: None,
             };
             assert!(
                 msg.to_user_message_text().contains(label),

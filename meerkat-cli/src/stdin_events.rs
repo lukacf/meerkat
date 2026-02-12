@@ -3,8 +3,8 @@
 //! Reads newline-delimited lines from stdin, auto-detects JSON/text,
 //! and injects them as `PlainEvent` items via the `EventInjector` trait.
 
-use meerkat_core::event_injector::{EventInjector, EventInjectorError};
 use meerkat_core::PlainEventSource;
+use meerkat_core::event_injector::{EventInjectorError, SubscribableInjector};
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use tokio::task::JoinHandle;
@@ -20,7 +20,7 @@ pub fn parse_stdin_line(line: &str) -> String {
 ///
 /// The task exits cleanly on EOF or when the injector's inbox is closed.
 /// On inbox full, it logs a warning and drops the line (backpressure).
-pub fn spawn_stdin_reader(injector: Arc<dyn EventInjector>) -> JoinHandle<()> {
+pub fn spawn_stdin_reader(injector: Arc<dyn SubscribableInjector>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let stdin = tokio::io::stdin();
         let reader = tokio::io::BufReader::new(stdin);

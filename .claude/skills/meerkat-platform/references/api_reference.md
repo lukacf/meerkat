@@ -497,6 +497,46 @@ let turn_result = service.start_turn(&session_id, StartTurnRequest {
 }).await?;
 ```
 
+### Interaction-Scoped Event Streaming
+
+Inject a message into a host-mode agent and subscribe to the streaming events from the turn that processes it.
+
+```rust
+use meerkat::{SubscribableInjector, AgentEvent, PlainEventSource};
+
+// Get the subscribable injector for a running session
+let injector = service.event_injector(&session_id).await
+    .expect("comms must be enabled");
+
+// Fire-and-forget (existing)
+injector.inject("hello".into(), PlainEventSource::Rpc)?;
+
+// With subscription — dedicated event stream for this interaction
+let sub = injector.inject_with_subscription(
+    "review PR #42".into(),
+    PlainEventSource::Rpc,
+)?;
+// sub.id     — InteractionId (for logging/correlation)
+// sub.events — mpsc::Receiver<AgentEvent> (scoped to this interaction)
+
+while let Some(event) = sub.events.recv().await {
+    match event {
+        AgentEvent::TextDelta { delta } => print!("{delta}"),
+        AgentEvent::InteractionComplete { result, .. } => {
+            println!("\n{result}");
+            break; // terminal — stream done
+        }
+        AgentEvent::InteractionFailed { error, .. } => {
+            eprintln!("error: {error}");
+            break; // terminal
+        }
+        _ => {} // TurnStarted, ToolCallRequested, etc.
+    }
+}
+```
+
+Guarantees: no cross-talk between concurrent interactions, exactly one terminal event, backpressure drops intermediate events (with `StreamTruncated` marker) but never the terminal. Requires host mode with events and comms enabled.
+
 ---
 
 ## Kitchen-Sink Examples

@@ -79,7 +79,7 @@ impl SessionAgent for FactoryAgent {
         self.agent.session().clone()
     }
 
-    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
         self.agent.comms()?.event_injector()
     }
 }

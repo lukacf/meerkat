@@ -73,6 +73,11 @@ where
         self.depth
     }
 
+    /// Get the event tap for interaction-scoped streaming.
+    pub fn event_tap(&self) -> &crate::event_tap::EventTap {
+        &self.event_tap
+    }
+
     /// Spawn a new sub-agent with minimal context
     ///
     /// The sub-agent runs independently with its own budget and tool access.
@@ -425,15 +430,16 @@ where
         for outcome in &report.outcomes {
             for patch in &outcome.patches {
                 if let HookPatch::RunResult { text } = patch {
-                    if let Some(tx) = event_tx {
-                        let _ = tx
-                            .send(AgentEvent::HookRewriteApplied {
-                                hook_id: outcome.hook_id.to_string(),
-                                point: HookPoint::RunCompleted,
-                                patch: HookPatch::RunResult { text: text.clone() },
-                            })
-                            .await;
-                    }
+                    crate::event_tap::tap_emit(
+                        &self.event_tap,
+                        event_tx,
+                        AgentEvent::HookRewriteApplied {
+                            hook_id: outcome.hook_id.to_string(),
+                            point: HookPoint::RunCompleted,
+                            patch: HookPatch::RunResult { text: text.clone() },
+                        },
+                    )
+                    .await;
                     result.text = text.clone();
                     self.apply_run_result_text_patch(text);
                 }
@@ -505,134 +511,30 @@ where
         Ok(())
     }
 
-    /// Run the agent with a user message
+    /// Run the agent with a user message.
     pub async fn run(&mut self, user_input: String) -> Result<RunResult, AgentError> {
-        // Reset state for new run (allows multi-turn on same agent)
-        self.state = LoopState::CallingLlm;
-
-        // Detect /skill-ref at start of message for per-turn activation
-        let user_input = self.apply_skill_ref(user_input).await;
-
-        // Add user message
-        self.session.push(Message::User(crate::types::UserMessage {
-            content: user_input.clone(),
-        }));
-
-        self.run_started_hooks(&user_input, None).await?;
-
-        match self.run_loop(None).await {
-            Ok(mut result) => {
-                self.run_completed_hooks(&mut result, None).await?;
-                Ok(result)
-            }
-            Err(err) => {
-                if let Err(hook_err) = self.run_failed_hooks(&err, None).await {
-                    tracing::warn!(?hook_err, "run_failed hook execution failed");
-                }
-                Err(err)
-            }
-        }
+        self.run_inner(user_input, None).await
     }
 
-    /// Run the agent with events streamed to the provided channel
+    /// Run the agent with events streamed to the provided channel.
     pub async fn run_with_events(
         &mut self,
         user_input: String,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
-        // Reset state for new run (allows multi-turn on same agent)
-        self.state = LoopState::CallingLlm;
-
-        // Detect /skill-ref at start of message for per-turn activation
-        let user_input = self.apply_skill_ref(user_input).await;
-
-        let session_id = self.session.id().clone();
-        let run_prompt = user_input.clone();
-
-        // Add user message
-        self.session.push(Message::User(crate::types::UserMessage {
-            content: user_input,
-        }));
-
-        let _ = event_tx
-            .send(AgentEvent::RunStarted {
-                session_id,
-                prompt: run_prompt.clone(),
-            })
-            .await;
-
-        self.run_started_hooks(&run_prompt, Some(&event_tx)).await?;
-
-        match self.run_loop(Some(event_tx.clone())).await {
-            Ok(mut result) => {
-                self.run_completed_hooks(&mut result, Some(&event_tx))
-                    .await?;
-                Ok(result)
-            }
-            Err(err) => {
-                if let Err(hook_err) = self.run_failed_hooks(&err, Some(&event_tx)).await {
-                    tracing::warn!(?hook_err, "run_failed hook execution failed");
-                }
-                let _ = event_tx
-                    .send(AgentEvent::RunFailed {
-                        session_id: self.session.id().clone(),
-                        error: err.to_string(),
-                    })
-                    .await;
-                Err(err)
-            }
-        }
+        self.run_inner(user_input, Some(event_tx)).await
     }
 
     /// Run the agent using the pending user message already in the session.
     ///
     /// This is useful when the session has been pre-populated with a user message
     /// (e.g., via `create_spawn_session` or `create_fork_session`). Unlike `run()`,
-    /// this method does NOT add a new user message - it runs directly from the
+    /// this method does NOT add a new user message — it runs directly from the
     /// session's current state.
     ///
     /// Returns an error if the session doesn't have a pending user message.
     pub async fn run_pending(&mut self) -> Result<RunResult, AgentError> {
-        let has_pending_user_message = self
-            .session
-            .messages()
-            .last()
-            .is_some_and(|m| matches!(m, Message::User(_)));
-
-        if !has_pending_user_message {
-            return Err(AgentError::ConfigError(
-                "run_pending requires a pending user message in the session".to_string(),
-            ));
-        }
-
-        // Reset state for new run (allows multi-turn on same agent)
-        self.state = LoopState::CallingLlm;
-
-        let pending_prompt = self
-            .session
-            .messages()
-            .last()
-            .and_then(|msg| match msg {
-                Message::User(user) => Some(user.content.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        self.run_started_hooks(&pending_prompt, None).await?;
-
-        // Run the loop without adding a message
-        match self.run_loop(None).await {
-            Ok(mut result) => {
-                self.run_completed_hooks(&mut result, None).await?;
-                Ok(result)
-            }
-            Err(err) => {
-                if let Err(hook_err) = self.run_failed_hooks(&err, None).await {
-                    tracing::warn!(?hook_err, "run_failed hook execution failed");
-                }
-                Err(err)
-            }
-        }
+        self.run_pending_inner(None).await
     }
 
     /// Run the agent using the pending user message, with event streaming.
@@ -642,6 +544,82 @@ where
         &mut self,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
+        self.run_pending_inner(Some(event_tx)).await
+    }
+
+    /// Core run implementation shared by `run()` and `run_with_events()`.
+    ///
+    /// Adds user_input as a user message, emits lifecycle events when `event_tx`
+    /// is provided, and delegates to `run_loop`.
+    async fn run_inner(
+        &mut self,
+        user_input: String,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Result<RunResult, AgentError> {
+        // Reset state for new run (allows multi-turn on same agent)
+        self.state = LoopState::CallingLlm;
+
+        // Detect /skill-ref at start of message for per-turn activation
+        let user_input = self.apply_skill_ref(user_input).await;
+
+        let run_prompt = user_input.clone();
+
+        // Add user message
+        self.session.push(Message::User(crate::types::UserMessage {
+            content: user_input,
+        }));
+
+        if let Some(ref tx) = event_tx {
+            let _ = crate::event_tap::tap_emit(
+                &self.event_tap,
+                Some(tx),
+                AgentEvent::RunStarted {
+                    session_id: self.session.id().clone(),
+                    prompt: run_prompt.clone(),
+                },
+            )
+            .await;
+        }
+
+        self.run_started_hooks(&run_prompt, event_tx.as_ref()).await?;
+
+        match self.run_loop(event_tx.clone()).await {
+            Ok(mut result) => {
+                self.run_completed_hooks(&mut result, event_tx.as_ref())
+                    .await?;
+                Ok(result)
+            }
+            Err(err) => {
+                if let Err(hook_err) =
+                    self.run_failed_hooks(&err, event_tx.as_ref()).await
+                {
+                    tracing::warn!(?hook_err, "run_failed hook execution failed");
+                }
+                if let Some(ref tx) = event_tx {
+                    let _ = crate::event_tap::tap_emit(
+                        &self.event_tap,
+                        Some(tx),
+                        AgentEvent::RunFailed {
+                            session_id: self.session.id().clone(),
+                            error: err.to_string(),
+                        },
+                    )
+                    .await;
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// Core run-pending implementation shared by `run_pending()` and
+    /// `run_pending_with_events()`.
+    ///
+    /// Uses the existing pending user message in the session (does NOT push a new one).
+    /// Emits lifecycle events when `event_tx` is provided.
+    async fn run_pending_inner(
+        &mut self,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Result<RunResult, AgentError> {
         let pending_prompt = self.session.messages().last().and_then(|m| match m {
             Message::User(u) => Some(u.content.clone()),
             _ => None,
@@ -649,41 +627,50 @@ where
 
         let Some(prompt) = pending_prompt else {
             return Err(AgentError::ConfigError(
-                "run_pending_with_events requires a pending user message in the session"
-                    .to_string(),
+                "run_pending requires a pending user message in the session".to_string(),
             ));
         };
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
 
-        let session_id = self.session.id().clone();
-
-        let _ = event_tx
-            .send(AgentEvent::RunStarted {
-                session_id,
-                prompt: prompt.clone(),
-            })
+        if let Some(ref tx) = event_tx {
+            let _ = crate::event_tap::tap_emit(
+                &self.event_tap,
+                Some(tx),
+                AgentEvent::RunStarted {
+                    session_id: self.session.id().clone(),
+                    prompt: prompt.clone(),
+                },
+            )
             .await;
+        }
 
-        self.run_started_hooks(&prompt, Some(&event_tx)).await?;
+        self.run_started_hooks(&prompt, event_tx.as_ref()).await?;
 
-        match self.run_loop(Some(event_tx.clone())).await {
+        match self.run_loop(event_tx.clone()).await {
             Ok(mut result) => {
-                self.run_completed_hooks(&mut result, Some(&event_tx))
+                self.run_completed_hooks(&mut result, event_tx.as_ref())
                     .await?;
                 Ok(result)
             }
             Err(err) => {
-                if let Err(hook_err) = self.run_failed_hooks(&err, Some(&event_tx)).await {
+                if let Err(hook_err) =
+                    self.run_failed_hooks(&err, event_tx.as_ref()).await
+                {
                     tracing::warn!(?hook_err, "run_failed hook execution failed");
                 }
-                let _ = event_tx
-                    .send(AgentEvent::RunFailed {
-                        session_id: self.session.id().clone(),
-                        error: err.to_string(),
-                    })
+                if let Some(ref tx) = event_tx {
+                    let _ = crate::event_tap::tap_emit(
+                        &self.event_tap,
+                        Some(tx),
+                        AgentEvent::RunFailed {
+                            session_id: self.session.id().clone(),
+                            error: err.to_string(),
+                        },
+                    )
                     .await;
+                }
                 Err(err)
             }
         }

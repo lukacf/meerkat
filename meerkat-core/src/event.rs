@@ -402,6 +402,17 @@ mod tests {
             AgentEvent::CompactionFailed {
                 error: "LLM request failed".to_string(),
             },
+            AgentEvent::InteractionComplete {
+                interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                result: "agent response".to_string(),
+            },
+            AgentEvent::InteractionFailed {
+                interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                error: "LLM failure".to_string(),
+            },
+            AgentEvent::StreamTruncated {
+                reason: "channel full".to_string(),
+            },
         ];
 
         for event in events {

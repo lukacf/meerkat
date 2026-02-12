@@ -92,11 +92,7 @@ mod tests {
     }
 
     impl EventInjector for MockEventInjector {
-        fn inject(
-            &self,
-            body: String,
-            source: PlainEventSource,
-        ) -> Result<(), EventInjectorError> {
+        fn inject(&self, body: String, source: PlainEventSource) -> Result<(), EventInjectorError> {
             self.events.lock().unwrap().push((body, source));
             Ok(())
         }

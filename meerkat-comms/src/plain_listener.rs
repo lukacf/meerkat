@@ -132,7 +132,10 @@ mod tests {
             handle_plain_connection(server, sender, 1024, PlainEventSource::Tcp).await;
         });
 
-        client_write.write_all(b"line 1\nline 2\nline 3\n").await.unwrap();
+        client_write
+            .write_all(b"line 1\nline 2\nline 3\n")
+            .await
+            .unwrap();
         drop(client_write);
         handle.await.unwrap();
 

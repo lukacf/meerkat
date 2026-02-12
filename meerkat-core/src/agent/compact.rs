@@ -155,9 +155,7 @@ where
                 )
                 .await
             {
-                tracing::warn!(
-                    "compaction event stream receiver dropped before CompactionFailed"
-                );
+                tracing::warn!("compaction event stream receiver dropped before CompactionFailed");
             }
             return Err(CompactionError::LlmFailed(e));
         }

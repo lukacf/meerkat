@@ -81,7 +81,7 @@ where
             ($event:expr) => {
                 {
                     let event = $event;
-                    crate::event_tap::tap_try_send(&self.event_tap, event.clone());
+                    crate::event_tap::tap_try_send(&self.event_tap, &event);
                     if event_stream_open {
                         if let Some(ref tx) = event_tx {
                             if tx.send(event).await.is_err() {

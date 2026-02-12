@@ -12,6 +12,17 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InteractionId(pub Uuid);
 
+/// Typed status for response interactions.
+///
+/// Mirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseStatus {
+    Accepted,
+    Completed,
+    Failed,
+}
+
 /// Simplified interaction content for the core agent loop.
 ///
 /// This is an adapter type — `CommsContent` in meerkat-comms has richer types
@@ -26,12 +37,13 @@ pub enum InteractionContent {
     /// A response to a previous request.
     Response {
         in_reply_to: InteractionId,
-        status: String,
+        status: ResponseStatus,
         result: Value,
     },
 }
 
 /// An interaction drained from the inbox, ready for classification.
+#[derive(Debug, Clone)]
 pub struct InboxInteraction {
     /// Unique identifier for this interaction.
     pub id: InteractionId,
@@ -84,12 +96,27 @@ mod tests {
         let id = InteractionId(Uuid::new_v4());
         let content = InteractionContent::Response {
             in_reply_to: id,
-            status: "completed".to_string(),
+            status: ResponseStatus::Completed,
             result: serde_json::json!({"ok": true}),
         };
         let json = serde_json::to_value(&content).unwrap();
         assert_eq!(json["type"], "response");
+        assert_eq!(json["status"], "completed");
         let parsed: InteractionContent = serde_json::from_value(json).unwrap();
         assert_eq!(content, parsed);
+    }
+
+    #[test]
+    fn response_status_json_roundtrip_all_variants() {
+        for (variant, expected_str) in [
+            (ResponseStatus::Accepted, "accepted"),
+            (ResponseStatus::Completed, "completed"),
+            (ResponseStatus::Failed, "failed"),
+        ] {
+            let json = serde_json::to_value(variant).unwrap();
+            assert_eq!(json, expected_str);
+            let parsed: ResponseStatus = serde_json::from_value(json).unwrap();
+            assert_eq!(variant, parsed);
+        }
     }
 }

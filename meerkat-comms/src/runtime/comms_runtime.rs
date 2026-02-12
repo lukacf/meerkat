@@ -108,14 +108,20 @@ impl CoreCommsRuntime for CommsRuntime {
                             status,
                             result,
                         } => {
-                            let status_str = match status {
-                                crate::agent::types::CommsStatus::Accepted => "accepted",
-                                crate::agent::types::CommsStatus::Completed => "completed",
-                                crate::agent::types::CommsStatus::Failed => "failed",
+                            let status = match status {
+                                crate::agent::types::CommsStatus::Accepted => {
+                                    meerkat_core::ResponseStatus::Accepted
+                                }
+                                crate::agent::types::CommsStatus::Completed => {
+                                    meerkat_core::ResponseStatus::Completed
+                                }
+                                crate::agent::types::CommsStatus::Failed => {
+                                    meerkat_core::ResponseStatus::Failed
+                                }
                             };
                             meerkat_core::InteractionContent::Response {
                                 in_reply_to: meerkat_core::InteractionId(in_reply_to),
-                                status: status_str.to_string(),
+                                status,
                                 result,
                             }
                         }
@@ -729,7 +735,7 @@ mod tests {
                 &i.content,
                 meerkat_core::InteractionContent::Response { in_reply_to, status, result }
                     if in_reply_to.0 == reply_to
-                        && status == "completed"
+                        && *status == meerkat_core::ResponseStatus::Completed
                         && result["ok"] == true
             )
         }));

@@ -66,7 +66,7 @@ pub use hooks::{
     HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
     HookRevision, HookToolCall, HookToolResult, default_failure_policy,
 };
-pub use interaction::{InboxInteraction, InteractionContent, InteractionId};
+pub use interaction::{InboxInteraction, InteractionContent, InteractionId, ResponseStatus};
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use ops::{
     ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent, OperationId,

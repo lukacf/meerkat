@@ -109,7 +109,7 @@ impl AgentLlmClient for LlmClientAdapter {
                         assembler.on_text_delta(&delta, meta);
                         meerkat_core::tap_try_send(
                             &self.event_tap,
-                            AgentEvent::TextDelta {
+                            &AgentEvent::TextDelta {
                                 delta: delta.clone(),
                             },
                         );

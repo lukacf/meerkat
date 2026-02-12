@@ -30,17 +30,20 @@ pub fn new_event_tap() -> EventTap {
 
 /// Best-effort send to the tap for streaming events (TextDelta, lifecycle).
 ///
+/// Takes a reference to avoid unconditional cloning — the event is only cloned
+/// when a subscriber is active and the channel has capacity.
+///
 /// On `TrySendError::Full`: sets `truncated = true`, attempts a one-time
 /// `StreamTruncated` marker via direct `tx.try_send(...)`.
 /// On `TrySendError::Closed`: no-op.
 ///
 /// This is synchronous (no await) — safe to call from both sync and async contexts.
-pub fn tap_try_send(tap: &EventTap, event: AgentEvent) {
+pub fn tap_try_send(tap: &EventTap, event: &AgentEvent) {
     let guard = tap.lock();
     let Some(state) = guard.as_ref() else {
         return;
     };
-    match state.tx.try_send(event) {
+    match state.tx.try_send(event.clone()) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(_)) => {
             if !state.truncated.swap(true, Ordering::Relaxed) {
@@ -82,13 +85,16 @@ pub async fn tap_send_terminal(tap: &EventTap, event: AgentEvent) {
 
 /// Convenience: send event to tap (best-effort), then to primary channel.
 ///
+/// The event is only cloned for the tap when a subscriber is active.
+/// The owned event is moved into the primary channel send.
+///
 /// Returns `false` if the primary send failed (receiver dropped).
 pub async fn tap_emit(
     tap: &EventTap,
     tx: Option<&mpsc::Sender<AgentEvent>>,
     event: AgentEvent,
 ) -> bool {
-    tap_try_send(tap, event.clone());
+    tap_try_send(tap, &event);
     if let Some(tx) = tx {
         return tx.send(event).await.is_ok();
     }
@@ -106,7 +112,7 @@ mod tests {
         // Should not panic
         tap_try_send(
             &tap,
-            AgentEvent::TextDelta {
+            &AgentEvent::TextDelta {
                 delta: "hello".to_string(),
             },
         );
@@ -126,7 +132,7 @@ mod tests {
 
         tap_try_send(
             &tap,
-            AgentEvent::TextDelta {
+            &AgentEvent::TextDelta {
                 delta: "hello".to_string(),
             },
         );
@@ -154,7 +160,7 @@ mod tests {
         // Fill the channel
         tap_try_send(
             &tap,
-            AgentEvent::TextDelta {
+            &AgentEvent::TextDelta {
                 delta: "first".to_string(),
             },
         );
@@ -162,7 +168,7 @@ mod tests {
         // This should trigger truncation
         tap_try_send(
             &tap,
-            AgentEvent::TextDelta {
+            &AgentEvent::TextDelta {
                 delta: "second".to_string(),
             },
         );

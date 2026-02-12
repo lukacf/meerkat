@@ -52,119 +52,7 @@ where
 
     /// Run the agent in host mode: process initial prompt, then stay alive for comms messages.
     pub async fn run_host_mode(&mut self, initial_prompt: String) -> Result<RunResult, AgentError> {
-        use std::time::Duration;
-
-        // Host loop owns the inbox drain cycle — suppress inner-loop drains
-        // to preserve interaction-scoped subscriber correlation.
-        self.host_drain_active = true;
-
-        let comms = self.comms_runtime.clone().ok_or_else(|| {
-            AgentError::ConfigError("Host mode requires comms to be enabled".to_string())
-        })?;
-
-        let has_pending_user_message = self
-            .session
-            .messages()
-            .last()
-            .is_some_and(|m| matches!(m, Message::User(_)));
-
-        let mut last_result = if !initial_prompt.trim().is_empty() {
-            self.run(initial_prompt).await?
-        } else if has_pending_user_message {
-            self.run_loop(None).await?
-        } else {
-            RunResult {
-                text: String::new(),
-                session_id: self.session.id().clone(),
-                turns: 0,
-                tool_calls: 0,
-                usage: Usage::default(),
-                structured_output: None,
-                schema_warnings: None,
-            }
-        };
-
-        let inbox_notify = comms.inbox_notify();
-        const POLL_INTERVAL: Duration = Duration::from_secs(60);
-
-        loop {
-            if self.budget.is_exhausted() {
-                tracing::info!("Host mode: budget exhausted, exiting");
-                return Ok(last_result);
-            }
-
-            let timeout = self.budget.remaining_duration().unwrap_or(POLL_INTERVAL);
-            let notified = inbox_notify.notified();
-
-            let interactions = comms.drain_interactions().await;
-
-            if comms.dismiss_received() {
-                tracing::info!("Host mode: DISMISS received, exiting");
-                return Ok(last_result);
-            }
-
-            if !interactions.is_empty() {
-                let mut batched_texts = Vec::new();
-
-                for interaction in interactions {
-                    // Response interactions: inject into session, never run through LLM
-                    if matches!(&interaction.content, InteractionContent::Response { .. }) {
-                        inject_response_into_session(&mut self.session, &interaction);
-                        continue;
-                    }
-
-                    // Consume subscriber to avoid leaks (no streaming in non-events mode)
-                    let _ = comms.interaction_subscriber(&interaction.id);
-
-                    match &interaction.content {
-                        InteractionContent::Message { .. } => {
-                            batched_texts.push(interaction.rendered_text);
-                        }
-                        InteractionContent::Request { .. } => {
-                            // Process requests individually
-                            match self.run(interaction.rendered_text).await {
-                                Ok(result) => last_result = result,
-                                Err(e) => {
-                                    if e.is_graceful() {
-                                        tracing::info!("Host mode: graceful exit - {}", e);
-                                        return Ok(last_result);
-                                    }
-                                    return Err(e);
-                                }
-                            }
-                        }
-                        InteractionContent::Response { .. } => unreachable!("handled above"),
-                    }
-                }
-
-                // Process batched messages as one run
-                if !batched_texts.is_empty() {
-                    let combined = batched_texts.join("\n\n");
-                    tracing::debug!(
-                        "Host mode: processing {} batched message(s)",
-                        batched_texts.len()
-                    );
-                    match self.run(combined).await {
-                        Ok(result) => last_result = result,
-                        Err(e) => {
-                            if e.is_graceful() {
-                                tracing::info!("Host mode: graceful exit - {}", e);
-                                return Ok(last_result);
-                            }
-                            return Err(e);
-                        }
-                    }
-                }
-                continue;
-            }
-
-            tokio::select! {
-                _ = notified => {} //
-                _ = tokio::time::sleep(timeout) => {
-                    tracing::trace!("Host mode: timeout, checking budget");
-                }
-            }
-        }
+        self.run_host_mode_inner(initial_prompt, None).await
     }
 
     /// Run in host mode with event streaming.
@@ -173,6 +61,22 @@ where
         initial_prompt: String,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
+        self.run_host_mode_inner(initial_prompt, Some(event_tx))
+            .await
+    }
+
+    /// Core host mode implementation shared by `run_host_mode()` and
+    /// `run_host_mode_with_events()`.
+    ///
+    /// Processes the initial prompt, then loops waiting for comms interactions.
+    /// When `event_tx` is `Some`, subscriber-bound interactions get individual
+    /// tap-scoped processing with terminal events; otherwise subscribers are
+    /// consumed and dropped.
+    async fn run_host_mode_inner(
+        &mut self,
+        initial_prompt: String,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Result<RunResult, AgentError> {
         use std::time::Duration;
 
         // Host loop owns the inbox drain cycle — suppress inner-loop drains
@@ -180,6 +84,7 @@ where
         self.host_drain_active = true;
 
         let comms = self.comms_runtime.clone().ok_or_else(|| {
+            self.host_drain_active = false;
             AgentError::ConfigError("Host mode requires comms to be enabled".to_string())
         })?;
 
@@ -190,28 +95,34 @@ where
             .is_some_and(|m| matches!(m, Message::User(_)));
 
         let mut last_result = if !initial_prompt.trim().is_empty() {
-            self.run_with_events(initial_prompt, event_tx.clone())
-                .await?
+            match &event_tx {
+                Some(tx) => self.run_with_events(initial_prompt, tx.clone()).await?,
+                None => self.run(initial_prompt).await?,
+            }
         } else if has_pending_user_message {
-            let run_prompt = self
-                .session
-                .messages()
-                .last()
-                .and_then(|msg| match msg {
-                    Message::User(user) => Some(user.content.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            crate::event_tap::tap_emit(
-                &self.event_tap,
-                Some(&event_tx),
-                AgentEvent::RunStarted {
-                    session_id: self.session.id().clone(),
-                    prompt: run_prompt,
-                },
-            )
-            .await;
-            self.run_loop(Some(event_tx.clone())).await?
+            if let Some(ref tx) = event_tx {
+                let run_prompt = self
+                    .session
+                    .messages()
+                    .last()
+                    .and_then(|msg| match msg {
+                        Message::User(user) => Some(user.content.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                crate::event_tap::tap_emit(
+                    &self.event_tap,
+                    Some(tx),
+                    AgentEvent::RunStarted {
+                        session_id: self.session.id().clone(),
+                        prompt: run_prompt,
+                    },
+                )
+                .await;
+                self.run_loop(Some(tx.clone())).await?
+            } else {
+                self.run_loop(None).await?
+            }
         } else {
             RunResult {
                 text: String::new(),
@@ -230,6 +141,7 @@ where
         loop {
             if self.budget.is_exhausted() {
                 tracing::info!("Host mode: budget exhausted, exiting");
+                self.host_drain_active = false;
                 return Ok(last_result);
             }
 
@@ -240,10 +152,20 @@ where
 
             if comms.dismiss_received() {
                 tracing::info!("Host mode: DISMISS received, exiting");
+                self.host_drain_active = false;
                 return Ok(last_result);
             }
 
             if !interactions.is_empty() {
+                // --- Classification phase ---
+                //
+                // Interactions are classified into individual vs batched processing.
+                // This intentionally reorders relative to inbox arrival: individual
+                // interactions (requests and subscriber-bound) are processed first,
+                // then batched messages. Requests need individual processing for
+                // subscriber correlation and isolated error handling; messages are
+                // batched for efficiency. The LLM sees all context regardless of
+                // processing order.
                 let mut batched_texts = Vec::new();
                 let mut individual: Vec<(InboxInteraction, Option<mpsc::Sender<AgentEvent>>)> =
                     Vec::new();
@@ -256,10 +178,16 @@ where
                     }
 
                     let subscriber = comms.interaction_subscriber(&interaction.id);
-                    if subscriber.is_some() {
-                        // Any interaction with a subscriber gets individual processing with tap
+
+                    if event_tx.is_some() && subscriber.is_some() {
+                        // Events mode: subscriber-bound interactions get individual
+                        // tap-scoped processing with terminal events.
                         individual.push((interaction, subscriber));
                     } else {
+                        // No events or no subscriber — consume subscriber to avoid
+                        // leaks, then classify by content type.
+                        drop(subscriber);
+
                         match &interaction.content {
                             InteractionContent::Message { .. } => {
                                 batched_texts.push(interaction.rendered_text);
@@ -274,23 +202,30 @@ where
                     }
                 }
 
-                // Process individual interactions (requests, or any with subscribers)
+                // Process individual interactions (requests, or subscriber-bound)
                 for (interaction, subscriber) in individual {
-                    // Install tap if subscriber present
-                    if let Some(tx) = subscriber {
-                        let mut guard = self.event_tap.lock();
-                        *guard = Some(crate::event_tap::EventTapState {
-                            tx,
-                            truncated: AtomicBool::new(false),
-                        });
-                    }
+                    let has_tap = match subscriber {
+                        Some(tx) => {
+                            self.event_tap
+                                .lock()
+                                .replace(crate::event_tap::EventTapState {
+                                    tx,
+                                    truncated: AtomicBool::new(false),
+                                });
+                            true
+                        }
+                        None => false,
+                    };
 
-                    let has_tap = self.event_tap.lock().is_some();
+                    let run_result = match &event_tx {
+                        Some(tx) => {
+                            self.run_with_events(interaction.rendered_text, tx.clone())
+                                .await
+                        }
+                        None => self.run(interaction.rendered_text).await,
+                    };
 
-                    match self
-                        .run_with_events(interaction.rendered_text, event_tx.clone())
-                        .await
-                    {
+                    match run_result {
                         Ok(result) => {
                             if has_tap {
                                 crate::event_tap::tap_send_terminal(
@@ -315,13 +250,14 @@ where
                                 )
                                 .await;
                             }
-                            // Clear tap before returning
                             self.event_tap.lock().take();
 
                             if e.is_graceful() {
                                 tracing::info!("Host mode: graceful exit - {}", e);
+                                self.host_drain_active = false;
                                 return Ok(last_result);
                             }
+                            self.host_drain_active = false;
                             return Err(e);
                         }
                     }
@@ -337,13 +273,19 @@ where
                         "Host mode: processing {} batched message(s)",
                         batched_texts.len()
                     );
-                    match self.run_with_events(combined, event_tx.clone()).await {
+                    let batch_result = match &event_tx {
+                        Some(tx) => self.run_with_events(combined, tx.clone()).await,
+                        None => self.run(combined).await,
+                    };
+                    match batch_result {
                         Ok(result) => last_result = result,
                         Err(e) => {
                             if e.is_graceful() {
                                 tracing::info!("Host mode: graceful exit - {}", e);
+                                self.host_drain_active = false;
                                 return Ok(last_result);
                             }
+                            self.host_drain_active = false;
                             return Err(e);
                         }
                     }
@@ -352,7 +294,7 @@ where
             }
 
             tokio::select! {
-                _ = notified => {} //
+                _ = notified => {}
                 _ = tokio::time::sleep(timeout) => {
                     tracing::trace!("Host mode: timeout, checking budget");
                 }
@@ -742,7 +684,7 @@ mod tests {
             from: "peer".into(),
             content: InteractionContent::Response {
                 in_reply_to: response_id,
-                status: "completed".into(),
+                status: crate::interaction::ResponseStatus::Completed,
                 result: serde_json::json!({"ok": true}),
             },
             rendered_text: "[Response] completed: {\"ok\":true}".into(),
@@ -1071,7 +1013,7 @@ mod tests {
             from: "peer".into(),
             content: InteractionContent::Response {
                 in_reply_to: response_id,
-                status: "ok".into(),
+                status: crate::interaction::ResponseStatus::Completed,
                 result: serde_json::json!("result data"),
             },
             rendered_text: "[Response] ok: result data".into(),

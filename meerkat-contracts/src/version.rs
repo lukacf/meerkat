@@ -21,7 +21,7 @@ pub struct ContractVersion {
 impl ContractVersion {
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 1,
+        minor: 2,
         patch: 0,
     };
 
@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        assert_eq!(ContractVersion::CURRENT.to_string(), "0.1.0");
+        assert_eq!(ContractVersion::CURRENT.to_string(), "0.2.0");
     }
 
     #[test]

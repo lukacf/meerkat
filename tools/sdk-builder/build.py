@@ -152,10 +152,10 @@ def emit_bundle_manifest(
 ) -> None:
     """Emit the bundle manifest."""
     version_file = root / "artifacts" / "schemas" / "version.json"
-    contract_version = "0.1.0"
+    contract_version = "0.2.0"
     if version_file.exists():
         with open(version_file) as f:
-            contract_version = json.load(f).get("contract_version", "0.1.0")
+            contract_version = json.load(f).get("contract_version", "0.2.0")
 
     bundle = {
         "profile": manifest.get("profile", {}).get("name", "unknown"),

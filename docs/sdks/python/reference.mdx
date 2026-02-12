@@ -241,12 +241,12 @@ except MeerkatError as e:
 
 The SDK negotiates version compatibility during `connect()`:
 
-- **0.x:** Requires exact minor version match (SDK `0.1.0` works with server `0.1.x`)
+- **0.x:** Requires exact minor version match (SDK `0.2.0` works with server `0.2.x`)
 - **1.0+:** Requires same major version
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # "0.1.0"
+print(CONTRACT_VERSION)  # "0.2.0"
 ```
 
 ---

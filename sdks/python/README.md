@@ -2,7 +2,7 @@
 
 Python SDK for the [Meerkat](https://github.com/lukacf/raik) agent runtime. Communicates with the `rkat` JSON-RPC server over stdio to manage sessions, run agent turns, stream events, and query capabilities.
 
-- **Contract version:** `0.1.0`
+- **Contract version:** `0.2.0`
 - **Python:** `>=3.10`
 - **License:** MIT OR Apache-2.0
 
@@ -98,7 +98,7 @@ async def connect(self) -> MeerkatClient
 
 Starts the `rkat rpc` subprocess and performs the initialization handshake:
 
-1. Sends `initialize` and checks the server's `contract_version` against the SDK's `CONTRACT_VERSION` (`"0.1.0"`). Raises `MeerkatError` (code `"VERSION_MISMATCH"`) on incompatibility.
+1. Sends `initialize` and checks the server's `contract_version` against the SDK's `CONTRACT_VERSION` (`"0.2.0"`). Raises `MeerkatError` (code `"VERSION_MISMATCH"`) on incompatibility.
 2. Fetches capabilities via `capabilities/get` and caches them internally.
 
 Returns `self` for chaining.
@@ -544,14 +544,14 @@ except MeerkatError as e:
 
 The SDK negotiates version compatibility during `connect()`. The contract version follows semver conventions:
 
-- **0.x:** The SDK requires an exact minor version match (e.g., SDK `0.1.0` is compatible with server `0.1.x` but not `0.2.0`).
+- **0.x:** The SDK requires an exact minor version match (e.g., SDK `0.2.0` is compatible with server `0.2.x` but not `0.3.0`).
 - **1.0+:** The SDK requires the same major version (e.g., SDK `1.0.0` is compatible with server `1.x.x` but not `2.0.0`).
 
-The current contract version is `0.1.0`, defined as the `CONTRACT_VERSION` constant:
+The current contract version is `0.2.0`, defined as the `CONTRACT_VERSION` constant:
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # "0.1.0"
+print(CONTRACT_VERSION)  # "0.2.0"
 ```
 
 ---

@@ -32,7 +32,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
 
     # Generate types from version and wire-types schemas
     version_info = schemas.get("version", {})
-    contract_version = version_info.get("contract_version", "0.1.0")
+    contract_version = version_info.get("contract_version", "0.2.0")
 
     types_content = f'"""Generated wire types for Meerkat SDK.\n\nContract version: {contract_version}\n"""\n\n'
     types_content += "from dataclasses import dataclass, field\n"
@@ -125,7 +125,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     output_dir.mkdir(parents=True, exist_ok=True)
 
     version_info = schemas.get("version", {})
-    contract_version = version_info.get("contract_version", "0.1.0")
+    contract_version = version_info.get("contract_version", "0.2.0")
 
     # Generate types
     types_content = f"// Generated wire types for Meerkat SDK\n// Contract version: {contract_version}\n\n"

@@ -9,8 +9,8 @@ import {
 } from "../src/generated/index";
 
 describe("Contract Version", () => {
-  it("should be 0.1.0", () => {
-    assert.equal(CONTRACT_VERSION, "0.1.0");
+  it("should be 0.2.0", () => {
+    assert.equal(CONTRACT_VERSION, "0.2.0");
   });
 
   it("should be semver format", () => {

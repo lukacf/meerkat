@@ -106,8 +106,8 @@ class MeerkatClient:
             enable_subagents: bool = False, enable_memory: bool = False,
             host_mode: bool = False, comms_name: Optional[str] = None,
             provider_params: Optional[dict] = None,
-            preload_skills: Optional[list] = None,
-            skill_references: Optional[list] = None) -> WireRunResult:
+            preload_skills: Optional[list[str]] = None,
+            skill_references: Optional[list[str]] = None) -> WireRunResult:
         """Create a new session and run the first turn."""
         params = self._build_create_params(prompt, model, provider, system_prompt,
             max_tokens, output_schema, structured_output_retries, hooks_override,
@@ -120,11 +120,11 @@ class MeerkatClient:
         self,
         session_id: str,
         prompt: str,
-        skill_references: Optional[list] = None,
+        skill_references: Optional[list[str]] = None,
     ) -> WireRunResult:
         """Start a new turn on an existing session."""
         params: dict = {"session_id": session_id, "prompt": prompt}
-        if skill_references:
+        if skill_references is not None:
             params["skill_references"] = skill_references
         result = await self._request("turn/start", params)
         return self._parse_run_result(result)
@@ -139,8 +139,8 @@ class MeerkatClient:
             enable_subagents: bool = False, enable_memory: bool = False,
             host_mode: bool = False, comms_name: Optional[str] = None,
             provider_params: Optional[dict] = None,
-            preload_skills: Optional[list] = None,
-            skill_references: Optional[list] = None) -> StreamingTurn:
+            preload_skills: Optional[list[str]] = None,
+            skill_references: Optional[list[str]] = None) -> StreamingTurn:
         """Create a new session and stream events from the first turn.
 
         Returns a StreamingTurn async context manager. The request is sent
@@ -173,7 +173,7 @@ class MeerkatClient:
             pending_send=(self._process.stdin, data))
 
     def start_turn_streaming(self, session_id: str, prompt: str,
-            skill_references: Optional[list] = None) -> StreamingTurn:
+            skill_references: Optional[list[str]] = None) -> StreamingTurn:
         """Start a new turn on an existing session and stream events.
 
         Usage::
@@ -190,7 +190,7 @@ class MeerkatClient:
         event_queue = self._dispatcher.subscribe_events(session_id)
         response_future = self._dispatcher.expect_response(request_id)
         params: dict = {"session_id": session_id, "prompt": prompt}
-        if skill_references:
+        if skill_references is not None:
             params["skill_references"] = skill_references
         request = {"jsonrpc": "2.0", "id": request_id, "method": "turn/start",
                    "params": params}
@@ -322,8 +322,8 @@ class MeerkatClient:
         host_mode: bool,
         comms_name: Optional[str],
         provider_params: Optional[dict],
-        preload_skills: Optional[list] = None,
-        skill_references: Optional[list] = None,
+        preload_skills: Optional[list[str]] = None,
+        skill_references: Optional[list[str]] = None,
     ) -> dict:
         """Build the params dict for session/create."""
         params: dict = {"prompt": prompt}
@@ -355,9 +355,9 @@ class MeerkatClient:
             params["comms_name"] = comms_name
         if provider_params:
             params["provider_params"] = provider_params
-        if preload_skills:
+        if preload_skills is not None:
             params["preload_skills"] = preload_skills
-        if skill_references:
+        if skill_references is not None:
             params["skill_references"] = skill_references
         return params
 

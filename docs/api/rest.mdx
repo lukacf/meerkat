@@ -44,6 +44,7 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
 |--------|------|-------------|
 | `POST` | `/sessions` | Create and run a new session |
 | `POST` | `/sessions/{id}/messages` | Continue an existing session |
+| `POST` | `/sessions/{id}/event` | Push an external event into a session |
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
 | `GET` | `/sessions/{id}/events` | SSE stream for real-time updates |
 | `GET` | `/health` | Liveness check |
@@ -372,6 +373,44 @@ Continue an existing session.
 #### Response fields
 
 Same shape as `POST /sessions`.
+
+### POST /sessions/\{id\}/event
+
+Push an external event into a running session's inbox. The event is queued and processed at the next turn boundary.
+
+<CodeGroup>
+```bash Without auth (localhost only)
+curl -X POST http://localhost:8080/sessions/sid_abc/event \
+  -H "Content-Type: application/json" \
+  -d '{"alert": "CPU spike", "host": "web-03"}'
+```
+
+```bash With webhook secret
+curl -X POST http://localhost:8080/sessions/sid_abc/event \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: my-secret" \
+  -d '{"alert": "deployment failed"}'
+```
+
+```json Response (202 Accepted)
+{"queued": true}
+```
+</CodeGroup>
+
+<ParamField body="(body)" type="any JSON" required>
+  Any JSON payload. Pretty-printed and injected as an event into the agent's inbox.
+</ParamField>
+
+<ParamField header="X-Webhook-Secret" type="string">
+  Webhook secret for authentication. Required when `RKAT_WEBHOOK_SECRET` env var is set on the server. Compared using constant-time equality (`subtle::ConstantTimeEq`).
+</ParamField>
+
+| HTTP Status | When |
+|-------------|------|
+| 202 | Event queued successfully |
+| 404 | Session not found |
+| 401 | Missing or invalid webhook secret |
+| 503 | Event inbox is full |
 
 ### GET /sessions/\{id\}
 

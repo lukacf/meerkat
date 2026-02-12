@@ -77,17 +77,25 @@ rkat run [OPTIONS] <PROMPT>
 </ParamField>
 </Accordion>
 
-<Accordion title="Inter-agent communication flags">
+<Accordion title="Inter-agent communication and events">
 <ParamField path="--comms-name" type="string">
   Agent name for inter-agent communication. Enables comms if set.
 </ParamField>
 
 <ParamField path="--comms-listen-tcp" type="string">
-  TCP address to listen on (e.g., `0.0.0.0:4200`).
+  TCP address to listen on for signed comms (e.g., `0.0.0.0:4200`).
 </ParamField>
 
 <ParamField path="--no-comms" type="boolean">
   Disable inter-agent communication entirely.
+</ParamField>
+
+<ParamField path="--host" type="boolean" default="false">
+  Run in host mode: process the initial prompt, then stay alive listening for comms messages and external events.
+</ParamField>
+
+<ParamField path="--stdin" type="boolean" default="false">
+  Read external events from stdin (newline-delimited JSON or plain text). Only meaningful with `--host`. Each line is injected into the agent's inbox.
 </ParamField>
 </Accordion>
 

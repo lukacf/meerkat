@@ -83,7 +83,7 @@ def resolve_features(manifest: dict) -> list[str]:
 
 def build_runtime(features: list[str], root: Path) -> Path:
     """Build the rkat binary with the given features."""
-    cmd = ["cargo", "build", "-p", "meerkat-cli", "--release"]
+    cmd = ["cargo", "build", "-p", "rkat", "--release"]
     if features:
         cmd.extend(["--features", ",".join(features)])
     print(f"Building runtime: {' '.join(cmd)}")

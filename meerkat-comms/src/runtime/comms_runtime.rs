@@ -7,6 +7,10 @@ use crate::{
 };
 use async_trait::async_trait;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
+use meerkat_core::event::AgentEvent;
+use meerkat_core::interaction::{InboxInteraction, InteractionContent, InteractionId};
+use parking_lot::Mutex as ParkingMutex;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +18,9 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use crate::agent::types::{DrainedMessage, drain_inbox_item};
 
@@ -25,6 +31,14 @@ fn is_dismiss(msg: &CommsMessage) -> bool {
 #[async_trait]
 impl CoreCommsRuntime for CommsRuntime {
     async fn drain_messages(&self) -> Vec<String> {
+        self.drain_interactions()
+            .await
+            .into_iter()
+            .map(|i| i.rendered_text)
+            .collect()
+    }
+
+    async fn drain_interactions(&self) -> Vec<InboxInteraction> {
         let mut inbox = self.inbox.lock().await;
         let items = inbox.try_drain();
         let trusted = self.trusted_peers.read().await;
@@ -50,8 +64,44 @@ impl CoreCommsRuntime for CommsRuntime {
                 !matches!(m, DrainedMessage::Authenticated(m) if is_dismiss(m))
             })
             .map(|m| match m {
-                DrainedMessage::Authenticated(msg) => msg.to_user_message_text(),
-                DrainedMessage::Plain(msg) => msg.to_user_message_text(),
+                DrainedMessage::Authenticated(msg) => InboxInteraction {
+                    id: InteractionId(Uuid::new_v4()),
+                    from: msg.from_peer.clone(),
+                    content: match &msg.content {
+                        CommsContent::Message { body } => {
+                            InteractionContent::Message { body: body.clone() }
+                        }
+                        CommsContent::Request { intent, params, .. } => {
+                            InteractionContent::Request {
+                                intent: intent.as_str().to_string(),
+                                params: params.clone(),
+                            }
+                        }
+                        CommsContent::Response {
+                            in_reply_to,
+                            status,
+                            result,
+                        } => InteractionContent::Response {
+                            in_reply_to: InteractionId(*in_reply_to),
+                            status: match status {
+                                crate::agent::types::CommsStatus::Accepted => "accepted",
+                                crate::agent::types::CommsStatus::Completed => "completed",
+                                crate::agent::types::CommsStatus::Failed => "failed",
+                            }
+                            .to_string(),
+                            result: result.clone(),
+                        },
+                    },
+                    rendered_text: msg.to_user_message_text(),
+                },
+                DrainedMessage::Plain(msg) => InboxInteraction {
+                    id: InteractionId(msg.interaction_id.unwrap_or_else(Uuid::new_v4)),
+                    from: "external".to_string(),
+                    content: InteractionContent::Message {
+                        body: msg.body.clone(),
+                    },
+                    rendered_text: msg.to_user_message_text(),
+                },
             })
             .collect()
     }
@@ -64,6 +114,9 @@ impl CoreCommsRuntime for CommsRuntime {
 
     fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         Some(self.event_injector())
+    }
+    fn interaction_subscriber(&self, id: &InteractionId) -> Option<mpsc::Sender<AgentEvent>> {
+        self.subscriber_registry.lock().remove(&id.0)
     }
 }
 
@@ -92,7 +145,10 @@ pub struct CommsRuntime {
     listeners_started: bool,
     keypair: Arc<Keypair>,
     dismiss_flag: AtomicBool,
+    subscriber_registry: SubscriberRegistry,
 }
+
+pub type SubscriberRegistry = Arc<ParkingMutex<HashMap<uuid::Uuid, mpsc::Sender<AgentEvent>>>>;
 
 impl CommsRuntime {
     pub async fn new(config: ResolvedCommsConfig) -> Result<Self, CommsRuntimeError> {
@@ -125,6 +181,7 @@ impl CommsRuntime {
             listeners_started: false,
             keypair: Arc::new(keypair),
             dismiss_flag: AtomicBool::new(false),
+            subscriber_registry: Arc::new(ParkingMutex::new(HashMap::new())),
         };
         InprocRegistry::global().register(config.name, runtime.public_key, inbox_sender);
         Ok(runtime)
@@ -168,6 +225,7 @@ impl CommsRuntime {
             listeners_started: false,
             keypair: Arc::new(keypair),
             dismiss_flag: AtomicBool::new(false),
+            subscriber_registry: Arc::new(ParkingMutex::new(HashMap::new())),
         };
         InprocRegistry::global().register(name, runtime.public_key, inbox_sender);
         Ok(runtime)
@@ -219,17 +277,19 @@ impl CommsRuntime {
             }
 
             if let Some(ref addr) = self.config.event_listen_tcp {
-                let handle =
-                    spawn_plain_tcp_listener(&addr.to_string(), inbox_sender.clone(), max_line_length)
-                        .await?;
+                let handle = spawn_plain_tcp_listener(
+                    &addr.to_string(),
+                    inbox_sender.clone(),
+                    max_line_length,
+                )
+                .await?;
                 self.listener_handles.push(handle);
             }
 
             #[cfg(unix)]
             if let Some(ref path) = self.config.event_listen_uds {
                 let handle =
-                    spawn_plain_uds_listener(path, inbox_sender.clone(), max_line_length)
-                        .await?;
+                    spawn_plain_uds_listener(path, inbox_sender.clone(), max_line_length).await?;
                 self.listener_handles.push(handle);
             }
         }
@@ -260,6 +320,7 @@ impl CommsRuntime {
     pub fn event_injector(&self) -> Arc<dyn meerkat_core::EventInjector> {
         Arc::new(crate::CommsEventInjector::new(
             self.router.inbox_sender().clone(),
+            self.subscriber_registry.clone(),
         ))
     }
 
@@ -443,6 +504,9 @@ async fn spawn_plain_uds_listener(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::{InboxItem, MessageKind, Signature, TrustedPeer};
+    use meerkat_core::agent::CommsRuntime as CoreCommsRuntimeTrait;
+    use meerkat_core::event_injector::SubscribableInjector;
 
     /// Regression: auth=Open must always load keypair and trusted peers from disk
     /// so that outbound routing still works.
@@ -520,5 +584,132 @@ mod tests {
         let result = runtime.start_listeners().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("prompt injection"));
+    }
+
+    #[tokio::test]
+    async fn test_drain_interactions_converts_comms_content_variants() {
+        let runtime = CommsRuntime::inproc_only("rt-convert").unwrap();
+        let sender = crate::Keypair::generate();
+        {
+            let mut trusted = runtime.trusted_peers.write().await;
+            trusted.upsert(TrustedPeer {
+                name: "peer-a".to_string(),
+                pubkey: sender.public_key(),
+                addr: "inproc://peer-a".to_string(),
+            });
+        }
+
+        let mk_env = |kind: MessageKind| {
+            let mut envelope = crate::Envelope {
+                id: Uuid::new_v4(),
+                from: sender.public_key(),
+                to: runtime.public_key(),
+                kind,
+                sig: Signature::new([0u8; 64]),
+            };
+            envelope.sign(&sender);
+            envelope
+        };
+
+        runtime
+            .router
+            .inbox_sender()
+            .send(InboxItem::External {
+                envelope: mk_env(MessageKind::Message {
+                    body: "hello".to_string(),
+                }),
+            })
+            .unwrap();
+        runtime
+            .router
+            .inbox_sender()
+            .send(InboxItem::External {
+                envelope: mk_env(MessageKind::Request {
+                    intent: "review".to_string(),
+                    params: serde_json::json!({"pr": 7}),
+                }),
+            })
+            .unwrap();
+        runtime
+            .router
+            .inbox_sender()
+            .send(InboxItem::External {
+                envelope: mk_env(MessageKind::Response {
+                    in_reply_to: Uuid::new_v4(),
+                    status: crate::Status::Completed,
+                    result: serde_json::json!({"ok": true}),
+                }),
+            })
+            .unwrap();
+
+        let interactions = CoreCommsRuntimeTrait::drain_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 3);
+        assert!(
+            interactions
+                .iter()
+                .any(|i| matches!(i.content, InteractionContent::Message { .. }))
+        );
+        assert!(
+            interactions
+                .iter()
+                .any(|i| matches!(i.content, InteractionContent::Request { .. }))
+        );
+        assert!(
+            interactions
+                .iter()
+                .any(|i| matches!(i.content, InteractionContent::Response { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscription_correlation_end_to_end() {
+        let runtime = CommsRuntime::inproc_only("rt-correlation").unwrap();
+        let injector = crate::CommsEventInjector::new(
+            runtime.router.inbox_sender().clone(),
+            runtime.subscriber_registry.clone(),
+        );
+
+        let sub = injector
+            .inject_with_subscription(
+                "scoped message".to_string(),
+                meerkat_core::PlainEventSource::Tcp,
+            )
+            .unwrap();
+
+        let interactions = CoreCommsRuntimeTrait::drain_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(interactions[0].id, sub.id);
+
+        let sender = CoreCommsRuntimeTrait::interaction_subscriber(&runtime, &sub.id);
+        assert!(sender.is_some());
+        let sender_second = CoreCommsRuntimeTrait::interaction_subscriber(&runtime, &sub.id);
+        assert!(sender_second.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_drain_interactions_preserves_plain_event_interaction_id() {
+        let runtime = CommsRuntime::inproc_only("rt-plain-id").unwrap();
+        let interaction_id = Uuid::new_v4();
+        runtime
+            .router
+            .inbox_sender()
+            .send(InboxItem::PlainEvent {
+                body: "plain".to_string(),
+                source: meerkat_core::PlainEventSource::Rpc,
+                interaction_id: Some(interaction_id),
+            })
+            .unwrap();
+
+        let interactions = CoreCommsRuntimeTrait::drain_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(interactions[0].id.0, interaction_id);
+    }
+
+    #[tokio::test]
+    async fn test_interaction_subscriber_correlation_miss_returns_none() {
+        let runtime = CommsRuntime::inproc_only("rt-correlation-miss").unwrap();
+        let missing = InteractionId(Uuid::new_v4());
+        let sender = CoreCommsRuntimeTrait::interaction_subscriber(&runtime, &missing);
+        assert!(sender.is_none());
     }
 }

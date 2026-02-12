@@ -14,7 +14,7 @@ use meerkat_client::{
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
-    SessionTooling,
+    SessionTooling, new_event_tap,
 };
 #[cfg(feature = "sub-agents")]
 use meerkat_core::{ConcurrencyLimits, SubAgentManager};
@@ -651,10 +651,12 @@ impl AgentFactory {
 
         // 4. Create LLM adapter (with optional provider_params and event channel)
         let model = build_config.model.clone();
+        let event_tap = new_event_tap();
         let mut llm_adapter_inner = match build_config.event_tx.clone() {
             Some(tx) => LlmClientAdapter::with_event_channel(llm_client, model.clone(), tx),
             None => LlmClientAdapter::new(llm_client, model.clone()),
-        };
+        }
+        .with_event_tap(event_tap.clone());
         if let Some(params) = build_config.provider_params.clone() {
             llm_adapter_inner = llm_adapter_inner.with_provider_params(Some(params));
         }
@@ -877,7 +879,8 @@ impl AgentFactory {
             .budget(budget_limits)
             .system_prompt(system_prompt)
             .structured_output_retries(build_config.structured_output_retries)
-            .with_hook_run_overrides(build_config.hooks_override);
+            .with_hook_run_overrides(build_config.hooks_override)
+            .with_event_tap(event_tap);
 
         if let Some(schema) = build_config.output_schema {
             builder = builder.output_schema(schema);

@@ -1217,9 +1217,7 @@ async fn run_agent(
         let notified = service.wait_session_registered();
 
         let svc = service.clone();
-        let session_task = tokio::spawn(async move {
-            svc.create_session(create_req).await
-        });
+        let session_task = tokio::spawn(async move { svc.create_session(create_req).await });
 
         // Wait for the session handle to be stored (no polling, no timeout).
         // The notification fires when EphemeralSessionService inserts the handle,
@@ -1227,17 +1225,22 @@ async fn run_agent(
         notified.await;
 
         // Now grab the event injector from the registered session.
-        let sessions = service.list(meerkat_core::service::SessionQuery::default()).await
+        let sessions = service
+            .list(meerkat_core::service::SessionQuery::default())
+            .await
             .unwrap_or_default();
         stdin_reader_handle = if let Some(info) = sessions.first() {
-            service.event_injector(&info.session_id).await
+            service
+                .event_injector(&info.session_id)
+                .await
                 .map(stdin_events::spawn_stdin_reader)
         } else {
             tracing::warn!("--stdin: session registered but not found in list");
             None
         };
 
-        session_task.await
+        session_task
+            .await
             .map_err(|e| anyhow::anyhow!("Session task panicked: {e}"))?
             .map_err(session_err_to_anyhow)?
     } else {

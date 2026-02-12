@@ -3,8 +3,8 @@
 //! Reads newline-delimited lines from stdin, auto-detects JSON/text,
 //! and injects them as `PlainEvent` items via the `EventInjector` trait.
 
-use meerkat_core::event_injector::{EventInjector, EventInjectorError};
 use meerkat_core::PlainEventSource;
+use meerkat_core::event_injector::{EventInjector, EventInjectorError};
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use tokio::task::JoinHandle;

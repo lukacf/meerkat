@@ -2,6 +2,7 @@
 
 use crate::error::AgentError;
 use crate::event::{AgentEvent, BudgetType};
+use crate::event_tap::tap_try_send;
 use crate::hooks::{
     HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
     HookToolCall, HookToolResult,
@@ -79,8 +80,10 @@ where
         macro_rules! emit_event {
             ($event:expr) => {
                 if event_stream_open {
+                    let event = $event;
+                    tap_try_send(&self.event_tap, event.clone());
                     if let Some(ref tx) = event_tx {
-                        if tx.send($event).await.is_err() {
+                        if tx.send(event).await.is_err() {
                             event_stream_open = false;
                             tracing::warn!(
                                 "agent event stream receiver dropped; continuing without streaming events"
@@ -92,9 +95,13 @@ where
         }
 
         loop {
+            if self.state == LoopState::CallingLlm {
+                self.drain_comms_inbox().await;
+            }
+
             // Check turn limit
             if turn_count >= max_turns {
-                self.state = LoopState::Completed;
+                self.state.transition(LoopState::Completed)?;
                 return Ok(self.build_result(turn_count, tool_call_count));
             }
 
@@ -106,7 +113,7 @@ where
                     limit: self.budget.remaining(),
                     percent: 1.0,
                 });
-                self.state = LoopState::Completed;
+                self.state.transition(LoopState::Completed)?;
                 return Ok(self.build_result(turn_count, tool_call_count));
             }
 
@@ -126,6 +133,7 @@ where
                             self.session.messages(),
                             self.last_input_tokens,
                             turn_count,
+                            &self.event_tap,
                             &event_tx,
                         )
                         .await;
@@ -831,7 +839,18 @@ fn fallback_raw_value() -> Box<RawValue> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::rewrite_assistant_text;
+    use crate::AgentBuilder;
+    use crate::budget::BudgetLimits;
+    use crate::error::{AgentError, ToolError};
+    use crate::interaction::{InboxInteraction, InteractionContent, InteractionId};
+    use crate::state::LoopState;
     use crate::types::AssistantBlock;
+    use crate::types::{Message, StopReason, ToolCallView, ToolDef, ToolResult, Usage};
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, Notify};
+    use uuid::Uuid;
 
     #[test]
     fn rewrite_assistant_text_rewrites_all_text_blocks() {
@@ -863,5 +882,177 @@ mod tests {
             .collect();
 
         assert_eq!(text_blocks, vec!["redacted"]);
+    }
+
+    struct MockClient;
+
+    #[async_trait]
+    impl crate::agent::AgentLlmClient for MockClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<crate::LlmStreamResult, AgentError> {
+            Ok(crate::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    struct MockTools;
+
+    #[async_trait]
+    impl crate::agent::AgentToolDispatcher for MockTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::new([])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            Err(ToolError::NotFound {
+                name: call.name.to_string(),
+            })
+        }
+    }
+
+    struct MockStore;
+
+    #[async_trait]
+    impl crate::agent::AgentSessionStore for MockStore {
+        async fn save(&self, _session: &crate::Session) -> Result<(), AgentError> {
+            Ok(())
+        }
+        async fn load(&self, _id: &str) -> Result<Option<crate::Session>, AgentError> {
+            Ok(None)
+        }
+    }
+
+    struct MockInteractionRuntime {
+        interactions: Mutex<Vec<InboxInteraction>>,
+        notify: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl crate::agent::CommsRuntime for MockInteractionRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn drain_interactions(&self) -> Vec<InboxInteraction> {
+            let mut guard = self.interactions.lock().await;
+            std::mem::take(&mut *guard)
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            self.notify.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn run_loop_max_turn_from_calling_llm_completes() {
+        let mut agent = AgentBuilder::new()
+            .build(
+                Arc::new(MockClient),
+                Arc::new(MockTools),
+                Arc::new(MockStore),
+            )
+            .await;
+        agent.config.max_turns = Some(0);
+        let result = agent.run_loop(None).await.unwrap();
+        assert_eq!(*agent.state(), LoopState::Completed);
+        assert_eq!(result.turns, 0);
+    }
+
+    #[tokio::test]
+    async fn run_loop_budget_exhausted_from_calling_llm_completes() {
+        let mut agent = AgentBuilder::new()
+            .budget(BudgetLimits::default().with_max_tokens(0))
+            .build(
+                Arc::new(MockClient),
+                Arc::new(MockTools),
+                Arc::new(MockStore),
+            )
+            .await;
+        let result = agent.run_loop(None).await.unwrap();
+        assert_eq!(*agent.state(), LoopState::Completed);
+        assert_eq!(result.turns, 0);
+    }
+
+    #[tokio::test]
+    async fn run_loop_invalid_completed_to_completed_is_error() {
+        let mut agent = AgentBuilder::new()
+            .build(
+                Arc::new(MockClient),
+                Arc::new(MockTools),
+                Arc::new(MockStore),
+            )
+            .await;
+        agent.config.max_turns = Some(0);
+        agent.state = LoopState::Completed;
+        let result = agent.run_loop(None).await;
+        assert!(matches!(
+            result,
+            Err(AgentError::InvalidStateTransition { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_loop_error_recovery_to_completed_is_valid() {
+        let mut agent = AgentBuilder::new()
+            .build(
+                Arc::new(MockClient),
+                Arc::new(MockTools),
+                Arc::new(MockStore),
+            )
+            .await;
+        agent.config.max_turns = Some(0);
+        agent.state = LoopState::ErrorRecovery;
+        let result = agent.run_loop(None).await.unwrap();
+        assert_eq!(*agent.state(), LoopState::Completed);
+        assert_eq!(result.turns, 0);
+    }
+
+    #[tokio::test]
+    async fn error_recovery_to_calling_llm_drains_comms_inbox() {
+        let runtime = Arc::new(MockInteractionRuntime {
+            interactions: Mutex::new(vec![InboxInteraction {
+                id: InteractionId(Uuid::now_v7()),
+                from: "ext".to_string(),
+                content: InteractionContent::Message {
+                    body: "injected during recovery".to_string(),
+                },
+                rendered_text: "injected during recovery".to_string(),
+            }]),
+            notify: Arc::new(Notify::new()),
+        });
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(runtime as Arc<dyn crate::agent::CommsRuntime>)
+            .build(
+                Arc::new(MockClient),
+                Arc::new(MockTools),
+                Arc::new(MockStore),
+            )
+            .await;
+        agent.state = LoopState::ErrorRecovery;
+        agent.config.max_turns = Some(1);
+
+        let _ = agent.run_loop(None).await.unwrap();
+        let saw_injected = agent.session.messages().iter().any(|m| match m {
+            Message::User(u) => u.content.contains("injected during recovery"),
+            _ => false,
+        });
+        assert!(saw_injected);
     }
 }

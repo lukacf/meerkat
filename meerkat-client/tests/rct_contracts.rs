@@ -4,11 +4,13 @@ use meerkat_client::error::LlmError;
 use meerkat_client::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_client::{LlmClientAdapter, ProviderResolver};
 use meerkat_core::{
-    AgentEvent, AgentLlmClient, AssistantBlock, Provider, ProviderMeta, StopReason,
+    AgentEvent, AgentLlmClient, AssistantBlock, EventTapState, Provider, ProviderMeta, StopReason,
+    new_event_tap,
 };
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
 struct MockClient {
@@ -128,6 +130,40 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
         _ => return Err("unexpected event".into()),
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_llm_adapter_text_delta_mirrors_to_event_tap() -> Result<(), Box<dyn std::error::Error>>
+{
+    let events = vec![
+        LlmEvent::TextDelta {
+            delta: "tap".to_string(),
+            meta: None,
+        },
+        LlmEvent::Done {
+            outcome: LlmDoneOutcome::Success {
+                stop_reason: StopReason::EndTurn,
+            },
+        },
+    ];
+    let client = Arc::new(MockClient { events });
+
+    let tap = new_event_tap();
+    let (tap_tx, mut tap_rx) = mpsc::channel(4);
+    tap.lock().replace(EventTapState {
+        tx: tap_tx,
+        truncated: AtomicBool::new(false),
+    });
+
+    let adapter = LlmClientAdapter::new(client, "model-x".to_string()).with_event_tap(tap);
+    let _ = adapter.stream_response(&[], &[], 64, None, None).await?;
+
+    let event = tap_rx.recv().await.ok_or("tap event missing")?;
+    match event {
+        AgentEvent::TextDelta { delta } => assert_eq!(delta, "tap"),
+        _ => return Err("unexpected event".into()),
+    }
     Ok(())
 }
 

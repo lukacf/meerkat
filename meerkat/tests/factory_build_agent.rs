@@ -15,7 +15,9 @@ use meerkat::{
     AgentBuildConfig, AgentFactory, BuildAgentError, LlmDoneOutcome, LlmEvent, LlmRequest,
 };
 use meerkat_client::LlmClient;
-use meerkat_core::{Config, Provider, Session, SessionId, SessionMetadata, SessionTooling, UserMessage};
+use meerkat_core::{
+    Config, Provider, Session, SessionId, SessionMetadata, SessionTooling, UserMessage,
+};
 use meerkat_store::{SessionFilter, SessionStore, StoreError};
 
 // ---------------------------------------------------------------------------
@@ -480,7 +482,10 @@ impl SessionStore for TrackingSessionStore {
         Ok(None)
     }
 
-    async fn list(&self, _filter: SessionFilter) -> Result<Vec<meerkat_core::SessionMeta>, StoreError> {
+    async fn list(
+        &self,
+        _filter: SessionFilter,
+    ) -> Result<Vec<meerkat_core::SessionMeta>, StoreError> {
         Ok(vec![])
     }
 

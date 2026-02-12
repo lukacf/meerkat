@@ -141,6 +141,8 @@ pub enum InboxItem {
     PlainEvent {
         body: String,
         source: meerkat_core::PlainEventSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interaction_id: Option<uuid::Uuid>,
     },
 }
 
@@ -453,6 +455,7 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "New email from john@example.com".to_string(),
             source: PlainEventSource::Tcp,
+            interaction_id: None,
         };
 
         // JSON round-trip
@@ -475,18 +478,22 @@ mod tests {
             InboxItem::PlainEvent {
                 body: "hello".to_string(),
                 source: PlainEventSource::Tcp,
+                interaction_id: None,
             },
             InboxItem::PlainEvent {
                 body: r#"{"event":"email"}"#.to_string(),
                 source: PlainEventSource::Stdin,
+                interaction_id: None,
             },
             InboxItem::PlainEvent {
                 body: "webhook payload".to_string(),
                 source: PlainEventSource::Webhook,
+                interaction_id: None,
             },
             InboxItem::PlainEvent {
                 body: "rpc event".to_string(),
                 source: PlainEventSource::Rpc,
+                interaction_id: None,
             },
         ];
         for item in items {
@@ -495,5 +502,34 @@ mod tests {
             let decoded: InboxItem = ciborium::from_reader(&buf[..]).unwrap();
             assert_eq!(item, decoded);
         }
+    }
+
+    #[test]
+    fn test_plain_event_backward_compat_without_interaction_id() {
+        let raw = r#"{"type":"plain_event","body":"x","source":"tcp"}"#;
+        let parsed: InboxItem = serde_json::from_str(raw).unwrap();
+        match parsed {
+            InboxItem::PlainEvent { interaction_id, .. } => assert_eq!(interaction_id, None),
+            other => panic!("Expected PlainEvent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_plain_event_with_interaction_id_roundtrip_json_and_cbor() {
+        let id = Uuid::new_v4();
+        let item = InboxItem::PlainEvent {
+            body: "scoped".to_string(),
+            source: meerkat_core::PlainEventSource::Webhook,
+            interaction_id: Some(id),
+        };
+
+        let json = serde_json::to_vec(&item).unwrap();
+        let from_json: InboxItem = serde_json::from_slice(&json).unwrap();
+        assert_eq!(item, from_json);
+
+        let mut buf = Vec::new();
+        ciborium::into_writer(&item, &mut buf).unwrap();
+        let from_cbor: InboxItem = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(item, from_cbor);
     }
 }

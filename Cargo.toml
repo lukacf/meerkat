@@ -56,6 +56,7 @@ anyhow = "1.0"
 # Utilities
 nix = { version = "0.29", features = ["signal", "process"] }
 which = "7"
+parking_lot = "0.12"
 uuid = { version = "1.11", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"

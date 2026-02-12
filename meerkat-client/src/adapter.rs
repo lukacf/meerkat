@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, OutputSchema, StopReason,
-    ToolDef, Usage,
+    AgentError, AgentEvent, AgentLlmClient, EventTap, LlmStreamResult, Message, OutputSchema,
+    StopReason, ToolDef, Usage, new_event_tap, tap_try_send,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -21,6 +21,7 @@ pub struct LlmClientAdapter {
     model: String,
     /// Optional channel to emit streaming text deltas.
     event_tx: Option<mpsc::Sender<AgentEvent>>,
+    event_tap: EventTap,
     /// Provider-specific parameters to pass with every request.
     provider_params: Option<Value>,
 }
@@ -31,6 +32,7 @@ impl LlmClientAdapter {
             client,
             model,
             event_tx: None,
+            event_tap: new_event_tap(),
             provider_params: None,
         }
     }
@@ -45,8 +47,14 @@ impl LlmClientAdapter {
             client,
             model,
             event_tx: Some(event_tx),
+            event_tap: new_event_tap(),
             provider_params: None,
         }
+    }
+
+    pub fn with_event_tap(mut self, tap: EventTap) -> Self {
+        self.event_tap = tap;
+        self
     }
 
     /// Set provider-specific parameters to pass with every request.
@@ -97,6 +105,12 @@ impl AgentLlmClient for LlmClientAdapter {
                 Ok(event) => match event {
                     LlmEvent::TextDelta { delta, meta } => {
                         assembler.on_text_delta(&delta, meta);
+                        tap_try_send(
+                            &self.event_tap,
+                            AgentEvent::TextDelta {
+                                delta: delta.clone(),
+                            },
+                        );
                         if let Some(ref tx) = self.event_tx {
                             let _ = tx.send(AgentEvent::TextDelta { delta }).await;
                         }

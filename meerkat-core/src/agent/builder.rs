@@ -2,6 +2,7 @@
 
 use crate::budget::{Budget, BudgetLimits};
 use crate::config::{AgentConfig, HookRunOverrides};
+use crate::event_tap::{EventTap, new_event_tap};
 use crate::hooks::HookEngine;
 use crate::ops::ConcurrencyLimits;
 use crate::prompt::SystemPromptConfig;
@@ -28,6 +29,7 @@ pub struct AgentBuilder {
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
     pub(super) hook_run_overrides: HookRunOverrides,
+    pub(super) event_tap: Option<EventTap>,
     pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     pub(super) skill_engine: Option<Arc<dyn crate::skills::SkillEngine>>,
@@ -47,6 +49,7 @@ impl AgentBuilder {
             comms_runtime: None,
             hook_engine: None,
             hook_run_overrides: HookRunOverrides::default(),
+            event_tap: None,
             compactor: None,
             memory_store: None,
             skill_engine: None,
@@ -149,6 +152,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the interaction-scoped event tap shared with host runtime surfaces.
+    pub fn with_event_tap(mut self, tap: EventTap) -> Self {
+        self.event_tap = Some(tap);
+        self
+    }
+
     /// Set the context compactor.
     pub fn compactor(mut self, compactor: Arc<dyn crate::compact::Compactor>) -> Self {
         self.compactor = Some(compactor);
@@ -195,6 +204,7 @@ impl AgentBuilder {
             comms_runtime: self.comms_runtime,
             hook_engine: self.hook_engine,
             hook_run_overrides: self.hook_run_overrides,
+            event_tap: self.event_tap.unwrap_or_else(new_event_tap),
             compactor: self.compactor,
             last_input_tokens: 0,
             last_compaction_turn: None,
@@ -217,10 +227,14 @@ mod tests {
     use super::*;
     use crate::LlmStreamResult;
     use crate::error::{AgentError, ToolError};
+    use crate::event::AgentEvent;
+    use crate::event_tap::EventTapState;
     use crate::types::{
         AssistantBlock, StopReason, ToolCallView, ToolDef, ToolResult, UserMessage,
     };
     use async_trait::async_trait;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::mpsc;
 
     struct MockClient;
 
@@ -375,5 +389,35 @@ mod tests {
             }
             other => panic!("First message should be System, got: {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_emit_event_writes_to_event_tap_without_primary_channel() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let (tap_tx, mut tap_rx) = mpsc::channel(64);
+        let tap = crate::new_event_tap();
+        tap.lock().replace(EventTapState {
+            tx: tap_tx,
+            truncated: AtomicBool::new(false),
+        });
+
+        let mut agent = AgentBuilder::new()
+            .with_event_tap(tap)
+            .build(client, tools, store)
+            .await;
+
+        let _ = agent.run("hello".to_string()).await.unwrap();
+
+        let mut saw_turn_started = false;
+        while let Ok(event) = tap_rx.try_recv() {
+            if matches!(event, AgentEvent::TurnStarted { .. }) {
+                saw_turn_started = true;
+                break;
+            }
+        }
+        assert!(saw_turn_started, "expected TurnStarted on event tap");
     }
 }

@@ -6,6 +6,9 @@
 //! that wraps `InboxSender`.
 
 use crate::PlainEventSource;
+use crate::event::AgentEvent;
+use crate::interaction::InteractionId;
+use tokio::sync::mpsc;
 
 /// Error returned when event injection fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +42,20 @@ pub trait EventInjector: Send + Sync {
     fn inject(&self, body: String, source: PlainEventSource) -> Result<(), EventInjectorError>;
 }
 
+#[derive(Debug)]
+pub struct InteractionSubscription {
+    pub id: InteractionId,
+    pub events: mpsc::Receiver<AgentEvent>,
+}
+
+pub trait SubscribableInjector: EventInjector {
+    fn inject_with_subscription(
+        &self,
+        body: String,
+        source: PlainEventSource,
+    ) -> Result<InteractionSubscription, EventInjectorError>;
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -60,11 +77,7 @@ mod tests {
     }
 
     impl EventInjector for MockEventInjector {
-        fn inject(
-            &self,
-            body: String,
-            source: PlainEventSource,
-        ) -> Result<(), EventInjectorError> {
+        fn inject(&self, body: String, source: PlainEventSource) -> Result<(), EventInjectorError> {
             self.events.lock().unwrap().push((body, source));
             Ok(())
         }

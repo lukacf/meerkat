@@ -3,6 +3,7 @@
 //! These events form the streaming API for consumers.
 
 use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
+use crate::interaction::InteractionId;
 use crate::types::{SessionId, StopReason, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,6 +34,21 @@ pub enum AgentEvent {
         session_id: SessionId,
         error: String,
     },
+
+    /// A scoped interaction completed.
+    InteractionComplete {
+        interaction_id: InteractionId,
+        result: String,
+    },
+
+    /// A scoped interaction failed.
+    InteractionFailed {
+        interaction_id: InteractionId,
+        error: String,
+    },
+
+    /// Best-effort warning that scoped stream updates were dropped.
+    StreamTruncated { reason: String },
 
     // === Hook Lifecycle ===
     /// Hook invocation started.
@@ -384,6 +400,17 @@ mod tests {
             },
             AgentEvent::CompactionFailed {
                 error: "LLM request failed".to_string(),
+            },
+            AgentEvent::InteractionComplete {
+                interaction_id: InteractionId(uuid::Uuid::now_v7()),
+                result: "interaction result".to_string(),
+            },
+            AgentEvent::InteractionFailed {
+                interaction_id: InteractionId(uuid::Uuid::now_v7()),
+                error: "interaction error".to_string(),
+            },
+            AgentEvent::StreamTruncated {
+                reason: "queue full".to_string(),
             },
         ];
 

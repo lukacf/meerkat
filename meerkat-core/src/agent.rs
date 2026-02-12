@@ -14,7 +14,10 @@ mod state;
 use crate::budget::Budget;
 use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
+use crate::event::AgentEvent;
+use crate::event_tap::EventTap;
 use crate::hooks::HookEngine;
+use crate::interaction::{InboxInteraction, InteractionContent, InteractionId};
 use crate::retry::RetryPolicy;
 use crate::schema::{CompiledSchema, SchemaError};
 use crate::session::Session;
@@ -28,6 +31,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use uuid::Uuid;
 
 pub use builder::AgentBuilder;
 pub use runner::AgentRunner;
@@ -181,6 +186,18 @@ pub trait AgentSessionStore: Send + Sync {
 pub trait CommsRuntime: Send + Sync {
     /// Drain comms inbox and return messages formatted for the LLM
     async fn drain_messages(&self) -> Vec<String>;
+    async fn drain_interactions(&self) -> Vec<InboxInteraction> {
+        self.drain_messages()
+            .await
+            .into_iter()
+            .map(|text| InboxInteraction {
+                id: InteractionId(Uuid::now_v7()),
+                from: "unknown".to_string(),
+                content: InteractionContent::Message { body: text.clone() },
+                rendered_text: text,
+            })
+            .collect()
+    }
     /// Get a notification when new messages arrive
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify>;
     /// Returns true if a DISMISS signal was seen during the last `drain_messages` call.
@@ -192,6 +209,10 @@ pub trait CommsRuntime: Send + Sync {
     /// Surfaces use this to push external events without depending on comms types.
     /// Returns `None` if the implementation doesn't support event injection.
     fn event_injector(&self) -> Option<Arc<dyn crate::EventInjector>> {
+        None
+    }
+    fn interaction_subscriber(&self, id: &InteractionId) -> Option<mpsc::Sender<AgentEvent>> {
+        let _ = id;
         None
     }
 }
@@ -216,6 +237,7 @@ where
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
     pub(super) hook_run_overrides: HookRunOverrides,
+    pub(crate) event_tap: EventTap,
     /// Optional context compaction strategy.
     pub(crate) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     /// Input tokens from the last LLM response (for compaction trigger).
@@ -229,4 +251,15 @@ where
     /// Skill references to resolve and inject for the next turn.
     /// Set by surfaces before calling `run()`, consumed on run start.
     pub pending_skill_references: Option<Vec<crate::skills::SkillId>>,
+}
+
+impl<C, T, S> Agent<C, T, S>
+where
+    C: AgentLlmClient + ?Sized,
+    T: AgentToolDispatcher + ?Sized,
+    S: AgentSessionStore + ?Sized,
+{
+    pub fn event_tap(&self) -> &EventTap {
+        &self.event_tap
+    }
 }

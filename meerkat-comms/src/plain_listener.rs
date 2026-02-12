@@ -42,6 +42,7 @@ pub async fn handle_plain_connection<S>(
                 match inbox_sender.send(InboxItem::PlainEvent {
                     body,
                     source,
+                    interaction_id: None,
                 }) {
                     Ok(()) => {}
                     Err(InboxError::Full) => {
@@ -89,7 +90,7 @@ mod tests {
         let items = inbox.try_drain();
         assert_eq!(items.len(), 1);
         match &items[0] {
-            InboxItem::PlainEvent { body, source } => {
+            InboxItem::PlainEvent { body, source, .. } => {
                 assert_eq!(body, "hello");
                 assert_eq!(*source, PlainEventSource::Tcp);
             }
@@ -131,7 +132,10 @@ mod tests {
             handle_plain_connection(server, sender, 1024, PlainEventSource::Tcp).await;
         });
 
-        client_write.write_all(b"line 1\nline 2\nline 3\n").await.unwrap();
+        client_write
+            .write_all(b"line 1\nline 2\nline 3\n")
+            .await
+            .unwrap();
         drop(client_write);
         handle.await.unwrap();
 

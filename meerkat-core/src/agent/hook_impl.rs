@@ -3,6 +3,7 @@
 use crate::agent::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 use crate::error::AgentError;
 use crate::event::AgentEvent;
+use crate::event_tap::tap_emit;
 use crate::hooks::{HookDecision, HookEngineError, HookExecutionReport, HookInvocation};
 use tokio::sync::mpsc;
 
@@ -26,12 +27,15 @@ where
                 .matching_hooks(&invocation, Some(&self.hook_run_overrides))
                 .map_err(Self::map_hook_engine_error)?;
             for hook_id in planned {
-                let _ = tx
-                    .send(AgentEvent::HookStarted {
+                let _ = tap_emit(
+                    &self.event_tap,
+                    Some(tx),
+                    AgentEvent::HookStarted {
                         hook_id: hook_id.to_string(),
                         point: invocation.point,
-                    })
-                    .await;
+                    },
+                )
+                .await;
             }
         }
 
@@ -43,21 +47,27 @@ where
         if let Some(tx) = event_tx {
             for outcome in &report.outcomes {
                 if let Some(error) = &outcome.error {
-                    let _ = tx
-                        .send(AgentEvent::HookFailed {
+                    let _ = tap_emit(
+                        &self.event_tap,
+                        Some(tx),
+                        AgentEvent::HookFailed {
                             hook_id: outcome.hook_id.to_string(),
                             point: outcome.point,
                             error: error.clone(),
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                 } else {
-                    let _ = tx
-                        .send(AgentEvent::HookCompleted {
+                    let _ = tap_emit(
+                        &self.event_tap,
+                        Some(tx),
+                        AgentEvent::HookCompleted {
                             hook_id: outcome.hook_id.to_string(),
                             point: outcome.point,
                             duration_ms: outcome.duration_ms.unwrap_or(0),
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                 }
             }
 
@@ -68,25 +78,31 @@ where
                 payload,
             }) = &report.decision
             {
-                let _ = tx
-                    .send(AgentEvent::HookDenied {
+                let _ = tap_emit(
+                    &self.event_tap,
+                    Some(tx),
+                    AgentEvent::HookDenied {
                         hook_id: hook_id.to_string(),
                         point: invocation.point,
                         reason_code: *reason_code,
                         message: message.clone(),
                         payload: payload.clone(),
-                    })
-                    .await;
+                    },
+                )
+                .await;
             }
 
             for envelope in &report.published_patches {
-                let _ = tx
-                    .send(AgentEvent::HookPatchPublished {
+                let _ = tap_emit(
+                    &self.event_tap,
+                    Some(tx),
+                    AgentEvent::HookPatchPublished {
                         hook_id: envelope.hook_id.to_string(),
                         point: envelope.point,
                         envelope: envelope.clone(),
-                    })
-                    .await;
+                    },
+                )
+                .await;
             }
         }
 

@@ -276,6 +276,9 @@ pub struct AgentFactory {
     /// repository resolution. For SDK users who wire sources programmatically.
     #[cfg(feature = "skills")]
     pub skill_source: Option<std::sync::Arc<dyn meerkat_core::skills::SkillSource>>,
+    /// Optional custom session store. When set, `build_agent()` uses this
+    /// instead of the feature-flag-based default (jsonl, memory, or ephemeral).
+    custom_store: Option<Arc<dyn SessionStore>>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -291,6 +294,7 @@ impl std::fmt::Debug for AgentFactory {
         d.field("enable_comms", &self.enable_comms);
         #[cfg(feature = "skills")]
         d.field("skill_source", &self.skill_source.as_ref().map(|_| ".."));
+        d.field("custom_store", &self.custom_store.as_ref().map(|_| ".."));
         d.finish()
     }
 }
@@ -309,6 +313,7 @@ impl AgentFactory {
             enable_memory: false,
             #[cfg(feature = "skills")]
             skill_source: None,
+            custom_store: None,
         }
     }
 
@@ -356,6 +361,16 @@ impl AgentFactory {
     #[cfg(feature = "comms")]
     pub fn comms(mut self, enabled: bool) -> Self {
         self.enable_comms = enabled;
+        self
+    }
+
+    /// Override the default session store.
+    ///
+    /// When set, `build_agent()` uses this store instead of the feature-flag-based
+    /// default (jsonl, memory, or ephemeral). The store is wrapped in `StoreAdapter`
+    /// and passed to `AgentBuilder::build()`.
+    pub fn session_store(mut self, store: Arc<dyn SessionStore>) -> Self {
+        self.custom_store = Some(store);
         self
     }
 
@@ -710,23 +725,30 @@ impl AgentFactory {
             .await?;
 
         // 7. Create session store adapter
-        #[cfg(feature = "jsonl-store")]
-        let store_adapter: Arc<dyn AgentSessionStore> = {
-            let store = JsonlStore::new(self.store_path.clone());
-            store
-                .init()
-                .await
-                .map_err(|e| BuildAgentError::Config(format!("Store init failed: {e}")))?;
-            Arc::new(StoreAdapter::new(Arc::new(store)))
+        let store_adapter: Arc<dyn AgentSessionStore> = if let Some(store) = &self.custom_store {
+            Arc::new(StoreAdapter::new(Arc::clone(store)))
+        } else {
+            #[cfg(feature = "jsonl-store")]
+            {
+                let store = JsonlStore::new(self.store_path.clone());
+                store
+                    .init()
+                    .await
+                    .map_err(|e| BuildAgentError::Config(format!("Store init failed: {e}")))?;
+                Arc::new(StoreAdapter::new(Arc::new(store)))
+            }
+            #[cfg(all(not(feature = "jsonl-store"), feature = "memory-store"))]
+            {
+                Arc::new(self.build_store_adapter(Arc::new(MemoryStore::new())).await)
+            }
+            #[cfg(all(not(feature = "jsonl-store"), not(feature = "memory-store")))]
+            {
+                Arc::new(
+                    self.build_store_adapter(Arc::new(EphemeralSessionStore::new()))
+                        .await,
+                )
+            }
         };
-        #[cfg(all(not(feature = "jsonl-store"), feature = "memory-store"))]
-        let store_adapter: Arc<dyn AgentSessionStore> =
-            Arc::new(self.build_store_adapter(Arc::new(MemoryStore::new())).await);
-        #[cfg(all(not(feature = "jsonl-store"), not(feature = "memory-store")))]
-        let store_adapter: Arc<dyn AgentSessionStore> = Arc::new(
-            self.build_store_adapter(Arc::new(EphemeralSessionStore::new()))
-                .await,
-        );
 
         // 8. Create comms runtime
         #[cfg(feature = "comms")]

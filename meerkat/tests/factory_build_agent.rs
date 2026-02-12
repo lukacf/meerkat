@@ -15,7 +15,8 @@ use meerkat::{
     AgentBuildConfig, AgentFactory, BuildAgentError, LlmDoneOutcome, LlmEvent, LlmRequest,
 };
 use meerkat_client::LlmClient;
-use meerkat_core::{Config, Provider, Session, SessionMetadata, SessionTooling, UserMessage};
+use meerkat_core::{Config, Provider, Session, SessionId, SessionMetadata, SessionTooling, UserMessage};
+use meerkat_store::{SessionFilter, SessionStore, StoreError};
 
 // ---------------------------------------------------------------------------
 // Mock LLM client (returns a simple text response)
@@ -443,5 +444,76 @@ async fn test_preload_missing_skill_fails_build() {
     assert!(
         result.is_err(),
         "Should fail when preloading a nonexistent skill"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Custom SessionStore tests
+// ---------------------------------------------------------------------------
+
+/// A custom session store that tracks save calls.
+struct TrackingSessionStore {
+    save_count: std::sync::atomic::AtomicU32,
+}
+
+impl TrackingSessionStore {
+    fn new() -> Self {
+        Self {
+            save_count: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn save_count(&self) -> u32 {
+        self.save_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl SessionStore for TrackingSessionStore {
+    async fn save(&self, _session: &Session) -> Result<(), StoreError> {
+        self.save_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn load(&self, _id: &SessionId) -> Result<Option<Session>, StoreError> {
+        Ok(None)
+    }
+
+    async fn list(&self, _filter: SessionFilter) -> Result<Vec<meerkat_core::SessionMeta>, StoreError> {
+        Ok(vec![])
+    }
+
+    async fn delete(&self, _id: &SessionId) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+
+/// 12. `build_agent` with custom session store uses the provided store.
+#[tokio::test]
+async fn build_agent_with_custom_session_store() {
+    let store = Arc::new(TrackingSessionStore::new());
+    let factory = AgentFactory::new("/unused/path").session_store(store.clone());
+    let config = Config::default();
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let mut agent = factory.build_agent(build_config, &config).await.unwrap();
+
+    // Store should not have been called yet (no save before run)
+    assert_eq!(store.save_count(), 0);
+
+    // Run the agent — the agent loop saves the session on completion
+    let result = agent.run("Hello".to_string()).await.unwrap();
+    assert!(result.text.contains("Hello from mock"));
+
+    // The custom store should have received at least one save call
+    assert!(
+        store.save_count() > 0,
+        "Custom store should have been used for saving, got {} saves",
+        store.save_count()
     );
 }

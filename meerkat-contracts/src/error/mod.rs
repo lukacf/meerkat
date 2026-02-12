@@ -253,7 +253,7 @@ mod tests {
             let http = code.http_status();
             let cli = code.cli_exit_code();
             assert!(
-                http >= 400 && http < 600,
+                (400..600).contains(&http),
                 "HTTP status should be 4xx or 5xx"
             );
             assert!(cli > 0, "CLI exit code should be positive");

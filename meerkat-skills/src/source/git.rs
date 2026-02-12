@@ -489,6 +489,7 @@ async fn run_git_in_dir(dir: &Path, args: &[String]) -> Result<(), String> {
 
 /// Test support utilities for creating local bare repos.
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 pub(crate) mod tests_support {
     use super::*;
 

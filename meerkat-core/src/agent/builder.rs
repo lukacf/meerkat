@@ -222,7 +222,7 @@ impl AgentBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
+#[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::LlmStreamResult;

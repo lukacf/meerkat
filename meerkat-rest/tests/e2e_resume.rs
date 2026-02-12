@@ -10,6 +10,7 @@ use meerkat::{
 use meerkat_client::TestClient;
 use meerkat_core::MemoryConfigStore;
 use meerkat_rest::{AppState, router};
+use meerkat_rest::webhook::WebhookAuth;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -64,6 +65,7 @@ async fn inner_test_rest_resume_metadata() {
         event_tx,
         session_service,
         builder_slot,
+        webhook_auth: WebhookAuth::None,
     };
 
     let app = router(state_run);
@@ -135,6 +137,7 @@ async fn inner_test_rest_resume_metadata() {
         event_tx: tokio::sync::broadcast::channel(16).0,
         session_service: session_service2,
         builder_slot: builder_slot2,
+        webhook_auth: WebhookAuth::None,
     };
 
     let app = router(state_resume);

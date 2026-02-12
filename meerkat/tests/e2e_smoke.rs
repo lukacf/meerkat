@@ -760,8 +760,8 @@ mod scenario_06_hooks {
         // 1. Observer on RunStarted
         // 2. Guardrail on PreLlmRequest (always Allow)
         // 3. Rewriter on PostLlmResponse (appends " [REVIEWED]")
-        let mut hooks_config = HooksConfig::default();
-        hooks_config.entries = vec![
+        let hooks_config = HooksConfig {
+            entries: vec![
             HookEntryConfig {
                 id: HookId::new("observer"),
                 enabled: true,
@@ -807,7 +807,9 @@ mod scenario_06_hooks {
                 )
                 .unwrap(),
             },
-        ];
+            ],
+            ..Default::default()
+        };
 
         let engine = DefaultHookEngine::new(hooks_config);
 

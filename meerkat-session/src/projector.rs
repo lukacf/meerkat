@@ -209,7 +209,7 @@ mod tests {
 
         fn add_events(&self, session_id: &SessionId, agent_events: &[AgentEvent]) {
             let mut map = self.events.lock().unwrap();
-            let entry = map.entry(session_id.to_string()).or_insert_with(Vec::new);
+            let entry = map.entry(session_id.to_string()).or_default();
             let base_seq = entry.len() as u64;
             for (i, event) in agent_events.iter().enumerate() {
                 entry.push(StoredEvent {

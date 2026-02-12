@@ -87,8 +87,8 @@ where
     let mut event_stream_open = true;
 
     // 1. Emit CompactionStarted
-    if event_stream_open {
-        if !tap_emit(
+    if event_stream_open
+        && !tap_emit(
             event_tap,
             event_tx.as_ref(),
             AgentEvent::CompactionStarted {
@@ -98,10 +98,9 @@ where
             },
         )
         .await
-        {
-            event_stream_open = false;
-            tracing::warn!("compaction event stream receiver dropped before CompactionStarted");
-        }
+    {
+        event_stream_open = false;
+        tracing::warn!("compaction event stream receiver dropped before CompactionStarted");
     }
 
     // 2. Build the compaction prompt messages
@@ -128,8 +127,8 @@ where
                 }
             }
             if summary.is_empty() {
-                if event_stream_open {
-                    if !tap_emit(
+                if event_stream_open
+                    && !tap_emit(
                         event_tap,
                         event_tx.as_ref(),
                         AgentEvent::CompactionFailed {
@@ -137,19 +136,18 @@ where
                         },
                     )
                     .await
-                    {
-                        tracing::warn!(
-                            "compaction event stream receiver dropped before CompactionFailed"
-                        );
-                    }
+                {
+                    tracing::warn!(
+                        "compaction event stream receiver dropped before CompactionFailed"
+                    );
                 }
                 return Err(CompactionError::EmptySummary);
             }
             (summary, result.usage().clone())
         }
         Err(e) => {
-            if event_stream_open {
-                if !tap_emit(
+            if event_stream_open
+                && !tap_emit(
                     event_tap,
                     event_tx.as_ref(),
                     AgentEvent::CompactionFailed {
@@ -157,11 +155,8 @@ where
                     },
                 )
                 .await
-                {
-                    tracing::warn!(
-                        "compaction event stream receiver dropped before CompactionFailed"
-                    );
-                }
+            {
+                tracing::warn!("compaction event stream receiver dropped before CompactionFailed");
             }
             return Err(CompactionError::LlmFailed(e));
         }
@@ -172,8 +167,8 @@ where
     let messages_after = result.messages.len();
 
     // 5. Emit CompactionCompleted
-    if event_stream_open {
-        if !tap_emit(
+    if event_stream_open
+        && !tap_emit(
             event_tap,
             event_tx.as_ref(),
             AgentEvent::CompactionCompleted {
@@ -183,9 +178,8 @@ where
             },
         )
         .await
-        {
-            tracing::warn!("compaction event stream receiver dropped before CompactionCompleted");
-        }
+    {
+        tracing::warn!("compaction event stream receiver dropped before CompactionCompleted");
     }
 
     Ok(CompactionOutcome {

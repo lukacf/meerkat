@@ -7,6 +7,7 @@ use meerkat::{AgentFactory, Config, EphemeralSessionService, FactoryAgentBuilder
 use meerkat_client::TestClient;
 use meerkat_core::MemoryConfigStore;
 use meerkat_rest::{AppState, router};
+use meerkat_rest::webhook::WebhookAuth;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -47,6 +48,7 @@ async fn integration_real_live_continue_hangs() {
         event_tx,
         session_service,
         builder_slot,
+        webhook_auth: WebhookAuth::None,
     };
 
     let app = router(state);

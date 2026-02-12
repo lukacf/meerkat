@@ -33,6 +33,7 @@ pub fn detect_skill_ref(message: &str) -> Option<(&str, &str)> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -4,10 +4,59 @@
 //! the format needed for injection into an agent's session.
 
 use crate::{InboxItem, MessageKind, PubKey, TrustedPeers};
+use meerkat_core::PlainEventSource;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use uuid::Uuid;
+
+/// A plain (unauthenticated) event message from an external source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlainMessage {
+    /// The event body (plain text or serialized JSON).
+    pub body: String,
+    /// Where the event originated from.
+    pub source: PlainEventSource,
+}
+
+impl PlainMessage {
+    /// Format this message for injection into an LLM session.
+    pub fn to_user_message_text(&self) -> String {
+        format!("[EVENT via {}] {}", self.source, self.body)
+    }
+}
+
+/// A message drained from the inbox, distinguishing authenticated peer
+/// messages from unauthenticated external events.
+///
+/// The compiler enforces this distinction — authenticated messages have
+/// verified sender identity (`CommsMessage`), plain events do not (`PlainMessage`).
+#[derive(Debug, Clone)]
+pub enum DrainedMessage {
+    /// A message from an authenticated peer (Ed25519-verified envelope).
+    Authenticated(CommsMessage),
+    /// A plain event from an external (unauthenticated) source.
+    Plain(PlainMessage),
+}
+
+/// Convert an inbox item into a `DrainedMessage`.
+///
+/// Returns `None` for:
+/// - `SubagentResult` items (handled separately)
+/// - Ack messages (not injected into session)
+/// - Unknown peers (for authenticated messages)
+pub fn drain_inbox_item(item: &InboxItem, trusted_peers: &TrustedPeers) -> Option<DrainedMessage> {
+    match item {
+        InboxItem::External { .. } => {
+            CommsMessage::from_inbox_item(item, trusted_peers).map(DrainedMessage::Authenticated)
+        }
+        InboxItem::PlainEvent { body, source } => Some(DrainedMessage::Plain(PlainMessage {
+            body: body.clone(),
+            source: *source,
+        })),
+        InboxItem::SubagentResult { .. } => None,
+    }
+}
 
 /// Standard message intents for inter-agent communication.
 ///
@@ -167,7 +216,7 @@ impl CommsMessage {
     pub fn from_inbox_item(item: &InboxItem, trusted_peers: &TrustedPeers) -> Option<Self> {
         let envelope = match item {
             InboxItem::External { envelope } => envelope,
-            InboxItem::SubagentResult { .. } => return None,
+            InboxItem::SubagentResult { .. } | InboxItem::PlainEvent { .. } => return None,
         };
 
         // Resolve peer name from pubkey
@@ -667,5 +716,88 @@ mod tests {
         // Unknown strings deserialize to Custom
         let intent: MessageIntent = serde_json::from_str("\"my-custom\"").unwrap();
         assert_eq!(intent, MessageIntent::Custom("my-custom".to_string()));
+    }
+
+    // === DrainedMessage / PlainMessage tests ===
+
+    #[test]
+    fn test_drained_message_from_external() {
+        let sender = make_keypair();
+        let receiver = make_keypair();
+        let trusted = make_trusted_peers("sender-agent", &sender.public_key());
+
+        let envelope = make_envelope(
+            &sender,
+            receiver.public_key(),
+            MessageKind::Message {
+                body: "hello".to_string(),
+            },
+        );
+        let item = InboxItem::External { envelope };
+        let drained = drain_inbox_item(&item, &trusted);
+
+        assert!(drained.is_some());
+        match drained.unwrap() {
+            DrainedMessage::Authenticated(msg) => {
+                assert_eq!(msg.from_peer, "sender-agent");
+            }
+            DrainedMessage::Plain(_) => panic!("Expected Authenticated"),
+        }
+    }
+
+    #[test]
+    fn test_drained_message_from_plain_event() {
+        use meerkat_core::PlainEventSource;
+
+        let trusted = TrustedPeers::new();
+        let item = InboxItem::PlainEvent {
+            body: "New email arrived".to_string(),
+            source: PlainEventSource::Tcp,
+        };
+        let drained = drain_inbox_item(&item, &trusted);
+
+        assert!(drained.is_some());
+        match drained.unwrap() {
+            DrainedMessage::Plain(msg) => {
+                assert_eq!(msg.body, "New email arrived");
+                assert_eq!(msg.source, PlainEventSource::Tcp);
+            }
+            DrainedMessage::Authenticated(_) => panic!("Expected Plain"),
+        }
+    }
+
+    #[test]
+    fn test_plain_message_to_user_message_text() {
+        use meerkat_core::PlainEventSource;
+
+        let msg = PlainMessage {
+            body: "CPU > 95% on prod-3".to_string(),
+            source: PlainEventSource::Webhook,
+        };
+        let text = msg.to_user_message_text();
+        assert_eq!(text, "[EVENT via webhook] CPU > 95% on prod-3");
+    }
+
+    #[test]
+    fn test_plain_message_formatting_all_sources() {
+        use meerkat_core::PlainEventSource;
+
+        for (source, label) in [
+            (PlainEventSource::Tcp, "tcp"),
+            (PlainEventSource::Uds, "uds"),
+            (PlainEventSource::Stdin, "stdin"),
+            (PlainEventSource::Webhook, "webhook"),
+            (PlainEventSource::Rpc, "rpc"),
+        ] {
+            let msg = PlainMessage {
+                body: "test".to_string(),
+                source,
+            };
+            assert!(
+                msg.to_user_message_text().contains(label),
+                "PlainMessage should contain source label '{}'",
+                label
+            );
+        }
     }
 }

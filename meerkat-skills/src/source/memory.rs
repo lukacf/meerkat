@@ -19,8 +19,7 @@ impl InMemorySkillSource {
 #[async_trait]
 impl SkillSource for InMemorySkillSource {
     async fn list(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
-        let all: Vec<SkillDescriptor> =
-            self.skills.iter().map(|s| s.descriptor.clone()).collect();
+        let all: Vec<SkillDescriptor> = self.skills.iter().map(|s| s.descriptor.clone()).collect();
         Ok(apply_filter(&all, filter))
     }
 

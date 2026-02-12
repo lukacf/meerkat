@@ -7,10 +7,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::memory::MemoryStore;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
-use meerkat_core::AgentToolDispatcher;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -103,13 +103,11 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
 
         let limit = input.limit.unwrap_or(DEFAULT_LIMIT).min(20);
 
-        let results = self
-            .store
-            .search(&input.query, limit)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
+        let results = self.store.search(&input.query, limit).await.map_err(|e| {
+            ToolError::ExecutionFailed {
                 message: format!("{TOOL_NAME}: {e}"),
-            })?;
+            }
+        })?;
 
         let results_json: Vec<Value> = results
             .into_iter()
@@ -233,10 +231,7 @@ mod tests {
 
         let parsed: Vec<Value> = serde_json::from_str(&result.content).unwrap();
         assert!(!parsed.is_empty());
-        assert!(parsed[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("AURORA"));
+        assert!(parsed[0]["content"].as_str().unwrap().contains("AURORA"));
         assert!(parsed[0]["score"].as_f64().unwrap() > 0.0);
         assert!(parsed[0]["session_id"].is_string());
     }

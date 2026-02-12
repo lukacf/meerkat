@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use meerkat_core::skills::{SkillCollection, SkillDescriptor, SkillEngine, SkillFilter};
 use meerkat_core::ToolDef;
+use meerkat_core::skills::{SkillCollection, SkillDescriptor, SkillEngine, SkillFilter};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -160,8 +160,7 @@ impl BuiltinTool for BrowseSkillsTool {
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
 
-        let (subcollections, direct_skills) =
-            partition_at_path(browse_path, &skills, &collections);
+        let (subcollections, direct_skills) = partition_at_path(browse_path, &skills, &collections);
 
         Ok(json!({
             "type": "listing",
@@ -310,10 +309,7 @@ mod tests {
     #[tokio::test]
     async fn test_browse_empty_collection() {
         let tool = BrowseSkillsTool::new(test_engine());
-        let result = tool
-            .call(json!({"path": "nonexistent"}))
-            .await
-            .unwrap();
+        let result = tool.call(json!({"path": "nonexistent"})).await.unwrap();
 
         assert_eq!(result["type"], "listing");
         let skills = result["skills"].as_array().unwrap();

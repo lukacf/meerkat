@@ -213,10 +213,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
         turn_resp["result"]["session_id"].as_str().unwrap(),
         session_id
     );
-    let turn_text = turn_resp["result"]["text"]
-        .as_str()
-        .unwrap()
-        .to_lowercase();
+    let turn_text = turn_resp["result"]["text"].as_str().unwrap().to_lowercase();
     assert!(
         turn_text.contains("smokebot") || turn_text.contains("smoke"),
         "Follow-up should recall the name. Got: {}",
@@ -380,7 +377,10 @@ async fn e2e_scenario_16_kitchen_sink() {
         resp["result"]["contract_version"].is_string(),
         "initialize should return contract_version string"
     );
-    eprintln!("[scenario 16] initialized, contract_version={}", resp["result"]["contract_version"]);
+    eprintln!(
+        "[scenario 16] initialized, contract_version={}",
+        resp["result"]["contract_version"]
+    );
 
     // --- 2. Create session A: shell + builtins enabled ---
     let id = next_id();
@@ -402,8 +402,14 @@ async fn e2e_scenario_16_kitchen_sink() {
     let session_a = resp["result"]["session_id"].as_str().unwrap().to_string();
     let tool_calls_a = resp["result"]["tool_calls"].as_u64().unwrap_or(0);
     let text_a = resp["result"]["text"].as_str().unwrap_or("").to_lowercase();
-    eprintln!("[scenario 16] session A: tool_calls={tool_calls_a}, text={}", &text_a[..text_a.len().min(80)]);
-    assert!(tool_calls_a >= 1, "Session A should have tool calls, got {tool_calls_a}");
+    eprintln!(
+        "[scenario 16] session A: tool_calls={tool_calls_a}, text={}",
+        &text_a[..text_a.len().min(80)]
+    );
+    assert!(
+        tool_calls_a >= 1,
+        "Session A should have tool calls, got {tool_calls_a}"
+    );
     assert!(
         text_a.contains("kitchen_sink_42"),
         "Session A should contain shell output, got: {text_a}"
@@ -422,7 +428,10 @@ async fn e2e_scenario_16_kitchen_sink() {
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "turn/start A failed: {resp}");
     let text_a2 = resp["result"]["text"].as_str().unwrap_or("").to_lowercase();
-    eprintln!("[scenario 16] turn A2: {}", &text_a2[..text_a2.len().min(80)]);
+    eprintln!(
+        "[scenario 16] turn A2: {}",
+        &text_a2[..text_a2.len().min(80)]
+    );
     assert!(
         text_a2.contains("kitchen_sink_42") || text_a2.contains("kitchen"),
         "Follow-up should recall shell output, got: {text_a2}"
@@ -491,8 +500,14 @@ async fn e2e_scenario_16_kitchen_sink() {
         .iter()
         .filter_map(|s| s["session_id"].as_str())
         .collect();
-    assert!(ids.contains(&session_a.as_str()), "Session A should be in list");
-    assert!(ids.contains(&session_b.as_str()), "Session B should be in list");
+    assert!(
+        ids.contains(&session_a.as_str()),
+        "Session A should be in list"
+    );
+    assert!(
+        ids.contains(&session_b.as_str()),
+        "Session B should be in list"
+    );
     eprintln!("[scenario 16] list: {ids:?}");
 
     // --- 7. Archive session A ---
@@ -538,8 +553,14 @@ async fn e2e_scenario_16_kitchen_sink() {
         .iter()
         .filter_map(|c| c["id"].as_str())
         .collect();
-    assert!(cap_ids.contains(&"sessions"), "Should have sessions capability");
-    assert!(cap_ids.contains(&"builtins"), "Should have builtins capability");
+    assert!(
+        cap_ids.contains(&"sessions"),
+        "Should have sessions capability"
+    );
+    assert!(
+        cap_ids.contains(&"builtins"),
+        "Should have builtins capability"
+    );
     assert!(cap_ids.contains(&"shell"), "Should have shell capability");
     eprintln!("[scenario 16] capabilities: {cap_ids:?}");
 
@@ -564,7 +585,9 @@ async fn e2e_scenario_16_kitchen_sink() {
     assert!(resp["error"].is_null(), "config/patch failed: {resp}");
     assert_eq!(resp["result"]["max_tokens"], original_max + 100);
 
-    eprintln!("[scenario 16] kitchen-sink test complete: tool calling + structured output + session CRUD + capabilities + config");
+    eprintln!(
+        "[scenario 16] kitchen-sink test complete: tool calling + structured output + session CRUD + capabilities + config"
+    );
 
     drop(writer);
     server_handle.await.unwrap().unwrap();
@@ -702,10 +725,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
     );
 
     // Verify context was maintained: the LLM should recall the passphrase
-    let turn_text = turn_resp["result"]["text"]
-        .as_str()
-        .unwrap()
-        .to_lowercase();
+    let turn_text = turn_resp["result"]["text"].as_str().unwrap().to_lowercase();
     assert!(
         turn_text.contains("meerkat-sunrise-42") || turn_text.contains("meerkat sunrise 42"),
         "Follow-up should recall the passphrase. Got: {}",

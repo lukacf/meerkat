@@ -4,7 +4,7 @@ description: "Built-in messaging system for coordination between multiple agent 
 icon: "tower-broadcast"
 ---
 
-Independent agent instances can exchange messages, delegate tasks, and coordinate work over Ed25519-signed channels. Supports TCP, Unix Domain Sockets, and in-process transports. Agents only accept messages from explicitly trusted peers.
+Independent agent instances can exchange messages, delegate tasks, and coordinate work over Ed25519-signed channels. External systems (webhooks, scripts, stdin) can push plain-text events into a running agent's inbox. Supports TCP, Unix Domain Sockets, and in-process transports.
 
 <Note>
 Comms requires the `comms` Cargo feature to be compiled in.
@@ -18,8 +18,10 @@ The comms system provides:
 - **Three transport layers**: Unix Domain Sockets (UDS), TCP, and in-process (`inproc`)
 - **Ed25519 cryptographic identity**: Every agent has a keypair; all messages are signed
 - **Trust-based peer model**: Agents only accept messages from explicitly trusted peers
-- **Host mode**: An agent processes its initial prompt then stays alive waiting for incoming comms messages
-- **Inbox with notification**: Incoming messages are queued and drained at turn boundaries
+- **External event ingestion**: Push plain-text events from stdin, webhooks, RPC, or TCP/UDS listeners
+- **Auth-optional mode**: Signed listeners for agent-to-agent comms; separate plain listeners for external events when `auth = "none"`
+- **Host mode**: An agent processes its initial prompt then stays alive waiting for incoming comms messages and external events
+- **Inbox with notification**: Incoming messages and events are queued and drained at turn boundaries
 
 ## Architecture
 
@@ -39,13 +41,22 @@ graph TD
 
     agent --> runtime
 
-    UDS["UDS Listener"]
-    TCP["TCP Listener"]
-    INPROC["Inproc Registry"]
+    subgraph signed["Signed listeners (agent-to-agent)"]
+        UDS["UDS Listener"]
+        TCP["TCP Listener"]
+        INPROC["Inproc Registry"]
+    end
 
-    runtime --> UDS
-    runtime --> TCP
-    runtime --> INPROC
+    subgraph plain["Plain listeners (external events)"]
+        PTCP["TCP Event Listener"]
+        PUDS["UDS Event Listener"]
+        STDIN["Stdin Reader"]
+        WEBHOOK["REST Webhook"]
+        RPC_EVT["RPC event/push"]
+    end
+
+    runtime --> signed
+    plain -->|"EventInjector"| INBOX
 ```
 
 | Crate | Role |
@@ -327,15 +338,19 @@ When converting to `CommsMessage` for the agent loop, ACKs and messages from unk
 <Accordion title="Config file (.rkat/config.toml)">
 ```toml
 [comms]
-mode = "inproc"           # "inproc", "tcp", or "uds"
-address = "0.0.0.0:4200"  # Required when mode = "tcp" or "uds"
+mode = "inproc"                    # "inproc", "tcp", or "uds"
+address = "0.0.0.0:4200"          # Required when mode = "tcp" or "uds"
+auth = "none"                      # "none" (open) or "ed25519"
+event_address = "127.0.0.1:4201"  # Plain-text event listener (requires auth = "none")
 auto_enable_for_subagents = false
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `mode` | `CommsRuntimeMode` | `Inproc` | Transport mode |
-| `address` | `Option<String>` | `None` | Listen address (TCP socket address or UDS path) |
+| `address` | `Option<String>` | `None` | Listen address for signed agent-to-agent comms |
+| `auth` | `CommsAuthMode` | `Open` | Auth mode: `"none"` (open) or `"ed25519"` |
+| `event_address` | `Option<String>` | `None` | Plain-text event listener address (requires `auth = "none"`) |
 | `auto_enable_for_subagents` | `bool` | `false` | Whether to auto-enable comms for spawned sub-agents |
 </Accordion>
 
@@ -363,9 +378,10 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 | Flag | Description |
 |------|-------------|
 | `--comms-name <NAME>` | Agent name for peer identification. Enables comms if set. |
-| `--comms-listen-tcp <ADDR>` | TCP address to listen on (e.g., `"0.0.0.0:4200"`) |
+| `--comms-listen-tcp <ADDR>` | TCP address to listen on for signed comms (e.g., `"0.0.0.0:4200"`) |
 | `--no-comms` | Disable inter-agent communication entirely |
-| `--host` | Run in host mode (stay alive for comms messages after initial prompt) |
+| `--host` | Run in host mode (stay alive for comms messages and events after initial prompt) |
+| `--stdin` | Read external events from stdin (newline-delimited, only meaningful with `--host`) |
 
 <Note>
 All comms flags require the `comms` feature at compile time (`#[cfg(feature = "comms")]`).
@@ -373,10 +389,14 @@ All comms flags require the `comms` feature at compile time (`#[cfg(feature = "c
 
 ### Host mode
 
-Host mode keeps the agent alive after processing the initial prompt, listening for incoming comms messages:
+Host mode keeps the agent alive after processing the initial prompt, listening for incoming comms messages and external events:
 
 ```bash
+# Host mode with comms only
 rkat run --comms-name orchestrator --host "You are a project coordinator."
+
+# Host mode with stdin events
+rkat run --comms-name monitor --host --stdin "You are a monitoring agent."
 ```
 
 <Steps>
@@ -386,8 +406,8 @@ rkat run --comms-name orchestrator --host "You are a project coordinator."
   <Step title="Enter wait loop">
     After the first run completes, the agent enters a wait loop.
   </Step>
-  <Step title="Handle incoming messages">
-    When comms messages arrive (via the inbox), they are injected as user messages and the agent runs again.
+  <Step title="Handle incoming messages and events">
+    When comms messages or external events arrive (via the inbox), they are injected as user messages and the agent runs again. Events from stdin, webhooks, RPC, or plain TCP/UDS listeners all flow into the same inbox.
   </Step>
   <Step title="Exit conditions">
     The agent exits when it receives a `DISMISS` message, its budget is exhausted, or it encounters a graceful error.
@@ -505,6 +525,102 @@ Incoming messages are formatted as text for the LLM:
 - **Message**: `[COMMS MESSAGE from <peer>]\n<body>`
 - **Request**: `[COMMS REQUEST from <peer> (id: <uuid>)]\nIntent: <intent>\nParams: <json>\n\nTo respond, use send_response with peer="<peer>", request_id="<uuid>"`
 - **Response**: `[COMMS RESPONSE from <peer> (to request: <uuid>)]\nStatus: <status>\nResult: <json>`
+
+## External event ingestion
+
+External systems can push plain-text events into a running agent's inbox without Ed25519 authentication. Events are drained at turn boundaries (or continuously in host mode) and injected as user messages.
+
+All events flow through the `EventInjector` trait into the bounded inbox, regardless of source.
+
+### Event sources
+
+| Source | Surface | How to use | Auth |
+|--------|---------|-----------|------|
+| Stdin | CLI | `--stdin` flag (with `--host`) | None |
+| Webhook | REST | `POST /sessions/{id}/event` | `RKAT_WEBHOOK_SECRET` env var |
+| RPC | JSON-RPC | `event/push` method | None (implicit) |
+| TCP listener | Comms | Configure `event_address` in config | `auth = "none"` required |
+| UDS listener | Comms | Configure `event_address` in config | `auth = "none"` required |
+
+### CLI stdin events
+
+Read newline-delimited events from stdin. Each line is parsed as JSON (extracting `body` field if present) or treated as plain text.
+
+```bash
+# Host mode with stdin events
+rkat run "You are a monitoring agent." \
+  --comms-name monitor \
+  --host --stdin \
+  --enable-builtins
+
+# Then type or pipe events:
+echo '{"body":"deployment failed on prod"}' | ...
+```
+
+### REST webhook
+
+Push events to a running session via HTTP. Auth is optional via `RKAT_WEBHOOK_SECRET` env var with constant-time comparison.
+
+```bash
+# Without auth (localhost only)
+curl -X POST http://localhost:8080/sessions/sid_abc/event \
+  -H "Content-Type: application/json" \
+  -d '{"alert": "CPU spike", "host": "web-03"}'
+
+# With webhook secret
+RKAT_WEBHOOK_SECRET=my-secret  # set on server
+curl -X POST http://localhost:8080/sessions/sid_abc/event \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: my-secret" \
+  -d '{"alert": "deployment failed"}'
+```
+
+Returns `202 Accepted` with `{"queued": true}`. Returns `503` if inbox full, `404` if session not found.
+
+### RPC event/push
+
+Push events to a running session via JSON-RPC.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "event/push",
+  "params": {
+    "session_id": "sid_abc123",
+    "payload": {"alert": "build failed"},
+    "source": "ci-pipeline"
+  }
+}
+```
+
+The optional `source` field is prepended as `[source: ci-pipeline]` metadata. Returns `{"queued": true}` on success.
+
+### TCP/UDS plain event listeners
+
+When `auth = "none"` in config, a separate plain-text listener starts on `event_address` for unauthenticated external events. The signed agent-to-agent listener is never replaced.
+
+```toml .rkat/config.toml
+[comms]
+mode = "tcp"
+address = "127.0.0.1:4200"         # Signed agent-to-agent listener
+auth = "none"
+event_address = "127.0.0.1:4201"   # Plain-text event listener
+```
+
+```bash
+# Push events via netcat
+echo '{"body":"hello from external system"}' | nc 127.0.0.1 4201
+```
+
+### Event injection format
+
+Events are injected into the agent's context with source tagging:
+
+- **Stdin**: `[EVENT via stdin] <body>`
+- **Webhook**: `[EVENT via webhook] <body>`
+- **RPC**: `[EVENT via rpc] <body>` (with optional `[source: name]` prefix)
+- **TCP/UDS**: `[EVENT via tcp] <body>` or `[EVENT via uds] <body>`
 
 ## Security
 

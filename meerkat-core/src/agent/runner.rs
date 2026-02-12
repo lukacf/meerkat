@@ -759,7 +759,11 @@ where
             return user_input;
         }
 
-        let text = if detected_ref { remaining_input } else { user_input };
+        let text = if detected_ref {
+            remaining_input
+        } else {
+            user_input
+        };
         if text.is_empty() {
             prefix_parts.join("\n\n")
         } else {

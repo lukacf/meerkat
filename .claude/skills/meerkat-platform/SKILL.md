@@ -95,7 +95,11 @@ max_tool_calls = 50
 timeout_secs = 120
 
 [comms]
-mode = "inproc"  # or "tcp" with address = "0.0.0.0:4200"
+mode = "inproc"           # "inproc", "tcp", or "uds"
+# address = "127.0.0.1:4200"      # Signed agent-to-agent listener
+# auth = "none"                    # "none" (open) or "ed25519"
+# event_address = "127.0.0.1:4201" # Plain-text external event listener
+# auto_enable_for_subagents = false
 
 [skills]
 enabled = true
@@ -127,9 +131,20 @@ Domain-specific knowledge injection. Activated via `/skill-ref` in messages, `sk
 
 Hierarchical agent spawning with tools: `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list`. Budget-isolated with configurable model inheritance.
 
-### Inter-Agent Communication
+### Inter-Agent Communication & External Events
 
-Encrypted peer-to-peer messaging via `send_message`, `send_request`, `send_response`, `list_peers`. Host mode keeps agent alive listening for messages.
+**Agent-to-agent comms:** Ed25519-signed peer-to-peer messaging via `send_message`, `send_request`, `send_response`, `list_peers`. Host mode (`--host`) keeps agent alive listening for messages. Signed listeners use CBOR + Ed25519 with trusted peer verification.
+
+**External event ingestion:** External systems (webhooks, scripts, stdin) can push events into a running agent's inbox. All events flow through the `EventInjector` trait into a bounded inbox, drained at turn boundaries (or continuously in host mode) and injected as user messages.
+
+| Surface | Ingestion Method | Source Tag | Auth |
+|---------|-----------------|------------|------|
+| CLI | `--stdin` (newline-delimited) | `stdin` | None |
+| REST | `POST /sessions/{id}/event` | `webhook` | `RKAT_WEBHOOK_SECRET` header |
+| RPC | `event/push` method | `rpc` | None (implicit) |
+| Comms | TCP/UDS plain listeners | `tcp`/`uds` | `auth = "none"` required |
+
+**Auth model:** Signed (Ed25519) listeners always run for agent-to-agent comms. When `auth = "none"`, a separate plain-text listener starts on `event_address` for unauthenticated external events. The signed listener is never replaced. REST webhook auth uses `RKAT_WEBHOOK_SECRET` env var with constant-time comparison (`subtle::ConstantTimeEq`).
 
 ### Memory
 

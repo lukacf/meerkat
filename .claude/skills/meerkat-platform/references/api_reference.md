@@ -39,11 +39,12 @@ rkat run <PROMPT> [OPTIONS]
 --hooks-override-json <JSON> # Inline hook overrides
 --hooks-override-file <FILE> # Hook overrides from file
 
-# Comms
+# Comms & events
 --comms-name <NAME>          # Agent name for inter-agent comms
---comms-listen-tcp <ADDR>    # TCP listen address
+--comms-listen-tcp <ADDR>    # TCP listen address for signed comms
 --no-comms                   # Disable comms
 --host                       # Host mode: stay alive for messages
+--stdin                      # Read external events from stdin (newline-delimited, with --host)
 ```
 
 ### rkat resume
@@ -111,6 +112,23 @@ curl -X POST http://localhost:3000/sessions/sid_abc/messages \
 curl -N http://localhost:3000/sessions/sid_abc/events
 ```
 
+### POST /sessions/{id}/event — Push external event
+
+```bash
+# Without auth (localhost only)
+curl -X POST http://localhost:3000/sessions/sid_abc/event \
+  -H "Content-Type: application/json" \
+  -d '{"source": "github", "action": "push", "ref": "main"}'
+
+# With webhook secret (set RKAT_WEBHOOK_SECRET on server)
+curl -X POST http://localhost:3000/sessions/sid_abc/event \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: my-secret" \
+  -d '{"alert": "deployment failed"}'
+```
+
+Response: `202 ACCEPTED` with `{"queued": true}`. Returns `503` if inbox full, `404` if session not found. Auth via `RKAT_WEBHOOK_SECRET` env var with constant-time comparison.
+
 ### Other endpoints
 
 - `GET /sessions/{id}` — Session details
@@ -155,6 +173,18 @@ All methods use JSON-RPC 2.0 over newline-delimited JSON on stdin/stdout.
   "event": {"type": "text_delta", "delta": "Here's"}
 }}
 ```
+
+### event/push
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"event/push","params":{
+  "session_id": "sid_abc123",
+  "payload": {"alert": "build failed", "repo": "main"},
+  "source": "ci-pipeline"
+}}
+```
+
+Response: `{"result": {"queued": true}}`. The `payload` is any JSON value. Optional `source` is prepended as `[source: ci-pipeline]` metadata. Error `-32603` if inbox full, `-32602` if session not found.
 
 ### Other methods
 
@@ -248,6 +278,13 @@ await client.interrupt(session_id)
 sessions = await client.list_sessions()
 details = await client.read_session(session_id)
 await client.archive_session(session_id)
+
+# Push external event into running session
+await client.push_event(
+    session_id=session_id,
+    payload={"alert": "deployment failed", "env": "prod"},
+    source="monitoring",  # optional
+)
 ```
 
 ### Streaming
@@ -352,6 +389,12 @@ await client.interrupt(sessionId);
 const sessions = await client.listSessions();
 const details = await client.readSession(sessionId);
 await client.archiveSession(sessionId);
+
+// Push external event
+await client.pushEvent(sessionId, {
+  payload: { alert: "build failed" },
+  source: "ci",
+});
 ```
 
 ### Capabilities & Config
@@ -562,14 +605,14 @@ for ep in endpoints:
     print(f"  {ep['method']:6s} {ep['path']}{auth} -> {ep['handler']}")
 ```
 
-### Example 3: Multi-agent system with host mode and comms (CLI)
+### Example 3: Multi-agent system with host mode, comms, and external events (CLI)
 
 ```bash
-# Terminal 1: Start a coordinator agent in host mode
+# Terminal 1: Start a coordinator agent in host mode with stdin events
 rkat run "You are a project coordinator. Delegate tasks to specialist agents." \
   --comms-name coordinator \
   --comms-listen-tcp 0.0.0.0:4200 \
-  --host \
+  --host --stdin \
   --enable-builtins \
   -v
 
@@ -580,16 +623,15 @@ rkat run "You are a code reviewer. Wait for review requests." \
   --host \
   --enable-builtins --enable-shell
 
-# Terminal 3: Start a test writer agent
-rkat run "You are a test engineer. Wait for test writing requests." \
-  --comms-name tester \
-  --comms-listen-tcp 0.0.0.0:4202 \
-  --host \
-  --enable-builtins --enable-shell
-
-# Terminal 4: Send a task to the coordinator
+# Terminal 3: Send a task to the coordinator via inter-agent comms
 rkat run "Tell the coordinator to review src/auth.rs and write tests for it" \
   --comms-name client
+
+# Terminal 4: Push an external event via stdin (in Terminal 1)
+echo '{"body":"CI pipeline failed on main branch"}' # typed into coordinator's stdin
+
+# Or push via netcat to a plain event listener (requires auth=none + event_address in config)
+echo '{"body":"deployment alert"}' | nc 127.0.0.1 4201
 ```
 
 ### Example 4: Full-stack application with sub-agents (Rust SDK)
@@ -781,8 +823,10 @@ security_mode = "permissive"
 # program = "/bin/bash"
 
 [comms]
-mode = "inproc"           # "inproc", "tcp", or "uds"
-# address = "0.0.0.0:4200"
+mode = "inproc"                    # "inproc", "tcp", or "uds"
+# address = "127.0.0.1:4200"      # Signed agent-to-agent listener
+# auth = "none"                    # "none" (open) or "ed25519"
+# event_address = "127.0.0.1:4201" # Plain-text external event listener (requires auth = "none")
 auto_enable_for_subagents = false
 
 [skills]

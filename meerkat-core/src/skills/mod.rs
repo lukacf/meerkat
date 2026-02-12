@@ -177,8 +177,7 @@ pub fn collection_matches_prefix(skill_collection: Option<&str>, prefix: &str) -
         None => false,
         Some(coll) => {
             coll == prefix
-                || (coll.starts_with(prefix)
-                    && coll.as_bytes().get(prefix.len()) == Some(&b'/'))
+                || (coll.starts_with(prefix) && coll.as_bytes().get(prefix.len()) == Some(&b'/'))
         }
     }
 }
@@ -229,9 +228,7 @@ pub fn apply_filter(skills: &[SkillDescriptor], filter: &SkillFilter) -> Vec<Ski
                 }
             }
             if let Some(ref q) = query_lower {
-                if !s.name.to_lowercase().contains(q)
-                    && !s.description.to_lowercase().contains(q)
-                {
+                if !s.name.to_lowercase().contains(q) && !s.description.to_lowercase().contains(q) {
                     return false;
                 }
             }
@@ -295,19 +292,13 @@ pub trait SkillEngine: Send + Sync {
     async fn inventory_section(&self) -> Result<String, SkillError>;
 
     /// Resolve skill IDs and render injection content.
-    async fn resolve_and_render(
-        &self,
-        ids: &[SkillId],
-    ) -> Result<Vec<ResolvedSkill>, SkillError>;
+    async fn resolve_and_render(&self, ids: &[SkillId]) -> Result<Vec<ResolvedSkill>, SkillError>;
 
     /// List collections (delegates to source).
     async fn collections(&self) -> Result<Vec<SkillCollection>, SkillError>;
 
     /// List skills with optional filter (for browse_skills tool).
-    async fn list_skills(
-        &self,
-        filter: &SkillFilter,
-    ) -> Result<Vec<SkillDescriptor>, SkillError>;
+    async fn list_skills(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError>;
 }
 
 // ---------------------------------------------------------------------------

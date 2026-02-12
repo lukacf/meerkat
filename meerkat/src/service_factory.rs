@@ -8,8 +8,8 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError};
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_core::{Config, Session};
-use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_session::EphemeralSessionService;
+use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -48,9 +48,7 @@ impl SessionAgent for FactoryAgent {
         prompt: String,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.agent
-            .run_host_mode_with_events(prompt, event_tx)
-            .await
+        self.agent.run_host_mode_with_events(prompt, event_tx).await
     }
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillId>>) {
@@ -79,6 +77,10 @@ impl SessionAgent for FactoryAgent {
 
     fn session_clone(&self) -> Session {
         self.agent.session().clone()
+    }
+
+    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+        self.agent.comms()?.event_injector()
     }
 }
 

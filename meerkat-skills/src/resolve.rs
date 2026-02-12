@@ -53,9 +53,7 @@ pub async fn resolve_repositories(
             match &repo.transport {
                 SkillRepoTransport::Filesystem { path } => {
                     let full_path = if Path::new(path).is_relative() {
-                        project_root
-                            .unwrap_or_else(|| Path::new("."))
-                            .join(path)
+                        project_root.unwrap_or_else(|| Path::new(".")).join(path)
                     } else {
                         path.into()
                     };
@@ -78,15 +76,11 @@ pub async fn resolve_repositories(
                         use crate::source::http::{HttpSkillAuth, HttpSkillSource};
 
                         let auth = match (auth_header.as_deref(), auth_token.as_deref()) {
-                            (Some(header), Some(token)) => {
-                                Some(HttpSkillAuth::Header {
-                                    name: header.to_string(),
-                                    value: token.to_string(),
-                                })
-                            }
-                            (None, Some(token)) => {
-                                Some(HttpSkillAuth::Bearer(token.to_string()))
-                            }
+                            (Some(header), Some(token)) => Some(HttpSkillAuth::Header {
+                                name: header.to_string(),
+                                value: token.to_string(),
+                            }),
+                            (None, Some(token)) => Some(HttpSkillAuth::Bearer(token.to_string())),
                             _ => None,
                         };
 
@@ -119,7 +113,9 @@ pub async fn resolve_repositories(
                     refresh_seconds,
                     depth,
                 } => {
-                    use crate::source::git::{GitRef, GitSkillAuth, GitSkillConfig, GitSkillSource};
+                    use crate::source::git::{
+                        GitRef, GitSkillAuth, GitSkillConfig, GitSkillSource,
+                    };
 
                     let git_ref_enum = match ref_type {
                         meerkat_core::skills_config::GitRefType::Branch => {
@@ -181,7 +177,13 @@ pub async fn resolve_repositories(
 /// Sanitize a repo URL into a valid directory name.
 fn sanitize_repo_name(url: &str) -> String {
     url.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -203,11 +205,7 @@ mod tests {
         assert!(source.is_some());
 
         // Should work (no skills in empty dirs, but no error)
-        let skills = source
-            .unwrap()
-            .list(&SkillFilter::default())
-            .await
-            .unwrap();
+        let skills = source.unwrap().list(&SkillFilter::default()).await.unwrap();
         // Only embedded skills (if any registered)
         // The important thing is it doesn't error
         let _ = skills;

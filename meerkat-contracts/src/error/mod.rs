@@ -8,9 +8,16 @@ use crate::capability::CapabilityId;
 
 /// Stable error codes for wire protocol.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    Serialize, Deserialize,
-    strum::EnumString, strum::Display,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::EnumString,
+    strum::Display,
 )]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -88,9 +95,16 @@ impl ErrorCode {
 
 /// Error category for grouping.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    Serialize, Deserialize,
-    strum::EnumString, strum::Display,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::EnumString,
+    strum::Display,
 )]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -238,7 +252,10 @@ mod tests {
             let _rpc = code.jsonrpc_code();
             let http = code.http_status();
             let cli = code.cli_exit_code();
-            assert!(http >= 400 && http < 600, "HTTP status should be 4xx or 5xx");
+            assert!(
+                http >= 400 && http < 600,
+                "HTTP status should be 4xx or 5xx"
+            );
             assert!(cli > 0, "CLI exit code should be positive");
         }
     }

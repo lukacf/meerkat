@@ -4,8 +4,8 @@
 //! Feature-gated crates self-register via [`inventory::submit!`] with
 //! [`CapabilityRegistration`].
 
-mod registry;
 pub mod query;
+mod registry;
 
 pub use query::{CapabilitiesResponse, CapabilityEntry};
 pub use registry::{CapabilityRegistration, build_capabilities};
@@ -19,9 +19,19 @@ use crate::Protocol;
 /// Every capability known to Meerkat. Adding a variant forces updates to
 /// the registry, error mappings, and codegen templates.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
-    Serialize, Deserialize,
-    strum::EnumIter, strum::EnumString, strum::Display,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::EnumIter,
+    strum::EnumString,
+    strum::Display,
 )]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -48,9 +58,7 @@ pub enum CapabilityScope {
     /// Available on all protocol surfaces.
     Universal,
     /// Available only on specific protocols.
-    Extension {
-        protocols: Cow<'static, [Protocol]>,
-    },
+    Extension { protocols: Cow<'static, [Protocol]> },
 }
 
 /// Runtime status of a capability.

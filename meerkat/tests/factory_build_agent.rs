@@ -440,5 +440,8 @@ async fn test_preload_missing_skill_fails_build() {
     };
 
     let result = factory.build_agent(build_config, &config).await;
-    assert!(result.is_err(), "Should fail when preloading a nonexistent skill");
+    assert!(
+        result.is_err(),
+        "Should fail when preloading a nonexistent skill"
+    );
 }

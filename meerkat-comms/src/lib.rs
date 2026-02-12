@@ -12,7 +12,9 @@ pub mod trust;
 pub mod types;
 
 pub mod agent;
+pub mod event_injector;
 pub mod mcp;
+pub mod plain_listener;
 pub mod runtime;
 
 pub use identity::{IdentityError, Keypair, PubKey, Signature};
@@ -24,6 +26,8 @@ pub use transport::codec::{EnvelopeFrame, TransportCodec};
 pub use transport::{PeerAddr, TransportError};
 pub use trust::{TrustError, TrustedPeer, TrustedPeers};
 pub use types::{Envelope, InboxItem, MessageKind, Status};
+pub use agent::types::{DrainedMessage, PlainMessage, drain_inbox_item};
+pub use event_injector::CommsEventInjector;
 
 // Re-export high-level components
 pub use runtime::comms_bootstrap::{

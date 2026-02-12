@@ -281,7 +281,10 @@ mod scenario_01_multi_provider {
 
         // --- Anthropic ---
         if let Some(api_key) = anthropic_api_key() {
-            eprintln!("[scenario 1] Testing Anthropic with model {}", smoke_model());
+            eprintln!(
+                "[scenario 1] Testing Anthropic with model {}",
+                smoke_model()
+            );
             let temp_dir = TempDir::new().unwrap();
             let factory = AgentFactory::new(temp_dir.path().join("sessions"));
             let config = Config::default();
@@ -297,7 +300,10 @@ mod scenario_01_multi_provider {
                 .await
                 .expect("Anthropic agent run should succeed");
 
-            assert!(!result.text.is_empty(), "Anthropic response should not be empty");
+            assert!(
+                !result.text.is_empty(),
+                "Anthropic response should not be empty"
+            );
             assert!(
                 result.text.contains('4') || result.text.to_lowercase().contains("four"),
                 "Anthropic response should contain 4: {}",
@@ -333,7 +339,10 @@ mod scenario_01_multi_provider {
                 .await
                 .expect("OpenAI agent run should succeed");
 
-            assert!(!result.text.is_empty(), "OpenAI response should not be empty");
+            assert!(
+                !result.text.is_empty(),
+                "OpenAI response should not be empty"
+            );
             assert!(
                 result.text.contains('4') || result.text.to_lowercase().contains("four"),
                 "OpenAI response should contain 4: {}",
@@ -366,7 +375,10 @@ mod scenario_01_multi_provider {
                 .await
                 .expect("Gemini agent run should succeed");
 
-            assert!(!result.text.is_empty(), "Gemini response should not be empty");
+            assert!(
+                !result.text.is_empty(),
+                "Gemini response should not be empty"
+            );
             assert!(
                 result.text.contains('4') || result.text.to_lowercase().contains("four"),
                 "Gemini response should contain 4: {}",
@@ -417,7 +429,6 @@ mod scenario_02_tool_driven_shell {
             .await
             .expect("Shell agent should build");
 
-
         let result = agent
             .run(
                 "Use the shell tool to run: echo 'hello meerkat smoke'. \
@@ -427,7 +438,11 @@ mod scenario_02_tool_driven_shell {
             .await
             .expect("Shell agent run should succeed");
 
-        eprintln!("[scenario 2] tool_calls={}, text={}", result.tool_calls, result.text.trim());
+        eprintln!(
+            "[scenario 2] tool_calls={}, text={}",
+            result.tool_calls,
+            result.text.trim()
+        );
 
         assert!(
             result.tool_calls >= 1,
@@ -556,7 +571,10 @@ mod scenario_03_structured_output {
                 file
             );
         }
-        eprintln!("[scenario 3] Structured output validated: {} files", files.len());
+        eprintln!(
+            "[scenario 3] Structured output validated: {} files",
+            files.len()
+        );
     }
 }
 
@@ -648,9 +666,8 @@ mod scenario_05_multi_turn {
         let config = Config::default();
 
         let mut build_config = AgentBuildConfig::new(smoke_model());
-        build_config.system_prompt = Some(
-            "You are a helpful assistant. Keep your responses brief and precise.".to_string(),
-        );
+        build_config.system_prompt =
+            Some("You are a helpful assistant. Keep your responses brief and precise.".to_string());
 
         let mut agent = factory
             .build_agent(build_config, &config)
@@ -1137,7 +1154,11 @@ mod scenario_08_comms {
             .await
             .expect("Agent A run should succeed");
 
-        eprintln!("[scenario 8] Agent A: tool_calls={}, text={}", result_a.tool_calls, result_a.text.trim());
+        eprintln!(
+            "[scenario 8] Agent A: tool_calls={}, text={}",
+            result_a.tool_calls,
+            result_a.text.trim()
+        );
         assert!(
             result_a.tool_calls > 0,
             "Agent A should have made tool calls to send message"
@@ -1199,7 +1220,7 @@ mod scenario_09_session_service {
             max_tokens: Some(256),
             event_tx: None,
             host_mode: false,
-                skill_references: None,
+            skill_references: None,
         };
 
         let create_result = service
@@ -1213,7 +1234,10 @@ mod scenario_09_session_service {
             session_id,
             create_result.text.trim()
         );
-        assert!(!create_result.text.is_empty(), "First turn should produce text");
+        assert!(
+            !create_result.text.is_empty(),
+            "First turn should produce text"
+        );
 
         // 2. Read session
         let view = service
@@ -1229,14 +1253,17 @@ mod scenario_09_session_service {
             view.state.message_count >= 2,
             "Session should have at least system + user + assistant messages"
         );
-        eprintln!("[scenario 9] Read session: {} messages", view.state.message_count);
+        eprintln!(
+            "[scenario 9] Read session: {} messages",
+            view.state.message_count
+        );
 
         // 3. Start follow-up turn
         let turn_req = StartTurnRequest {
             prompt: "What did I just say to you?".to_string(),
             event_tx: None,
             host_mode: false,
-                skill_references: None,
+            skill_references: None,
         };
 
         let turn_result = service
@@ -1245,7 +1272,10 @@ mod scenario_09_session_service {
             .expect("start_turn should succeed");
 
         eprintln!("[scenario 9] Follow-up turn: {}", turn_result.text.trim());
-        assert!(!turn_result.text.is_empty(), "Follow-up should produce text");
+        assert!(
+            !turn_result.text.is_empty(),
+            "Follow-up should produce text"
+        );
 
         // 4. List sessions (verify present)
         let summaries = service
@@ -1274,7 +1304,10 @@ mod scenario_09_session_service {
             !summaries_after.iter().any(|s| s.session_id == session_id),
             "Archived session should not appear in list"
         );
-        eprintln!("[scenario 9] Post-archive list: {} sessions", summaries_after.len());
+        eprintln!(
+            "[scenario 9] Post-archive list: {} sessions",
+            summaries_after.len()
+        );
     }
 }
 
@@ -1308,8 +1341,8 @@ mod scenario_10_memory {
             max_summary_tokens: 256,
             min_turns_between_compactions: 1,
         };
-        let compactor =
-            Arc::new(DefaultCompactor::new(compactor_config)) as Arc<dyn meerkat_core::compact::Compactor>;
+        let compactor = Arc::new(DefaultCompactor::new(compactor_config))
+            as Arc<dyn meerkat_core::compact::Compactor>;
 
         // Build memory_search tool dispatcher
         let memory_dispatcher =
@@ -1394,7 +1427,10 @@ mod scenario_10_memory {
              Got 0 tool_calls. text={}",
             r5.text
         );
-        eprintln!("[scenario 10] memory_search tool was called ({} tool calls)", r5.tool_calls);
+        eprintln!(
+            "[scenario 10] memory_search tool was called ({} tool calls)",
+            r5.tool_calls
+        );
 
         let text5_lower = r5.text.to_lowercase();
         assert!(
@@ -1554,8 +1590,7 @@ name = "smoke-test"
 include = ["comms"]
 exclude = ["mcp"]
 "#;
-        std::fs::write(&profile_path, profile_content)
-            .expect("Should write profile TOML");
+        std::fs::write(&profile_path, profile_content).expect("Should write profile TOML");
 
         // Run the build.py with the profile manifest. The script takes a
         // positional argument (the TOML path). This will attempt a real build
@@ -1601,15 +1636,18 @@ exclude = ["mcp"]
             "Bundle manifest should exist at {}",
             bundle_manifest.display()
         );
-        let manifest_content = std::fs::read_to_string(&bundle_manifest)
-            .expect("Should read bundle manifest");
+        let manifest_content =
+            std::fs::read_to_string(&bundle_manifest).expect("Should read bundle manifest");
         let manifest: serde_json::Value =
             serde_json::from_str(&manifest_content).expect("Bundle manifest must be valid JSON");
         assert_eq!(
             manifest["profile"], "smoke-test",
             "Bundle manifest profile should be 'smoke-test'"
         );
-        eprintln!("[scenario 21] Bundle manifest validated: {}", manifest_content.trim());
+        eprintln!(
+            "[scenario 21] Bundle manifest validated: {}",
+            manifest_content.trim()
+        );
 
         // Clean up dist output
         let _ = std::fs::remove_dir_all(workspace_root.join("dist/smoke-test"));

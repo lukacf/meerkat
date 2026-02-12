@@ -252,6 +252,27 @@ class MeerkatClient:
         """Merge-patch runtime configuration. Returns updated config."""
         return await self._request("config/patch", {"patch": patch})
 
+    async def push_event(
+        self, session_id: str, payload, source: Optional[str] = None
+    ) -> dict:
+        """Push an external event into a session's inbox.
+
+        The event is queued for processing at the next turn boundary
+        (in host mode). Does NOT trigger an immediate LLM call.
+
+        Args:
+            session_id: Target session ID.
+            payload: Event payload (any JSON-serializable value).
+            source: Optional source identifier (e.g. "github", "webhook").
+
+        Returns:
+            dict with {"queued": true} on success.
+        """
+        params = {"session_id": session_id, "payload": payload}
+        if source is not None:
+            params["source"] = source
+        return await self._request("event/push", params)
+
     # --- Internal ---
 
     async def _request(self, method: str, params: dict) -> dict:

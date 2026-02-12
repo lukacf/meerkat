@@ -10,12 +10,12 @@ use std::sync::OnceLock;
 /// Matches: `/segment` or `/segment/segment/...` followed by whitespace or end of string.
 fn skill_ref_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        match Regex::new(r"^/([a-z0-9-]+(?:/[a-z0-9-]+)*)(?:\s+(.*))?$") {
+    RE.get_or_init(
+        || match Regex::new(r"^/([a-z0-9-]+(?:/[a-z0-9-]+)*)(?:\s+(.*))?$") {
             Ok(re) => re,
             Err(_) => unreachable!("static regex pattern is valid"),
-        }
-    })
+        },
+    )
 }
 
 /// Detect a `/skill-ref` at the start of a message.
@@ -74,8 +74,7 @@ mod tests {
 
     #[test]
     fn test_strip_skill_ref() {
-        let (skill_id, remaining) =
-            detect_skill_ref("/extraction/email extract stuff").unwrap();
+        let (skill_id, remaining) = detect_skill_ref("/extraction/email extract stuff").unwrap();
         assert_eq!(skill_id, "extraction/email");
         assert_eq!(remaining, "extract stuff");
     }

@@ -325,6 +325,56 @@ Agent B LLM: "I received: 'Hello from Agent A!' from agent-a"
 
 </Accordion>
 
+## External event ingestion
+
+Push events from external systems into a running agent. See the full [comms guide](/guides/comms#external-event-ingestion).
+
+<Accordion title="Webhook-driven monitoring agent (REST + CLI)">
+
+Start an agent in host mode, then push webhook events from your CI pipeline or monitoring system:
+
+```bash
+# Terminal 1: Start a monitoring agent with stdin events
+rkat run "You are a monitoring agent. When you receive alerts, analyze them and suggest fixes." \
+  --comms-name monitor \
+  --host --stdin \
+  --enable-builtins --enable-shell \
+  -v
+```
+
+```bash
+# Terminal 2: Push events via REST webhook
+curl -X POST http://localhost:8080/sessions/sid_abc/event \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: my-secret" \
+  -d '{"alert": "CPU at 95%", "host": "web-03", "severity": "critical"}'
+```
+
+```python
+# Or via Python SDK
+await client.push_event(
+    session_id=session_id,
+    payload={"alert": "deployment failed", "env": "prod"},
+    source="github-actions",
+)
+```
+
+```json
+// Or via JSON-RPC
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "event/push",
+  "params": {
+    "session_id": "sid_abc",
+    "payload": {"alert": "test suite failed"},
+    "source": "ci-pipeline"
+  }
+}
+```
+
+</Accordion>
+
 ## Building your own
 
 <Accordion title="Example template">

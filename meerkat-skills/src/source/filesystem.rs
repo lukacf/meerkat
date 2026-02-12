@@ -70,10 +70,7 @@ async fn find_skill_files(root: &Path, dir: &Path) -> Vec<(String, PathBuf)> {
                         let id = rel_str.replace(std::path::MAIN_SEPARATOR, "/");
                         results.push((id, skill_file));
                     } else {
-                        tracing::warn!(
-                            "Skipping non-UTF-8 skill directory: {}",
-                            path.display()
-                        );
+                        tracing::warn!("Skipping non-UTF-8 skill directory: {}", path.display());
                     }
                 }
             } else {
@@ -158,14 +155,12 @@ impl SkillSource for FilesystemSkillSource {
             let id = SkillId(id_str);
 
             match tokio::fs::read_to_string(&skill_file).await {
-                Ok(content) => {
-                    match crate::parser::parse_skill_md(id, self.scope, &content) {
-                        Ok(doc) => descriptors.push(doc.descriptor),
-                        Err(e) => {
-                            tracing::warn!("Failed to parse {}: {e}", skill_file.display());
-                        }
+                Ok(content) => match crate::parser::parse_skill_md(id, self.scope, &content) {
+                    Ok(doc) => descriptors.push(doc.descriptor),
+                    Err(e) => {
+                        tracing::warn!("Failed to parse {}: {e}", skill_file.display());
                     }
-                }
+                },
                 Err(e) => {
                     tracing::warn!("Failed to read {}: {e}", skill_file.display());
                 }
@@ -182,12 +177,22 @@ impl SkillSource for FilesystemSkillSource {
             .canonicalize()
             .or_else(|_| {
                 // canonicalize fails if path doesn't exist — use the parent to check
-                skill_dir.parent()
-                    .map(|p| p.canonicalize().map(|c| c.join(skill_dir.file_name().unwrap_or_default())))
-                    .unwrap_or(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve")))
+                skill_dir
+                    .parent()
+                    .map(|p| {
+                        p.canonicalize()
+                            .map(|c| c.join(skill_dir.file_name().unwrap_or_default()))
+                    })
+                    .unwrap_or(Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "cannot resolve",
+                    )))
             })
             .unwrap_or_else(|_| skill_dir.clone());
-        let root_canonical = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        let root_canonical = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.root.clone());
         if !canonical.starts_with(&root_canonical) {
             return Err(SkillError::Load(
                 format!("skill ID '{}' resolves outside skills root", id.0).into(),
@@ -195,13 +200,9 @@ impl SkillSource for FilesystemSkillSource {
         }
         let skill_file = skill_dir.join("SKILL.md");
 
-        let content = tokio::fs::read_to_string(&skill_file)
-            .await
-            .map_err(|e| {
-                SkillError::Load(
-                    format!("failed to read {}: {e}", skill_file.display()).into(),
-                )
-            })?;
+        let content = tokio::fs::read_to_string(&skill_file).await.map_err(|e| {
+            SkillError::Load(format!("failed to read {}: {e}", skill_file.display()).into())
+        })?;
 
         crate::parser::parse_skill_md(id.clone(), self.scope, &content)
     }
@@ -233,9 +234,8 @@ mod tests {
     async fn create_skill(root: &Path, rel_path: &str, name: &str) {
         let dir = root.join(rel_path);
         tokio::fs::create_dir_all(&dir).await.unwrap();
-        let content = format!(
-            "---\nname: {name}\ndescription: Test skill {name}\n---\n\n# {name}\n\nBody."
-        );
+        let content =
+            format!("---\nname: {name}\ndescription: Test skill {name}\n---\n\n# {name}\n\nBody.");
         tokio::fs::write(dir.join("SKILL.md"), content)
             .await
             .unwrap();

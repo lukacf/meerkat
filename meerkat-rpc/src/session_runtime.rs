@@ -12,14 +12,10 @@
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use meerkat::{
-    AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder,
-};
+use meerkat::{AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_client::LlmClient;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionService, StartTurnRequest,
-};
+use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_core::{Config, Session};
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -114,7 +110,12 @@ impl SessionRuntime {
         // Check combined capacity (pending + active).
         {
             let pending = self.pending.read().await;
-            let active = self.service.list(Default::default()).await.map_err(session_error_to_rpc)?.len();
+            let active = self
+                .service
+                .list(Default::default())
+                .await
+                .map_err(session_error_to_rpc)?
+                .len();
             let total = pending.len() + active;
             if total >= self.max_sessions {
                 return Err(RpcError {
@@ -306,6 +307,14 @@ impl SessionRuntime {
         }
 
         result
+    }
+
+    /// Get the event injector for a session, if available.
+    pub async fn event_injector(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::EventInjector>> {
+        self.service.event_injector(session_id).await
     }
 
     /// Shut down the runtime, closing all sessions.

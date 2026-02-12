@@ -4,6 +4,8 @@
 
 pub mod capabilities;
 pub mod config;
+#[cfg(feature = "comms")]
+pub mod event;
 pub mod initialize;
 pub mod session;
 pub mod turn;

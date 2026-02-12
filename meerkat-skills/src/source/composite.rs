@@ -165,10 +165,8 @@ mod tests {
             make_skill("extraction/email", "email"),
             make_skill("extraction/fiction", "fiction"),
         ]);
-        let source_b = InMemorySkillSource::new(vec![make_skill(
-            "formatting/markdown",
-            "markdown",
-        )]);
+        let source_b =
+            InMemorySkillSource::new(vec![make_skill("formatting/markdown", "markdown")]);
 
         let composite = CompositeSkillSource::from_named(vec![
             NamedSource {
@@ -187,12 +185,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_collections_merged_across_sources() {
-        let source_a =
-            InMemorySkillSource::new(vec![make_skill("extraction/email", "email")]);
-        let source_b = InMemorySkillSource::new(vec![make_skill(
-            "extraction/fiction",
-            "fiction",
-        )]);
+        let source_a = InMemorySkillSource::new(vec![make_skill("extraction/email", "email")]);
+        let source_b = InMemorySkillSource::new(vec![make_skill("extraction/fiction", "fiction")]);
 
         let composite = CompositeSkillSource::from_named(vec![
             NamedSource {

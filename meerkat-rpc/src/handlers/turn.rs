@@ -78,9 +78,9 @@ pub async fn handle_start(
         }
     });
 
-    let skill_refs = params.skill_references.map(|ids| {
-        ids.into_iter().map(meerkat_core::skills::SkillId).collect()
-    });
+    let skill_refs = params
+        .skill_references
+        .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
     let result = match runtime
         .start_turn(&session_id, params.prompt, event_tx, skill_refs)
         .await

@@ -89,6 +89,9 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 # MCP
 rmcp = "0.14"
 
+# Crypto
+subtle = "2.6"
+
 # Testing
 tempfile = "3.14"
 

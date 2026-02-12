@@ -926,23 +926,8 @@ mod mcp_protocol {
         connection.close().await.expect("Should close cleanly");
     }
 
-    #[tokio::test]
-    async fn test_meerkat_mcp_server_tools_list() {
-        let tools = meerkat_mcp_server::tools_list();
-        let names: std::collections::HashSet<&str> = tools
-            .iter()
-            .filter_map(|tool| tool.get("name").and_then(|n| n.as_str()))
-            .collect();
-
-        assert!(
-            names.contains("meerkat_run"),
-            "meerkat-mcp-server should expose meerkat_run"
-        );
-        assert!(
-            names.contains("meerkat_resume"),
-            "meerkat-mcp-server should expose meerkat_resume"
-        );
-    }
+    // NOTE: test_meerkat_mcp_server_tools_list moved to meerkat-mcp-server crate
+    // (meerkat facade no longer depends on meerkat-mcp-server to avoid circular dep)
 }
 
 /// Additional integration tests for combined functionality

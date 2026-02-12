@@ -77,7 +77,14 @@ mod tests {
     #[test]
     fn test_from_str() {
         let v: ContractVersion = "1.2.3".parse().unwrap();
-        assert_eq!(v, ContractVersion { major: 1, minor: 2, patch: 3 });
+        assert_eq!(
+            v,
+            ContractVersion {
+                major: 1,
+                minor: 2,
+                patch: 3
+            }
+        );
     }
 
     #[test]
@@ -88,9 +95,21 @@ mod tests {
 
     #[test]
     fn test_compatibility_pre_1_0() {
-        let v010 = ContractVersion { major: 0, minor: 1, patch: 0 };
-        let v011 = ContractVersion { major: 0, minor: 1, patch: 1 };
-        let v020 = ContractVersion { major: 0, minor: 2, patch: 0 };
+        let v010 = ContractVersion {
+            major: 0,
+            minor: 1,
+            patch: 0,
+        };
+        let v011 = ContractVersion {
+            major: 0,
+            minor: 1,
+            patch: 1,
+        };
+        let v020 = ContractVersion {
+            major: 0,
+            minor: 2,
+            patch: 0,
+        };
 
         assert!(v010.is_compatible_with(&v011)); // same minor
         assert!(!v010.is_compatible_with(&v020)); // different minor
@@ -98,9 +117,21 @@ mod tests {
 
     #[test]
     fn test_compatibility_post_1_0() {
-        let v100 = ContractVersion { major: 1, minor: 0, patch: 0 };
-        let v110 = ContractVersion { major: 1, minor: 1, patch: 0 };
-        let v200 = ContractVersion { major: 2, minor: 0, patch: 0 };
+        let v100 = ContractVersion {
+            major: 1,
+            minor: 0,
+            patch: 0,
+        };
+        let v110 = ContractVersion {
+            major: 1,
+            minor: 1,
+            patch: 0,
+        };
+        let v200 = ContractVersion {
+            major: 2,
+            minor: 0,
+            patch: 0,
+        };
 
         assert!(v100.is_compatible_with(&v110)); // same major
         assert!(!v100.is_compatible_with(&v200)); // different major
@@ -108,9 +139,21 @@ mod tests {
 
     #[test]
     fn test_ord() {
-        let v010 = ContractVersion { major: 0, minor: 1, patch: 0 };
-        let v011 = ContractVersion { major: 0, minor: 1, patch: 1 };
-        let v100 = ContractVersion { major: 1, minor: 0, patch: 0 };
+        let v010 = ContractVersion {
+            major: 0,
+            minor: 1,
+            patch: 0,
+        };
+        let v011 = ContractVersion {
+            major: 0,
+            minor: 1,
+            patch: 1,
+        };
+        let v100 = ContractVersion {
+            major: 1,
+            minor: 0,
+            patch: 0,
+        };
         assert!(v010 < v011);
         assert!(v011 < v100);
     }

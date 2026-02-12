@@ -1,16 +1,18 @@
 //! meerkat-cli - Headless CLI for Meerkat
 
 mod mcp;
+#[cfg(feature = "comms")]
+mod stdin_events;
 
-#[cfg(feature = "mcp")]
-use meerkat_mcp::McpRouterAdapter;
 use meerkat::{AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_core::AgentToolDispatcher;
-use meerkat_core::service::{CreateSessionRequest, SessionService};
-use meerkat_core::{AgentEvent, SchemaCompat, format_verbose_event};
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
+use meerkat_core::service::{CreateSessionRequest, SessionService};
+use meerkat_core::{AgentEvent, SchemaCompat, format_verbose_event};
 use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
+#[cfg(feature = "mcp")]
+use meerkat_mcp::McpRouterAdapter;
 use meerkat_store::SessionStore;
 use meerkat_tools::find_project_root;
 use tokio::sync::mpsc;
@@ -232,6 +234,12 @@ enum Commands {
         #[cfg(feature = "comms")]
         #[arg(long)]
         host: bool,
+
+        /// Also read events from stdin (one per line, JSON or plain text).
+        /// Only meaningful with --host. Lines are injected as external events.
+        #[cfg(feature = "comms")]
+        #[arg(long)]
+        stdin: bool,
     },
 
     /// Resume a previous session
@@ -483,6 +491,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             no_subagents,
             verbose,
             host,
+            stdin,
         } => {
             let comms_overrides = CommsOverrides {
                 name: comms_name,
@@ -512,6 +521,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 no_subagents,
                 verbose,
                 host,
+                stdin,
             )
             .await
         }
@@ -558,7 +568,8 @@ async fn main() -> anyhow::Result<ExitCode> {
                 enable_shell,
                 no_subagents,
                 verbose,
-                false,
+                false, // host_mode
+                false, // stdin_events
             )
             .await
         }
@@ -583,9 +594,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             ConfigCommands::Patch { file, json } => handle_config_patch(file, json).await,
         },
         Commands::Rpc => handle_rpc().await,
-        Commands::Capabilities => {
-            handle_capabilities().await
-        }
+        Commands::Capabilities => handle_capabilities().await,
     };
 
     // Map result to exit code
@@ -629,6 +638,7 @@ async fn handle_run_command(
     no_subagents: bool,
     verbose: bool,
     host: bool,
+    stdin: bool,
 ) -> anyhow::Result<()> {
     let (config, config_base_dir) = load_config().await?;
 
@@ -683,6 +693,7 @@ async fn handle_run_command(
                 !no_subagents,
                 verbose,
                 host,
+                stdin,
                 &config,
                 config_base_dir,
                 hooks_override,
@@ -1009,9 +1020,10 @@ fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
 }
 
 /// Load MCP tools as an external tool dispatcher for AgentBuildConfig.
-async fn load_mcp_external_tools()
-    -> (Option<Arc<dyn AgentToolDispatcher>>, Option<Arc<McpRouterAdapter>>)
-{
+async fn load_mcp_external_tools() -> (
+    Option<Arc<dyn AgentToolDispatcher>>,
+    Option<Arc<McpRouterAdapter>>,
+) {
     #[cfg(feature = "mcp")]
     {
         match create_mcp_tools().await {
@@ -1058,6 +1070,13 @@ fn build_cli_service(
     (service, config_slot)
 }
 
+fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Error {
+    match e {
+        meerkat_core::service::SessionError::Agent(agent_err) => anyhow::Error::from(agent_err),
+        other => anyhow::anyhow!("Session service error: {other}"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_agent(
     prompt: &str,
@@ -1076,6 +1095,7 @@ async fn run_agent(
     enable_subagents: bool,
     verbose: bool,
     host_mode: bool,
+    stdin_events: bool,
     config: &Config,
     _config_base_dir: PathBuf,
     hooks_override: HookRunOverrides,
@@ -1164,24 +1184,84 @@ async fn run_agent(
         );
     }
 
+    // Wrap in Arc so we can share with the stdin reader task
+    let service = Arc::new(service);
+
     // Route through SessionService::create_session()
-    let result = service
-        .create_session(CreateSessionRequest {
-            model: model.to_string(),
-            prompt: prompt.to_string(),
-            system_prompt: None,
-            max_tokens: Some(max_tokens),
-            event_tx: event_tx.clone(),
-            host_mode,
-                skill_references: None,
-        })
-        .await
-        .map_err(|e| match e {
-            meerkat_core::service::SessionError::Agent(agent_err) => {
-                anyhow::Error::from(agent_err)
-            }
-            other => anyhow::anyhow!("Session service error: {other}"),
-        })?;
+    let create_req = CreateSessionRequest {
+        model: model.to_string(),
+        prompt: prompt.to_string(),
+        system_prompt: None,
+        max_tokens: Some(max_tokens),
+        event_tx: event_tx.clone(),
+        host_mode,
+        skill_references: None,
+    };
+
+    // Warn if --stdin is used without --host (it has no effect)
+    #[cfg(feature = "comms")]
+    if stdin_events && !host_mode {
+        eprintln!("Warning: --stdin has no effect without --host");
+    }
+
+    // If --stdin is enabled with --host, spawn create_session in the background
+    // so we can start the stdin reader concurrently. The session is registered
+    // (and the EventInjector is available) before the first turn blocks.
+    #[cfg(feature = "comms")]
+    let stdin_reader_handle: Option<tokio::task::JoinHandle<()>>;
+
+    #[cfg(feature = "comms")]
+    let result = if stdin_events && host_mode {
+        // Register for notification BEFORE spawning create_session to avoid
+        // a race where the session registers before we start waiting.
+        let notified = service.wait_session_registered();
+
+        let svc = service.clone();
+        let session_task = tokio::spawn(async move {
+            svc.create_session(create_req).await
+        });
+
+        // Wait for the session handle to be stored (no polling, no timeout).
+        // The notification fires when EphemeralSessionService inserts the handle,
+        // which happens before the first turn command is sent.
+        notified.await;
+
+        // Now grab the event injector from the registered session.
+        let sessions = service.list(meerkat_core::service::SessionQuery::default()).await
+            .unwrap_or_default();
+        stdin_reader_handle = if let Some(info) = sessions.first() {
+            service.event_injector(&info.session_id).await
+                .map(stdin_events::spawn_stdin_reader)
+        } else {
+            tracing::warn!("--stdin: session registered but not found in list");
+            None
+        };
+
+        session_task.await
+            .map_err(|e| anyhow::anyhow!("Session task panicked: {e}"))?
+            .map_err(session_err_to_anyhow)?
+    } else {
+        stdin_reader_handle = None;
+        service
+            .create_session(create_req)
+            .await
+            .map_err(session_err_to_anyhow)?
+    };
+
+    #[cfg(not(feature = "comms"))]
+    let result = {
+        let _ = stdin_events;
+        service
+            .create_session(create_req)
+            .await
+            .map_err(session_err_to_anyhow)?
+    };
+
+    // Abort stdin reader if it was running
+    #[cfg(feature = "comms")]
+    if let Some(h) = stdin_reader_handle {
+        h.abort();
+    }
 
     // Wait for streaming task to complete (it will end when sender is dropped)
     if let Some(task) = event_task {
@@ -1363,15 +1443,10 @@ async fn resume_session(
             max_tokens: Some(max_tokens),
             event_tx: None,
             host_mode,
-                skill_references: None,
+            skill_references: None,
         })
         .await
-        .map_err(|e| match e {
-            meerkat_core::service::SessionError::Agent(agent_err) => {
-                anyhow::Error::from(agent_err)
-            }
-            other => anyhow::anyhow!("Session service error: {other}"),
-        })?;
+        .map_err(session_err_to_anyhow)?;
 
     // Shutdown the session service and MCP connections gracefully
     service.shutdown().await;

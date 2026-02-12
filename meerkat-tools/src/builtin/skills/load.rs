@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use meerkat_core::skills::{SkillEngine, SkillId};
 use meerkat_core::ToolDef;
+use meerkat_core::skills::{SkillEngine, SkillId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -48,12 +48,9 @@ impl BuiltinTool for LoadSkillTool {
     }
 
     async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
-        let id_str = args
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                BuiltinToolError::InvalidArgs("Missing required 'id' parameter".into())
-            })?;
+        let id_str = args.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+            BuiltinToolError::InvalidArgs("Missing required 'id' parameter".into())
+        })?;
 
         let skill_id = SkillId(id_str.to_string());
         let results = self
@@ -104,10 +101,7 @@ mod tests {
                     results.push(ResolvedSkill {
                         id: id.clone(),
                         name: skill.name.clone(),
-                        rendered_body: format!(
-                            "<skill id=\"{}\">Body content</skill>",
-                            id.0
-                        ),
+                        rendered_body: format!("<skill id=\"{}\">Body content</skill>", id.0),
                         byte_size: 30,
                     });
                 } else {
@@ -144,10 +138,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_skill_returns_body() {
         let tool = LoadSkillTool::new(test_engine());
-        let result = tool
-            .call(json!({"id": "extraction/email"}))
-            .await
-            .unwrap();
+        let result = tool.call(json!({"id": "extraction/email"})).await.unwrap();
 
         assert_eq!(result["id"], "extraction/email");
         assert_eq!(result["name"], "email");
@@ -158,9 +149,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_skill_not_found() {
         let tool = LoadSkillTool::new(test_engine());
-        let result = tool
-            .call(json!({"id": "nonexistent/skill"}))
-            .await;
+        let result = tool.call(json!({"id": "nonexistent/skill"})).await;
 
         assert!(result.is_err());
     }

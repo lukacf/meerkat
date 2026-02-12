@@ -145,12 +145,18 @@ impl SkillsConfig {
         user_path: Option<&Path>,
         project_path: Option<&Path>,
     ) -> Result<Self, SkillsConfigError> {
-        let user_cfg = read_skills_file(user_path).await?.unwrap_or_else(SkillsConfig::default);
+        let user_cfg = read_skills_file(user_path)
+            .await?
+            .unwrap_or_else(SkillsConfig::default);
         let (project_cfg, project_has_file) = match read_skills_file(project_path).await? {
             Some(cfg) => (cfg, true),
             None => (SkillsConfig::default(), false),
         };
-        Ok(merge_project_over_user(user_cfg, project_cfg, project_has_file))
+        Ok(merge_project_over_user(
+            user_cfg,
+            project_cfg,
+            project_has_file,
+        ))
     }
 }
 
@@ -176,7 +182,11 @@ async fn read_skills_file(path: Option<&Path>) -> Result<Option<SkillsConfig>, S
     Ok(Some(parsed))
 }
 
-fn merge_project_over_user(user: SkillsConfig, project: SkillsConfig, project_has_file: bool) -> SkillsConfig {
+fn merge_project_over_user(
+    user: SkillsConfig,
+    project: SkillsConfig,
+    project_has_file: bool,
+) -> SkillsConfig {
     let mut seen: HashSet<String> = HashSet::new();
     let mut merged_repos: Vec<SkillRepositoryConfig> = Vec::new();
 
@@ -197,9 +207,21 @@ fn merge_project_over_user(user: SkillsConfig, project: SkillsConfig, project_ha
     // `project_has_file` is true when the project config was loaded from disk
     // (not a default placeholder).
     SkillsConfig {
-        enabled: if project_has_file { project.enabled } else { user.enabled },
-        max_injection_bytes: if project_has_file { project.max_injection_bytes } else { user.max_injection_bytes },
-        inventory_threshold: if project_has_file { project.inventory_threshold } else { user.inventory_threshold },
+        enabled: if project_has_file {
+            project.enabled
+        } else {
+            user.enabled
+        },
+        max_injection_bytes: if project_has_file {
+            project.max_injection_bytes
+        } else {
+            user.max_injection_bytes
+        },
+        inventory_threshold: if project_has_file {
+            project.inventory_threshold
+        } else {
+            user.inventory_threshold
+        },
         repositories: merged_repos,
     }
 }
@@ -258,11 +280,10 @@ fn expand_env_in_string(value: &str, field: &str) -> Result<String, SkillsConfig
                 value: value.to_string(),
             });
         }
-        let var_value =
-            std::env::var(var_name).map_err(|_| SkillsConfigError::MissingEnvVar {
-                field: field.to_string(),
-                var: var_name.to_string(),
-            })?;
+        let var_value = std::env::var(var_name).map_err(|_| SkillsConfigError::MissingEnvVar {
+            field: field.to_string(),
+            var: var_name.to_string(),
+        })?;
         output.push_str(&var_value);
         remaining = &after[end + 1..];
     }
@@ -393,10 +414,7 @@ auth_token = "ghp_token"
 
     #[test]
     fn test_env_expansion_missing_var_errors() {
-        let result = expand_env_in_string(
-            "${RKAT_NONEXISTENT_VAR_SKILLS_TEST}",
-            "test_field",
-        );
+        let result = expand_env_in_string("${RKAT_NONEXISTENT_VAR_SKILLS_TEST}", "test_field");
         assert!(matches!(
             result,
             Err(SkillsConfigError::MissingEnvVar { .. })

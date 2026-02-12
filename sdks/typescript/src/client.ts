@@ -209,6 +209,32 @@ export class MeerkatClient {
     >;
   }
 
+  /**
+   * Push an external event into a session's inbox.
+   *
+   * The event is queued for processing at the next turn boundary
+   * (in host mode). Does NOT trigger an immediate LLM call.
+   *
+   * @param sessionId - Target session ID
+   * @param payload - Event payload (any JSON-serializable value)
+   * @param source - Optional source identifier (e.g. "github", "webhook")
+   * @returns Object with `{ queued: true }` on success
+   */
+  async pushEvent(
+    sessionId: string,
+    payload: unknown,
+    source?: string,
+  ): Promise<{ queued: boolean }> {
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      payload,
+    };
+    if (source !== undefined) {
+      params.source = source;
+    }
+    return (await this.request("event/push", params)) as { queued: boolean };
+  }
+
   // --- Internal ---
 
   /**

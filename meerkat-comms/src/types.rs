@@ -129,13 +129,18 @@ impl Envelope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InboxItem {
-    /// A message received from an external peer.
+    /// A message received from an external peer (signed CBOR envelope).
     External { envelope: Envelope },
     /// A result from a completed subagent.
     SubagentResult {
         subagent_id: Uuid,
         result: JsonValue,
         summary: String,
+    },
+    /// A plain-text event from an external (unauthenticated) source.
+    PlainEvent {
+        body: String,
+        source: meerkat_core::PlainEventSource,
     },
 }
 
@@ -437,5 +442,58 @@ mod tests {
         };
         envelope.sign(&keypair);
         assert!(envelope.verify(), "signed envelope should verify");
+    }
+
+    // === PlainEvent tests ===
+
+    #[test]
+    fn test_inbox_item_plain_event_serde_roundtrip() {
+        use meerkat_core::PlainEventSource;
+
+        let item = InboxItem::PlainEvent {
+            body: "New email from john@example.com".to_string(),
+            source: PlainEventSource::Tcp,
+        };
+
+        // JSON round-trip
+        let json = serde_json::to_string(&item).unwrap();
+        let parsed: InboxItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(item, parsed);
+
+        // Verify tag
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["type"], "plain_event");
+        assert_eq!(value["body"], "New email from john@example.com");
+        assert_eq!(value["source"], "tcp");
+    }
+
+    #[test]
+    fn test_inbox_item_plain_event_cbor_roundtrip() {
+        use meerkat_core::PlainEventSource;
+
+        let items = vec![
+            InboxItem::PlainEvent {
+                body: "hello".to_string(),
+                source: PlainEventSource::Tcp,
+            },
+            InboxItem::PlainEvent {
+                body: r#"{"event":"email"}"#.to_string(),
+                source: PlainEventSource::Stdin,
+            },
+            InboxItem::PlainEvent {
+                body: "webhook payload".to_string(),
+                source: PlainEventSource::Webhook,
+            },
+            InboxItem::PlainEvent {
+                body: "rpc event".to_string(),
+                source: PlainEventSource::Rpc,
+            },
+        ];
+        for item in items {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&item, &mut buf).unwrap();
+            let decoded: InboxItem = ciborium::from_reader(&buf[..]).unwrap();
+            assert_eq!(item, decoded);
+        }
     }
 }

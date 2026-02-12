@@ -76,7 +76,8 @@ fn render_inventory_flat(skills: &[SkillDescriptor]) -> String {
         let _ = write!(
             output,
             "  <skill id=\"{}\">\n    <description>{}</description>\n  </skill>\n",
-            escape_xml(&skill.id.0), escape_xml(&skill.description),
+            escape_xml(&skill.id.0),
+            escape_xml(&skill.description),
         );
     }
     output.push_str("</available_skills>");
@@ -90,16 +91,14 @@ fn render_inventory_collections(collections: &[SkillCollection]) -> String {
         let _ = writeln!(
             output,
             "  <collection path=\"{}\" count=\"{}\">{}</collection>",
-            escape_xml(&coll.path), coll.count, escape_xml(&coll.description),
+            escape_xml(&coll.path),
+            coll.count,
+            escape_xml(&coll.description),
         );
     }
     output.push('\n');
-    output.push_str(
-        "  Use the browse_skills tool to list skills in a collection or search.\n",
-    );
-    output.push_str(
-        "  Use the load_skill tool or /collection/skill-name to activate a skill.\n",
-    );
+    output.push_str("  Use the browse_skills tool to list skills in a collection or search.\n");
+    output.push_str("  Use the load_skill tool or /collection/skill-name to activate a skill.\n");
     output.push_str("</available_skills>");
     output
 }

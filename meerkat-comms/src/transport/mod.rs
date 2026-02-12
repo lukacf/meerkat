@@ -3,6 +3,7 @@
 //! Provides length-prefix framing and address parsing for UDS and TCP transports.
 
 pub mod codec;
+pub mod plain_codec;
 pub mod tcp;
 pub mod uds;
 

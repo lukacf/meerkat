@@ -1070,6 +1070,13 @@ fn build_cli_service(
     (service, config_slot)
 }
 
+fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Error {
+    match e {
+        meerkat_core::service::SessionError::Agent(agent_err) => anyhow::Error::from(agent_err),
+        other => anyhow::anyhow!("Session service error: {other}"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_agent(
     prompt: &str,
@@ -1205,48 +1212,40 @@ async fn run_agent(
 
     #[cfg(feature = "comms")]
     let result = if stdin_events && host_mode {
+        // Register for notification BEFORE spawning create_session to avoid
+        // a race where the session registers before we start waiting.
+        let notified = service.wait_session_registered();
+
         let svc = service.clone();
         let session_task = tokio::spawn(async move {
             svc.create_session(create_req).await
         });
 
-        // Poll for the session to be registered (deterministic, no fixed sleep).
-        // The session handle is stored before the first turn command is sent,
-        // so this loop converges quickly (typically 1-2 iterations).
-        let mut injector_found = None;
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            let sessions = service.list(meerkat_core::service::SessionQuery::default()).await
-                .unwrap_or_default();
-            if let Some(info) = sessions.first() {
-                if let Some(inj) = service.event_injector(&info.session_id).await {
-                    injector_found = Some(inj);
-                    break;
-                }
-            }
-        }
+        // Wait for the session handle to be stored (no polling, no timeout).
+        // The notification fires when EphemeralSessionService inserts the handle,
+        // which happens before the first turn command is sent.
+        notified.await;
 
-        stdin_reader_handle = injector_found
-            .map(stdin_events::spawn_stdin_reader);
-        if stdin_reader_handle.is_none() {
-            tracing::warn!("--stdin: could not find session event injector after polling");
-        }
+        // Now grab the event injector from the registered session.
+        let sessions = service.list(meerkat_core::service::SessionQuery::default()).await
+            .unwrap_or_default();
+        stdin_reader_handle = if let Some(info) = sessions.first() {
+            service.event_injector(&info.session_id).await
+                .map(stdin_events::spawn_stdin_reader)
+        } else {
+            tracing::warn!("--stdin: session registered but not found in list");
+            None
+        };
 
         session_task.await
             .map_err(|e| anyhow::anyhow!("Session task panicked: {e}"))?
-            .map_err(|e| match e {
-                meerkat_core::service::SessionError::Agent(agent_err) => anyhow::Error::from(agent_err),
-                other => anyhow::anyhow!("Session service error: {other}"),
-            })?
+            .map_err(session_err_to_anyhow)?
     } else {
         stdin_reader_handle = None;
         service
             .create_session(create_req)
             .await
-            .map_err(|e| match e {
-                meerkat_core::service::SessionError::Agent(agent_err) => anyhow::Error::from(agent_err),
-                other => anyhow::anyhow!("Session service error: {other}"),
-            })?
+            .map_err(session_err_to_anyhow)?
     };
 
     #[cfg(not(feature = "comms"))]
@@ -1255,10 +1254,7 @@ async fn run_agent(
         service
             .create_session(create_req)
             .await
-            .map_err(|e| match e {
-                meerkat_core::service::SessionError::Agent(agent_err) => anyhow::Error::from(agent_err),
-                other => anyhow::anyhow!("Session service error: {other}"),
-            })?
+            .map_err(session_err_to_anyhow)?
     };
 
     // Abort stdin reader if it was running
@@ -1450,10 +1446,7 @@ async fn resume_session(
             skill_references: None,
         })
         .await
-        .map_err(|e| match e {
-            meerkat_core::service::SessionError::Agent(agent_err) => anyhow::Error::from(agent_err),
-            other => anyhow::anyhow!("Session service error: {other}"),
-        })?;
+        .map_err(session_err_to_anyhow)?;
 
     // Shutdown the session service and MCP connections gracefully
     service.shutdown().await;

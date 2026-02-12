@@ -784,6 +784,7 @@ mod tests {
 
         for (source, label) in [
             (PlainEventSource::Tcp, "tcp"),
+            (PlainEventSource::Uds, "uds"),
             (PlainEventSource::Stdin, "stdin"),
             (PlainEventSource::Webhook, "webhook"),
             (PlainEventSource::Rpc, "rpc"),

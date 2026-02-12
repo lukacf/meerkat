@@ -42,11 +42,13 @@ pub async fn handle_push(
         }
     };
 
-    // Format the event body with source metadata
+    // Build the event body. Don't add an [EVENT ...] prefix here —
+    // PlainMessage::to_user_message_text() already wraps with [EVENT via rpc].
+    // If the caller provided a source name, prepend it as metadata.
     let body = if let Some(ref source) = params.source {
-        format!("[EVENT from {}] {}", source, params.payload.get())
+        format!("[source: {}] {}", source, params.payload.get())
     } else {
-        format!("[EVENT] {}", params.payload.get())
+        params.payload.get().to_string()
     };
 
     // Get the event injector for this session
@@ -99,11 +101,13 @@ mod tests {
         let source = Some("github".to_string());
         let payload_raw = r#"{"pr":42}"#;
         let body = if let Some(ref s) = source {
-            format!("[EVENT from {}] {}", s, payload_raw)
+            format!("[source: {}] {}", s, payload_raw)
         } else {
-            format!("[EVENT] {}", payload_raw)
+            payload_raw.to_string()
         };
-        assert_eq!(body, r#"[EVENT from github] {"pr":42}"#);
+        // PlainMessage::to_user_message_text() will wrap this as:
+        // [EVENT via rpc] [source: github] {"pr":42}
+        assert_eq!(body, r#"[source: github] {"pr":42}"#);
     }
 
     #[test]
@@ -111,10 +115,11 @@ mod tests {
         let source: Option<String> = None;
         let payload_raw = r#""hello""#;
         let body = if let Some(ref s) = source {
-            format!("[EVENT from {}] {}", s, payload_raw)
+            format!("[source: {}] {}", s, payload_raw)
         } else {
-            format!("[EVENT] {}", payload_raw)
+            payload_raw.to_string()
         };
-        assert_eq!(body, r#"[EVENT] "hello""#);
+        // PlainMessage::to_user_message_text() will wrap as: [EVENT via rpc] "hello"
+        assert_eq!(body, r#""hello""#);
     }
 }

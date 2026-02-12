@@ -170,6 +170,9 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     builder: B,
     max_sessions: usize,
     session_capacity: Arc<Semaphore>,
+    /// Notified when a new session handle is stored. Used by CLI --stdin
+    /// to avoid polling for the session to appear.
+    session_registered: tokio::sync::Notify,
 }
 
 impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
@@ -180,6 +183,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             builder,
             max_sessions,
             session_capacity: Arc::new(Semaphore::new(max_sessions)),
+            session_registered: tokio::sync::Notify::new(),
         }
     }
 
@@ -226,6 +230,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         sessions
             .get(session_id)
             .and_then(|h| h.event_injector.clone())
+    }
+
+    /// Wait for a session to be registered.
+    ///
+    /// Returns when the next session handle is stored. Used by CLI `--stdin`
+    /// to wait for the session to become available before starting the stdin reader.
+    pub async fn wait_session_registered(&self) {
+        self.session_registered.notified().await;
     }
 
     /// Shut down all sessions.
@@ -326,6 +338,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 false
             } else {
                 sessions.insert(session_id.clone(), handle);
+                // Notify waiters (e.g., CLI --stdin) that a session is available.
+                self.session_registered.notify_waiters();
                 true
             }
         };

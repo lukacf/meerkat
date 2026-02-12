@@ -70,6 +70,8 @@ pub struct AppState {
     pub session_service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
     /// Slot for staging `AgentBuildConfig` before `session_service` calls.
     pub builder_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
+    /// Webhook authentication, resolved once at startup from RKAT_WEBHOOK_SECRET.
+    pub webhook_auth: webhook::WebhookAuth,
 }
 
 impl Default for AppState {
@@ -118,6 +120,7 @@ impl Default for AppState {
             event_tx,
             session_service,
             builder_slot,
+            webhook_auth: webhook::WebhookAuth::from_env(),
         }
     }
 }
@@ -189,6 +192,7 @@ impl AppState {
             event_tx,
             session_service,
             builder_slot,
+            webhook_auth: webhook::WebhookAuth::from_env(),
         }
     }
 }
@@ -345,9 +349,8 @@ async fn push_event(
     headers: axum::http::HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    // Verify webhook authentication (secret read once from env, no TOCTOU)
-    let auth = webhook::WebhookAuth::from_env();
-    webhook::verify_webhook(&headers, &auth)
+    // Webhook auth resolved once at startup, stored in AppState.
+    webhook::verify_webhook(&headers, &state.webhook_auth)
         .map_err(|msg| ApiError::Unauthorized(msg.to_string()))?;
 
     // Validate session ID

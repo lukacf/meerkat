@@ -105,12 +105,14 @@ class MeerkatClient:
             enable_builtins: bool = False, enable_shell: bool = False,
             enable_subagents: bool = False, enable_memory: bool = False,
             host_mode: bool = False, comms_name: Optional[str] = None,
-            provider_params: Optional[dict] = None) -> WireRunResult:
+            provider_params: Optional[dict] = None,
+            preload_skills: Optional[list] = None,
+            skill_references: Optional[list] = None) -> WireRunResult:
         """Create a new session and run the first turn."""
         params = self._build_create_params(prompt, model, provider, system_prompt,
             max_tokens, output_schema, structured_output_retries, hooks_override,
             enable_builtins, enable_shell, enable_subagents, enable_memory,
-            host_mode, comms_name, provider_params)
+            host_mode, comms_name, provider_params, preload_skills, skill_references)
         result = await self._request("session/create", params)
         return self._parse_run_result(result)
 
@@ -136,7 +138,9 @@ class MeerkatClient:
             enable_builtins: bool = False, enable_shell: bool = False,
             enable_subagents: bool = False, enable_memory: bool = False,
             host_mode: bool = False, comms_name: Optional[str] = None,
-            provider_params: Optional[dict] = None) -> StreamingTurn:
+            provider_params: Optional[dict] = None,
+            preload_skills: Optional[list] = None,
+            skill_references: Optional[list] = None) -> StreamingTurn:
         """Create a new session and stream events from the first turn.
 
         Returns a StreamingTurn async context manager. The request is sent
@@ -156,7 +160,7 @@ class MeerkatClient:
         params = self._build_create_params(prompt, model, provider, system_prompt,
             max_tokens, output_schema, structured_output_retries, hooks_override,
             enable_builtins, enable_shell, enable_subagents, enable_memory,
-            host_mode, comms_name, provider_params)
+            host_mode, comms_name, provider_params, preload_skills, skill_references)
         self._request_id += 1
         request_id = self._request_id
         event_queue = self._dispatcher.subscribe_pending_stream(request_id)
@@ -168,7 +172,8 @@ class MeerkatClient:
             parse_result=self._parse_run_result,
             pending_send=(self._process.stdin, data))
 
-    def start_turn_streaming(self, session_id: str, prompt: str) -> StreamingTurn:
+    def start_turn_streaming(self, session_id: str, prompt: str,
+            skill_references: Optional[list] = None) -> StreamingTurn:
         """Start a new turn on an existing session and stream events.
 
         Usage::
@@ -184,8 +189,11 @@ class MeerkatClient:
         request_id = self._request_id
         event_queue = self._dispatcher.subscribe_events(session_id)
         response_future = self._dispatcher.expect_response(request_id)
+        params: dict = {"session_id": session_id, "prompt": prompt}
+        if skill_references:
+            params["skill_references"] = skill_references
         request = {"jsonrpc": "2.0", "id": request_id, "method": "turn/start",
-                   "params": {"session_id": session_id, "prompt": prompt}}
+                   "params": params}
         data = (json.dumps(request) + "\n").encode()
         return StreamingTurn(session_id=session_id, event_queue=event_queue,
             response_future=response_future, dispatcher=self._dispatcher,
@@ -246,11 +254,11 @@ class MeerkatClient:
 
     async def set_config(self, config: dict) -> None:
         """Replace runtime configuration."""
-        await self._request("config/set", {"config": config})
+        await self._request("config/set", config)
 
     async def patch_config(self, patch: dict) -> dict:
         """Merge-patch runtime configuration. Returns updated config."""
-        return await self._request("config/patch", {"patch": patch})
+        return await self._request("config/patch", patch)
 
     async def push_event(
         self, session_id: str, payload, source: Optional[str] = None
@@ -314,6 +322,8 @@ class MeerkatClient:
         host_mode: bool,
         comms_name: Optional[str],
         provider_params: Optional[dict],
+        preload_skills: Optional[list] = None,
+        skill_references: Optional[list] = None,
     ) -> dict:
         """Build the params dict for session/create."""
         params: dict = {"prompt": prompt}
@@ -345,6 +355,10 @@ class MeerkatClient:
             params["comms_name"] = comms_name
         if provider_params:
             params["provider_params"] = provider_params
+        if preload_skills:
+            params["preload_skills"] = preload_skills
+        if skill_references:
+            params["skill_references"] = skill_references
         return params
 
     @staticmethod

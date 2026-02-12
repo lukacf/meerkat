@@ -10,6 +10,7 @@ pub mod config;
 pub mod config_store;
 pub mod error;
 pub mod event;
+pub mod event_injector;
 pub mod gateway;
 pub mod hooks;
 pub mod mcp_config;
@@ -38,11 +39,13 @@ pub use compact::{CompactionConfig, CompactionContext, CompactionResult, Compact
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 
 pub use config::{
-    AgentConfig, BudgetConfig, CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta,
-    ConfigScope, HookEntryConfig, HookRunOverrides, HookRuntimeConfig, HooksConfig, LimitsConfig,
-    ModelDefaults, ProviderConfig, ProviderSettings, ResolvedSubAgentConfig, RetryConfig,
-    ShellDefaults, StorageConfig, StoreConfig, SubAgentsConfig, ToolsConfig,
+    AgentConfig, BudgetConfig, CommsAuthMode, CommsRuntimeConfig, CommsRuntimeMode, Config,
+    ConfigDelta, ConfigScope, HookEntryConfig, HookRunOverrides, HookRuntimeConfig, HooksConfig,
+    LimitsConfig, ModelDefaults, PlainEventSource, ProviderConfig, ProviderSettings,
+    ResolvedSubAgentConfig, RetryConfig, ShellDefaults, StorageConfig, StoreConfig,
+    SubAgentsConfig, ToolsConfig,
 };
+pub use event_injector::{EventInjector, EventInjectorError};
 pub use config_store::{ConfigStore, FileConfigStore, MemoryConfigStore};
 pub use error::{AgentError, ToolError};
 pub use event::{

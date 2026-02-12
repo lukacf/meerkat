@@ -175,6 +175,17 @@ pub async fn build_comms_runtime_from_config(
     base_dir: impl AsRef<Path>,
     comms_name: &str,
 ) -> Result<CommsRuntime, String> {
+    // Parse the optional event listener address (for external plain-text events)
+    let event_listen_tcp = config
+        .comms
+        .event_address
+        .as_ref()
+        .map(|addr| {
+            addr.parse()
+                .map_err(|e| format!("Invalid event_address '{}': {}", addr, e))
+        })
+        .transpose()?;
+
     match config.comms.mode {
         CommsRuntimeMode::Inproc => CommsRuntime::inproc_only(comms_name)
             .map_err(|e| format!("Failed to create inproc comms runtime: {}", e)),
@@ -191,6 +202,8 @@ pub async fn build_comms_runtime_from_config(
                 enabled: true,
                 name: comms_name.to_string(),
                 listen_tcp: Some(listen_tcp),
+                auth: config.comms.auth,
+                event_listen_tcp,
                 ..Default::default()
             };
             let resolved = comms.resolve_paths(base_dir.as_ref());
@@ -213,6 +226,8 @@ pub async fn build_comms_runtime_from_config(
                 enabled: true,
                 name: comms_name.to_string(),
                 listen_uds: Some(std::path::PathBuf::from(address)),
+                auth: config.comms.auth,
+                event_listen_tcp,
                 ..Default::default()
             };
             let resolved = comms.resolve_paths(base_dir.as_ref());

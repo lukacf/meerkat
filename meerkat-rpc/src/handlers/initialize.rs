@@ -27,20 +27,26 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
         contract_version: meerkat_contracts::ContractVersion::CURRENT.to_string(),
-        methods: vec![
-            "initialize".to_string(),
-            "initialized".to_string(),
-            "session/create".to_string(),
-            "session/list".to_string(),
-            "session/read".to_string(),
-            "session/archive".to_string(),
-            "turn/start".to_string(),
-            "turn/interrupt".to_string(),
-            "config/get".to_string(),
-            "config/set".to_string(),
-            "config/patch".to_string(),
-            "capabilities/get".to_string(),
-        ],
+        methods: {
+            #[allow(unused_mut)]
+            let mut m = vec![
+                "initialize".to_string(),
+                "initialized".to_string(),
+                "session/create".to_string(),
+                "session/list".to_string(),
+                "session/read".to_string(),
+                "session/archive".to_string(),
+                "turn/start".to_string(),
+                "turn/interrupt".to_string(),
+                "config/get".to_string(),
+                "config/set".to_string(),
+                "config/patch".to_string(),
+                "capabilities/get".to_string(),
+            ];
+            #[cfg(feature = "comms")]
+            m.push("event/push".to_string());
+            m
+        },
     };
     RpcResponse::success(id, caps)
 }

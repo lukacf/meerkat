@@ -3,6 +3,7 @@
 //! Provides HTTP endpoints for running and managing Meerkat agents:
 //! - POST /sessions - Create and run a new agent
 //! - POST /sessions/:id/messages - Continue an existing session
+//! - POST /sessions/:id/event - Push an external event to a session
 //! - GET /sessions/:id - Get session details
 //! - GET /sessions/:id/events - SSE stream for agent events
 //!
@@ -10,6 +11,8 @@
 //! Built-in tools are configured via the REST config store.
 //! When enabled, the REST instance uses its instance-scoped data directory
 //! as the project root for task storage and shell working directory.
+
+pub mod webhook;
 
 use axum::{
     Json, Router,
@@ -34,8 +37,8 @@ use meerkat_core::service::{
     StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
-    Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
-    SessionTooling, format_verbose_event,
+    Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider, SessionTooling,
+    format_verbose_event,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -313,6 +316,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/messages", post(continue_session))
         .route("/sessions/{id}/events", get(session_events))
+        .route("/sessions/{id}/event", post(push_event))
         .route(
             "/config",
             get(get_config).put(set_config).patch(patch_config),
@@ -325,6 +329,51 @@ pub fn router(state: AppState) -> Router {
 /// Health check endpoint
 async fn health_check() -> &'static str {
     "ok"
+}
+
+/// Push an external event to a session's inbox.
+///
+/// The event is queued for processing at the next turn boundary — it does NOT
+/// trigger an immediate LLM call. Returns 202 Accepted on success.
+///
+/// Authentication is controlled by `RKAT_WEBHOOK_SECRET` env var:
+/// - If not set: no authentication (suitable for localhost/dev)
+/// - If set: requires `X-Webhook-Secret` header with matching value
+async fn push_event(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    // Verify webhook authentication (secret read once from env, no TOCTOU)
+    let auth = webhook::WebhookAuth::from_env();
+    webhook::verify_webhook(&headers, &auth)
+        .map_err(|msg| ApiError::Unauthorized(msg.to_string()))?;
+
+    // Validate session ID
+    let session_id =
+        SessionId::parse(&id).map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+
+    // Get event injector for this session
+    let injector = state
+        .session_service
+        .event_injector(&session_id)
+        .await
+        .ok_or_else(|| ApiError::NotFound(format!("Session not found: {session_id}")))?;
+
+    // Format payload as pretty JSON for the agent
+    let body = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+
+    // Inject the event
+    match injector.inject(body, meerkat_core::PlainEventSource::Webhook) {
+        Ok(()) => Ok((StatusCode::ACCEPTED, Json(json!({"queued": true})))),
+        Err(meerkat_core::EventInjectorError::Full) => Err(ApiError::ServiceUnavailable(
+            "Event inbox is full — try again later".to_string(),
+        )),
+        Err(meerkat_core::EventInjectorError::Closed) => {
+            Err(ApiError::Gone("Session has been shut down".to_string()))
+        }
+    }
 }
 
 /// Get runtime capabilities with status resolved against config.
@@ -493,7 +542,7 @@ async fn create_session(
             max_tokens: Some(max_tokens),
             event_tx: Some(caller_event_tx),
             host_mode,
-                skill_references: None,
+            skill_references: None,
         };
 
         state.session_service.create_session(svc_req).await
@@ -574,13 +623,10 @@ async fn continue_session(
         prompt: req.prompt.clone(),
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
-                skill_references: None,
+        skill_references: None,
     };
 
-    let result = state
-        .session_service
-        .start_turn(&session_id, svc_req)
-        .await;
+    let result = state.session_service.start_turn(&session_id, svc_req).await;
 
     let final_result = match result {
         Ok(run_result) => Ok(run_result),
@@ -776,16 +822,20 @@ async fn session_events(
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(String),
+    Unauthorized(String),
     NotFound(String),
     Configuration(String),
     Agent(String),
     Internal(String),
+    ServiceUnavailable(String),
+    Gone(String),
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg),
+            ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg),
             ApiError::Configuration(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -794,6 +844,10 @@ impl IntoResponse for ApiError {
             ),
             ApiError::Agent(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "AGENT_ERROR", msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg),
+            ApiError::ServiceUnavailable(msg) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", msg)
+            }
+            ApiError::Gone(msg) => (StatusCode::GONE, "GONE", msg),
         };
 
         let body = Json(ErrorResponse {

@@ -90,6 +90,9 @@ struct SessionHandle {
     turn_lock: Arc<AtomicBool>,
     _capacity_permit: OwnedSemaphorePermit,
     created_at: SystemTime,
+    /// Transport-agnostic event injector for pushing external events.
+    /// Extracted from the agent before it moves into its task.
+    event_injector: Option<Arc<dyn meerkat_core::EventInjector>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +148,14 @@ pub trait SessionAgent: Send {
     /// full message history. Only called by `PersistentSessionService`
     /// after each turn.
     fn session_clone(&self) -> meerkat_core::Session;
+
+    /// Get a transport-agnostic event injector for pushing external events.
+    ///
+    /// Called once before the agent moves into its dedicated task. The returned
+    /// injector is stored in the session handle for surfaces to access.
+    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +214,20 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
+    /// Get the event injector for a session, if available.
+    ///
+    /// Returns `None` if the session doesn't exist, has no comms runtime,
+    /// or the comms runtime doesn't support event injection.
+    pub async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .and_then(|h| h.event_injector.clone())
+    }
+
     /// Shut down all sessions.
     pub async fn shutdown(&self) {
         let mut sessions = self.sessions.write().await;
@@ -257,6 +282,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let created_at = SystemTime::now();
         let turn_lock = Arc::new(AtomicBool::new(false));
 
+        // Extract the event injector before the agent moves into its task.
+        let event_injector = agent.event_injector();
+
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
         let (state_tx, state_rx) = watch::channel(SessionState::Idle);
@@ -286,6 +314,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             turn_lock: turn_lock.clone(),
             _capacity_permit: capacity_permit,
             created_at,
+            event_injector,
         };
 
         // Acquire turn lock for the first turn (cannot fail — fresh session)
@@ -538,7 +567,14 @@ async fn session_task<A: SessionAgent>(
                 // Scope the pinned future so its mutable borrow of `agent` is
                 // released before we call `agent.snapshot()`.
                 let result = {
-                    let run_fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<RunResult, meerkat_core::error::AgentError>> + Send + '_>> = if host_mode {
+                    let run_fut: std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = Result<RunResult, meerkat_core::error::AgentError>,
+                                > + Send
+                                + '_,
+                        >,
+                    > = if host_mode {
                         Box::pin(agent.run_host_mode_with_events(prompt, agent_event_tx.clone()))
                     } else {
                         Box::pin(agent.run_with_events(prompt, agent_event_tx.clone()))

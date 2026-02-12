@@ -77,6 +77,7 @@ pub fn create_child_comms_config(child_name: &str, base_dir: &std::path::Path) -
         trusted_peers_path: base_dir.join(format!("{}/trusted_peers.json", child_name)),
         ack_timeout_secs: 30,
         max_message_bytes: 1_048_576,
+        ..Default::default()
     }
 }
 

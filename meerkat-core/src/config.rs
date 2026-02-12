@@ -878,12 +878,61 @@ impl Default for RestServerConfig {
     }
 }
 
+/// Authentication mode for comms listeners.
+///
+/// `Open` (default) accepts plain JSON messages over TCP/UDS — no cryptographic
+/// verification. Suitable for local agent-to-agent communication where the OS
+/// provides process isolation. Non-loopback binding with `Open` auth is a hard
+/// error unless explicitly overridden.
+///
+/// `Ed25519` requires signed CBOR envelopes and a trusted peers list. Use for
+/// multi-machine or untrusted network communication.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CommsAuthMode {
+    #[default]
+    #[serde(rename = "none")]
+    Open,
+    Ed25519,
+}
+
+/// Source identifier for plain (unauthenticated) events.
+///
+/// Used for diagnostics and prompt formatting — tells the agent where
+/// an external event originated from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlainEventSource {
+    Tcp,
+    Uds,
+    Stdin,
+    Webhook,
+    Rpc,
+}
+
+impl std::fmt::Display for PlainEventSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp => write!(f, "tcp"),
+            Self::Uds => write!(f, "uds"),
+            Self::Stdin => write!(f, "stdin"),
+            Self::Webhook => write!(f, "webhook"),
+            Self::Rpc => write!(f, "rpc"),
+        }
+    }
+}
+
 /// Runtime comms configuration (portable across interfaces).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CommsRuntimeConfig {
     pub mode: CommsRuntimeMode,
+    /// Address for agent-to-agent (signed) listener.
     pub address: Option<String>,
+    pub auth: CommsAuthMode,
+    /// Address for the plain-text external event listener.
+    /// Only active when `auth = "none"`. Accepts newline-delimited JSON or text.
+    pub event_address: Option<String>,
     pub auto_enable_for_subagents: bool,
 }
 
@@ -892,6 +941,8 @@ impl Default for CommsRuntimeConfig {
         Self {
             mode: CommsRuntimeMode::Inproc,
             address: None,
+            auth: CommsAuthMode::default(),
+            event_address: None,
             auto_enable_for_subagents: false,
         }
     }
@@ -1745,5 +1796,100 @@ gemini = ["gemini-3-flash-preview"]
         assert!(desc.contains("Gemini"));
         assert!(desc.contains("gpt-5.2"));
         assert!(desc.contains("claude-opus-4-6"));
+    }
+
+    // === CommsAuthMode tests ===
+
+    #[test]
+    fn test_comms_auth_mode_default_is_open() {
+        assert_eq!(CommsAuthMode::default(), CommsAuthMode::Open);
+    }
+
+    #[test]
+    fn test_comms_auth_mode_serde_roundtrip() {
+        // Open serializes as "none"
+        let json = serde_json::to_string(&CommsAuthMode::Open).unwrap();
+        assert_eq!(json, r#""none""#);
+        let parsed: CommsAuthMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, CommsAuthMode::Open);
+
+        // Ed25519 serializes as "ed25519"
+        let json = serde_json::to_string(&CommsAuthMode::Ed25519).unwrap();
+        assert_eq!(json, r#""ed25519""#);
+        let parsed: CommsAuthMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, CommsAuthMode::Ed25519);
+    }
+
+    #[test]
+    fn test_comms_auth_mode_toml_roundtrip() {
+        let config = CommsRuntimeConfig::default();
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: CommsRuntimeConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.auth, CommsAuthMode::Open);
+
+        // Explicit ed25519
+        let toml_str = r#"
+mode = "inproc"
+auth = "ed25519"
+auto_enable_for_subagents = false
+"#;
+        let parsed: CommsRuntimeConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.auth, CommsAuthMode::Ed25519);
+    }
+
+    #[test]
+    fn test_comms_runtime_config_default_has_open_auth() {
+        let config = CommsRuntimeConfig::default();
+        assert_eq!(config.auth, CommsAuthMode::Open);
+    }
+
+    // === PlainEventSource tests ===
+
+    #[test]
+    fn test_plain_event_source_serde_roundtrip() {
+        let cases = [
+            (PlainEventSource::Tcp, r#""tcp""#),
+            (PlainEventSource::Uds, r#""uds""#),
+            (PlainEventSource::Stdin, r#""stdin""#),
+            (PlainEventSource::Webhook, r#""webhook""#),
+            (PlainEventSource::Rpc, r#""rpc""#),
+        ];
+        for (variant, expected_json) in cases {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected_json, "serialize {:?}", variant);
+            let parsed: PlainEventSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant, "deserialize {:?}", variant);
+        }
+    }
+
+    #[test]
+    fn test_plain_event_source_display() {
+        assert_eq!(PlainEventSource::Tcp.to_string(), "tcp");
+        assert_eq!(PlainEventSource::Uds.to_string(), "uds");
+        assert_eq!(PlainEventSource::Stdin.to_string(), "stdin");
+        assert_eq!(PlainEventSource::Webhook.to_string(), "webhook");
+        assert_eq!(PlainEventSource::Rpc.to_string(), "rpc");
+    }
+
+    // === Regression: event_address in CommsRuntimeConfig ===
+
+    #[test]
+    fn test_comms_config_event_address_toml_roundtrip() {
+        let toml_str = r#"
+mode = "tcp"
+address = "127.0.0.1:4200"
+auth = "none"
+event_address = "127.0.0.1:4201"
+auto_enable_for_subagents = false
+"#;
+        let parsed: CommsRuntimeConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.event_address.as_deref(), Some("127.0.0.1:4201"));
+        assert_eq!(parsed.auth, CommsAuthMode::Open);
+    }
+
+    #[test]
+    fn test_comms_config_event_address_defaults_none() {
+        let config = CommsRuntimeConfig::default();
+        assert!(config.event_address.is_none());
     }
 }

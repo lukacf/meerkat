@@ -49,6 +49,7 @@ async-stream = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
+subtle = { workspace = true }
 
 [features]
 default = ["comms"]

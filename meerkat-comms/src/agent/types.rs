@@ -769,6 +769,7 @@ mod tests {
             DrainedMessage::Plain(msg) => {
                 assert_eq!(msg.body, "New email arrived");
                 assert_eq!(msg.source, PlainEventSource::Tcp);
+                assert_eq!(msg.interaction_id, None);
             }
             DrainedMessage::Authenticated(_) => panic!("Expected Plain"),
         }

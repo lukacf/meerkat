@@ -2,16 +2,19 @@
 
 use crate::inbox::{InboxError, InboxSender};
 use crate::types::InboxItem;
-use meerkat_core::event_injector::{EventInjector, EventInjectorError};
 use meerkat_core::PlainEventSource;
+use meerkat_core::event_injector::{EventInjector, EventInjectorError};
 
 /// Shared subscriber registry for interaction-scoped event streaming.
 ///
 /// Maps interaction UUIDs to event senders. Entries are inserted by
 /// `inject_with_subscription()` and removed (one-shot) by
 /// `CommsRuntime::interaction_subscriber()`.
-pub type SubscriberRegistry =
-    std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<uuid::Uuid, tokio::sync::mpsc::Sender<meerkat_core::AgentEvent>>>>;
+pub type SubscriberRegistry = std::sync::Arc<
+    parking_lot::Mutex<
+        std::collections::HashMap<uuid::Uuid, tokio::sync::mpsc::Sender<meerkat_core::AgentEvent>>,
+    >,
+>;
 
 /// Create an empty subscriber registry.
 pub fn new_subscriber_registry() -> SubscriberRegistry {
@@ -136,7 +139,8 @@ mod tests {
         use std::sync::Arc;
 
         let (mut inbox, sender) = Inbox::new();
-        let injector: Arc<dyn EventInjector> = Arc::new(CommsEventInjector::new(sender, new_subscriber_registry()));
+        let injector: Arc<dyn EventInjector> =
+            Arc::new(CommsEventInjector::new(sender, new_subscriber_registry()));
 
         injector
             .inject("via dyn".to_string(), PlainEventSource::Webhook)
@@ -196,5 +200,20 @@ mod tests {
 
         // Registry should be empty (cleaned up)
         assert!(registry.lock().is_empty());
+    }
+
+    #[test]
+    fn test_inject_with_subscription_cleans_up_on_closed_inbox() {
+        use meerkat_core::SubscribableInjector;
+
+        let registry = new_subscriber_registry();
+        let (inbox, sender) = Inbox::new();
+        drop(inbox); // close receiver
+
+        let injector = CommsEventInjector::new(sender, registry.clone());
+        let result = injector.inject_with_subscription("closed".to_string(), PlainEventSource::Tcp);
+
+        assert!(matches!(result, Err(EventInjectorError::Closed)));
+        assert!(registry.lock().is_empty(), "registry should be cleaned up");
     }
 }

@@ -203,7 +203,9 @@ impl AgentBuilder {
             memory_store: self.memory_store,
             skill_engine: self.skill_engine,
             pending_skill_references: None,
-            event_tap: self.event_tap.unwrap_or_else(crate::event_tap::new_event_tap),
+            event_tap: self
+                .event_tap
+                .unwrap_or_else(crate::event_tap::new_event_tap),
             host_drain_active: false,
         }
     }
@@ -227,10 +229,14 @@ mod tests {
     use super::*;
     use crate::LlmStreamResult;
     use crate::error::{AgentError, ToolError};
+    use crate::event::AgentEvent;
+    use crate::event_tap::EventTapState;
     use crate::types::{
         AssistantBlock, StopReason, ToolCallView, ToolDef, ToolResult, UserMessage,
     };
     use async_trait::async_trait;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::mpsc;
 
     struct MockClient;
 
@@ -385,5 +391,41 @@ mod tests {
             }
             other => panic!("First message should be System, got: {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_builder_event_tap_receives_turn_started_without_primary_event_tx() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let tap = crate::event_tap::new_event_tap();
+        let (tap_tx, mut tap_rx) = mpsc::channel(128);
+        {
+            let mut guard = tap.lock();
+            *guard = Some(EventTapState {
+                tx: tap_tx,
+                truncated: AtomicBool::new(false),
+            });
+        }
+
+        let mut agent = AgentBuilder::new()
+            .with_event_tap(tap)
+            .build(client, tools, store)
+            .await;
+
+        let _ = agent.run("hello".to_string()).await.unwrap();
+
+        let mut saw_turn_started = false;
+        while let Ok(event) = tap_rx.try_recv() {
+            if matches!(event, AgentEvent::TurnStarted { .. }) {
+                saw_turn_started = true;
+                break;
+            }
+        }
+        assert!(
+            saw_turn_started,
+            "tap should receive TurnStarted even without primary event channel"
+        );
     }
 }

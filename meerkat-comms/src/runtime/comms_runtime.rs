@@ -134,9 +134,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             msg.interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
                         ),
                         from: format!("event:{}", msg.source),
-                        content: meerkat_core::InteractionContent::Message {
-                            body: msg.body,
-                        },
+                        content: meerkat_core::InteractionContent::Message { body: msg.body },
                         rendered_text,
                     }
                 }
@@ -307,17 +305,19 @@ impl CommsRuntime {
             }
 
             if let Some(ref addr) = self.config.event_listen_tcp {
-                let handle =
-                    spawn_plain_tcp_listener(&addr.to_string(), inbox_sender.clone(), max_line_length)
-                        .await?;
+                let handle = spawn_plain_tcp_listener(
+                    &addr.to_string(),
+                    inbox_sender.clone(),
+                    max_line_length,
+                )
+                .await?;
                 self.listener_handles.push(handle);
             }
 
             #[cfg(unix)]
             if let Some(ref path) = self.config.event_listen_uds {
                 let handle =
-                    spawn_plain_uds_listener(path, inbox_sender.clone(), max_line_length)
-                        .await?;
+                    spawn_plain_uds_listener(path, inbox_sender.clone(), max_line_length).await?;
                 self.listener_handles.push(handle);
             }
         }
@@ -532,6 +532,40 @@ async fn spawn_plain_uds_listener(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::event_injector::CommsEventInjector;
+    use crate::identity::Signature;
+    use crate::types::{Envelope, InboxItem, MessageKind, Status};
+    use meerkat_core::SubscribableInjector;
+    use uuid::Uuid;
+
+    fn test_runtime_config(name: &str, tmp: &tempfile::TempDir) -> ResolvedCommsConfig {
+        ResolvedCommsConfig {
+            enabled: true,
+            name: name.to_string(),
+            listen_uds: None,
+            listen_tcp: None,
+            event_listen_tcp: None,
+            #[cfg(unix)]
+            event_listen_uds: None,
+            identity_dir: tmp.path().join("identity"),
+            trusted_peers_path: tmp.path().join("trusted_peers.json"),
+            comms_config: crate::CommsConfig::default(),
+            auth: meerkat_core::CommsAuthMode::Open,
+            allow_external_unauthenticated: false,
+        }
+    }
+
+    fn signed_envelope(from: &Keypair, to: PubKey, kind: MessageKind) -> Envelope {
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: from.public_key(),
+            to,
+            kind,
+            sig: Signature::new([0u8; 64]),
+        };
+        envelope.sign(from);
+        envelope
+    }
 
     /// Regression: auth=Open must always load keypair and trusted peers from disk
     /// so that outbound routing still works.
@@ -609,5 +643,150 @@ mod tests {
         let result = runtime.start_listeners().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("prompt injection"));
+    }
+
+    #[tokio::test]
+    async fn test_drain_interactions_converts_all_authenticated_content_variants() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("variants", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+
+        let sender = Keypair::generate();
+        {
+            let mut trusted = runtime.trusted_peers.write().await;
+            trusted.upsert(crate::TrustedPeer {
+                name: "sender".to_string(),
+                pubkey: sender.public_key(),
+                addr: "tcp://127.0.0.1:4200".to_string(),
+            });
+        }
+
+        let request_id = Uuid::new_v4();
+        let reply_to = Uuid::new_v4();
+
+        let msg = signed_envelope(
+            &sender,
+            runtime.public_key(),
+            MessageKind::Message {
+                body: "hello".to_string(),
+            },
+        );
+        let req = signed_envelope(
+            &sender,
+            runtime.public_key(),
+            MessageKind::Request {
+                intent: "review".to_string(),
+                params: serde_json::json!({"pr": 19}),
+            },
+        );
+        let mut req = req;
+        req.id = request_id;
+        req.sign(&sender);
+        let resp = signed_envelope(
+            &sender,
+            runtime.public_key(),
+            MessageKind::Response {
+                in_reply_to: reply_to,
+                status: Status::Completed,
+                result: serde_json::json!({"ok": true}),
+            },
+        );
+
+        runtime
+            .router
+            .inbox_sender()
+            .send(InboxItem::External { envelope: msg })
+            .unwrap();
+        runtime
+            .router
+            .inbox_sender()
+            .send(InboxItem::External { envelope: req })
+            .unwrap();
+        runtime
+            .router
+            .inbox_sender()
+            .send(InboxItem::External { envelope: resp })
+            .unwrap();
+
+        let interactions = CoreCommsRuntime::drain_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 3);
+
+        assert!(interactions.iter().any(|i| {
+            matches!(
+                &i.content,
+                meerkat_core::InteractionContent::Message { body } if body == "hello"
+            )
+        }));
+        assert!(interactions.iter().any(|i| {
+            matches!(
+                &i.content,
+                meerkat_core::InteractionContent::Request { intent, params }
+                    if intent == "review" && params["pr"] == 19
+            )
+        }));
+        assert!(interactions.iter().any(|i| {
+            matches!(
+                &i.content,
+                meerkat_core::InteractionContent::Response { in_reply_to, status, result }
+                    if in_reply_to.0 == reply_to
+                        && status == "completed"
+                        && result["ok"] == true
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_subscription_correlation_e2e_one_shot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("subscription", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+
+        let injector = CommsEventInjector::new(
+            runtime.router.inbox_sender().clone(),
+            runtime.subscriber_registry.clone(),
+        );
+        let sub = injector
+            .inject_with_subscription("tracked".to_string(), meerkat_core::PlainEventSource::Rpc)
+            .unwrap();
+        let tracked_id = sub.id;
+
+        let interactions = CoreCommsRuntime::drain_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(interactions[0].id, tracked_id);
+
+        let first = CoreCommsRuntime::interaction_subscriber(&runtime, &tracked_id);
+        assert!(first.is_some(), "subscriber should be found");
+        let second = CoreCommsRuntime::interaction_subscriber(&runtime, &tracked_id);
+        assert!(second.is_none(), "subscriber should be one-shot");
+    }
+
+    #[tokio::test]
+    async fn test_plain_event_interaction_id_is_preserved_in_drain_interactions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("plain-id", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+
+        let interaction_id = Uuid::new_v4();
+        runtime
+            .router
+            .inbox_sender()
+            .send(InboxItem::PlainEvent {
+                body: "evt".to_string(),
+                source: meerkat_core::PlainEventSource::Tcp,
+                interaction_id: Some(interaction_id),
+            })
+            .unwrap();
+
+        let interactions = CoreCommsRuntime::drain_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(interactions[0].id.0, interaction_id);
+    }
+
+    #[test]
+    fn test_interaction_subscriber_correlation_miss_returns_none() {
+        let runtime = CommsRuntime::inproc_only("corr-miss").unwrap();
+        let random = meerkat_core::InteractionId(Uuid::new_v4());
+        let sender = CoreCommsRuntime::interaction_subscriber(&runtime, &random);
+        assert!(sender.is_none());
     }
 }

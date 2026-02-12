@@ -544,6 +544,21 @@ mod tests {
     }
 
     #[test]
+    fn test_inbox_item_plain_event_with_interaction_id_cbor_roundtrip() {
+        let id = Uuid::new_v4();
+        let item = InboxItem::PlainEvent {
+            body: "tracked event".to_string(),
+            source: meerkat_core::PlainEventSource::Rpc,
+            interaction_id: Some(id),
+        };
+
+        let mut buf = Vec::new();
+        ciborium::into_writer(&item, &mut buf).unwrap();
+        let decoded: InboxItem = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(item, decoded);
+    }
+
+    #[test]
     fn test_inbox_item_plain_event_none_interaction_id_skipped_in_json() {
         let item = InboxItem::PlainEvent {
             body: "untracked".to_string(),

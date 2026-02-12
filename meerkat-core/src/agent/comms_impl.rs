@@ -140,7 +140,10 @@ where
                 // Process batched messages as one run
                 if !batched_texts.is_empty() {
                     let combined = batched_texts.join("\n\n");
-                    tracing::debug!("Host mode: processing {} batched message(s)", batched_texts.len());
+                    tracing::debug!(
+                        "Host mode: processing {} batched message(s)",
+                        batched_texts.len()
+                    );
                     match self.run(combined).await {
                         Ok(result) => last_result = result,
                         Err(e) => {
@@ -334,10 +337,7 @@ where
                         "Host mode: processing {} batched message(s)",
                         batched_texts.len()
                     );
-                    match self
-                        .run_with_events(combined, event_tx.clone())
-                        .await
-                    {
+                    match self.run_with_events(combined, event_tx.clone()).await {
                         Ok(result) => last_result = result,
                         Err(e) => {
                             if e.is_graceful() {
@@ -378,7 +378,7 @@ mod tests {
     use crate::agent::{
         AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult,
     };
-    use crate::error::AgentError;
+    use crate::error::{AgentError, LlmFailureReason};
     use crate::session::Session;
     use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, ToolResult};
     use async_trait::async_trait;
@@ -454,6 +454,31 @@ mod tests {
                 }],
                 StopReason::EndTurn,
                 crate::types::Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    // Mock LLM client that always fails.
+    struct FailingLlmClient;
+
+    #[async_trait]
+    impl AgentLlmClient for FailingLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<LlmStreamResult, AgentError> {
+            Err(AgentError::llm(
+                "mock",
+                LlmFailureReason::ProviderError(serde_json::json!({"kind":"test"})),
+                "forced failure",
             ))
         }
 
@@ -976,6 +1001,64 @@ mod tests {
 
         // Tap should be cleared (no active subscriber)
         assert!(agent.event_tap.lock().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_events_host_mode_subscriber_receives_interaction_failed_before_error() {
+        let interaction = make_interaction(
+            InteractionContent::Message {
+                body: "hello".into(),
+            },
+            "hello",
+        );
+        let interaction_id = interaction.id;
+
+        let (sub_tx, mut sub_rx) = mpsc::channel::<AgentEvent>(4096);
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            interaction,
+        ]));
+        comms.register_subscriber(interaction_id, sub_tx);
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms.clone() as Arc<dyn CommsRuntime>)
+            .build(
+                Arc::new(FailingLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(4096);
+        let err = agent
+            .run_host_mode_with_events("".into(), event_tx)
+            .await
+            .expect_err("run should fail");
+
+        // Subscriber should be consumed despite error
+        assert!(comms.subscribers.lock().is_empty());
+
+        let mut saw_failed = false;
+        while let Ok(event) = sub_rx.try_recv() {
+            if let AgentEvent::InteractionFailed {
+                interaction_id: id,
+                error,
+            } = event
+            {
+                assert_eq!(id, interaction_id);
+                assert!(
+                    error.contains("forced failure"),
+                    "unexpected error payload: {}",
+                    error
+                );
+                saw_failed = true;
+                break;
+            }
+        }
+        assert!(
+            saw_failed,
+            "expected InteractionFailed on subscriber channel"
+        );
+        assert!(err.to_string().contains("forced failure"));
     }
 
     #[tokio::test]

@@ -164,7 +164,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         max_tokens: None,
         event_tx: None,
         host_mode: false,
-                skill_references: None,
+        skill_references: None,
     }
 }
 
@@ -327,7 +327,7 @@ async fn test_concurrent_turns_return_busy() {
                 &sid_clone,
                 StartTurnRequest {
                     host_mode: false,
-                skill_references: None,
+                    skill_references: None,
                     prompt: "Slow".to_string(),
                     event_tx: None,
                 },
@@ -377,7 +377,7 @@ async fn test_interrupt_cancels_inflight_turn() {
                 &sid_clone,
                 StartTurnRequest {
                     host_mode: false,
-                skill_references: None,
+                    skill_references: None,
                     prompt: "Slow".to_string(),
                     event_tx: None,
                 },

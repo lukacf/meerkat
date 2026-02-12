@@ -125,8 +125,7 @@ mod tests {
         config.agent.system_prompt = Some("Config inline prompt".to_string());
         config.agent.tool_instructions = Some("Config tool instructions".to_string());
 
-        let result =
-            assemble_system_prompt(&config, Some("Per-request prompt"), &[], "").await;
+        let result = assemble_system_prompt(&config, Some("Per-request prompt"), &[], "").await;
         // Per-request override skips config.agent.system_prompt and tool_instructions
         assert_eq!(result, "Per-request prompt");
         assert!(!result.contains("Config inline"));
@@ -230,8 +229,7 @@ mod tests {
         let mut config = default_config();
         config.agent.tool_instructions = Some("Config tools".to_string());
 
-        let result =
-            assemble_system_prompt(&config, None, &[], "Dispatcher tools").await;
+        let result = assemble_system_prompt(&config, None, &[], "Dispatcher tools").await;
         let config_pos = result.find("Config tools").unwrap();
         let dispatcher_pos = result.find("Dispatcher tools").unwrap();
         assert!(
@@ -271,13 +269,8 @@ mod tests {
         let mut config = default_config();
         config.agent.tool_instructions = Some("Config tools".to_string());
 
-        let result = assemble_system_prompt(
-            &config,
-            None,
-            &["Skills section"],
-            "Dispatcher tools",
-        )
-        .await;
+        let result =
+            assemble_system_prompt(&config, None, &["Skills section"], "Dispatcher tools").await;
         let skills_pos = result.find("Skills section").unwrap();
         let config_tools_pos = result.find("Config tools").unwrap();
         let dispatcher_pos = result.find("Dispatcher tools").unwrap();
@@ -301,13 +294,8 @@ mod tests {
         config.agent.system_prompt = Some("Inline base".to_string());
         config.agent.tool_instructions = Some("Config tools".to_string());
 
-        let result = assemble_system_prompt(
-            &config,
-            None,
-            &["Skills inventory"],
-            "Dispatcher tools",
-        )
-        .await;
+        let result =
+            assemble_system_prompt(&config, None, &["Skills inventory"], "Dispatcher tools").await;
 
         assert!(result.contains("Inline base"));
         assert!(result.contains("Skills inventory"));

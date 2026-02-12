@@ -120,13 +120,7 @@ mod tests {
         };
         let json = serde_json::to_string(&params).unwrap();
         let parsed: SkillsParams = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed.preload_skills,
-            Some(vec!["a/b".to_string()])
-        );
-        assert_eq!(
-            parsed.skill_references,
-            Some(vec!["c/d".to_string()])
-        );
+        assert_eq!(parsed.preload_skills, Some(vec!["a/b".to_string()]));
+        assert_eq!(parsed.skill_references, Some(vec!["c/d".to_string()]));
     }
 }

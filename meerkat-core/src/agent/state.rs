@@ -155,7 +155,9 @@ where
                                                 indexed_at: std::time::SystemTime::now(),
                                             };
                                             if let Err(e) = store.index(&content, metadata).await {
-                                                tracing::warn!("failed to index compaction discard into memory: {e}");
+                                                tracing::warn!(
+                                                    "failed to index compaction discard into memory: {e}"
+                                                );
                                             }
                                         }
                                     }

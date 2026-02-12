@@ -133,9 +133,10 @@ impl HttpSkillSource {
     async fn fetch_all_descriptors(&self) -> Result<Vec<SkillDescriptor>, SkillError> {
         let url = format!("{}/skills", self.base_url);
         let req = self.apply_auth(self.client.get(&url));
-        let resp = req.send().await.map_err(|e| {
-            SkillError::Load(format!("HTTP request to {url} failed: {e}").into())
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| SkillError::Load(format!("HTTP request to {url} failed: {e}").into()))?;
 
         if !resp.status().is_success() {
             return Err(SkillError::Load(
@@ -217,9 +218,10 @@ impl SkillSource for HttpSkillSource {
         let encoded_id = urlencoding::encode(&id.0);
         let url = format!("{}/skills/{encoded_id}", self.base_url);
         let req = self.apply_auth(self.client.get(&url));
-        let resp = req.send().await.map_err(|e| {
-            SkillError::Load(format!("HTTP request to {url} failed: {e}").into())
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| SkillError::Load(format!("HTTP request to {url} failed: {e}").into()))?;
 
         if !resp.status().is_success() {
             if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -230,9 +232,10 @@ impl SkillSource for HttpSkillSource {
             ));
         }
 
-        let wire: WireSkillDocument = resp.json().await.map_err(|e| {
-            SkillError::Load(format!("Failed to parse skill document: {e}").into())
-        })?;
+        let wire: WireSkillDocument = resp
+            .json()
+            .await
+            .map_err(|e| SkillError::Load(format!("Failed to parse skill document: {e}").into()))?;
 
         let metadata = wire
             .metadata
@@ -253,7 +256,9 @@ impl SkillSource for HttpSkillSource {
         // Cache the document
         {
             let mut cache = self.cache.write().await;
-            cache.documents.insert(id.clone(), (doc.clone(), Instant::now()));
+            cache
+                .documents
+                .insert(id.clone(), (doc.clone(), Instant::now()));
         }
 
         Ok(doc)
@@ -262,9 +267,10 @@ impl SkillSource for HttpSkillSource {
     async fn collections(&self) -> Result<Vec<SkillCollection>, SkillError> {
         let url = format!("{}/skill-collections", self.base_url);
         let req = self.apply_auth(self.client.get(&url));
-        let resp = req.send().await.map_err(|e| {
-            SkillError::Load(format!("HTTP request to {url} failed: {e}").into())
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| SkillError::Load(format!("HTTP request to {url} failed: {e}").into()))?;
 
         if !resp.status().is_success() {
             // Fall back to deriving from descriptors
@@ -284,7 +290,7 @@ impl SkillSource for HttpSkillSource {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path, header};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn setup_list_mock(server: &MockServer) {
@@ -407,11 +413,7 @@ mod tests {
         setup_list_mock(&server).await;
 
         // Very short TTL
-        let source = HttpSkillSource::new(
-            server.uri(),
-            None,
-            Duration::from_millis(50),
-        );
+        let source = HttpSkillSource::new(server.uri(), None, Duration::from_millis(50));
 
         let _ = source.list(&SkillFilter::default()).await.unwrap();
 

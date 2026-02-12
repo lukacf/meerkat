@@ -67,14 +67,18 @@ fn skip_if_no_api_prereqs() -> bool {
         return true;
     }
     if anthropic_api_key().is_none() {
-        eprintln!("Skipping: no Anthropic API key (set ANTHROPIC_API_KEY or RKAT_ANTHROPIC_API_KEY)");
+        eprintln!(
+            "Skipping: no Anthropic API key (set ANTHROPIC_API_KEY or RKAT_ANTHROPIC_API_KEY)"
+        );
         return true;
     }
     false
 }
 
 /// Write a minimal config.toml into the `.rkat/` directory inside `project_dir`.
-async fn write_smoke_config(project_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn write_smoke_config(
+    project_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let rkat_dir = project_dir.join(".rkat");
     tokio::fs::create_dir_all(&rkat_dir).await?;
 
@@ -167,10 +171,7 @@ async fn inner_e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error
         .ok_or("session_id missing in initial run response")?
         .to_string();
 
-    assert!(
-        !session_id.is_empty(),
-        "session_id should be non-empty"
-    );
+    assert!(!session_id.is_empty(), "session_id should be non-empty");
 
     // --- Step 2: Resume and ask about name ---
     let output = timeout(
@@ -280,17 +281,13 @@ async fn inner_e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("Failed to parse JSON output: {e}\nstdout: {stdout}"))?;
 
-    let tool_calls = parsed["tool_calls"]
-        .as_u64()
-        .unwrap_or(0);
+    let tool_calls = parsed["tool_calls"].as_u64().unwrap_or(0);
     assert!(
         tool_calls > 0,
         "Expected at least one tool call, got {tool_calls}"
     );
 
-    let text = parsed["text"]
-        .as_str()
-        .unwrap_or("");
+    let text = parsed["text"].as_str().unwrap_or("");
     assert!(
         text.contains("SMOKE_OK_42"),
         "Response text should contain 'SMOKE_OK_42', got: {text}"
@@ -469,7 +466,8 @@ async fn inner_e2e_cli_structured_output() -> Result<(), Box<dyn std::error::Err
 
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
-    let schema = r#"{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"]}"#;
+    let schema =
+        r#"{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"]}"#;
 
     let output = timeout(
         Duration::from_secs(120),

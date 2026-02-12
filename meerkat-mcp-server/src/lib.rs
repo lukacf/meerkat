@@ -510,7 +510,7 @@ async fn handle_meerkat_run(
         override_shell: Some(input.enable_builtins && enable_shell),
         override_subagents: None,
         override_memory: None,
-            preload_skills: None,
+        preload_skills: None,
     };
 
     // Hold slot lock across staging + create to prevent concurrent
@@ -526,7 +526,7 @@ async fn handle_meerkat_run(
             max_tokens: None,    // already in the staged build config
             event_tx: event_tx.clone(),
             host_mode,
-                skill_references: None,
+            skill_references: None,
         };
 
         state.service.create_session(req).await
@@ -658,7 +658,7 @@ async fn handle_meerkat_resume(
         override_shell: Some(enable_builtins && enable_shell),
         override_subagents: None,
         override_memory: None,
-            preload_skills: None,
+        preload_skills: None,
     };
 
     // Try start_turn on the live session first (it may still be alive
@@ -667,7 +667,7 @@ async fn handle_meerkat_resume(
         prompt: prompt.clone(),
         event_tx: event_tx.clone(),
         host_mode,
-                skill_references: None,
+        skill_references: None,
     };
 
     let result = match state.service.start_turn(&session_id, turn_req).await {

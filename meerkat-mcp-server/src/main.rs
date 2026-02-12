@@ -47,10 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_request(
-    state: &meerkat_mcp_server::MeerkatMcpState,
-    request: &Value,
-) -> Value {
+async fn handle_request(state: &meerkat_mcp_server::MeerkatMcpState, request: &Value) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 

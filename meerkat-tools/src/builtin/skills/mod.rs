@@ -30,6 +30,9 @@ impl SkillToolSet {
     }
 
     pub fn tools(&self) -> Vec<&dyn BuiltinTool> {
-        vec![&self.browse as &dyn BuiltinTool, &self.load as &dyn BuiltinTool]
+        vec![
+            &self.browse as &dyn BuiltinTool,
+            &self.load as &dyn BuiltinTool,
+        ]
     }
 }

@@ -103,7 +103,8 @@ When running background jobs..."#;
 
     #[test]
     fn test_parse_no_capabilities() {
-        let content = "---\nname: MCP Setup\ndescription: Configure MCP servers\n---\n\nContent here";
+        let content =
+            "---\nname: MCP Setup\ndescription: Configure MCP servers\n---\n\nContent here";
         let doc = parse_skill_md(
             SkillId("mcp-setup".to_string()),
             SkillScope::Project,
@@ -116,23 +117,15 @@ When running background jobs..."#;
     #[test]
     fn test_parse_description_with_colon() {
         let content = "---\nname: Test\ndescription: \"Use: this tool carefully\"\n---\n\nBody";
-        let doc = parse_skill_md(
-            SkillId("test".to_string()),
-            SkillScope::Builtin,
-            content,
-        )
-        .unwrap();
+        let doc =
+            parse_skill_md(SkillId("test".to_string()), SkillScope::Builtin, content).unwrap();
         assert_eq!(doc.descriptor.description, "Use: this tool carefully");
     }
 
     #[test]
     fn test_missing_frontmatter() {
         let content = "# No frontmatter";
-        let result = parse_skill_md(
-            SkillId("test".to_string()),
-            SkillScope::Builtin,
-            content,
-        );
+        let result = parse_skill_md(SkillId("test".to_string()), SkillScope::Builtin, content);
         assert!(result.is_err());
     }
 }

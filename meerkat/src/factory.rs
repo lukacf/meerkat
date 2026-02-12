@@ -314,7 +314,10 @@ impl AgentFactory {
 
     /// Set a custom skill source (bypasses config-driven repository resolution).
     #[cfg(feature = "skills")]
-    pub fn skill_source(mut self, source: std::sync::Arc<dyn meerkat_core::skills::SkillSource>) -> Self {
+    pub fn skill_source(
+        mut self,
+        source: std::sync::Arc<dyn meerkat_core::skills::SkillSource>,
+    ) -> Self {
         self.skill_source = Some(source);
         self
     }
@@ -434,7 +437,15 @@ impl AgentFactory {
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
-        self.build_builtin_dispatcher_with_skills(store, config, shell_config, external, session_id, None).await
+        self.build_builtin_dispatcher_with_skills(
+            store,
+            config,
+            shell_config,
+            external,
+            session_id,
+            None,
+        )
+        .await
     }
 
     /// Build a shared builtin dispatcher, optionally including skill tools.
@@ -457,14 +468,17 @@ impl AgentFactory {
         #[cfg(not(feature = "sub-agents"))]
         {
             let mut composite = CompositeDispatcher::new(
-                builder.store, &builder.config, builder.shell_config,
-                builder.external, builder.session_id,
+                builder.store,
+                &builder.config,
+                builder.shell_config,
+                builder.external,
+                builder.session_id,
             )?;
             #[cfg(feature = "skills")]
             if let Some(engine) = skill_engine {
-                composite.register_skill_tools(
-                    meerkat_tools::builtin::skills::SkillToolSet::new(engine),
-                );
+                composite.register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(
+                    engine,
+                ));
             }
             return Ok(Arc::new(composite));
         }
@@ -472,14 +486,17 @@ impl AgentFactory {
         #[cfg(feature = "sub-agents")]
         if !self.enable_subagents {
             let mut composite = CompositeDispatcher::new(
-                builder.store, &builder.config, builder.shell_config,
-                builder.external, builder.session_id,
+                builder.store,
+                &builder.config,
+                builder.shell_config,
+                builder.external,
+                builder.session_id,
             )?;
             #[cfg(feature = "skills")]
             if let Some(engine) = skill_engine {
-                composite.register_skill_tools(
-                    meerkat_tools::builtin::skills::SkillToolSet::new(engine),
-                );
+                composite.register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(
+                    engine,
+                ));
             }
             return Ok(Arc::new(composite));
         }
@@ -557,9 +574,9 @@ impl AgentFactory {
 
             #[cfg(feature = "skills")]
             if let Some(engine) = skill_engine {
-                composite.register_skill_tools(
-                    meerkat_tools::builtin::skills::SkillToolSet::new(engine),
-                );
+                composite.register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(
+                    engine,
+                ));
             }
 
             Ok(Arc::new(composite))
@@ -763,9 +780,10 @@ impl AgentFactory {
                 };
 
                 // Normalize preload_skills: Some([]) → None
-                let preload = build_config.preload_skills.take().and_then(|ids| {
-                    if ids.is_empty() { None } else { Some(ids) }
-                });
+                let preload = build_config
+                    .preload_skills
+                    .take()
+                    .and_then(|ids| if ids.is_empty() { None } else { Some(ids) });
 
                 // Pre-load requested skills into system prompt (Level 2)
                 let mut preloaded_sections = Vec::new();
@@ -785,11 +803,13 @@ impl AgentFactory {
                 }
 
                 // Collect active skill IDs
-                let skill_ids: Vec<meerkat_core::skills::SkillId> =
-                    match engine.list_skills(&meerkat_core::skills::SkillFilter::default()).await {
-                        Ok(descs) => descs.into_iter().map(|d| d.id).collect(),
-                        Err(_) => Vec::new(),
-                    };
+                let skill_ids: Vec<meerkat_core::skills::SkillId> = match engine
+                    .list_skills(&meerkat_core::skills::SkillFilter::default())
+                    .await
+                {
+                    Ok(descs) => descs.into_iter().map(|d| d.id).collect(),
+                    Err(_) => Vec::new(),
+                };
 
                 (inventory, preloaded_sections, Some(skill_ids))
             } else {
@@ -798,9 +818,13 @@ impl AgentFactory {
             }
         };
         #[cfg(not(feature = "skills"))]
-        let skill_inventory_section: (String, Vec<String>, Option<Vec<meerkat_core::skills::SkillId>>) =
-            (String::new(), Vec::new(), None);
-        let (inventory_section, preloaded_skill_sections, active_skill_ids) = skill_inventory_section;
+        let skill_inventory_section: (
+            String,
+            Vec<String>,
+            Option<Vec<meerkat_core::skills::SkillId>>,
+        ) = (String::new(), Vec::new(), None);
+        let (inventory_section, preloaded_skill_sections, active_skill_ids) =
+            skill_inventory_section;
 
         // 12. Build system prompt (single canonical path)
         let mut extra_sections: Vec<&str> = Vec::new();
@@ -852,16 +876,13 @@ impl AgentFactory {
 
         // 12b. Wire memory store + memory_search tool (when feature compiled + enabled)
         #[allow(unused_variables)]
-        let effective_memory = build_config
-            .override_memory
-            .unwrap_or(self.enable_memory);
+        let effective_memory = build_config.override_memory.unwrap_or(self.enable_memory);
         #[cfg(feature = "memory-store-session")]
         if effective_memory {
             let memory_dir = self.store_path.join("memory");
             match meerkat_memory::HnswMemoryStore::open(&memory_dir) {
                 Ok(store) => {
-                    let store =
-                        Arc::new(store) as Arc<dyn meerkat_core::memory::MemoryStore>;
+                    let store = Arc::new(store) as Arc<dyn meerkat_core::memory::MemoryStore>;
                     builder = builder.memory_store(Arc::clone(&store));
 
                     // Compose memory_search tool into the dispatcher
@@ -872,9 +893,7 @@ impl AgentFactory {
                         .add_dispatcher(Arc::new(memory_dispatcher))
                         .build()
                         .map_err(|e| {
-                            BuildAgentError::Config(format!(
-                                "Failed to compose memory tools: {e}"
-                            ))
+                            BuildAgentError::Config(format!("Failed to compose memory tools: {e}"))
                         })?;
                     tools = Arc::new(gateway);
                     // Tool guidance reaches the model via the embedded
@@ -1026,7 +1045,12 @@ impl AgentFactory {
         temp_factory.enable_subagents = effective_subagents;
         let dispatcher = temp_factory
             .build_builtin_dispatcher_with_skills(
-                task_store, builtin_config, shell_config, external, None, skill_engine,
+                task_store,
+                builtin_config,
+                shell_config,
+                external,
+                None,
+                skill_engine,
             )
             .await?;
 

@@ -15,7 +15,11 @@ fn registration_to_descriptor(reg: &SkillRegistration) -> SkillDescriptor {
         name: reg.name.to_string(),
         description: reg.description.to_string(),
         scope: reg.scope,
-        requires_capabilities: reg.requires_capabilities.iter().map(|s| s.to_string()).collect(),
+        requires_capabilities: reg
+            .requires_capabilities
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         ..Default::default()
     }
 }

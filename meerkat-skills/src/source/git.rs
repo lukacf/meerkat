@@ -236,17 +236,16 @@ fn gix_clone_blocking(
             .map_err(|e| SkillError::Load(format!("cannot create cache dir: {e}").into()))?;
     }
 
-    let mut prepare = gix::prepare_clone(url, dest)
-        .map_err(|e| SkillError::Load(format!("gix clone prepare failed for '{url}': {e}").into()))?;
+    let mut prepare = gix::prepare_clone(url, dest).map_err(|e| {
+        SkillError::Load(format!("gix clone prepare failed for '{url}': {e}").into())
+    })?;
 
     // Set branch/tag ref (not applicable for commit — clone default then checkout)
     match git_ref {
         GitRef::Branch(name) | GitRef::Tag(name) => {
             prepare = prepare
                 .with_ref_name(Some(name.as_str()))
-                .map_err(|e| SkillError::Load(
-                    format!("invalid ref name '{name}': {e}").into(),
-                ))?;
+                .map_err(|e| SkillError::Load(format!("invalid ref name '{name}': {e}").into()))?;
         }
         GitRef::Commit(_) => {
             // Clone default branch, checkout commit after
@@ -316,7 +315,9 @@ fn gix_fetch_blocking(repo_dir: &Path, repo_url: &str) -> Result<(), SkillError>
         .connect(gix::remote::Direction::Fetch)
         .map_err(|e| SkillError::Load(format!("connect failed for '{repo_url}': {e}").into()))?
         .prepare_fetch(gix::progress::Discard, Default::default())
-        .map_err(|e| SkillError::Load(format!("prepare fetch failed for '{repo_url}': {e}").into()))?
+        .map_err(|e| {
+            SkillError::Load(format!("prepare fetch failed for '{repo_url}': {e}").into())
+        })?
         .receive(gix::progress::Discard, &interrupt)
         .map_err(|e| SkillError::Load(format!("fetch failed for '{repo_url}': {e}").into()))?;
 
@@ -387,7 +388,9 @@ fn checkout_tree_at_rev(
         .map_err(|e| SkillError::Load(format!("index from tree failed: {e}").into()))?;
 
     // Now move repo.objects into Arc-backed form for Send (required by checkout)
-    let objects = repo.objects.into_arc()
+    let objects = repo
+        .objects
+        .into_arc()
         .map_err(|e| SkillError::Load(format!("object store conversion failed: {e}").into()))?;
 
     gix::worktree::state::checkout(
@@ -536,9 +539,7 @@ pub(crate) mod tests_support {
         )
         .await
         .unwrap();
-        run_git_in_dir(work_dir, &["push".into()])
-            .await
-            .unwrap();
+        run_git_in_dir(work_dir, &["push".into()]).await.unwrap();
     }
 }
 
@@ -580,12 +581,9 @@ mod tests {
         .unwrap();
 
         let coll_dir = work_dir.join("extraction");
-        tokio::fs::write(
-            coll_dir.join("COLLECTION.md"),
-            "Entity extraction skills",
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(coll_dir.join("COLLECTION.md"), "Entity extraction skills")
+            .await
+            .unwrap();
 
         run_git_in_dir(&work_dir, &["add".into(), "-A".into()])
             .await
@@ -602,9 +600,7 @@ mod tests {
         )
         .await
         .unwrap();
-        run_git_in_dir(&work_dir, &["push".into()])
-            .await
-            .unwrap();
+        run_git_in_dir(&work_dir, &["push".into()]).await.unwrap();
 
         repo_dir
     }
@@ -746,9 +742,13 @@ mod tests {
         let work_dir = tmp.path().join("subdir-work");
 
         tokio::fs::create_dir_all(&repo_dir).await.unwrap();
-        run_git(&["init".into(), "--bare".into(), repo_dir.to_str().unwrap().into()])
-            .await
-            .unwrap();
+        run_git(&[
+            "init".into(),
+            "--bare".into(),
+            repo_dir.to_str().unwrap().into(),
+        ])
+        .await
+        .unwrap();
         run_git(&[
             "clone".into(),
             repo_dir.to_str().unwrap().into(),
@@ -781,9 +781,7 @@ mod tests {
         )
         .await
         .unwrap();
-        run_git_in_dir(&work_dir, &["push".into()])
-            .await
-            .unwrap();
+        run_git_in_dir(&work_dir, &["push".into()]).await.unwrap();
 
         let cache_dir = tmp.path().join("subdir-cache");
         let source = GitSkillSource::new(GitSkillConfig {

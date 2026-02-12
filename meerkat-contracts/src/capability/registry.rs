@@ -63,8 +63,9 @@ inventory::submit! {
 /// Collect all registered capabilities, sorted by [`CapabilityId`] ordinal
 /// for deterministic ordering regardless of `inventory` collection order.
 pub fn build_capabilities() -> Vec<&'static CapabilityRegistration> {
-    let mut caps: Vec<&'static CapabilityRegistration> =
-        inventory::iter::<CapabilityRegistration>.into_iter().collect();
+    let mut caps: Vec<&'static CapabilityRegistration> = inventory::iter::<CapabilityRegistration>
+        .into_iter()
+        .collect();
     caps.sort_by_key(|r| r.id);
     caps
 }

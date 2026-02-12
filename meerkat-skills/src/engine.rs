@@ -71,28 +71,31 @@ impl SkillEngine for DefaultSkillEngine {
         ))
     }
 
-    async fn resolve_and_render(
-        &self,
-        ids: &[SkillId],
-    ) -> Result<Vec<ResolvedSkill>, SkillError> {
+    async fn resolve_and_render(&self, ids: &[SkillId]) -> Result<Vec<ResolvedSkill>, SkillError> {
         let mut results = Vec::new();
         for id in ids {
             let doc = self.source.load(id).await?;
 
             // Enforce capability gating: reject skills whose required
             // capabilities are not available, even if the caller knows the ID.
-            let missing: Vec<_> = doc.descriptor.requires_capabilities.iter()
+            let missing: Vec<_> = doc
+                .descriptor
+                .requires_capabilities
+                .iter()
                 .filter(|cap| !self.available_capabilities.contains(*cap))
                 .collect();
             if !missing.is_empty() {
                 return Err(SkillError::Load(
-                    format!("skill '{}' requires unavailable capabilities: {:?}", id.0, missing).into(),
+                    format!(
+                        "skill '{}' requires unavailable capabilities: {:?}",
+                        id.0, missing
+                    )
+                    .into(),
                 ));
             }
 
-            let rendered = renderer::render_injection_with_limit(
-                &id.0, &doc.body, self.max_injection_bytes,
-            );
+            let rendered =
+                renderer::render_injection_with_limit(&id.0, &doc.body, self.max_injection_bytes);
             let byte_size = rendered.len();
             results.push(ResolvedSkill {
                 id: id.clone(),
@@ -108,10 +111,7 @@ impl SkillEngine for DefaultSkillEngine {
         self.source.collections().await
     }
 
-    async fn list_skills(
-        &self,
-        filter: &SkillFilter,
-    ) -> Result<Vec<SkillDescriptor>, SkillError> {
+    async fn list_skills(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
         let all_skills = self.source.list(filter).await?;
         Ok(filter_by_capabilities(
             all_skills,
@@ -179,8 +179,7 @@ mod tests {
             test_skill("shell-patterns", "Shell Patterns", &["builtins", "shell"]),
         ]);
 
-        let engine =
-            DefaultSkillEngine::new(Box::new(source), vec!["builtins".to_string()]);
+        let engine = DefaultSkillEngine::new(Box::new(source), vec!["builtins".to_string()]);
 
         let section = engine.inventory_section().await.unwrap();
         assert!(section.contains("<skill id=\"task-workflow\">"));
@@ -191,11 +190,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_and_render_returns_vec() {
-        let source = InMemorySkillSource::new(vec![test_skill(
-            "task-workflow",
-            "Task Workflow",
-            &[],
-        )]);
+        let source =
+            InMemorySkillSource::new(vec![test_skill("task-workflow", "Task Workflow", &[])]);
 
         let engine = DefaultSkillEngine::new(Box::new(source), vec![]);
 
@@ -204,10 +200,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result[0]
-            .rendered_body
-            .contains("<skill id=\"task-workflow\">"));
-        assert!(result[0].rendered_body.contains("Content for task-workflow"));
+        assert!(
+            result[0]
+                .rendered_body
+                .contains("<skill id=\"task-workflow\">")
+        );
+        assert!(
+            result[0]
+                .rendered_body
+                .contains("Content for task-workflow")
+        );
         assert_eq!(result[0].name, "Task Workflow");
         assert!(result[0].byte_size > 0);
     }
@@ -225,11 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_preload_missing_skill_errors() {
-        let source = InMemorySkillSource::new(vec![test_skill(
-            "existing/skill",
-            "Existing",
-            &[],
-        )]);
+        let source = InMemorySkillSource::new(vec![test_skill("existing/skill", "Existing", &[])]);
         let engine = DefaultSkillEngine::new(Box::new(source), vec![]);
 
         // One valid, one invalid — should fail on the invalid one
@@ -247,10 +245,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_skills_no_filter() {
         let engine = DefaultSkillEngine::new(Box::new(multi_source()), vec![]);
-        let skills = engine
-            .list_skills(&SkillFilter::default())
-            .await
-            .unwrap();
+        let skills = engine.list_skills(&SkillFilter::default()).await.unwrap();
         assert_eq!(skills.len(), 4);
     }
 

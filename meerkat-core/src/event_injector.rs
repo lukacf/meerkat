@@ -54,7 +54,7 @@ pub struct InteractionSubscription {
 ///
 /// Implementors register a subscriber in the registry keyed by interaction ID,
 /// then inject the event into the inbox. The host loop looks up the subscriber
-/// during `drain_interactions()` and wires it to the event tap.
+/// during `drain_inbox_interactions()` and wires it to the event tap.
 pub trait SubscribableInjector: EventInjector {
     /// Inject an event and return a subscription for streaming events.
     ///

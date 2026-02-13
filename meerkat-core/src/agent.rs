@@ -239,7 +239,7 @@ pub trait CommsRuntime: Send + Sync {
     ///
     /// Default implementation wraps `drain_messages()` results as `InteractionContent::Message`
     /// with generated IDs.
-    async fn drain_interactions(&self) -> Vec<crate::interaction::InboxInteraction> {
+    async fn drain_inbox_interactions(&self) -> Vec<crate::interaction::InboxInteraction> {
         self.drain_messages()
             .await
             .into_iter()

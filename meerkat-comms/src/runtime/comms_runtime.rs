@@ -347,7 +347,7 @@ impl CoreCommsRuntime for CommsRuntime {
         peers.into_values().collect()
     }
 
-    async fn drain_interactions(&self) -> Vec<meerkat_core::InboxInteraction> {
+    async fn drain_inbox_interactions(&self) -> Vec<meerkat_core::InboxInteraction> {
         let mut inbox = self.inbox.lock().await;
         let items = inbox.try_drain();
         let trusted = self.trusted_peers.read().await;
@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drain_interactions_converts_all_authenticated_content_variants() {
+    async fn test_drain_inbox_interactions_converts_all_authenticated_content_variants() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("variants", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
@@ -1105,7 +1105,7 @@ mod tests {
             .send(InboxItem::External { envelope: resp })
             .unwrap();
 
-        let interactions = CoreCommsRuntime::drain_interactions(&runtime).await;
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
         assert_eq!(interactions.len(), 3);
 
         assert!(interactions.iter().any(|i| {
@@ -1147,7 +1147,7 @@ mod tests {
             .unwrap();
         let tracked_id = sub.id;
 
-        let interactions = CoreCommsRuntime::drain_interactions(&runtime).await;
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
         assert_eq!(interactions.len(), 1);
         assert_eq!(interactions[0].id, tracked_id);
 
@@ -1158,7 +1158,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_plain_event_interaction_id_is_preserved_in_drain_interactions() {
+    async fn test_plain_event_interaction_id_is_preserved_in_drain_inbox_interactions() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("plain-id", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
@@ -1174,7 +1174,7 @@ mod tests {
             })
             .unwrap();
 
-        let interactions = CoreCommsRuntime::drain_interactions(&runtime).await;
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
         assert_eq!(interactions.len(), 1);
         assert_eq!(interactions[0].id.0, interaction_id);
     }
@@ -1211,7 +1211,7 @@ mod tests {
             other => panic!("Expected InputAccepted, got: {other:?}"),
         }
 
-        let interactions = CoreCommsRuntime::drain_interactions(&runtime).await;
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
         assert_eq!(interactions.len(), 1);
         assert!(matches!(
             &interactions[0].content,
@@ -1418,7 +1418,7 @@ mod tests {
             other => panic!("Expected peer message receipt, got: {other:?}"),
         }
 
-        let interactions = CoreCommsRuntime::drain_interactions(&receiver).await;
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
         assert_eq!(interactions.len(), 1);
         assert!(matches!(
             &interactions[0].content,
@@ -1451,7 +1451,7 @@ mod tests {
             other => panic!("Expected peer message receipt, got: {other:?}"),
         }
 
-        let interactions = CoreCommsRuntime::drain_interactions(&receiver).await;
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
         assert_eq!(interactions.len(), 1);
         assert!(matches!(
             &interactions[0].content,

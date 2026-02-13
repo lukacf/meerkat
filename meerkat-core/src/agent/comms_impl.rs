@@ -31,7 +31,7 @@ where
     /// Returns true if any messages were injected.
     ///
     /// No-op when `host_drain_active` is set — in host mode, the host loop
-    /// owns the inbox drain cycle via `drain_interactions()` to preserve
+    /// owns the inbox drain cycle via `drain_inbox_interactions()` to preserve
     /// interaction-scoped subscriber correlation.
     pub(super) async fn drain_comms_inbox(&mut self) -> bool {
         if self.host_drain_active {
@@ -154,7 +154,7 @@ where
             let timeout = self.budget.remaining_duration().unwrap_or(POLL_INTERVAL);
             let notified = inbox_notify.notified();
 
-            let interactions = comms.drain_interactions().await;
+            let interactions = comms.drain_inbox_interactions().await;
 
             if comms.dismiss_received() {
                 tracing::info!("Host mode: DISMISS received, exiting");
@@ -511,7 +511,7 @@ mod tests {
             self.notify.clone()
         }
 
-        async fn drain_interactions(&self) -> Vec<crate::interaction::InboxInteraction> {
+        async fn drain_inbox_interactions(&self) -> Vec<crate::interaction::InboxInteraction> {
             let mut interactions = self.interactions.lock().await;
             let result = std::mem::take(&mut *interactions);
             if !result.is_empty() {

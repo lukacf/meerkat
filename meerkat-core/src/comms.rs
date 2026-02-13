@@ -160,6 +160,7 @@ pub enum SendReceipt {
 pub enum PeerDirectorySource {
     Trusted,
     Inproc,
+    TrustedAndInproc,
     Unknown,
 }
 

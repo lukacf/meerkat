@@ -10,10 +10,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::InprocRegistry;
 #[cfg(test)]
 use crate::{CommsConfig, Keypair};
-use crate::{Router, Status, TrustedPeer, TrustedPeers};
+use crate::{Router, Status, TrustedPeers};
 
 fn schema_for<T: JsonSchema>() -> Value {
     let schema = schemars::schema_for!(T);
@@ -71,27 +70,6 @@ pub struct ToolContext {
     pub trusted_peers: Arc<RwLock<TrustedPeers>>,
 }
 
-impl ToolContext {
-    async fn sync_trusted_inproc_peers(&self) {
-        let self_pubkey = self.router.keypair_arc().public_key();
-        let mut trusted = self.trusted_peers.write().await;
-        for (name, pubkey) in InprocRegistry::global().peers() {
-            if pubkey == self_pubkey {
-                continue;
-            }
-
-            trusted
-                .peers
-                .retain(|entry| entry.name != name && entry.pubkey != pubkey);
-            trusted.peers.push(TrustedPeer {
-                name: name.clone(),
-                pubkey,
-                addr: format!("inproc://{}", name),
-            });
-        }
-    }
-}
-
 /// Returns the list of comms tools: exactly `send` and `peers`.
 pub fn tools_list() -> Vec<Value> {
     vec![
@@ -130,7 +108,6 @@ pub async fn handle_tools_call(
 }
 
 async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, String> {
-    ctx.sync_trusted_inproc_peers().await;
     match input.kind.as_str() {
         "peer_message" => {
             let body = input.body.ok_or("peer_message requires 'body' field")?;
@@ -185,10 +162,9 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
 }
 
 async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
-    ctx.sync_trusted_inproc_peers().await;
     let self_pubkey = ctx.router.keypair_arc().public_key();
     let peers = ctx.trusted_peers.read().await;
-    let mut peer_map: BTreeMap<String, Value> = peers
+    let peer_map: BTreeMap<String, Value> = peers
         .peers
         .iter()
         .filter(|p| p.pubkey != self_pubkey)
@@ -204,19 +180,6 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
         })
         .collect();
     drop(peers);
-
-    for (name, pubkey) in InprocRegistry::global().peers() {
-        if pubkey == self_pubkey {
-            continue;
-        }
-        peer_map.entry(name.clone()).or_insert_with(|| {
-            json!({
-                "name": name,
-                "peer_id": pubkey.to_peer_id(),
-                "address": format!("inproc://{}", name),
-            })
-        });
-    }
 
     let peer_list: Vec<Value> = peer_map.into_values().collect();
     Ok(json!({ "peers": peer_list }))
@@ -276,68 +239,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_peers_includes_inproc() {
+    async fn test_send_fails_when_recipient_is_not_trusted() {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let self_name = format!("self-{suffix}");
-        let peer_name = format!("peer-{suffix}");
-
-        let self_keypair = Keypair::generate();
-        let self_pubkey = self_keypair.public_key();
-        let (_, self_sender) = crate::Inbox::new();
-        InprocRegistry::global().register(&self_name, self_pubkey, self_sender);
-
-        let peer_keypair = Keypair::generate();
-        let peer_pubkey = peer_keypair.public_key();
-        let (_, peer_sender) = crate::Inbox::new();
-        InprocRegistry::global().register(&peer_name, peer_pubkey, peer_sender);
-
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
-        let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
-            self_keypair,
-            trusted_peers.clone(),
-            CommsConfig::default(),
-            inbox_sender,
-        ));
-
-        let ctx = ToolContext {
-            router,
-            trusted_peers,
-        };
-
-        let result = handle_tools_call(&ctx, "peers", &json!({})).await;
-        assert!(result.is_ok());
-        let val = result.unwrap();
-        let peers = val["peers"].as_array().expect("peers should be array");
-        let matched: Vec<_> = peers.iter().filter(|p| p["name"] == peer_name).collect();
-        assert_eq!(matched.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_send_syncs_inproc_peer_into_trusted() {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let sender_name = format!("sender-{suffix}");
         let receiver_name = format!("receiver-{suffix}");
-
-        // Set up sender (the agent calling the tool)
         let sender_keypair = Keypair::generate();
-        let (_, sender_inbox_sender) = crate::Inbox::new();
-        InprocRegistry::global().register(
-            &sender_name,
-            sender_keypair.public_key(),
-            sender_inbox_sender,
-        );
 
-        // Set up receiver in InprocRegistry (NOT in TrustedPeers)
-        let receiver_keypair = Keypair::generate();
-        let (mut receiver_inbox, receiver_inbox_sender) = crate::Inbox::new();
-        InprocRegistry::global().register(
-            &receiver_name,
-            receiver_keypair.public_key(),
-            receiver_inbox_sender,
-        );
-
-        // Router has empty TrustedPeers — receiver is only in InprocRegistry
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, router_inbox_sender) = crate::Inbox::new();
         let router = Arc::new(Router::with_shared_peers(
@@ -352,29 +258,18 @@ mod tests {
             trusted_peers,
         };
 
-        // Send a peer_message — sync in-proc peers into trusted peers first.
         let result = handle_tools_call(
             &ctx,
             "send",
             &json!({
                 "kind": "peer_message",
                 "to": receiver_name,
-                "body": "hello via inproc"
+                "body": "hello"
             }),
         )
         .await;
 
-        assert!(
-            result.is_ok(),
-            "send should succeed when inproc peer is synced into trusted: {:?}",
-            result.err()
-        );
-        let val = result.unwrap();
-        assert_eq!(val["status"], "sent");
-
-        // Verify message was delivered to receiver's inbox
-        let items = receiver_inbox.try_drain();
-        assert_eq!(items.len(), 1, "receiver should have 1 message");
+        assert!(matches!(result, Err(_)));
     }
 
     #[tokio::test]

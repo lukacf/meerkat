@@ -3,8 +3,7 @@
 use super::comms_config::ResolvedCommsConfig;
 use crate::agent::types::{CommsContent, CommsMessage};
 use crate::{
-    InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers,
-    handle_connection,
+    InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeers, handle_connection,
 };
 use async_trait::async_trait;
 use futures::Stream;
@@ -149,7 +148,6 @@ fn is_dismiss(msg: &CommsMessage) -> bool {
 #[async_trait]
 impl CoreCommsRuntime for CommsRuntime {
     async fn drain_messages(&self) -> Vec<String> {
-        self.sync_trusted_peers_from_inproc().await;
         let mut inbox = self.inbox.lock().await;
         let items = inbox.try_drain();
         let trusted = self.trusted_peers.read().await;
@@ -446,7 +444,6 @@ impl CoreCommsRuntime for CommsRuntime {
     }
 
     async fn drain_inbox_interactions(&self) -> Vec<meerkat_core::InboxInteraction> {
-        self.sync_trusted_peers_from_inproc().await;
         let mut inbox = self.inbox.lock().await;
         let items = inbox.try_drain();
         let trusted = self.trusted_peers.read().await;
@@ -757,46 +754,15 @@ impl CommsRuntime {
     pub fn router(&self) -> &Router {
         &self.router
     }
-    async fn sync_trusted_peers_from_inproc(&self) {
-        let inproc_peers = InprocRegistry::global().peers();
-        if inproc_peers.is_empty() {
-            return;
-        }
-
-        let self_pubkey = self.public_key;
-        let self_name = self.config.name.clone();
-        let mut trusted = self.trusted_peers.write().await;
-
-        for (name, pubkey) in inproc_peers {
-            if name == self_name || pubkey == self_pubkey {
-                continue;
-            }
-
-            trusted
-                .peers
-                .retain(|entry| entry.name != name && entry.pubkey != pubkey);
-
-            trusted.peers.push(TrustedPeer {
-                name: name.clone(),
-                pubkey,
-                addr: format!("inproc://{}", name),
-            });
-        }
-    }
-
-    /// Canonical peer resolver: trusted first, inproc second.
+    /// Canonical peer resolver.
     ///
-    /// Both `send()` and `peers()` use this same resolution policy.
+    /// Discovery and sendability are tied only to the trusted peer list.
     async fn resolve_peer_directory(&self) -> Vec<PeerDirectoryEntry> {
-        self.sync_trusted_peers_from_inproc().await;
         let sendable_kinds = vec![
             "peer_message".to_string(),
             "peer_request".to_string(),
             "peer_response".to_string(),
         ];
-        let inproc_peers = InprocRegistry::global().peers();
-        let inproc_names: std::collections::HashSet<String> =
-            inproc_peers.iter().map(|(n, _)| n.clone()).collect();
 
         let mut peers: std::collections::HashMap<String, PeerDirectoryEntry> =
             std::collections::HashMap::new();
@@ -807,18 +773,13 @@ impl CommsRuntime {
                 if peer.name == self.config.name {
                     continue;
                 }
-                let source = if inproc_names.contains(&peer.name) {
-                    PeerDirectorySource::TrustedAndInproc
-                } else {
-                    PeerDirectorySource::Trusted
-                };
                 peers.insert(
                     peer.name.clone(),
                     PeerDirectoryEntry {
                         name: PeerName(peer.name.clone()),
                         peer_id: peer.pubkey.to_peer_id(),
                         address: peer.addr.clone(),
-                        source,
+                        source: PeerDirectorySource::Trusted,
                         sendable_kinds: sendable_kinds.clone(),
                         capabilities: serde_json::json!({}),
                     },
@@ -826,32 +787,15 @@ impl CommsRuntime {
             }
         }
 
-        for (name, pubkey) in &inproc_peers {
-            if *name == self.config.name {
-                continue;
-            }
-            peers
-                .entry(name.clone())
-                .or_insert_with(|| PeerDirectoryEntry {
-                    name: PeerName(name.clone()),
-                    peer_id: pubkey.to_peer_id(),
-                    address: format!("inproc://{}", name),
-                    source: PeerDirectorySource::Inproc,
-                    sendable_kinds: sendable_kinds.clone(),
-                    capabilities: serde_json::json!({}),
-                });
-        }
-
         peers.into_values().collect()
     }
 
-    /// Canonical send path: trusted peers are synchronized from inproc peers first.
+    /// Canonical send path uses trusted peers only.
     async fn send_peer_command(
         &self,
         peer_name: &str,
         kind: crate::types::MessageKind,
     ) -> Result<(), SendError> {
-        self.sync_trusted_peers_from_inproc().await;
         self.router
             .send(peer_name, kind)
             .await
@@ -955,7 +899,6 @@ impl CommsRuntime {
     }
 
     pub async fn drain_messages(&self) -> Vec<CommsMessage> {
-        self.sync_trusted_peers_from_inproc().await;
         let mut inbox = self.inbox.lock().await;
         let items = inbox.try_drain();
         let trusted = self.trusted_peers.read().await;
@@ -967,7 +910,6 @@ impl CommsRuntime {
 
     pub async fn recv_message(&self) -> Option<CommsMessage> {
         loop {
-            self.sync_trusted_peers_from_inproc().await;
             {
                 let mut inbox = self.inbox.lock().await;
                 let items = inbox.try_drain();
@@ -1497,12 +1439,10 @@ mod tests {
             other => panic!("Expected InputAccepted, got: {other:?}"),
         };
 
-        let stream =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id))
-                .expect("first attach should succeed");
+        let stream = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id))
+            .expect("first attach should succeed");
 
-        let dup =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id));
+        let dup = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id));
         assert!(matches!(dup, Err(StreamError::AlreadyAttached(_))));
 
         drop(stream);
@@ -1571,8 +1511,7 @@ mod tests {
             other => panic!("Expected InputAccepted, got: {other:?}"),
         };
 
-        let dup =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id));
+        let dup = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id));
         assert!(matches!(dup, Err(StreamError::AlreadyAttached(_))));
 
         assert!(
@@ -1646,7 +1585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_core_send_peer_message_success_via_inproc_without_trusted_entry() {
+    async fn test_core_send_peer_message_fails_without_trusted_entry() {
         let suffix = Uuid::new_v4().simple().to_string();
         let sender_name = format!("sender-ipc-{suffix}");
         let receiver_name = format!("receiver-ipc-{suffix}");
@@ -1654,28 +1593,24 @@ mod tests {
         let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
         let cmd = CommsCommand::PeerMessage {
-            to: PeerName(receiver_name),
+            to: PeerName(receiver_name.clone()),
             body: "inproc-only hello".to_string(),
         };
 
         let receipt = CoreCommsRuntime::send(&sender, cmd).await;
         match receipt {
-            Ok(SendReceipt::PeerMessageSent { .. }) => {}
-            other => panic!("Expected peer message receipt, got: {other:?}"),
+            Err(SendError::PeerNotFound(peer)) => assert_eq!(peer, receiver_name),
+            other => panic!("Expected peer-not-found for missing trust, got: {other:?}"),
         }
 
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
-        assert_eq!(interactions.len(), 1);
-        assert!(matches!(
-            &interactions[0].content,
-            meerkat_core::InteractionContent::Message { body } if body == "inproc-only hello"
-        ));
+        assert_eq!(interactions.len(), 0);
     }
 
     #[tokio::test]
-    async fn test_core_peers_includes_inproc_and_trusted_without_self() {
+    async fn test_core_peers_includes_trusted_without_self() {
         let suffix = Uuid::new_v4().simple().to_string();
-        let peer_name = format!("trusted-mixed-{suffix}");
+        let peer_name = format!("trusted-only-{suffix}");
         let runtime_name = format!("runtime-mixed-{suffix}");
 
         let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
@@ -1702,13 +1637,9 @@ mod tests {
         assert_eq!(matched.len(), 1);
 
         let peer = matched[0];
-        // Peer exists in both registries → TrustedAndInproc.
-        // In parallel test execution another test may clear the global inproc
-        // registry, so Trusted alone is also accepted.
         assert!(
-            peer.source == PeerDirectorySource::TrustedAndInproc
-                || peer.source == PeerDirectorySource::Trusted,
-            "expected TrustedAndInproc or Trusted, got {:?}",
+            peer.source == PeerDirectorySource::Trusted,
+            "expected Trusted, got {:?}",
             peer.source
         );
         assert_eq!(peer.address, format!("inproc://{peer_name}"));
@@ -1725,21 +1656,26 @@ mod tests {
         let peer_name = format!("truth-peer-{suffix}");
         let runtime_name = format!("truth-runtime-{suffix}");
 
-        let _peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
+        {
+            let mut trusted = runtime.trusted_peers.write().await;
+            trusted.upsert(crate::TrustedPeer {
+                name: peer_name.clone(),
+                pubkey: peer.public_key(),
+                addr: format!("inproc://{peer_name}"),
+            });
+        }
 
         let all_peers = CoreCommsRuntime::peers(&runtime).await;
-        // Only test peers we set up (avoid stale global registry entries)
-        let peers: Vec<_> = all_peers
-            .iter()
-            .filter(|e| e.name.0.contains(&suffix))
-            .collect();
-        assert!(
-            !peers.is_empty(),
-            "should have at least the inproc peer visible"
+        let peers: Vec<_> = all_peers.iter().filter(|e| e.name.0 == peer_name).collect();
+        assert_eq!(
+            peers.len(),
+            1,
+            "peer should be visible when explicitly trusted"
         );
 
-        for entry in &peers {
+        for entry in peers {
             for kind in &entry.sendable_kinds {
                 let cmd = match kind.as_str() {
                     "peer_message" => CommsCommand::PeerMessage {
@@ -1792,8 +1728,7 @@ mod tests {
             _ => panic!("expected InputAccepted"),
         };
 
-        let stream =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid)).unwrap();
+        let stream = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid)).unwrap();
         // Drop stream → ClosedEarly
         drop(stream);
 
@@ -1821,8 +1756,7 @@ mod tests {
             _ => panic!("expected InputAccepted"),
         };
 
-        let mut stream =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid)).unwrap();
+        let mut stream = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid)).unwrap();
 
         // Simulate terminal event
         runtime.mark_interaction_complete(iid.0);
@@ -1873,6 +1807,14 @@ mod tests {
 
         let _peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
+        {
+            let mut trusted = runtime.trusted_peers.write().await;
+            trusted.upsert(crate::TrustedPeer {
+                name: peer_name.clone(),
+                pubkey: _peer.public_key(),
+                addr: format!("inproc://{peer_name}"),
+            });
+        }
 
         let cmd = CommsCommand::PeerMessage {
             to: PeerName(peer_name),
@@ -1948,8 +1890,7 @@ mod tests {
         };
 
         // Attach
-        let _stream =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid)).unwrap();
+        let _stream = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid)).unwrap();
 
         // Complete
         runtime.mark_interaction_complete(iid.0);

@@ -1,0 +1,23 @@
+# Temporary legacy allowlist for Milestone 0 migration staging.
+# These entries are expected legacy surfaces while the redesign
+# has not yet replaced every public surface.
+# Remove entries in lockstep with cleanup milestones.
+
+# Public docs / skills / SDK references (M11+M13 cleanup)
+^\./docs/.+
+^\./\.claude/skills/meerkat-platform/.+
+^\./sdks/.+
+
+# Crate code still migration-boundary internal/public surfaces (M1+)
+^\./meerkat/.+
+^\./meerkat-cli/.+
+^\./meerkat-core/.+
+^\./meerkat-comms/.+
+^\./meerkat-rpc/.+
+^\./meerkat-rest/.+
+^\./meerkat-session/.+
+^\./meerkat-tools/.+
+^\./meerkat-contracts/src/version\.rs
+
+# Historical log / release notes placeholders
+^\./CHANGELOG\.md

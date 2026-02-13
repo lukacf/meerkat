@@ -10,7 +10,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix lint lint-feature-matrix fmt fmt-check audit ci clean doc release install-hooks coverage check help
+.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix lint lint-feature-matrix fmt fmt-check audit ci clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory
 
 # Default target
 all: ci
@@ -148,8 +148,19 @@ audit-alt:
 	cargo audit
 
 # Full CI pipeline - runs everything
-ci: fmt-check lint lint-feature-matrix test-all test-minimal test-feature-matrix audit
+ci: fmt-check legacy-surface-gate lint lint-feature-matrix test-all test-minimal test-feature-matrix audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
+
+# Milestone 0 gate: ensure legacy public surface names are either removed
+# or explicitly whitelisted during migration.
+legacy-surface-gate:
+	@echo "$(GREEN)Checking legacy public surface names...$(NC)"
+	@scripts/m0_legacy_surface_scan.sh
+
+# Capture or refresh the baseline inventory file used by the M0 gate.
+legacy-surface-inventory:
+	@echo "$(GREEN)Generating legacy surface inventory baseline...$(NC)"
+	@scripts/m0_legacy_surface_scan.sh --no-fail --output=artifacts/m0_legacy_surface_inventory.txt
 
 # Quick check - compile without producing output
 check:

@@ -84,7 +84,7 @@ client = MeerkatClient(rkat_path="/path/to/rkat")
 | `get_config()` | Read runtime configuration |
 | `set_config(config)` | Replace runtime configuration |
 | `patch_config(patch)` | Merge-patch runtime configuration |
-| `push_event(session_id, payload, source)` | Push an external event into a session |
+| `send(session_id, payload, source)` | Push an external event into a session |
 
 ---
 
@@ -171,10 +171,10 @@ await client.set_config(config)
 updated = await client.patch_config({"max_tokens": 2048})
 ```
 
-### push_event()
+### send()
 
 ```python
-async def push_event(
+async def send(
     self,
     session_id: str,
     payload: Any,
@@ -185,7 +185,7 @@ async def push_event(
 Push an external event into a running session's inbox. The event is queued and processed at the next turn boundary. Returns `{"queued": True}` on success.
 
 ```python
-await client.push_event(
+await client.send(
     session_id=session_id,
     payload={"alert": "deployment failed", "env": "prod"},
     source="monitoring",

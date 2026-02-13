@@ -174,10 +174,10 @@ All methods use JSON-RPC 2.0 over newline-delimited JSON on stdin/stdout.
 }}
 ```
 
-### event/push
+### comms/send
 
 ```json
-{"jsonrpc":"2.0","id":3,"method":"event/push","params":{
+{"jsonrpc":"2.0","id":3,"method":"comms/send","params":{
   "session_id": "sid_abc123",
   "payload": {"alert": "build failed", "repo": "main"},
   "source": "ci-pipeline"
@@ -280,7 +280,7 @@ details = await client.read_session(session_id)
 await client.archive_session(session_id)
 
 # Push external event into running session
-await client.push_event(
+await client.send(
     session_id=session_id,
     payload={"alert": "deployment failed", "env": "prod"},
     source="monitoring",  # optional
@@ -391,7 +391,7 @@ const details = await client.readSession(sessionId);
 await client.archiveSession(sessionId);
 
 // Push external event
-await client.pushEvent(sessionId, {
+await client.send(sessionId, {
   payload: { alert: "build failed" },
   source: "ci",
 });

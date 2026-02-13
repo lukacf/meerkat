@@ -14,7 +14,7 @@ Comms requires the `comms` Cargo feature to be compiled in.
 
 The comms system provides:
 
-- **Four LLM-facing tools**: `send_message`, `send_request`, `send_response`, `list_peers`
+- **Two LLM-facing tools**: `send` (with `kind` parameter for message/request/response), `peers`
 - **Three transport layers**: Unix Domain Sockets (UDS), TCP, and in-process (`inproc`)
 - **Ed25519 cryptographic identity**: Every agent has a keypair; all messages are signed
 - **Trust-based peer model**: Agents only accept messages from explicitly trusted peers
@@ -52,7 +52,7 @@ graph TD
         PUDS["UDS Event Listener"]
         STDIN["Stdin Reader"]
         WEBHOOK["REST Webhook"]
-        RPC_EVT["RPC event/push"]
+        RPC_EVT["RPC comms/send"]
     end
 
     runtime --> signed
@@ -245,11 +245,15 @@ Standard strings are parsed into their enum variants; unknown strings become `Cu
 
 Four tools are exposed to the LLM when comms is enabled.
 
-<Accordion title="send_message">
+<Accordion title="send (kind=peer_message)">
 Send a fire-and-forget text message to a peer.
 
 <ParamField path="to" type="string" required>
   Peer name to send message to.
+</ParamField>
+
+<ParamField path="kind" type="string" required>
+  Must be `"peer_message"`.
 </ParamField>
 
 <ParamField path="body" type="string" required>
@@ -259,11 +263,15 @@ Send a fire-and-forget text message to a peer.
 **Response**: `{"status": "sent"}`
 </Accordion>
 
-<Accordion title="send_request">
+<Accordion title="send (kind=peer_request)">
 Send a request to a peer. The sender waits for an ACK (not the response itself).
 
 <ParamField path="to" type="string" required>
   Peer name to send request to.
+</ParamField>
+
+<ParamField path="kind" type="string" required>
+  Must be `"peer_request"`.
 </ParamField>
 
 <ParamField path="intent" type="string" required>
@@ -277,11 +285,15 @@ Send a request to a peer. The sender waits for an ACK (not the response itself).
 **Response**: `{"status": "sent"}`
 </Accordion>
 
-<Accordion title="send_response">
+<Accordion title="send (kind=peer_response)">
 Send a response to a previously received request.
 
 <ParamField path="to" type="string" required>
   Peer name to send response to.
+</ParamField>
+
+<ParamField path="kind" type="string" required>
+  Must be `"peer_response"`.
 </ParamField>
 
 <ParamField path="in_reply_to" type="string" required>
@@ -299,7 +311,7 @@ Send a response to a previously received request.
 **Response**: `{"status": "sent"}`
 </Accordion>
 
-<Accordion title="list_peers">
+<Accordion title="peers">
 List all discoverable peers and their addresses.
 
 This includes both configured trusted peers and in-process peers currently
@@ -443,7 +455,7 @@ let (tools_with_comms, usage_instructions) =
     compose_tools_with_comms(base_tools, tool_usage_instructions, &runtime)?;
 ```
 
-This wraps the base tool dispatcher with comms tools via `ToolGateway`, registering `send_message`, `send_request`, `send_response`, and `list_peers`.
+This wraps the base tool dispatcher with comms tools via `ToolGateway`, registering `send` and `peers`.
 </Accordion>
 
 <Accordion title="Using AgentFactory">
@@ -484,7 +496,7 @@ let agent = AgentBuilder::new()
 let mut comms_agent = CommsAgent::new(agent, comms_manager);
 
 // Run with comms inbox draining
-let result = comms_agent.run("Send a greeting to agent-b".to_string()).await?;
+let result = comms_agent.run("Use send with kind=peer_message to greet agent-b".to_string()).await?;
 
 // Or run in stay-alive mode
 let result = comms_agent.run_stay_alive("You are a coordinator.".to_string(), None).await?;
@@ -529,7 +541,7 @@ The agent loop calls `drain_comms_inbox()` at turn boundaries:
 Incoming messages are formatted as text for the LLM:
 
 - **Message**: `[COMMS MESSAGE from <peer>]\n<body>`
-- **Request**: `[COMMS REQUEST from <peer> (id: <uuid>)]\nIntent: <intent>\nParams: <json>\n\nTo respond, use send_response with peer="<peer>", request_id="<uuid>"`
+- **Request**: `[COMMS REQUEST from <peer> (id: <uuid>)]\nIntent: <intent>\nParams: <json>\n\nTo respond, use send with kind=peer_response, peer="<peer>", request_id="<uuid>"`
 - **Response**: `[COMMS RESPONSE from <peer> (to request: <uuid>)]\nStatus: <status>\nResult: <json>`
 
 ## External event ingestion
@@ -544,7 +556,7 @@ All events flow through the `EventInjector` trait into the bounded inbox, regard
 |--------|---------|-----------|------|
 | Stdin | CLI | `--stdin` flag (with `--host`) | None |
 | Webhook | REST | `POST /sessions/{id}/event` | `RKAT_WEBHOOK_SECRET` env var |
-| RPC | JSON-RPC | `event/push` method | None (implicit) |
+| RPC | JSON-RPC | `comms/send` method | None (implicit) |
 | TCP listener | Comms | Configure `event_address` in config | `auth = "none"` required |
 | UDS listener | Comms | Configure `event_address` in config | `auth = "none"` required |
 
@@ -583,19 +595,20 @@ curl -X POST http://localhost:8080/sessions/sid_abc/event \
 
 Returns `202 Accepted` with `{"queued": true}`. Returns `503` if inbox full, `404` if session not found.
 
-### RPC event/push
+### RPC comms/send
 
-Push events to a running session via JSON-RPC.
+Send a comms command to a running session via JSON-RPC.
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
-  "method": "event/push",
+  "method": "comms/send",
   "params": {
     "session_id": "sid_abc123",
-    "payload": {"alert": "build failed"},
-    "source": "ci-pipeline"
+    "kind": "input",
+    "body": "{\"alert\": \"build failed\"}",
+    "source": "rpc"
   }
 }
 ```

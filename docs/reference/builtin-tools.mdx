@@ -24,10 +24,8 @@ icon: "wrench"
 | `memory_search` | Memory | N/A | `memory-store-session` | Search semantic memory |
 | `wait` | Utility | Yes | -- | Pause execution |
 | `datetime` | Utility | Yes | -- | Get current date/time |
-| `send_message` | Comms | Yes | `comms` | Send text to a peer |
-| `send_request` | Comms | Yes | `comms` | Send a request to a peer |
-| `send_response` | Comms | Yes | `comms` | Respond to a request |
-| `list_peers` | Comms | Yes | `comms` | List discoverable peers (trusted + inproc) |
+| `send` | Comms | Yes | `comms` | Send message/request/response to a peer |
+| `peers` | Comms | Yes | `comms` | List discoverable peers (trusted + inproc) |
 
 ## Enabling and disabling tools
 
@@ -693,73 +691,41 @@ self.
 
 Tool definitions (name, description, input schema) are dynamically loaded from `meerkat_comms::tools_list()`.
 
-<Accordion title="send_message">
-Send a simple text message to a trusted peer. The peer receives it in their inbox.
+<Accordion title="send">
+Send a message, request, or response to a trusted peer. The `kind` parameter determines the message type.
 
 **Default enabled:** Yes (when comms is active)
 
 <ParamField body="to" type="String" required>
-  Peer name to send the message to.
+  Peer name to send to.
 </ParamField>
 
-<ParamField body="body" type="String" required>
-  Message content.
+<ParamField body="kind" type="String" required>
+  Message kind: `"peer_message"`, `"peer_request"`, or `"peer_response"`.
 </ParamField>
 
-```json
-{
-  "status": "sent"
-}
-```
-
-**Source:** `meerkat-comms/src/mcp/tools.rs` -- `SendMessageInput`
-</Accordion>
-
-<Accordion title="send_request">
-Send a request to a trusted peer and wait for acknowledgement. Use this for structured interactions where you expect a response.
-
-**Default enabled:** Yes (when comms is active)
-
-<ParamField body="to" type="String" required>
-  Peer name to send the request to.
+<ParamField body="body" type="String">
+  Message content (required when `kind="peer_message"`).
 </ParamField>
 
-<ParamField body="intent" type="String" required>
-  Request intent/action identifier.
+<ParamField body="intent" type="String">
+  Request intent/action identifier (required when `kind="peer_request"`).
 </ParamField>
 
 <ParamField body="params" type="any" default="null">
-  Request parameters (arbitrary JSON).
+  Request parameters (for `kind="peer_request"`).
 </ParamField>
 
-```json
-{
-  "status": "sent"
-}
-```
-
-**Source:** `meerkat-comms/src/mcp/tools.rs` -- `SendRequestInput`
-</Accordion>
-
-<Accordion title="send_response">
-Send a response back to a previous request from a peer.
-
-**Default enabled:** Yes (when comms is active)
-
-<ParamField body="to" type="String" required>
-  Peer name to send the response to.
+<ParamField body="in_reply_to" type="String (UUID)">
+  ID of the request being responded to (required when `kind="peer_response"`).
 </ParamField>
 
-<ParamField body="in_reply_to" type="String (UUID)" required>
-  ID of the request being responded to.
-</ParamField>
-
-<ParamField body="status" type="String" required>
-  Response status: `"accepted"`, `"completed"`, or `"failed"`.
+<ParamField body="status" type="String">
+  Response status: `"accepted"`, `"completed"`, or `"failed"` (required when `kind="peer_response"`).
 </ParamField>
 
 <ParamField body="result" type="any" default="null">
-  Response result data (arbitrary JSON).
+  Response result data (for `kind="peer_response"`).
 </ParamField>
 
 ```json
@@ -768,10 +734,10 @@ Send a response back to a previous request from a peer.
 }
 ```
 
-**Source:** `meerkat-comms/src/mcp/tools.rs` -- `SendResponseInput`
+**Source:** `meerkat-comms/src/mcp/tools.rs` -- `SendInput`
 </Accordion>
 
-<Accordion title="list_peers">
+<Accordion title="peers">
 List all discoverable peers and their connection status.
 
 Returns the union of:
@@ -796,7 +762,7 @@ Peers are de-duplicated by name and the current agent ("self") is excluded.
 }
 ```
 
-**Source:** `meerkat-comms/src/mcp/tools.rs` -- `ListPeersInput`
+**Source:** `meerkat-comms/src/mcp/tools.rs` -- `PeersInput`
 </Accordion>
 
 ## Cargo feature gates
@@ -806,7 +772,7 @@ Tool availability depends on compile-time features in the `meerkat-tools` crate:
 | Feature | Default | Dependencies | Tools unlocked |
 |---------|---------|-------------|----------------|
 | `sub-agents` | Yes | `dep:meerkat-client` | `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list` |
-| `comms` | Yes | `dep:meerkat-comms` | `send_message`, `send_request`, `send_response`, `list_peers` |
+| `comms` | Yes | `dep:meerkat-comms` | `send`, `peers` |
 | `mcp` | Yes | `dep:meerkat-mcp` | External MCP tool routing (not builtin tools) |
 
 The `memory_search` tool is gated by the `memory-store-session` feature on the `meerkat` facade crate (not `meerkat-tools`), since `MemorySearchDispatcher` lives in `meerkat-memory`.

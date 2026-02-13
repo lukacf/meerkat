@@ -288,8 +288,8 @@ Two completely separate agent instances communicating over TCP using encrypted c
 |                        AGENT A                                 |
 |  +--------------+  +---------------+  +------------------+     |
 |  | CommsManager |  | TCP Listener  |  | Agent + LLM      |     |
-|  | (keypair A)  |  | (port 12345)  |  | (send_message    |     |
-|  +--------------+  +---------------+  |  list_peers)     |     |
+|  | (keypair A)  |  | (port 12345)  |  | (send, peers)    |     |
+|  +--------------+  +---------------+  |                  |     |
 |                                       +------------------+     |
 +----------------------------------------------------------------+
                               |
@@ -304,7 +304,7 @@ Two completely separate agent instances communicating over TCP using encrypted c
 +----------------------------------------------------------------+
 ```
 
-Each agent has a cryptographic identity (Ed25519 keypair). Messages are signed and encrypted. The LLM uses `send_message` and `list_peers` tools to communicate.
+Each agent has a cryptographic identity (Ed25519 keypair). Messages are signed and encrypted. The LLM uses the `send` and `peers` tools to communicate.
 
 **Execution flow:**
 
@@ -312,8 +312,8 @@ Each agent has a cryptographic identity (Ed25519 keypair). Messages are signed a
 Phase 1: Agent A sends message
 ------------------------------
 User -> Agent A: "Send 'Hello from Agent A!' to agent-b"
-Agent A LLM: Calls send_message tool
-send_message: Encrypts + TCP sends to Agent B's port
+Agent A LLM: Calls send tool (kind=peer_message)
+send: Encrypts + TCP sends to Agent B's port
 Agent A LLM: "I've sent the message"
 
 Phase 2: Agent B processes inbox
@@ -352,7 +352,7 @@ curl -X POST http://localhost:8080/sessions/sid_abc/event \
 
 ```python
 # Or via Python SDK
-await client.push_event(
+await client.send(
     session_id=session_id,
     payload={"alert": "deployment failed", "env": "prod"},
     source="github-actions",
@@ -364,7 +364,7 @@ await client.push_event(
 {
   "jsonrpc": "2.0",
   "id": 1,
-  "method": "event/push",
+  "method": "comms/send",
   "params": {
     "session_id": "sid_abc",
     "payload": {"alert": "test suite failed"},

@@ -39,7 +39,7 @@ Meerkat exposes a JSON-RPC 2.0 stdio interface for IDE integration, desktop apps
 | `session/archive` | Session | Remove session from runtime |
 | `turn/start` | Turn | Start a new turn on existing session |
 | `turn/interrupt` | Turn | Cancel in-flight turn |
-| `event/push` | Event | Push an external event into a session |
+| `comms/send` | Event | Push an external event into a session |
 | `capabilities/get` | Capabilities | Runtime capability report |
 | `config/get` | Config | Read current config |
 | `config/set` | Config | Replace config |
@@ -105,7 +105,7 @@ Handshake. Returns server capabilities.
       "session/archive", "turn/start", "turn/interrupt",
       "capabilities/get",
       "config/get", "config/set", "config/patch",
-      "event/push"
+      "comms/send"
     ]
   }
 }
@@ -428,7 +428,7 @@ Cancel an in-flight turn. No-op if the session is idle.
 
 ## Event methods
 
-### event/push
+### comms/send
 
 Push an external event into a running session's inbox. The event is queued and processed at the next turn boundary.
 
@@ -437,7 +437,7 @@ Push an external event into a running session's inbox. The event is queued and p
 {
   "jsonrpc": "2.0",
   "id": 8,
-  "method": "event/push",
+  "method": "comms/send",
   "params": {
     "session_id": "01936f8a-...",
     "payload": {"alert": "build failed", "repo": "main"},

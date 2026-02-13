@@ -79,7 +79,8 @@ The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, s
 | `getConfig()` | Read runtime configuration |
 | `setConfig(config)` | Replace runtime configuration |
 | `patchConfig(patch)` | Merge-patch runtime configuration |
-| `pushEvent(sessionId, payload, source?)` | Push an external event into a session |
+| `send(sessionId, command)` | Send a comms command to a session |
+| `peers(sessionId)` | List peers visible to a session |
 
 ---
 
@@ -148,24 +149,37 @@ await client.setConfig({ ...config, max_tokens: 4096 });
 const updated = await client.patchConfig({ max_tokens: 8192 });
 ```
 
-### pushEvent(sessionId, payload, source?)
+### send(sessionId, command)
 
 ```typescript
-async pushEvent(
+async send(
   sessionId: string,
-  payload: unknown,
-  source?: string,
-): Promise<{ queued: boolean }>
+  command: Record<string, unknown>,
+): Promise<Record<string, unknown>>
 ```
 
-Push an external event into a running session's inbox. Queued and processed at the next turn boundary.
+Send a canonical comms command to a session.
 
 ```typescript
-await client.pushEvent(
-  sessionId,
-  { alert: "build failed", repo: "main" },
-  "ci",
-);
+await client.send(sessionId, {
+  kind: "peer_message",
+  to: "agent-b",
+  body: "Hello from Agent A!",
+});
+```
+
+### peers(sessionId)
+
+```typescript
+async peers(
+  sessionId: string,
+): Promise<{ peers: Array<Record<string, unknown>> }>
+```
+
+List peers visible to a session's comms runtime.
+
+```typescript
+const { peers } = await client.peers(sessionId);
 ```
 
 ---

@@ -248,31 +248,42 @@ impl CoreCommsRuntime for CommsRuntime {
                 body,
                 source,
                 stream,
-                allow_self_session: _,
+                allow_self_session,
                 session_id: _,
-            } => match stream {
-                InputStreamMode::None => {
-                    let injector = CoreCommsRuntime::event_injector(self).ok_or_else(|| {
-                        SendError::Unsupported("event injector unavailable".into())
-                    })?;
-                    injector
-                        .inject(body, PlainEventSource::from(source))
-                        .map_err(map_event_injector_error)?;
-                    Ok(SendReceipt::InputAccepted {
-                        interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
-                        stream_reserved: false,
-                    })
+            } => {
+                // Self-input guard: when allow_self_session is false, this runtime's
+                // inbox is the target, which is a self-loop. Reject unless explicitly
+                // opted in. MCP never exposes this flag.
+                if !allow_self_session {
+                    return Err(SendError::Validation(
+                        "self-session input rejected: set allow_self_session=true to override"
+                            .into(),
+                    ));
                 }
-                InputStreamMode::ReserveInteraction => {
-                    let interaction_id = Uuid::new_v4();
-                    self.register_interaction_stream(interaction_id, body, source)?;
-
-                    Ok(SendReceipt::InputAccepted {
-                        interaction_id: meerkat_core::InteractionId(interaction_id),
-                        stream_reserved: true,
-                    })
+                match stream {
+                    InputStreamMode::None => {
+                        let injector =
+                            CoreCommsRuntime::event_injector(self).ok_or_else(|| {
+                                SendError::Unsupported("event injector unavailable".into())
+                            })?;
+                        injector
+                            .inject(body, PlainEventSource::from(source))
+                            .map_err(map_event_injector_error)?;
+                        Ok(SendReceipt::InputAccepted {
+                            interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
+                            stream_reserved: false,
+                        })
+                    }
+                    InputStreamMode::ReserveInteraction => {
+                        let interaction_id = Uuid::new_v4();
+                        self.register_interaction_stream(interaction_id, body, source)?;
+                        Ok(SendReceipt::InputAccepted {
+                            interaction_id: meerkat_core::InteractionId(interaction_id),
+                            stream_reserved: true,
+                        })
+                    }
                 }
-            },
+            }
             CommsCommand::PeerMessage { to, body } => self
                 .send_peer_command(&to.0, crate::types::MessageKind::Message { body })
                 .await
@@ -284,18 +295,21 @@ impl CoreCommsRuntime for CommsRuntime {
                 to,
                 intent,
                 params,
-                stream: _,
-            } => self
-                .send_peer_command(
+                stream,
+            } => {
+                let interaction_id = Uuid::new_v4();
+                let stream_reserved = stream == InputStreamMode::ReserveInteraction;
+                self.send_peer_command(
                     &to.0,
                     crate::types::MessageKind::Request { intent, params },
                 )
-                .await
-                .map(|_| SendReceipt::PeerRequestSent {
+                .await?;
+                Ok(SendReceipt::PeerRequestSent {
                     envelope_id: Uuid::new_v4(),
-                    interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
-                    stream_reserved: false,
-                }),
+                    interaction_id: meerkat_core::InteractionId(interaction_id),
+                    stream_reserved,
+                })
+            }
             CommsCommand::PeerResponse {
                 to,
                 in_reply_to,
@@ -334,9 +348,15 @@ impl CoreCommsRuntime for CommsRuntime {
                 body,
                 source,
                 stream: InputStreamMode::ReserveInteraction,
-                allow_self_session: _,
+                allow_self_session,
                 session_id: _,
             } => {
+                if !allow_self_session {
+                    return Err(SendAndStreamError::Send(SendError::Validation(
+                        "self-session input rejected: set allow_self_session=true to override"
+                            .into(),
+                    )));
+                }
                 let interaction_id = Uuid::new_v4();
                 self.register_interaction_stream(interaction_id, body, source)?;
                 let receipt = SendReceipt::InputAccepted {
@@ -352,6 +372,44 @@ impl CoreCommsRuntime for CommsRuntime {
                         error,
                     })?;
                 Ok((receipt, stream))
+            }
+            CommsCommand::PeerRequest {
+                to,
+                intent,
+                params,
+                stream: InputStreamMode::ReserveInteraction,
+            } => {
+                // Reserve a local interaction stream, then send the peer request.
+                let interaction_id = Uuid::new_v4();
+                let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(4096);
+                self.subscriber_registry
+                    .lock()
+                    .insert(interaction_id, sender.clone());
+                self.interaction_stream_registry.lock().insert(
+                    interaction_id,
+                    StreamRegistryEntry::reserved(sender, receiver),
+                );
+
+                self.send_peer_command(
+                    &to.0,
+                    crate::types::MessageKind::Request { intent, params },
+                )
+                .await?;
+
+                let receipt = SendReceipt::PeerRequestSent {
+                    envelope_id: Uuid::new_v4(),
+                    interaction_id: meerkat_core::InteractionId(interaction_id),
+                    stream_reserved: true,
+                };
+                let event_stream = self
+                    .stream(StreamScope::Interaction(meerkat_core::InteractionId(
+                        interaction_id,
+                    )))
+                    .map_err(|error| SendAndStreamError::StreamAttach {
+                        receipt: receipt.clone(),
+                        error,
+                    })?;
+                Ok((receipt, event_stream))
             }
             other => {
                 let receipt = self.send(other).await?;
@@ -467,6 +525,10 @@ impl CoreCommsRuntime for CommsRuntime {
             }
             None => sender,
         }
+    }
+
+    fn mark_interaction_complete(&self, id: &meerkat_core::InteractionId) {
+        self.mark_interaction_complete(id.0);
     }
 }
 
@@ -1320,7 +1382,7 @@ mod tests {
             body: "standalone test input".to_string(),
             source: InputSource::Rpc,
             stream: InputStreamMode::None,
-            allow_self_session: false,
+            allow_self_session: true,
         };
 
         let receipt = CoreCommsRuntime::send(&runtime, cmd).await;
@@ -1352,7 +1414,7 @@ mod tests {
             body: "streaming input".to_string(),
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
-            allow_self_session: false,
+            allow_self_session: true,
         };
 
         let receipt = CoreCommsRuntime::send(&runtime, cmd).await.unwrap();
@@ -1389,7 +1451,7 @@ mod tests {
             body: "duplicate stream test".to_string(),
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
-            allow_self_session: false,
+            allow_self_session: true,
         };
 
         let interaction_id = match CoreCommsRuntime::send(&runtime, cmd).await.unwrap() {
@@ -1432,7 +1494,7 @@ mod tests {
             body: "send before stream attach".to_string(),
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
-            allow_self_session: false,
+            allow_self_session: true,
         };
         let interaction_id = match CoreCommsRuntime::send(&runtime, cmd).await.unwrap() {
             SendReceipt::InputAccepted {
@@ -1459,7 +1521,7 @@ mod tests {
             body: "stream-first".to_string(),
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
-            allow_self_session: false,
+            allow_self_session: true,
         };
 
         let (receipt, _stream) = CoreCommsRuntime::send_and_stream(&runtime, cmd)
@@ -1874,6 +1936,24 @@ mod tests {
         assert!(
             matches!(result, Err(StreamError::NotReserved(_))),
             "attach after completed should return NotReserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allow_self_session_guard_rejects_default() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("self-guard-{suffix}")).unwrap();
+        let cmd = CommsCommand::Input {
+            session_id: meerkat_core::SessionId::new(),
+            body: "blocked".to_string(),
+            source: meerkat_core::InputSource::Rpc,
+            stream: InputStreamMode::None,
+            allow_self_session: false,
+        };
+        let result = CoreCommsRuntime::send(&runtime, cmd).await;
+        assert!(
+            matches!(result, Err(SendError::Validation(_))),
+            "allow_self_session=false should reject self-input"
         );
     }
 }

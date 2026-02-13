@@ -243,6 +243,8 @@ where
                                 )
                                 .await;
                             }
+                            // Explicitly transition reservation FSM to Completed.
+                            comms.mark_interaction_complete(&interaction.id);
                             last_result = result;
                         }
                         Err(e) => {
@@ -256,6 +258,8 @@ where
                                 )
                                 .await;
                             }
+                            // Explicitly transition reservation FSM to Completed on failure too.
+                            comms.mark_interaction_complete(&interaction.id);
                             self.event_tap.lock().take();
 
                             if e.is_graceful() {

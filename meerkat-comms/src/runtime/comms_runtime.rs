@@ -923,7 +923,10 @@ mod tests {
     use meerkat_core::SubscribableInjector;
     use meerkat_core::{
         SendError,
-        comms::{InputSource, InputStreamMode, PeerDirectorySource, PeerName},
+        comms::{
+            InputSource, InputStreamMode, PeerDirectorySource, PeerName, StreamError, StreamScope,
+        },
+        interaction::InteractionId,
         types::SessionId,
     };
     use uuid::Uuid;
@@ -1250,6 +1253,113 @@ mod tests {
                 .take_interaction_stream_sender(&interaction_id)
                 .is_none(),
             "interaction registration must be one-shot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_core_stream_attachment_duplicate_attach_fails() {
+        clear_inproc_registry();
+        let runtime = CommsRuntime::inproc_only("stream-duplicate-attach").unwrap();
+
+        let cmd = CommsCommand::Input {
+            session_id: SessionId::new(),
+            body: "duplicate stream test".to_string(),
+            source: InputSource::Rpc,
+            stream: InputStreamMode::ReserveInteraction,
+            allow_self_session: false,
+        };
+
+        let interaction_id = match CoreCommsRuntime::send(&runtime, cmd).await.unwrap() {
+            SendReceipt::InputAccepted {
+                interaction_id,
+                stream_reserved,
+            } => {
+                assert!(stream_reserved);
+                interaction_id
+            }
+            other => panic!("Expected InputAccepted, got: {other:?}"),
+        };
+
+        let stream =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id.clone()))
+                .expect("first attach should succeed");
+
+        let dup =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id.clone()));
+        assert!(matches!(dup, Err(StreamError::AlreadyAttached(_))));
+
+        drop(stream);
+
+        let after_drop =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id));
+        assert!(matches!(after_drop, Err(StreamError::NotReserved(_))));
+    }
+
+    #[tokio::test]
+    async fn test_core_stream_not_reserved_before_send() {
+        clear_inproc_registry();
+        let runtime = CommsRuntime::inproc_only("stream-before-send").unwrap();
+        let random = InteractionId(Uuid::new_v4());
+
+        let missing = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(random));
+        assert!(matches!(missing, Err(StreamError::NotReserved(_))));
+
+        let cmd = CommsCommand::Input {
+            session_id: SessionId::new(),
+            body: "send before stream attach".to_string(),
+            source: InputSource::Rpc,
+            stream: InputStreamMode::ReserveInteraction,
+            allow_self_session: false,
+        };
+        let interaction_id = match CoreCommsRuntime::send(&runtime, cmd).await.unwrap() {
+            SendReceipt::InputAccepted {
+                interaction_id,
+                stream_reserved,
+            } => {
+                assert!(stream_reserved);
+                interaction_id
+            }
+            other => panic!("Expected InputAccepted, got: {other:?}"),
+        };
+
+        let _stream = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id))
+            .expect("should attach after send");
+    }
+
+    #[tokio::test]
+    async fn test_core_send_and_stream_input_returns_stream_and_receipt() {
+        clear_inproc_registry();
+        let runtime = CommsRuntime::inproc_only("send-and-stream").unwrap();
+
+        let cmd = CommsCommand::Input {
+            session_id: SessionId::new(),
+            body: "stream-first".to_string(),
+            source: InputSource::Rpc,
+            stream: InputStreamMode::ReserveInteraction,
+            allow_self_session: false,
+        };
+
+        let (receipt, _stream) = CoreCommsRuntime::send_and_stream(&runtime, cmd)
+            .await
+            .unwrap();
+
+        let interaction_id = match receipt {
+            SendReceipt::InputAccepted {
+                interaction_id,
+                stream_reserved,
+            } => {
+                assert!(stream_reserved);
+                interaction_id
+            }
+            other => panic!("Expected InputAccepted, got: {other:?}"),
+        };
+
+        let dup =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id.clone()));
+        assert!(matches!(dup, Err(StreamError::AlreadyAttached(_))));
+
+        assert!(
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id)).is_err()
         );
     }
 

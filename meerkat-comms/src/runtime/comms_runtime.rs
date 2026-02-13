@@ -6,7 +6,13 @@ use crate::{
     InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeers, handle_connection,
 };
 use async_trait::async_trait;
+use meerkat_core::SubscribableInjector;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
+use meerkat_core::comms::{
+    CommsCommand, InputStreamMode, PeerDirectoryEntry, PeerDirectorySource, PeerName, SendError,
+    SendReceipt,
+};
+use meerkat_core::config::PlainEventSource;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +21,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use crate::agent::types::{DrainedMessage, drain_inbox_item};
 
@@ -64,6 +71,144 @@ impl CoreCommsRuntime for CommsRuntime {
 
     fn event_injector(&self) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
         Some(self.event_injector())
+    }
+
+    async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
+        match cmd {
+            CommsCommand::Input {
+                body,
+                source,
+                stream,
+                allow_self_session: _,
+                session_id: _,
+            } => {
+                let injector = CoreCommsRuntime::event_injector(self)
+                    .ok_or_else(|| SendError::Unsupported("event injector unavailable".into()))?;
+
+                match stream {
+                    InputStreamMode::None => {
+                        injector
+                            .inject(body, PlainEventSource::from(source))
+                            .map_err(map_event_injector_error)?;
+                        Ok(SendReceipt::InputAccepted {
+                            interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
+                            stream_reserved: false,
+                        })
+                    }
+                    InputStreamMode::ReserveInteraction => {
+                        let sub = <dyn SubscribableInjector>::inject_with_subscription(
+                            injector.as_ref(),
+                            body,
+                            source.into(),
+                        )
+                        .map_err(map_event_injector_error)?;
+
+                        Ok(SendReceipt::InputAccepted {
+                            interaction_id: sub.id,
+                            stream_reserved: true,
+                        })
+                    }
+                }
+            }
+            CommsCommand::PeerMessage { to, body } => self
+                .router
+                .send_message(&to.0, body)
+                .await
+                .map_err(map_router_send_error)
+                .map(|_| SendReceipt::PeerMessageSent {
+                    envelope_id: Uuid::new_v4(),
+                    acked: false,
+                }),
+            CommsCommand::PeerRequest {
+                to,
+                intent,
+                params,
+                stream: _,
+            } => self
+                .router
+                .send_request(&to.0, intent, params)
+                .await
+                .map_err(map_router_send_error)
+                .map(|_| SendReceipt::PeerRequestSent {
+                    envelope_id: Uuid::new_v4(),
+                    interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
+                    stream_reserved: false,
+                }),
+            CommsCommand::PeerResponse {
+                to,
+                in_reply_to,
+                status,
+                result,
+            } => {
+                let status = match status {
+                    meerkat_core::ResponseStatus::Accepted => crate::Status::Accepted,
+                    meerkat_core::ResponseStatus::Completed => crate::Status::Completed,
+                    meerkat_core::ResponseStatus::Failed => crate::Status::Failed,
+                };
+
+                self.router
+                    .send_response(&to.0, in_reply_to.0, status, result)
+                    .await
+                    .map_err(map_router_send_error)
+                    .map(|_| SendReceipt::PeerResponseSent {
+                        envelope_id: Uuid::new_v4(),
+                        in_reply_to,
+                    })
+            }
+        }
+    }
+
+    async fn peers(&self) -> Vec<PeerDirectoryEntry> {
+        let mut peers: std::collections::HashMap<String, PeerDirectoryEntry> =
+            std::collections::HashMap::new();
+
+        {
+            let trusted = self.trusted_peers.read().await;
+            for peer in &trusted.peers {
+                if peer.name == self.config.name {
+                    continue;
+                }
+
+                peers.insert(
+                    peer.name.clone(),
+                    PeerDirectoryEntry {
+                        name: PeerName(peer.name.clone()),
+                        peer_id: peer.pubkey.to_peer_id(),
+                        address: peer.addr.clone(),
+                        source: PeerDirectorySource::Trusted,
+                        sendable_kinds: vec![
+                            "peer_message".to_string(),
+                            "peer_request".to_string(),
+                            "peer_response".to_string(),
+                        ],
+                        capabilities: serde_json::json!({}),
+                    },
+                );
+            }
+        }
+
+        for (name, pubkey) in InprocRegistry::global().peers() {
+            if name == self.config.name {
+                continue;
+            }
+
+            peers
+                .entry(name.clone())
+                .or_insert_with(|| PeerDirectoryEntry {
+                    name: PeerName(name.clone()),
+                    peer_id: pubkey.to_peer_id(),
+                    address: format!("inproc://{}", name),
+                    source: PeerDirectorySource::Inproc,
+                    sendable_kinds: vec![
+                        "peer_message".to_string(),
+                        "peer_request".to_string(),
+                        "peer_response".to_string(),
+                    ],
+                    capabilities: serde_json::json!({}),
+                });
+        }
+
+        peers.into_values().collect()
     }
 
     async fn drain_interactions(&self) -> Vec<meerkat_core::InboxInteraction> {
@@ -153,6 +298,25 @@ impl CoreCommsRuntime for CommsRuntime {
         id: &meerkat_core::InteractionId,
     ) -> Option<tokio::sync::mpsc::Sender<meerkat_core::AgentEvent>> {
         self.subscriber_registry.lock().remove(&id.0)
+    }
+}
+
+fn map_event_injector_error(error: meerkat_core::event_injector::EventInjectorError) -> SendError {
+    match error {
+        meerkat_core::event_injector::EventInjectorError::Full => {
+            SendError::Validation("input queue full".into())
+        }
+        meerkat_core::event_injector::EventInjectorError::Closed => SendError::InputClosed,
+    }
+}
+
+fn map_router_send_error(err: crate::router::SendError) -> SendError {
+    match err {
+        crate::router::SendError::PeerNotFound(peer) => SendError::PeerNotFound(peer),
+        crate::router::SendError::PeerOffline => SendError::PeerOffline,
+        crate::router::SendError::Transport(_) | crate::router::SendError::Io(_) => {
+            SendError::Internal(err.to_string())
+        }
     }
 }
 
@@ -543,7 +707,16 @@ mod tests {
     use crate::identity::Signature;
     use crate::types::{Envelope, InboxItem, MessageKind, Status};
     use meerkat_core::SubscribableInjector;
+    use meerkat_core::{
+        SendError,
+        comms::{InputSource, InputStreamMode, PeerDirectorySource, PeerName},
+        types::SessionId,
+    };
     use uuid::Uuid;
+
+    fn clear_inproc_registry() {
+        InprocRegistry::global().clear();
+    }
 
     fn test_runtime_config(name: &str, tmp: &tempfile::TempDir) -> ResolvedCommsConfig {
         ResolvedCommsConfig {
@@ -795,5 +968,176 @@ mod tests {
         let random = meerkat_core::InteractionId(Uuid::new_v4());
         let sender = CoreCommsRuntime::interaction_subscriber(&runtime, &random);
         assert!(sender.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_core_send_input_no_reservation() {
+        clear_inproc_registry();
+        let runtime = CommsRuntime::inproc_only("input-no-reservation").unwrap();
+
+        let cmd = CommsCommand::Input {
+            session_id: SessionId::new(),
+            body: "standalone test input".to_string(),
+            source: InputSource::Rpc,
+            stream: InputStreamMode::None,
+            allow_self_session: false,
+        };
+
+        let receipt = CoreCommsRuntime::send(&runtime, cmd).await;
+        assert!(receipt.is_ok(), "send should succeed: {receipt:?}");
+
+        match receipt.unwrap() {
+            SendReceipt::InputAccepted {
+                interaction_id: _,
+                stream_reserved,
+            } => assert!(!stream_reserved),
+            other => panic!("Expected InputAccepted, got: {other:?}"),
+        }
+
+        let interactions = CoreCommsRuntime::drain_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        assert!(matches!(
+            &interactions[0].content,
+            meerkat_core::InteractionContent::Message { body } if body == "standalone test input"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_core_send_input_reserves_stream() {
+        clear_inproc_registry();
+        let runtime = CommsRuntime::inproc_only("input-with-reserve").unwrap();
+
+        let cmd = CommsCommand::Input {
+            session_id: SessionId::new(),
+            body: "streaming input".to_string(),
+            source: InputSource::Rpc,
+            stream: InputStreamMode::ReserveInteraction,
+            allow_self_session: false,
+        };
+
+        let receipt = CoreCommsRuntime::send(&runtime, cmd).await.unwrap();
+        let (interaction_id, reserved) = match receipt {
+            SendReceipt::InputAccepted {
+                interaction_id,
+                stream_reserved,
+            } => (interaction_id, stream_reserved),
+            other => panic!("Expected InputAccepted, got: {other:?}"),
+        };
+
+        assert!(reserved);
+
+        let sender = runtime
+            .take_interaction_stream_sender(&interaction_id)
+            .expect("reserved interaction should be registered");
+        drop(sender);
+
+        assert!(
+            runtime
+                .take_interaction_stream_sender(&interaction_id)
+                .is_none(),
+            "interaction registration must be one-shot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_core_send_peer_message_unknown_peer_fails() {
+        clear_inproc_registry();
+        let runtime = CommsRuntime::inproc_only("sender-unknown").unwrap();
+
+        let cmd = CommsCommand::PeerMessage {
+            to: PeerName("missing-peer".to_string()),
+            body: "hello".to_string(),
+        };
+
+        let result = CoreCommsRuntime::send(&runtime, cmd).await;
+        assert!(matches!(
+            result,
+            Err(SendError::PeerNotFound(peer)) if peer == "missing-peer"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_core_send_peer_message_success_and_drain() {
+        clear_inproc_registry();
+        let sender = CommsRuntime::inproc_only("sender-success").unwrap();
+        let receiver = CommsRuntime::inproc_only("receiver-success").unwrap();
+
+        {
+            let mut trusted = sender.trusted_peers.write().await;
+            trusted.upsert(crate::TrustedPeer {
+                name: "receiver-success".to_string(),
+                pubkey: receiver.public_key(),
+                addr: "inproc://receiver-success".to_string(),
+            });
+        }
+
+        {
+            let mut trusted = receiver.trusted_peers.write().await;
+            trusted.upsert(crate::TrustedPeer {
+                name: "sender-success".to_string(),
+                pubkey: sender.public_key(),
+                addr: "inproc://sender-success".to_string(),
+            });
+        }
+
+        let cmd = CommsCommand::PeerMessage {
+            to: PeerName("receiver-success".to_string()),
+            body: "greeting".to_string(),
+        };
+
+        let receipt = CoreCommsRuntime::send(&sender, cmd).await;
+        match receipt {
+            Ok(SendReceipt::PeerMessageSent {
+                envelope_id: _,
+                acked,
+            }) => assert!(!acked),
+            other => panic!("Expected peer message receipt, got: {other:?}"),
+        }
+
+        let interactions = CoreCommsRuntime::drain_interactions(&receiver).await;
+        assert_eq!(interactions.len(), 1);
+        assert!(matches!(
+            &interactions[0].content,
+            meerkat_core::InteractionContent::Message { body } if body == "greeting"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_core_peers_includes_inproc_and_trusted_without_self() {
+        clear_inproc_registry();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let peer_name = format!("trusted-mixed-{suffix}");
+        let runtime_name = format!("runtime-mixed-{suffix}");
+
+        let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
+
+        {
+            let mut trusted = runtime.trusted_peers.write().await;
+            trusted.upsert(crate::TrustedPeer {
+                name: peer_name.clone(),
+                pubkey: peer.public_key(),
+                addr: format!("inproc://{peer_name}"),
+            });
+        }
+
+        let peers = CoreCommsRuntime::peers(&runtime).await;
+        let names: Vec<_> = peers.iter().map(|entry| entry.name.0.clone()).collect();
+        assert!(names.iter().any(|name| name == &peer_name));
+        assert!(!names.iter().any(|name| name == &runtime_name));
+
+        let matched: Vec<_> = peers
+            .iter()
+            .filter(|entry| entry.name.0 == peer_name)
+            .collect();
+        assert_eq!(matched.len(), 1);
+
+        let peer = matched[0];
+        assert_eq!(peer.source, PeerDirectorySource::Trusted);
+        assert_eq!(peer.address, format!("inproc://{peer_name}"));
+        assert_eq!(peer.sendable_kinds.len(), 3);
+        assert!(peer.sendable_kinds.contains(&"peer_message".to_string()));
+        assert!(peer.sendable_kinds.contains(&"peer_request".to_string()));
+        assert!(peer.sendable_kinds.contains(&"peer_response".to_string()));
     }
 }

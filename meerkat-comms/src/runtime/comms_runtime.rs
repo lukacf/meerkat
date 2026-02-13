@@ -111,10 +111,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 }
             }
             CommsCommand::PeerMessage { to, body } => self
-                .router
-                .send_message(&to.0, body)
+                .send_peer_command(&to.0, crate::types::MessageKind::Message { body })
                 .await
-                .map_err(map_router_send_error)
                 .map(|_| SendReceipt::PeerMessageSent {
                     envelope_id: Uuid::new_v4(),
                     acked: false,
@@ -125,10 +123,14 @@ impl CoreCommsRuntime for CommsRuntime {
                 params,
                 stream: _,
             } => self
-                .router
-                .send_request(&to.0, intent, params)
+                .send_peer_command(
+                    &to.0,
+                    crate::types::MessageKind::Request {
+                        intent: intent,
+                        params: params,
+                    },
+                )
                 .await
-                .map_err(map_router_send_error)
                 .map(|_| SendReceipt::PeerRequestSent {
                     envelope_id: Uuid::new_v4(),
                     interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
@@ -146,10 +148,15 @@ impl CoreCommsRuntime for CommsRuntime {
                     meerkat_core::ResponseStatus::Failed => crate::Status::Failed,
                 };
 
-                self.router
-                    .send_response(&to.0, in_reply_to.0, status, result)
+                self.send_peer_command(
+                    &to.0,
+                    crate::types::MessageKind::Response {
+                        in_reply_to: in_reply_to.0,
+                        status,
+                        result,
+                    },
+                )
                     .await
-                    .map_err(map_router_send_error)
                     .map(|_| SendReceipt::PeerResponseSent {
                         envelope_id: Uuid::new_v4(),
                         in_reply_to,
@@ -316,6 +323,15 @@ fn map_router_send_error(err: crate::router::SendError) -> SendError {
         crate::router::SendError::PeerOffline => SendError::PeerOffline,
         crate::router::SendError::Transport(_) | crate::router::SendError::Io(_) => {
             SendError::Internal(err.to_string())
+        }
+    }
+}
+
+fn map_inproc_send_error(err: crate::inproc::InprocSendError) -> SendError {
+    match err {
+        crate::inproc::InprocSendError::PeerNotFound(peer) => SendError::PeerNotFound(peer),
+        crate::inproc::InprocSendError::InboxClosed | crate::inproc::InprocSendError::InboxFull => {
+            SendError::PeerOffline
         }
     }
 }
@@ -502,6 +518,21 @@ impl CommsRuntime {
     pub fn router(&self) -> &Router {
         &self.router
     }
+    async fn send_peer_command(
+        &self,
+        peer_name: &str,
+        kind: crate::types::MessageKind,
+    ) -> Result<(), SendError> {
+        let primary = self.router.send(peer_name, kind.clone()).await;
+        match primary {
+            Ok(()) => Ok(()),
+            Err(crate::router::SendError::PeerNotFound(_)) => InprocRegistry::global()
+                .send(&self.keypair, peer_name, kind)
+                .map_err(map_inproc_send_error),
+            Err(err) => Err(map_router_send_error(err)),
+        }
+    }
+
     pub fn router_arc(&self) -> Arc<Router> {
         self.router.clone()
     }
@@ -1099,6 +1130,39 @@ mod tests {
         assert!(matches!(
             &interactions[0].content,
             meerkat_core::InteractionContent::Message { body } if body == "greeting"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_core_send_peer_message_success_via_inproc_without_trusted_entry() {
+        clear_inproc_registry();
+        let sender = CommsRuntime::inproc_only("sender-inproc-only").unwrap();
+        let receiver = CommsRuntime::inproc_only("receiver-inproc-only").unwrap();
+        {
+            let mut trusted = receiver.trusted_peers.write().await;
+            trusted.upsert(crate::TrustedPeer {
+                name: "sender-inproc-only".to_string(),
+                pubkey: sender.public_key(),
+                addr: "inproc://sender-inproc-only".to_string(),
+            });
+        }
+
+        let cmd = CommsCommand::PeerMessage {
+            to: PeerName("receiver-inproc-only".to_string()),
+            body: "inproc-only hello".to_string(),
+        };
+
+        let receipt = CoreCommsRuntime::send(&sender, cmd).await;
+        match receipt {
+            Ok(SendReceipt::PeerMessageSent { .. }) => {}
+            other => panic!("Expected peer message receipt, got: {other:?}"),
+        }
+
+        let interactions = CoreCommsRuntime::drain_interactions(&receiver).await;
+        assert_eq!(interactions.len(), 1);
+        assert!(matches!(
+            &interactions[0].content,
+            meerkat_core::InteractionContent::Message { body } if body == "inproc-only hello"
         ));
     }
 

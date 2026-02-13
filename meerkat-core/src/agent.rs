@@ -14,7 +14,7 @@ mod state;
 use crate::budget::Budget;
 use crate::comms::{
     CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
-    StreamError, StreamScope,
+    StreamError, StreamScope, TrustedPeerSpec,
 };
 use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
@@ -183,6 +183,24 @@ pub trait AgentSessionStore: Send + Sync {
 /// Trait for comms runtime that can be used with the agent
 #[async_trait]
 pub trait CommsRuntime: Send + Sync {
+    /// Runtime-local public key identifier, if available.
+    ///
+    /// Returns a peer ID string in `ed25519:<base64>` format.
+    fn public_key(&self) -> Option<String> {
+        None
+    }
+
+    /// Register a trusted peer for future peer sends.
+    ///
+    /// Runtimes that manage trust dynamically should accept this as a mutable
+    /// control-plane operation and return `SendError::Unsupported` if not
+    /// available.
+    async fn add_trusted_peer(&self, _peer: TrustedPeerSpec) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "add_trusted_peer not supported for this CommsRuntime".to_string(),
+        ))
+    }
+
     /// Dispatch a canonical comms command.
     async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
         Err(SendError::Unsupported(
@@ -321,4 +339,43 @@ where
     /// `drain_comms_inbox()` becomes a no-op to avoid stealing
     /// interaction-scoped messages through the legacy path.
     pub(crate) host_drain_active: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CommsRuntime;
+    use crate::comms::{SendError, TrustedPeerSpec};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    struct NoopCommsRuntime {
+        notify: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl CommsRuntime for NoopCommsRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> std::sync::Arc<Notify> {
+            self.notify.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_comms_runtime_trait_defaults_hide_unimplemented_features() {
+        let runtime = NoopCommsRuntime {
+            notify: Arc::new(Notify::new()),
+        };
+        assert!(<NoopCommsRuntime as CommsRuntime>::public_key(&runtime).is_none());
+        let peer = TrustedPeerSpec {
+            name: "peer-a".to_string(),
+            peer_id: "ed25519:test".to_string(),
+            address: "inproc://peer-a".to_string(),
+        };
+        let result = <NoopCommsRuntime as CommsRuntime>::add_trusted_peer(&runtime, peer).await;
+        assert!(matches!(result, Err(SendError::Unsupported(_))));
+    }
 }

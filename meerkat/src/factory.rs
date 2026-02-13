@@ -472,8 +472,7 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
-        #[allow(unused_variables)]
-        skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
+        #[allow(unused_variables)] skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let builder = BuiltinDispatcherConfig {
             store,

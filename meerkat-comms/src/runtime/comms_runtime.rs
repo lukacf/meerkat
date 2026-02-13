@@ -3,7 +3,8 @@
 use super::comms_config::ResolvedCommsConfig;
 use crate::agent::types::{CommsContent, CommsMessage};
 use crate::{
-    InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeers, handle_connection,
+    InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers,
+    handle_connection,
 };
 use async_trait::async_trait;
 use futures::Stream;
@@ -11,7 +12,7 @@ use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, EventStream, InputStreamMode, PeerDirectoryEntry, PeerDirectorySource, PeerName,
-    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
+    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope, TrustedPeerSpec,
 };
 use meerkat_core::config::PlainEventSource;
 use parking_lot::Mutex;
@@ -181,6 +182,23 @@ impl CoreCommsRuntime for CommsRuntime {
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
         self.inbox_notify.clone()
     }
+    fn public_key(&self) -> Option<String> {
+        Some(self.public_key.to_peer_id())
+    }
+
+    async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
+        let public_key = PubKey::from_peer_id(&peer.peer_id)
+            .map_err(|err| SendError::Validation(err.to_string()))?;
+
+        let trusted_peer = TrustedPeer {
+            name: peer.name,
+            pubkey: public_key,
+            addr: peer.address,
+        };
+        self.trusted_peers.write().await.upsert(trusted_peer);
+        Ok(())
+    }
+
     fn dismiss_received(&self) -> bool {
         self.dismiss_flag.swap(false, Ordering::SeqCst)
     }
@@ -1605,6 +1623,84 @@ mod tests {
 
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
         assert_eq!(interactions.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_add_trusted_peer_updates_peers_and_enables_send() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("trust-sender-{suffix}");
+        let receiver_name = format!("trust-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+
+        let peer_spec = meerkat_core::comms::TrustedPeerSpec::new(
+            &receiver_name,
+            receiver.public_key().to_peer_id(),
+            format!("inproc://{receiver_name}"),
+        )
+        .expect("valid peer spec");
+
+        CoreCommsRuntime::add_trusted_peer(&sender, peer_spec)
+            .await
+            .expect("trusted peer add should succeed");
+
+        let reverse_spec = meerkat_core::comms::TrustedPeerSpec::new(
+            &sender_name,
+            sender.public_key().to_peer_id(),
+            format!("inproc://{sender_name}"),
+        )
+        .expect("valid reverse peer spec");
+
+        CoreCommsRuntime::add_trusted_peer(&receiver, reverse_spec)
+            .await
+            .expect("reverse trusted peer add should succeed");
+
+        let peers = CoreCommsRuntime::peers(&sender).await;
+        let receiver_entries: Vec<_> = peers
+            .iter()
+            .filter(|entry| entry.name.0 == receiver_name)
+            .collect();
+        assert_eq!(receiver_entries.len(), 1, "peer should appear in peers()");
+
+        let send_cmd = CommsCommand::PeerMessage {
+            to: PeerName(receiver_name.clone()),
+            body: "hello trusted peer".to_string(),
+        };
+        let receipt = CoreCommsRuntime::send(&sender, send_cmd).await;
+        assert!(matches!(receipt, Ok(SendReceipt::PeerMessageSent { .. })));
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
+        assert_eq!(interactions.len(), 1);
+        assert!(matches!(
+            &interactions[0].content,
+            meerkat_core::InteractionContent::Message { body } if body == "hello trusted peer"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_add_trusted_peer_invalid_peer_id_is_rejected() {
+        let sender = CommsRuntime::inproc_only("trust-invalid-sender").unwrap();
+        let invalid_peer_spec = meerkat_core::comms::TrustedPeerSpec {
+            name: "invalid".to_string(),
+            peer_id: "bad-peer-id".to_string(),
+            address: "inproc://invalid".to_string(),
+        };
+
+        let result = CoreCommsRuntime::add_trusted_peer(&sender, invalid_peer_spec).await;
+        assert!(matches!(result, Err(SendError::Validation(_))));
+    }
+
+    #[test]
+    fn test_core_runtime_public_key_is_exposed_via_trait() {
+        let runtime = CommsRuntime::inproc_only("pub-key-trait").unwrap();
+        let public_key = <CommsRuntime as CoreCommsRuntime>::public_key(&runtime);
+        assert!(
+            public_key
+                .as_ref()
+                .map(|id| id.starts_with("ed25519:"))
+                .unwrap_or(false),
+            "public_key should be available and formatted as ed25519 peer id"
+        );
     }
 
     #[tokio::test]

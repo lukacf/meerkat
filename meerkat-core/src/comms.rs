@@ -174,6 +174,29 @@ pub struct PeerDirectoryEntry {
     pub capabilities: serde_json::Value,
 }
 
+/// Canonical payload for registering a trusted peer through a runtime seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedPeerSpec {
+    pub name: String,
+    pub peer_id: String,
+    pub address: String,
+}
+
+impl TrustedPeerSpec {
+    pub fn new(
+        name: impl Into<String>,
+        peer_id: impl Into<String>,
+        address: impl Into<String>,
+    ) -> Result<Self, String> {
+        let name = PeerName::new(name.into())?;
+        Ok(Self {
+            name: name.0,
+            peer_id: peer_id.into(),
+            address: address.into(),
+        })
+    }
+}
+
 /// Scope for streaming event output.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StreamScope {
@@ -267,5 +290,20 @@ mod tests {
         };
         assert_eq!(entry.name.0, "agent");
         assert_eq!(entry.source, PeerDirectorySource::Inproc);
+    }
+
+    #[test]
+    fn trusted_peer_spec_requires_valid_name() {
+        let invalid = TrustedPeerSpec::new("", "ed25519:abc", "inproc://a");
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn trusted_peer_spec_keeps_peer_id_and_address() {
+        let spec = TrustedPeerSpec::new("alice", "ed25519:abc", "inproc://alice")
+            .expect("valid trusted peer spec should parse");
+        assert_eq!(spec.name, "alice");
+        assert_eq!(spec.peer_id, "ed25519:abc");
+        assert_eq!(spec.address, "inproc://alice");
     }
 }

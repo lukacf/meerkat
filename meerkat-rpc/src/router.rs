@@ -3,14 +3,14 @@
 use std::sync::Arc;
 
 #[cfg(feature = "comms")]
-use std::collections::HashMap;
-#[cfg(feature = "comms")]
 use futures::StreamExt;
 #[cfg(feature = "comms")]
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+#[cfg(feature = "comms")]
+use std::collections::HashMap;
 #[cfg(feature = "comms")]
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 #[cfg(feature = "comms")]
 use tokio::sync::oneshot;
 #[cfg(feature = "comms")]
@@ -411,9 +411,7 @@ impl MethodRouter {
                 }
                 StreamForwarderState::Closed => true,
             },
-            None => {
-                false
-            }
+            None => false,
         };
 
         RpcResponse::success(

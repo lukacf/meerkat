@@ -215,6 +215,7 @@ pub struct CommsMessage {
 
 impl CommsMessage {
     /// Create a CommsMessage from an InboxItem and trusted peers list.
+    /// Resolves sender only from trusted peers.
     ///
     /// Returns `None` if:
     /// - The item is not an External envelope
@@ -227,8 +228,9 @@ impl CommsMessage {
         };
 
         // Resolve peer name from pubkey
-        let peer = trusted_peers.get_peer(&envelope.from)?;
-        let from_peer = peer.name.clone();
+        let from_peer = trusted_peers
+            .get_peer(&envelope.from)
+            .map(|peer| peer.name.clone())?;
 
         // Convert MessageKind to CommsContent
         let content = match &envelope.kind {

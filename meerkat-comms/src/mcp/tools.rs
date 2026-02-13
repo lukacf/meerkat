@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::InprocRegistry;
 #[cfg(test)]
 use crate::{CommsConfig, Keypair};
-use crate::{Router, Status, TrustedPeers};
+use crate::{Router, Status, TrustedPeer, TrustedPeers};
 
 fn schema_for<T: JsonSchema>() -> Value {
     let schema = schemars::schema_for!(T);
@@ -71,6 +71,27 @@ pub struct ToolContext {
     pub trusted_peers: Arc<RwLock<TrustedPeers>>,
 }
 
+impl ToolContext {
+    async fn sync_trusted_inproc_peers(&self) {
+        let self_pubkey = self.router.keypair_arc().public_key();
+        let mut trusted = self.trusted_peers.write().await;
+        for (name, pubkey) in InprocRegistry::global().peers() {
+            if pubkey == self_pubkey {
+                continue;
+            }
+
+            trusted
+                .peers
+                .retain(|entry| entry.name != name && entry.pubkey != pubkey);
+            trusted.peers.push(TrustedPeer {
+                name: name.clone(),
+                pubkey,
+                addr: format!("inproc://{}", name),
+            });
+        }
+    }
+}
+
 /// Returns the list of comms tools: exactly `send` and `peers`.
 pub fn tools_list() -> Vec<Value> {
     vec![
@@ -109,6 +130,7 @@ pub async fn handle_tools_call(
 }
 
 async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, String> {
+    ctx.sync_trusted_inproc_peers().await;
     match input.kind.as_str() {
         "peer_message" => {
             let body = input.body.ok_or("peer_message requires 'body' field")?;
@@ -163,6 +185,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
 }
 
 async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
+    ctx.sync_trusted_inproc_peers().await;
     let self_pubkey = ctx.router.keypair_arc().public_key();
     let peers = ctx.trusted_peers.read().await;
     let mut peer_map: BTreeMap<String, Value> = peers
@@ -223,8 +246,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_peers() {
-        InprocRegistry::global().clear();
-
         let keypair = Keypair::generate();
         let trusted_peers = TrustedPeers {
             peers: vec![TrustedPeer {
@@ -252,8 +273,6 @@ mod tests {
         let val = result.unwrap();
         let peers = val["peers"].as_array().expect("peers should be array");
         assert!(peers.iter().any(|p| p["name"] == "test-peer"));
-
-        InprocRegistry::global().clear();
     }
 
     #[tokio::test]
@@ -295,7 +314,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_via_inproc_fallback() {
+    async fn test_send_syncs_inproc_peer_into_trusted() {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let sender_name = format!("sender-{suffix}");
         let receiver_name = format!("receiver-{suffix}");
@@ -333,7 +352,7 @@ mod tests {
             trusted_peers,
         };
 
-        // Send a peer_message — should fall back to inproc
+        // Send a peer_message — sync in-proc peers into trusted peers first.
         let result = handle_tools_call(
             &ctx,
             "send",
@@ -347,7 +366,7 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "send should succeed via inproc fallback: {:?}",
+            "send should succeed when inproc peer is synced into trusted: {:?}",
             result.err()
         );
         let val = result.unwrap();

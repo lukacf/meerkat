@@ -3,7 +3,8 @@
 use super::comms_config::ResolvedCommsConfig;
 use crate::agent::types::{CommsContent, CommsMessage};
 use crate::{
-    InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeers, handle_connection,
+    InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers,
+    handle_connection,
 };
 use async_trait::async_trait;
 use futures::Stream;
@@ -148,6 +149,7 @@ fn is_dismiss(msg: &CommsMessage) -> bool {
 #[async_trait]
 impl CoreCommsRuntime for CommsRuntime {
     async fn drain_messages(&self) -> Vec<String> {
+        self.sync_trusted_peers_from_inproc().await;
         let mut inbox = self.inbox.lock().await;
         let items = inbox.try_drain();
         let trusted = self.trusted_peers.read().await;
@@ -444,6 +446,7 @@ impl CoreCommsRuntime for CommsRuntime {
     }
 
     async fn drain_inbox_interactions(&self) -> Vec<meerkat_core::InboxInteraction> {
+        self.sync_trusted_peers_from_inproc().await;
         let mut inbox = self.inbox.lock().await;
         let items = inbox.try_drain();
         let trusted = self.trusted_peers.read().await;
@@ -754,10 +757,38 @@ impl CommsRuntime {
     pub fn router(&self) -> &Router {
         &self.router
     }
+    async fn sync_trusted_peers_from_inproc(&self) {
+        let inproc_peers = InprocRegistry::global().peers();
+        if inproc_peers.is_empty() {
+            return;
+        }
+
+        let self_pubkey = self.public_key;
+        let self_name = self.config.name.clone();
+        let mut trusted = self.trusted_peers.write().await;
+
+        for (name, pubkey) in inproc_peers {
+            if name == self_name || pubkey == self_pubkey {
+                continue;
+            }
+
+            trusted
+                .peers
+                .retain(|entry| entry.name != name && entry.pubkey != pubkey);
+
+            trusted.peers.push(TrustedPeer {
+                name: name.clone(),
+                pubkey,
+                addr: format!("inproc://{}", name),
+            });
+        }
+    }
+
     /// Canonical peer resolver: trusted first, inproc second.
     ///
     /// Both `send()` and `peers()` use this same resolution policy.
     async fn resolve_peer_directory(&self) -> Vec<PeerDirectoryEntry> {
+        self.sync_trusted_peers_from_inproc().await;
         let sendable_kinds = vec![
             "peer_message".to_string(),
             "peer_request".to_string(),
@@ -814,12 +845,13 @@ impl CommsRuntime {
         peers.into_values().collect()
     }
 
-    /// Canonical send resolver: trusted first, inproc fallback.
+    /// Canonical send path: trusted peers are synchronized from inproc peers first.
     async fn send_peer_command(
         &self,
         peer_name: &str,
         kind: crate::types::MessageKind,
     ) -> Result<(), SendError> {
+        self.sync_trusted_peers_from_inproc().await;
         self.router
             .send(peer_name, kind)
             .await
@@ -923,6 +955,7 @@ impl CommsRuntime {
     }
 
     pub async fn drain_messages(&self) -> Vec<CommsMessage> {
+        self.sync_trusted_peers_from_inproc().await;
         let mut inbox = self.inbox.lock().await;
         let items = inbox.try_drain();
         let trusted = self.trusted_peers.read().await;
@@ -934,6 +967,7 @@ impl CommsRuntime {
 
     pub async fn recv_message(&self) -> Option<CommsMessage> {
         loop {
+            self.sync_trusted_peers_from_inproc().await;
             {
                 let mut inbox = self.inbox.lock().await;
                 let items = inbox.try_drain();
@@ -1464,11 +1498,11 @@ mod tests {
         };
 
         let stream =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id.clone()))
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id))
                 .expect("first attach should succeed");
 
         let dup =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id.clone()));
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id));
         assert!(matches!(dup, Err(StreamError::AlreadyAttached(_))));
 
         drop(stream);
@@ -1538,7 +1572,7 @@ mod tests {
         };
 
         let dup =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id.clone()));
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id));
         assert!(matches!(dup, Err(StreamError::AlreadyAttached(_))));
 
         assert!(
@@ -1618,14 +1652,6 @@ mod tests {
         let receiver_name = format!("receiver-ipc-{suffix}");
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
         let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
-        {
-            let mut trusted = receiver.trusted_peers.write().await;
-            trusted.upsert(crate::TrustedPeer {
-                name: sender_name.clone(),
-                pubkey: sender.public_key(),
-                addr: format!("inproc://{sender_name}"),
-            });
-        }
 
         let cmd = CommsCommand::PeerMessage {
             to: PeerName(receiver_name),
@@ -1767,12 +1793,12 @@ mod tests {
         };
 
         let stream =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid.clone())).unwrap();
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid)).unwrap();
         // Drop stream → ClosedEarly
         drop(stream);
 
         // Second attach after close → NotReserved (entry cleaned up)
-        let result = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid.clone()));
+        let result = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid));
         assert!(matches!(result, Err(StreamError::NotReserved(_))));
     }
 
@@ -1796,7 +1822,7 @@ mod tests {
         };
 
         let mut stream =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid.clone())).unwrap();
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid)).unwrap();
 
         // Simulate terminal event
         runtime.mark_interaction_complete(iid.0);
@@ -1923,13 +1949,13 @@ mod tests {
 
         // Attach
         let _stream =
-            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid.clone())).unwrap();
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid)).unwrap();
 
         // Complete
         runtime.mark_interaction_complete(iid.0);
 
         // Try to attach again → NotReserved
-        let result = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid.clone()));
+        let result = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid));
         assert!(
             matches!(result, Err(StreamError::NotReserved(_))),
             "attach after completed should return NotReserved"

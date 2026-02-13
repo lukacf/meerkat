@@ -402,7 +402,12 @@ async fn comms_send(
                 Some("uds") => InputSource::Uds,
                 Some("stdin") => InputSource::Stdin,
                 Some("webhook") => InputSource::Webhook,
-                _ => InputSource::Rpc,
+                Some("rpc") | None => InputSource::Rpc,
+                Some(other) => {
+                    return Err(ApiError::BadRequest(format!(
+                        "invalid source: {other}"
+                    )));
+                }
             };
             let stream_mode = match req.stream.as_deref() {
                 Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
@@ -450,8 +455,13 @@ async fn comms_send(
                 .map_err(|_| ApiError::BadRequest(format!("invalid UUID: {in_reply_to_str}")))?;
             let status = match req.status.as_deref() {
                 Some("accepted") => meerkat_core::ResponseStatus::Accepted,
+                Some("completed") | None => meerkat_core::ResponseStatus::Completed,
                 Some("failed") => meerkat_core::ResponseStatus::Failed,
-                _ => meerkat_core::ResponseStatus::Completed,
+                Some(other) => {
+                    return Err(ApiError::BadRequest(format!(
+                        "invalid status: {other}"
+                    )));
+                }
             };
             CommsCommand::PeerResponse {
                 to: PeerName(to),

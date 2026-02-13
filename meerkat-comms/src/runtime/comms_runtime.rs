@@ -299,11 +299,36 @@ impl CoreCommsRuntime for CommsRuntime {
             } => {
                 let interaction_id = Uuid::new_v4();
                 let stream_reserved = stream == InputStreamMode::ReserveInteraction;
-                self.send_peer_command(
-                    &to.0,
-                    crate::types::MessageKind::Request { intent, params },
-                )
-                .await?;
+
+                if stream_reserved {
+                    // Register reservation BEFORE sending so stream() can attach.
+                    let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(4096);
+                    self.subscriber_registry
+                        .lock()
+                        .insert(interaction_id, sender.clone());
+                    self.interaction_stream_registry.lock().insert(
+                        interaction_id,
+                        StreamRegistryEntry::reserved(sender, receiver),
+                    );
+                }
+
+                if let Err(e) = self
+                    .send_peer_command(
+                        &to.0,
+                        crate::types::MessageKind::Request { intent, params },
+                    )
+                    .await
+                {
+                    if stream_reserved {
+                        // Clean up reservation on send failure.
+                        self.interaction_stream_registry
+                            .lock()
+                            .remove(&interaction_id);
+                        self.subscriber_registry.lock().remove(&interaction_id);
+                    }
+                    return Err(e);
+                }
+
                 Ok(SendReceipt::PeerRequestSent {
                     envelope_id: Uuid::new_v4(),
                     interaction_id: meerkat_core::InteractionId(interaction_id),
@@ -390,11 +415,20 @@ impl CoreCommsRuntime for CommsRuntime {
                     StreamRegistryEntry::reserved(sender, receiver),
                 );
 
-                self.send_peer_command(
-                    &to.0,
-                    crate::types::MessageKind::Request { intent, params },
-                )
-                .await?;
+                if let Err(e) = self
+                    .send_peer_command(
+                        &to.0,
+                        crate::types::MessageKind::Request { intent, params },
+                    )
+                    .await
+                {
+                    // Clean up reservation on send failure.
+                    self.interaction_stream_registry
+                        .lock()
+                        .remove(&interaction_id);
+                    self.subscriber_registry.lock().remove(&interaction_id);
+                    return Err(SendAndStreamError::Send(e));
+                }
 
                 let receipt = SendReceipt::PeerRequestSent {
                     envelope_id: Uuid::new_v4(),
@@ -1550,8 +1584,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_send_peer_message_unknown_peer_fails() {
-        clear_inproc_registry();
-        let runtime = CommsRuntime::inproc_only("sender-unknown").unwrap();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("sender-{suffix}")).unwrap();
 
         let cmd = CommsCommand::PeerMessage {
             to: PeerName("missing-peer".to_string()),
@@ -1567,30 +1601,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_send_peer_message_success_and_drain() {
-        clear_inproc_registry();
-        let sender = CommsRuntime::inproc_only("sender-success").unwrap();
-        let receiver = CommsRuntime::inproc_only("receiver-success").unwrap();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("sender-{suffix}");
+        let receiver_name = format!("receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
         {
             let mut trusted = sender.trusted_peers.write().await;
             trusted.upsert(crate::TrustedPeer {
-                name: "receiver-success".to_string(),
+                name: receiver_name.clone(),
                 pubkey: receiver.public_key(),
-                addr: "inproc://receiver-success".to_string(),
+                addr: format!("inproc://{receiver_name}"),
             });
         }
 
         {
             let mut trusted = receiver.trusted_peers.write().await;
             trusted.upsert(crate::TrustedPeer {
-                name: "sender-success".to_string(),
+                name: sender_name.clone(),
                 pubkey: sender.public_key(),
-                addr: "inproc://sender-success".to_string(),
+                addr: format!("inproc://{sender_name}"),
             });
         }
 
         let cmd = CommsCommand::PeerMessage {
-            to: PeerName("receiver-success".to_string()),
+            to: PeerName(receiver_name),
             body: "greeting".to_string(),
         };
 
@@ -1613,20 +1649,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_send_peer_message_success_via_inproc_without_trusted_entry() {
-        clear_inproc_registry();
-        let sender = CommsRuntime::inproc_only("sender-inproc-only").unwrap();
-        let receiver = CommsRuntime::inproc_only("receiver-inproc-only").unwrap();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("sender-ipc-{suffix}");
+        let receiver_name = format!("receiver-ipc-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
         {
             let mut trusted = receiver.trusted_peers.write().await;
             trusted.upsert(crate::TrustedPeer {
-                name: "sender-inproc-only".to_string(),
+                name: sender_name.clone(),
                 pubkey: sender.public_key(),
-                addr: "inproc://sender-inproc-only".to_string(),
+                addr: format!("inproc://{sender_name}"),
             });
         }
 
         let cmd = CommsCommand::PeerMessage {
-            to: PeerName("receiver-inproc-only".to_string()),
+            to: PeerName(receiver_name),
             body: "inproc-only hello".to_string(),
         };
 

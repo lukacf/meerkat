@@ -279,7 +279,12 @@ fn build_comms_command(
             let stream = match params.stream.as_deref() {
                 Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
                 Some("none") | None => InputStreamMode::None,
-                _ => InputStreamMode::None,
+                Some(other) => {
+                    errors.push(serde_json::json!({
+                        "field": "stream", "issue": "invalid_value", "got": other
+                    }));
+                    return Err(errors);
+                }
             };
             Ok(CommsCommand::PeerRequest {
                 to,

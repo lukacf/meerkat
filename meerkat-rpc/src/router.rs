@@ -106,8 +106,16 @@ impl StreamScopeState {
 
 #[cfg(feature = "comms")]
 struct StreamForwarder {
-    stop_tx: Option<oneshot::Sender<()>>,
-    task: JoinHandle<()>,
+    state: StreamForwarderState,
+}
+
+#[cfg(feature = "comms")]
+enum StreamForwarderState {
+    Active {
+        stop_tx: Option<oneshot::Sender<()>>,
+        task: JoinHandle<()>,
+    },
+    Closed,
 }
 
 // ---------------------------------------------------------------------------
@@ -332,14 +340,22 @@ impl MethodRouter {
                 }
             }
 
-            active_streams.lock().await.remove(&stream_id_for_task);
+            let mut active_streams = active_streams.lock().await;
+            if active_streams
+                .get(&stream_id_for_task)
+                .is_some_and(|stream| matches!(stream.state, StreamForwarderState::Active { .. }))
+            {
+                active_streams.remove(&stream_id_for_task);
+            }
         });
 
         self.active_streams.lock().await.insert(
             stream_id,
             StreamForwarder {
-                stop_tx: Some(stop_tx),
-                task,
+                state: StreamForwarderState::Active {
+                    stop_tx: Some(stop_tx),
+                    task,
+                },
             },
         );
 
@@ -383,18 +399,20 @@ impl MethodRouter {
         };
 
         let mut active_streams = self.active_streams.lock().await;
-        let already_closed = match active_streams.remove(&stream_id) {
-            Some(stream) => {
-                drop(active_streams);
-                if let Some(stop_tx) = stream.stop_tx {
-                    let _ = stop_tx.send(());
+        let already_closed = match active_streams.get_mut(&stream_id) {
+            Some(stream) => match &mut stream.state {
+                StreamForwarderState::Active { stop_tx, task } => {
+                    if let Some(stop_tx) = stop_tx.take() {
+                        let _ = stop_tx.send(());
+                    }
+                    task.abort();
+                    stream.state = StreamForwarderState::Closed;
+                    false
                 }
-                stream.task.abort();
-                false
-            }
+                StreamForwarderState::Closed => true,
+            },
             None => {
-                drop(active_streams);
-                true
+                false
             }
         };
 
@@ -628,6 +646,7 @@ mod tests {
         let close_resp = router.dispatch(close_req).await.unwrap();
         let closed = result_value(&close_resp);
         assert_eq!(closed["closed"], true);
+        assert_eq!(closed["already_closed"], false);
 
         // Idempotent: second close succeeds with already_closed=true.
         let close_again_req = make_request(
@@ -638,6 +657,21 @@ mod tests {
         let close_again = result_value(&close_again_resp);
         assert_eq!(close_again["closed"], true);
         assert_eq!(close_again["already_closed"], true);
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn comms_stream_close_unknown_returns_not_closed() {
+        let (router, _notif_rx) = test_router().await;
+
+        let close_req = make_request(
+            "comms/stream_close",
+            serde_json::json!({"stream_id": "00000000-0000-0000-0000-000000000000"}),
+        );
+        let close_resp = router.dispatch(close_req).await.unwrap();
+        let closed = result_value(&close_resp);
+        assert_eq!(closed["closed"], true);
+        assert_eq!(closed["already_closed"], false);
     }
 
     /// 2. Unknown method returns METHOD_NOT_FOUND error.

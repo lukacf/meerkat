@@ -1783,6 +1783,65 @@ mod tests {
         );
     }
 
+    // --- M5: send_and_stream partial-failure tests ---
+
+    #[tokio::test]
+    async fn test_m5_send_and_stream_non_streamable_returns_stream_attach() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let peer_name = format!("m5-peer-{suffix}");
+        let runtime_name = format!("m5-runtime-{suffix}");
+
+        let _peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
+
+        let cmd = CommsCommand::PeerMessage {
+            to: PeerName(peer_name),
+            body: "not streamable".to_string(),
+        };
+        let result = CoreCommsRuntime::send_and_stream(&runtime, cmd).await;
+        match result {
+            Err(SendAndStreamError::StreamAttach { receipt, error }) => {
+                assert!(
+                    matches!(receipt, SendReceipt::PeerMessageSent { .. }),
+                    "receipt should be PeerMessageSent"
+                );
+                assert!(
+                    matches!(error, StreamError::NotFound(_)),
+                    "error should be NotFound for non-streamable command"
+                );
+            }
+            Err(e) => panic!("expected StreamAttach error, got send error: {e}"),
+            Ok(_) => panic!("expected StreamAttach error, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_m5_send_and_stream_input_none_is_not_streamable() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("m5-none-{suffix}")).unwrap();
+        let session_id = meerkat_core::SessionId::new();
+
+        let cmd = CommsCommand::Input {
+            session_id: session_id.clone(),
+            body: "no stream".to_string(),
+            source: meerkat_core::InputSource::Rpc,
+            stream: InputStreamMode::None,
+            allow_self_session: true,
+        };
+        let result = CoreCommsRuntime::send_and_stream(&runtime, cmd).await;
+        match result {
+            Err(SendAndStreamError::StreamAttach { receipt, error }) => {
+                assert!(
+                    matches!(receipt, SendReceipt::InputAccepted { stream_reserved: false, .. }),
+                    "receipt should indicate no stream reserved"
+                );
+                assert!(matches!(error, StreamError::NotFound(_)));
+            }
+            Err(e) => panic!("expected StreamAttach error, got send error: {e}"),
+            Ok(_) => panic!("expected StreamAttach error, got Ok"),
+        }
+    }
+
     #[tokio::test]
     async fn test_m4_attach_after_completed_returns_not_reserved() {
         let suffix = Uuid::new_v4().simple().to_string();

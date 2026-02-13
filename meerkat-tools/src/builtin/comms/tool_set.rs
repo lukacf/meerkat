@@ -1,18 +1,14 @@
 //! CommsToolSet - groups all comms tools together
 
-use super::tools::{
-    CommsToolState, ListPeersTool, SendMessageTool, SendRequestTool, SendResponseTool,
-};
+use super::tools::{CommsToolState, PeersTool, SendTool};
 use meerkat_comms::{Router, TrustedPeers};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Collection of all comms tools
+/// Collection of all comms tools: `send` and `peers`.
 pub struct CommsToolSet {
-    pub send_message: SendMessageTool,
-    pub send_request: SendRequestTool,
-    pub send_response: SendResponseTool,
-    pub list_peers: ListPeersTool,
+    pub send: SendTool,
+    pub peers: PeersTool,
 }
 
 impl CommsToolSet {
@@ -20,21 +16,14 @@ impl CommsToolSet {
     pub fn new(router: Arc<Router>, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
         let state = CommsToolState::new(router, trusted_peers);
         Self {
-            send_message: SendMessageTool::new(state.clone()),
-            send_request: SendRequestTool::new(state.clone()),
-            send_response: SendResponseTool::new(state.clone()),
-            list_peers: ListPeersTool::new(state),
+            send: SendTool::new(state.clone()),
+            peers: PeersTool::new(state),
         }
     }
 
     /// Get tool names for collision detection
     pub fn tool_names(&self) -> Vec<&str> {
-        vec![
-            "send_message",
-            "send_request",
-            "send_response",
-            "list_peers",
-        ]
+        vec!["send", "peers"]
     }
 
     /// Usage instructions for comms tools
@@ -43,10 +32,8 @@ impl CommsToolSet {
 
 You have access to comms tools for communicating with other agents:
 
-- `send_message`: Send a message to a peer. The peer receives it in their inbox.
-- `send_request`: Send a request to a peer with an intent and parameters.
-- `send_response`: Reply to a request with a status and result.
-- `list_peers`: List all trusted peers.
+- `send`: Send a message, request, or response to a peer. Use `kind` to select the type.
+- `peers`: List all visible peers.
 
 When communicating with other agents, identify them by their peer name (not pubkey)."#
     }
@@ -79,6 +66,6 @@ mod tests {
         ));
 
         let tool_set = CommsToolSet::new(router, trusted_peers);
-        assert_eq!(tool_set.tool_names().len(), 4);
+        assert_eq!(tool_set.tool_names().len(), 2);
     }
 }

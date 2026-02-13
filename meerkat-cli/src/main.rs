@@ -1998,10 +1998,8 @@ mod tests {
         let tools = dispatcher.tools();
         let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
 
-        assert!(tool_names.contains(&"send_message"));
-        assert!(tool_names.contains(&"send_request"));
-        assert!(tool_names.contains(&"send_response"));
-        assert!(tool_names.contains(&"list_peers"));
+        assert!(tool_names.contains(&"send"));
+        assert!(tool_names.contains(&"peers"));
     }
 
     // === Tests for sub-agent flag behavior ===

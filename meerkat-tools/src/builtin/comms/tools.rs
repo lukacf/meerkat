@@ -1,4 +1,4 @@
-//! Individual comms tool implementations
+//! Comms tool implementations: `send` and `peers`.
 
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 use crate::schema::empty_object_schema;
@@ -26,7 +26,6 @@ impl CommsToolState {
     }
 }
 
-// Helper to get tool def from tools_list by name
 fn get_tool_def(name: &str) -> ToolDef {
     tools_list()
         .into_iter()
@@ -43,58 +42,57 @@ fn get_tool_def(name: &str) -> ToolDef {
         })
 }
 
-/// Send a message to a peer
-pub struct SendMessageTool {
+/// Unified send tool — dispatches peer_message, peer_request, peer_response via `kind`.
+pub struct SendTool {
     state: CommsToolState,
 }
 
-impl SendMessageTool {
+impl SendTool {
     pub fn new(state: CommsToolState) -> Self {
         Self { state }
     }
 }
 
 #[async_trait]
-impl BuiltinTool for SendMessageTool {
+impl BuiltinTool for SendTool {
     fn name(&self) -> &'static str {
-        "send_message"
+        "send"
     }
 
     fn def(&self) -> ToolDef {
-        get_tool_def("send_message")
+        get_tool_def("send")
     }
 
     fn default_enabled(&self) -> bool {
-        // Comms tools are enabled when comms is configured
         true
     }
 
     async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
-        handle_tools_call(&self.state.tool_context, "send_message", &args)
+        handle_tools_call(&self.state.tool_context, "send", &args)
             .await
             .map_err(BuiltinToolError::ExecutionFailed)
     }
 }
 
-/// Send a request to a peer
-pub struct SendRequestTool {
+/// Peers discovery tool.
+pub struct PeersTool {
     state: CommsToolState,
 }
 
-impl SendRequestTool {
+impl PeersTool {
     pub fn new(state: CommsToolState) -> Self {
         Self { state }
     }
 }
 
 #[async_trait]
-impl BuiltinTool for SendRequestTool {
+impl BuiltinTool for PeersTool {
     fn name(&self) -> &'static str {
-        "send_request"
+        "peers"
     }
 
     fn def(&self) -> ToolDef {
-        get_tool_def("send_request")
+        get_tool_def("peers")
     }
 
     fn default_enabled(&self) -> bool {
@@ -102,71 +100,7 @@ impl BuiltinTool for SendRequestTool {
     }
 
     async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
-        handle_tools_call(&self.state.tool_context, "send_request", &args)
-            .await
-            .map_err(BuiltinToolError::ExecutionFailed)
-    }
-}
-
-/// Send a response to a peer
-pub struct SendResponseTool {
-    state: CommsToolState,
-}
-
-impl SendResponseTool {
-    pub fn new(state: CommsToolState) -> Self {
-        Self { state }
-    }
-}
-
-#[async_trait]
-impl BuiltinTool for SendResponseTool {
-    fn name(&self) -> &'static str {
-        "send_response"
-    }
-
-    fn def(&self) -> ToolDef {
-        get_tool_def("send_response")
-    }
-
-    fn default_enabled(&self) -> bool {
-        true
-    }
-
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
-        handle_tools_call(&self.state.tool_context, "send_response", &args)
-            .await
-            .map_err(BuiltinToolError::ExecutionFailed)
-    }
-}
-
-/// List trusted peers
-pub struct ListPeersTool {
-    state: CommsToolState,
-}
-
-impl ListPeersTool {
-    pub fn new(state: CommsToolState) -> Self {
-        Self { state }
-    }
-}
-
-#[async_trait]
-impl BuiltinTool for ListPeersTool {
-    fn name(&self) -> &'static str {
-        "list_peers"
-    }
-
-    fn def(&self) -> ToolDef {
-        get_tool_def("list_peers")
-    }
-
-    fn default_enabled(&self) -> bool {
-        true
-    }
-
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
-        handle_tools_call(&self.state.tool_context, "list_peers", &args)
+        handle_tools_call(&self.state.tool_context, "peers", &args)
             .await
             .map_err(BuiltinToolError::ExecutionFailed)
     }
@@ -200,37 +134,23 @@ mod tests {
     }
 
     #[test]
-    fn test_send_message_tool_name() {
+    fn test_send_tool_name() {
         let state = make_test_state();
-        let tool = SendMessageTool::new(state);
-        assert_eq!(tool.name(), "send_message");
+        let tool = SendTool::new(state);
+        assert_eq!(tool.name(), "send");
     }
 
     #[test]
-    fn test_send_request_tool_name() {
+    fn test_peers_tool_name() {
         let state = make_test_state();
-        let tool = SendRequestTool::new(state);
-        assert_eq!(tool.name(), "send_request");
-    }
-
-    #[test]
-    fn test_send_response_tool_name() {
-        let state = make_test_state();
-        let tool = SendResponseTool::new(state);
-        assert_eq!(tool.name(), "send_response");
-    }
-
-    #[test]
-    fn test_list_peers_tool_name() {
-        let state = make_test_state();
-        let tool = ListPeersTool::new(state);
-        assert_eq!(tool.name(), "list_peers");
+        let tool = PeersTool::new(state);
+        assert_eq!(tool.name(), "peers");
     }
 
     #[tokio::test]
-    async fn test_list_peers_tool_works() {
+    async fn test_peers_tool_works() {
         let state = make_test_state();
-        let tool = ListPeersTool::new(state);
+        let tool = PeersTool::new(state);
         let result = tool.call(serde_json::json!({})).await;
         assert!(result.is_ok());
         let output = result.unwrap();

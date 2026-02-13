@@ -59,7 +59,7 @@ impl CommsToolSurface {
 
     /// Usage instructions for comms tools to be added to the system prompt
     pub fn usage_instructions() -> &'static str {
-        "# Inter-agent Communication\n\nYou can communicate with other agents using these tools:\n\n- send_message: Send a simple text message\n- send_request: Send a request and wait for a response\n- send_response: Respond to a previous request\n- list_peers: See which agents are available to talk to\n\nAlways check list_peers first to see who is online."
+        "# Inter-agent Communication\n\nYou can communicate with other agents using these tools:\n\n- send: Send a message, request, or response to a peer (use `kind` to select type)\n- peers: List all visible peers and their connection info\n\nAlways check peers first to see who is available."
     }
 }
 

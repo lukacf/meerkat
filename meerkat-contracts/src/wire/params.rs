@@ -88,17 +88,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_skills_params_none_serde() {
+    fn test_skills_params_none_serde() -> Result<(), serde_json::Error> {
         let params = SkillsParams {
             preload_skills: None,
             skill_references: None,
         };
-        let json = serde_json::to_string(&params).unwrap();
+        let json = serde_json::to_string(&params)?;
         assert_eq!(json, "{}");
 
-        let parsed: SkillsParams = serde_json::from_str("{}").unwrap();
+        let parsed: SkillsParams = serde_json::from_str("{}")?;
         assert!(parsed.preload_skills.is_none());
         assert!(parsed.skill_references.is_none());
+        Ok(())
     }
 
     #[test]
@@ -113,14 +114,15 @@ mod tests {
     }
 
     #[test]
-    fn test_skills_params_with_ids() {
+    fn test_skills_params_with_ids() -> Result<(), serde_json::Error> {
         let params = SkillsParams {
             preload_skills: Some(vec!["a/b".into()]),
             skill_references: Some(vec!["c/d".into()]),
         };
-        let json = serde_json::to_string(&params).unwrap();
-        let parsed: SkillsParams = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&params)?;
+        let parsed: SkillsParams = serde_json::from_str(&json)?;
         assert_eq!(parsed.preload_skills, Some(vec!["a/b".to_string()]));
         assert_eq!(parsed.skill_references, Some(vec!["c/d".to_string()]));
+        Ok(())
     }
 }

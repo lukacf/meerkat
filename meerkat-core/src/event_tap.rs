@@ -138,10 +138,10 @@ mod tests {
         );
 
         let event = rx.try_recv().unwrap();
-        match event {
-            AgentEvent::TextDelta { delta } => assert_eq!(delta, "hello"),
-            other => panic!("Expected TextDelta, got {:?}", other),
-        }
+        let AgentEvent::TextDelta { delta } = event else {
+            unreachable!("Expected TextDelta, got {:?}", event);
+        };
+        assert_eq!(delta, "hello");
     }
 
     #[test]

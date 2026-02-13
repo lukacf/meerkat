@@ -358,20 +358,20 @@ refresh_seconds = 60
 "#;
         let config: SkillsConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.repositories.len(), 1);
-        match &config.repositories[0].transport {
-            SkillRepoTransport::Http {
-                url,
-                auth_header,
-                auth_token,
-                refresh_seconds,
-            } => {
-                assert_eq!(url, "http://localhost:8080/api");
-                assert_eq!(auth_header.as_deref(), Some("X-API-Key"));
-                assert_eq!(auth_token.as_deref(), Some("secret"));
-                assert_eq!(*refresh_seconds, 60);
-            }
-            other => panic!("Expected Http, got {other:?}"),
-        }
+        let SkillRepoTransport::Http {
+            url,
+            auth_header,
+            auth_token,
+            refresh_seconds,
+            ..
+        } = &config.repositories[0].transport
+        else {
+            unreachable!("Expected Http transport");
+        };
+        assert_eq!(url, "http://localhost:8080/api");
+        assert_eq!(auth_header.as_deref(), Some("X-API-Key"));
+        assert_eq!(auth_token.as_deref(), Some("secret"));
+        assert_eq!(*refresh_seconds, 60);
     }
 
     #[test]
@@ -387,21 +387,20 @@ auth_token = "ghp_token"
 "#;
         let config: SkillsConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.repositories.len(), 1);
-        match &config.repositories[0].transport {
-            SkillRepoTransport::Git {
-                url,
-                git_ref,
-                ref_type,
-                auth_token,
-                ..
-            } => {
-                assert_eq!(url, "https://github.com/company/skills.git");
-                assert_eq!(git_ref, "v1.2.0");
-                assert!(matches!(ref_type, GitRefType::Tag));
-                assert_eq!(auth_token.as_deref(), Some("ghp_token"));
-            }
-            other => panic!("Expected Git, got {other:?}"),
-        }
+        let SkillRepoTransport::Git {
+            url,
+            git_ref,
+            ref_type,
+            auth_token,
+            ..
+        } = &config.repositories[0].transport
+        else {
+            unreachable!("Expected Git transport");
+        };
+        assert_eq!(url, "https://github.com/company/skills.git");
+        assert_eq!(git_ref, "v1.2.0");
+        assert!(matches!(ref_type, GitRefType::Tag));
+        assert_eq!(auth_token.as_deref(), Some("ghp_token"));
     }
 
     #[test]
@@ -466,12 +465,10 @@ auth_token = "ghp_token"
         assert_eq!(merged.repositories[2].name, "personal");
 
         // Company should be from project (first wins)
-        match &merged.repositories[1].transport {
-            SkillRepoTransport::Filesystem { path } => {
-                assert_eq!(path, "project-company-path");
-            }
-            other => panic!("Expected Filesystem, got {other:?}"),
-        }
+        let SkillRepoTransport::Filesystem { path } = &merged.repositories[1].transport else {
+            unreachable!("Expected Filesystem transport");
+        };
+        assert_eq!(path, "project-company-path");
     }
 
     #[test]
@@ -498,12 +495,10 @@ auth_token = "ghp_token"
 
         let merged = merge_project_over_user(user, project, true);
         assert_eq!(merged.repositories.len(), 1);
-        match &merged.repositories[0].transport {
-            SkillRepoTransport::Filesystem { path } => {
-                assert_eq!(path, "project-shared");
-            }
-            other => panic!("Expected Filesystem, got {other:?}"),
-        }
+        let SkillRepoTransport::Filesystem { path } = &merged.repositories[0].transport else {
+            unreachable!("Expected Filesystem transport");
+        };
+        assert_eq!(path, "project-shared");
     }
 
     #[tokio::test]

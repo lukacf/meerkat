@@ -74,8 +74,9 @@ mod tests {
 
     #[test]
     fn test_strip_skill_ref() {
-        let (skill_id, remaining) = detect_skill_ref("/extraction/email extract stuff").unwrap();
-        assert_eq!(skill_id, "extraction/email");
-        assert_eq!(remaining, "extract stuff");
+        assert_eq!(
+            detect_skill_ref("/extraction/email extract stuff"),
+            Some(("extraction/email", "extract stuff"))
+        );
     }
 }

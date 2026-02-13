@@ -1184,10 +1184,10 @@ mod tests {
         };
         let session_id = meerkat_core::SessionId::new();
         let err = build_comms_command(&req, &session_id).expect_err("invalid stream should fail");
-        match err {
-            ApiError::BadRequest(msg) => assert_eq!(msg, "invalid stream: invalid"),
-            _ => panic!("expected bad request"),
-        }
+        let ApiError::BadRequest(msg) = err else {
+            unreachable!("expected bad request");
+        };
+        assert_eq!(msg, "invalid stream: invalid");
     }
 
     #[test]
@@ -1208,10 +1208,10 @@ mod tests {
         };
         let session_id = meerkat_core::SessionId::new();
         let err = build_comms_command(&req, &session_id).expect_err("invalid status should fail");
-        match err {
-            ApiError::BadRequest(msg) => assert_eq!(msg, "invalid status: almost-done"),
-            _ => panic!("expected bad request"),
-        }
+        let ApiError::BadRequest(msg) = err else {
+            unreachable!("expected bad request");
+        };
+        assert_eq!(msg, "invalid status: almost-done");
     }
 
     #[test]
@@ -1232,10 +1232,10 @@ mod tests {
         };
         let session_id = meerkat_core::SessionId::new();
         let err = build_comms_command(&req, &session_id).expect_err("invalid source should fail");
-        match err {
-            ApiError::BadRequest(msg) => assert_eq!(msg, "invalid source: webhookd"),
-            _ => panic!("expected bad request"),
-        }
+        let ApiError::BadRequest(msg) = err else {
+            unreachable!("expected bad request");
+        };
+        assert_eq!(msg, "invalid source: webhookd");
     }
 
     #[cfg(not(feature = "comms"))]

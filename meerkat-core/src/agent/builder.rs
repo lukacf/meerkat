@@ -428,7 +428,8 @@ mod tests {
             .build(client, tools, store)
             .await;
 
-        let _ = agent.run("hello".to_string()).await.unwrap();
+        let result = agent.run("hello".to_string()).await;
+        assert!(result.is_ok());
 
         let mut saw_turn_started = false;
         while let Ok(event) = tap_rx.try_recv() {

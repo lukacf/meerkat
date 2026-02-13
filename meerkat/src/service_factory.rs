@@ -283,14 +283,14 @@ mod tests {
     async fn build_factory_agent_with_mock(
         temp: &TempDir,
         mut build_config: AgentBuildConfig,
-    ) -> FactoryAgent {
+    ) -> Result<FactoryAgent, String> {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         build_config.llm_client_override = Some(Arc::new(MockLlmClient));
         let agent = factory
             .build_agent(build_config, &Config::default())
             .await
-            .unwrap();
-        FactoryAgent { agent }
+            .map_err(|err| format!("{err}"))?;
+        Ok(FactoryAgent { agent })
     }
 
     fn mock_input_cmd(session_id: &SessionId, stream: InputStreamMode) -> CommsCommand {
@@ -304,15 +304,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_factory_agent_send_without_comms_runtime_is_unsupported() {
-        let temp = tempfile::tempdir().unwrap();
+    async fn test_factory_agent_send_without_comms_runtime_is_unsupported() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
         let agent = build_factory_agent_with_mock(
             &temp,
             AgentBuildConfig {
                 ..AgentBuildConfig::new("claude-sonnet-4-5")
             },
         )
-        .await;
+        .await?;
         let session_id = agent.session().id().clone();
         let result = agent
             .send(mock_input_cmd(&session_id, InputStreamMode::None))
@@ -332,17 +332,19 @@ mod tests {
             stream_result,
             Err(SendAndStreamError::Send(SendError::Unsupported(_)))
         ));
+
+        Ok(())
     }
 
     #[cfg(feature = "comms")]
     #[tokio::test]
-    async fn test_factory_agent_send_and_stream_opens_interaction_stream() {
-        let temp = tempfile::tempdir().unwrap();
+    async fn test_factory_agent_send_and_stream_opens_interaction_stream() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
         let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
         build_config.host_mode = true;
         build_config.comms_name = Some("factory-agent-comms".to_string());
 
-        let agent = build_factory_agent_with_mock(&temp, build_config).await;
+        let agent = build_factory_agent_with_mock(&temp, build_config).await?;
         let session_id = agent.session().id().clone();
         let (receipt, stream) = agent
             .send_and_stream(mock_input_cmd(
@@ -350,7 +352,7 @@ mod tests {
                 InputStreamMode::ReserveInteraction,
             ))
             .await
-            .expect("send_and_stream should reserve and open stream");
+            .map_err(|err| format!("send_and_stream failed: {err}"))?;
 
         let interaction_id = match receipt {
             SendReceipt::InputAccepted {
@@ -360,11 +362,11 @@ mod tests {
                 assert!(stream_reserved);
                 interaction_id
             }
-            _ => panic!("unexpected receipt variant"),
+            _ => unreachable!("unexpected receipt variant"),
         };
 
         assert!(matches!(
-            agent.stream(StreamScope::Interaction(interaction_id.clone())),
+            agent.stream(StreamScope::Interaction(interaction_id)),
             Err(StreamError::AlreadyAttached(_))
         ));
 
@@ -375,5 +377,7 @@ mod tests {
             peers.is_empty(),
             "comms runtime should be configured but no trusted peers are registered"
         );
+
+        Ok(())
     }
 }

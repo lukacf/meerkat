@@ -493,40 +493,44 @@ pub(crate) mod tests_support {
     use super::*;
 
     /// Create a local bare git repo with a sample skill and push initial commit.
-    pub async fn init_test_repo(repo_dir: &std::path::Path, work_dir: &std::path::Path) {
-        run_git(&[
-            "init".into(),
-            "--bare".into(),
-            repo_dir.to_str().unwrap().into(),
-        ])
-        .await
-        .unwrap();
+    pub async fn init_test_repo(
+        repo_dir: &std::path::Path,
+        work_dir: &std::path::Path,
+    ) -> Result<(), String> {
+        let repo_dir_str = repo_dir.to_str().ok_or_else(|| {
+            "failed to convert repo_dir to UTF-8 path for git command".to_string()
+        })?;
+        let work_dir_str = work_dir.to_str().ok_or_else(|| {
+            "failed to convert work_dir to UTF-8 path for git command".to_string()
+        })?;
 
-        run_git(&[
-            "clone".into(),
-            repo_dir.to_str().unwrap().into(),
-            work_dir.to_str().unwrap().into(),
-        ])
-        .await
-        .unwrap();
+        run_git(&["init".into(), "--bare".into(), repo_dir_str.into()])
+            .await
+            .map_err(|err| format!("git init failed: {err}"))?;
+
+        run_git(&["clone".into(), repo_dir_str.into(), work_dir_str.into()])
+            .await
+            .map_err(|err| format!("git clone failed: {err}"))?;
 
         let skill_dir = work_dir.join("extraction/email");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        tokio::fs::create_dir_all(&skill_dir)
+            .await
+            .map_err(|err| format!("failed to create skill dir: {err}"))?;
         tokio::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: email\ndescription: Extract from emails\n---\n\n# Email\n\nBody.",
         )
         .await
-        .unwrap();
+        .map_err(|err| format!("failed to write SKILL.md: {err}"))?;
 
         let coll_dir = work_dir.join("extraction");
         tokio::fs::write(coll_dir.join("COLLECTION.md"), "Entity extraction skills")
             .await
-            .unwrap();
+            .map_err(|err| format!("failed to write COLLECTION.md: {err}"))?;
 
         run_git_in_dir(work_dir, &["add".into(), "-A".into()])
             .await
-            .unwrap();
+            .map_err(|err| format!("git add failed: {err}"))?;
         run_git_in_dir(
             work_dir,
             &[
@@ -538,8 +542,12 @@ pub(crate) mod tests_support {
             ],
         )
         .await
-        .unwrap();
-        run_git_in_dir(work_dir, &["push".into()]).await.unwrap();
+        .map_err(|err| format!("git commit failed: {err}"))?;
+        run_git_in_dir(work_dir, &["push".into()])
+            .await
+            .map_err(|err| format!("git push failed: {err}"))?;
+
+        Ok(())
     }
 }
 

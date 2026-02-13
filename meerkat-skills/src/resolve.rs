@@ -286,7 +286,9 @@ mod tests {
         let work_dir = tmp.path().join("work");
 
         tokio::fs::create_dir_all(&repo_dir).await.unwrap();
-        crate::source::git::tests_support::init_test_repo(&repo_dir, &work_dir).await;
+        crate::source::git::tests_support::init_test_repo(&repo_dir, &work_dir)
+            .await
+            .unwrap();
 
         let config = SkillsConfig {
             repositories: vec![meerkat_core::skills_config::SkillRepositoryConfig {

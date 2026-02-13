@@ -1064,13 +1064,11 @@ mod tests {
             .run_loop(None)
             .await
             .expect_err("expected transition error");
-        match err {
-            AgentError::InvalidStateTransition { from, to } => {
-                assert_eq!(from, "Completed");
-                assert_eq!(to, "Completed");
-            }
-            other => panic!("expected InvalidStateTransition, got {other:?}"),
-        }
+        let AgentError::InvalidStateTransition { from, to } = err else {
+            unreachable!("expected InvalidStateTransition, got {err:?}");
+        };
+        assert_eq!(from, "Completed");
+        assert_eq!(to, "Completed");
     }
 
     #[tokio::test]

@@ -268,20 +268,18 @@ mod tests {
     }
 
     #[test]
-    fn input_stream_mode_roundtrip() {
+    fn input_stream_mode_roundtrip() -> Result<(), serde_json::Error> {
         let mode = InputStreamMode::ReserveInteraction;
-        let serialized = serde_json::to_value(&mode).unwrap();
+        let serialized = serde_json::to_value(mode)?;
         assert_eq!(serialized.as_str(), Some("reserve_interaction"));
-        assert_eq!(
-            serde_json::from_value::<InputStreamMode>(serialized).unwrap(),
-            mode
-        );
+        assert_eq!(serde_json::from_value::<InputStreamMode>(serialized)?, mode);
+        Ok(())
     }
 
     #[test]
-    fn peer_directory_entry_fields() {
+    fn peer_directory_entry_fields() -> Result<(), String> {
         let entry = PeerDirectoryEntry {
-            name: PeerName::new("agent").unwrap(),
+            name: PeerName::new("agent")?,
             peer_id: "ed25519:abc".to_string(),
             address: "inproc://agent".to_string(),
             source: PeerDirectorySource::Inproc,
@@ -290,6 +288,7 @@ mod tests {
         };
         assert_eq!(entry.name.0, "agent");
         assert_eq!(entry.source, PeerDirectorySource::Inproc);
+        Ok(())
     }
 
     #[test]
@@ -299,11 +298,11 @@ mod tests {
     }
 
     #[test]
-    fn trusted_peer_spec_keeps_peer_id_and_address() {
-        let spec = TrustedPeerSpec::new("alice", "ed25519:abc", "inproc://alice")
-            .expect("valid trusted peer spec should parse");
+    fn trusted_peer_spec_keeps_peer_id_and_address() -> Result<(), String> {
+        let spec = TrustedPeerSpec::new("alice", "ed25519:abc", "inproc://alice")?;
         assert_eq!(spec.name, "alice");
         assert_eq!(spec.peer_id, "ed25519:abc");
         assert_eq!(spec.address, "inproc://alice");
+        Ok(())
     }
 }

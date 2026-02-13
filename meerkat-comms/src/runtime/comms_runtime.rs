@@ -6,24 +6,94 @@ use crate::{
     InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeers, handle_connection,
 };
 use async_trait::async_trait;
-use meerkat_core::SubscribableInjector;
+use futures::Stream;
+use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, InputStreamMode, PeerDirectoryEntry, PeerDirectorySource, PeerName, SendError,
-    SendReceipt,
+    CommsCommand, EventStream, InputStreamMode, PeerDirectoryEntry, PeerDirectorySource, PeerName,
+    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
 };
 use meerkat_core::config::PlainEventSource;
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::types::{DrainedMessage, drain_inbox_item};
+
+#[derive(Debug)]
+struct StreamRegistryEntry {
+    _sender: mpsc::Sender<meerkat_core::AgentEvent>,
+    _sender_attached: bool,
+    receiver_attached: bool,
+    receiver: Option<Receiver<meerkat_core::AgentEvent>>,
+}
+
+impl StreamRegistryEntry {
+    fn reserved(
+        sender: mpsc::Sender<meerkat_core::AgentEvent>,
+        receiver: Receiver<meerkat_core::AgentEvent>,
+    ) -> Self {
+        Self {
+            _sender: sender,
+            _sender_attached: false,
+            receiver_attached: false,
+            receiver: Some(receiver),
+        }
+    }
+}
+
+type InteractionStreamRegistry = Arc<Mutex<HashMap<Uuid, StreamRegistryEntry>>>;
+
+struct InteractionStream {
+    id: Uuid,
+    receiver: Option<Receiver<meerkat_core::AgentEvent>>,
+    registry: InteractionStreamRegistry,
+}
+
+impl InteractionStream {
+    fn finish(self: &mut Self) {
+        if let Some(mut receiver) = self.receiver.take() {
+            // Drain any remaining items to avoid holding a blocked channel.
+            receiver.close();
+        }
+        self.registry.lock().remove(&self.id);
+    }
+}
+
+impl Stream for InteractionStream {
+    type Item = meerkat_core::AgentEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.receiver.as_mut() {
+            Some(receiver) => match Pin::new(receiver).poll_recv(cx) {
+                Poll::Ready(None) => {
+                    this.finish();
+                    Poll::Ready(None)
+                }
+                other => other,
+            },
+            None => Poll::Ready(None),
+        }
+    }
+}
+
+impl Drop for InteractionStream {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
 
 fn is_dismiss(msg: &CommsMessage) -> bool {
     matches!(&msg.content, CommsContent::Message { body } if body.trim().eq_ignore_ascii_case("DISMISS"))
@@ -73,6 +143,33 @@ impl CoreCommsRuntime for CommsRuntime {
         Some(self.event_injector())
     }
 
+    fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
+        match scope {
+            StreamScope::Session(session_id) => {
+                Err(StreamError::NotFound(format!("session {session_id}")))
+            }
+            StreamScope::Interaction(interaction_id) => {
+                let id = interaction_id.0;
+                let mut registry = self.interaction_stream_registry.lock();
+                let entry = registry
+                    .get_mut(&id)
+                    .ok_or(StreamError::NotReserved(interaction_id.clone()))?;
+                if entry.receiver_attached {
+                    return Err(StreamError::AlreadyAttached(interaction_id));
+                }
+                let receiver = entry.receiver.take().ok_or_else(|| {
+                    StreamError::Internal("interaction stream receiver missing".to_string())
+                })?;
+                entry.receiver_attached = true;
+                Ok(Box::pin(InteractionStream {
+                    id,
+                    receiver: Some(receiver),
+                    registry: self.interaction_stream_registry.clone(),
+                }))
+            }
+        }
+    }
+
     async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
         match cmd {
             CommsCommand::Input {
@@ -81,35 +178,29 @@ impl CoreCommsRuntime for CommsRuntime {
                 stream,
                 allow_self_session: _,
                 session_id: _,
-            } => {
-                let injector = CoreCommsRuntime::event_injector(self)
-                    .ok_or_else(|| SendError::Unsupported("event injector unavailable".into()))?;
-
-                match stream {
-                    InputStreamMode::None => {
-                        injector
-                            .inject(body, PlainEventSource::from(source))
-                            .map_err(map_event_injector_error)?;
-                        Ok(SendReceipt::InputAccepted {
-                            interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
-                            stream_reserved: false,
-                        })
-                    }
-                    InputStreamMode::ReserveInteraction => {
-                        let sub = <dyn SubscribableInjector>::inject_with_subscription(
-                            injector.as_ref(),
-                            body,
-                            source.into(),
-                        )
+            } => match stream {
+                InputStreamMode::None => {
+                    let injector = CoreCommsRuntime::event_injector(self).ok_or_else(|| {
+                        SendError::Unsupported("event injector unavailable".into())
+                    })?;
+                    injector
+                        .inject(body, PlainEventSource::from(source))
                         .map_err(map_event_injector_error)?;
-
-                        Ok(SendReceipt::InputAccepted {
-                            interaction_id: sub.id,
-                            stream_reserved: true,
-                        })
-                    }
+                    Ok(SendReceipt::InputAccepted {
+                        interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
+                        stream_reserved: false,
+                    })
                 }
-            }
+                InputStreamMode::ReserveInteraction => {
+                    let interaction_id = Uuid::new_v4();
+                    self.register_interaction_stream(interaction_id, body, source.into())?;
+
+                    Ok(SendReceipt::InputAccepted {
+                        interaction_id: meerkat_core::InteractionId(interaction_id),
+                        stream_reserved: true,
+                    })
+                }
+            },
             CommsCommand::PeerMessage { to, body } => self
                 .send_peer_command(&to.0, crate::types::MessageKind::Message { body })
                 .await
@@ -156,11 +247,49 @@ impl CoreCommsRuntime for CommsRuntime {
                         result,
                     },
                 )
-                    .await
-                    .map(|_| SendReceipt::PeerResponseSent {
-                        envelope_id: Uuid::new_v4(),
-                        in_reply_to,
-                    })
+                .await
+                .map(|_| SendReceipt::PeerResponseSent {
+                    envelope_id: Uuid::new_v4(),
+                    in_reply_to,
+                })
+            }
+        }
+    }
+
+    async fn send_and_stream(
+        &self,
+        cmd: CommsCommand,
+    ) -> Result<(SendReceipt, EventStream), SendAndStreamError> {
+        match cmd {
+            CommsCommand::Input {
+                body,
+                source,
+                stream: InputStreamMode::ReserveInteraction,
+                allow_self_session: _,
+                session_id: _,
+            } => {
+                let interaction_id = Uuid::new_v4();
+                self.register_interaction_stream(interaction_id, body, source)?;
+                let receipt = SendReceipt::InputAccepted {
+                    interaction_id: meerkat_core::InteractionId(interaction_id),
+                    stream_reserved: true,
+                };
+                let stream = self
+                    .stream(StreamScope::Interaction(meerkat_core::InteractionId(
+                        interaction_id,
+                    )))
+                    .map_err(|error| SendAndStreamError::StreamAttach {
+                        receipt: receipt.clone(),
+                        error,
+                    })?;
+                Ok((receipt, stream))
+            }
+            other => {
+                let receipt = self.send(other).await?;
+                Err(SendAndStreamError::StreamAttach {
+                    receipt,
+                    error: StreamError::NotFound("command is not streamable".to_string()),
+                })
             }
         }
     }
@@ -304,7 +433,21 @@ impl CoreCommsRuntime for CommsRuntime {
         &self,
         id: &meerkat_core::InteractionId,
     ) -> Option<tokio::sync::mpsc::Sender<meerkat_core::AgentEvent>> {
-        self.subscriber_registry.lock().remove(&id.0)
+        let sender = self.subscriber_registry.lock().remove(&id.0);
+        if sender.is_none() {
+            return None;
+        }
+
+        let mut registry = self.interaction_stream_registry.lock();
+        match registry.get(&id.0) {
+            Some(entry) => {
+                if !entry.receiver_attached {
+                    registry.remove(&id.0);
+                }
+                sender
+            }
+            None => sender,
+        }
     }
 }
 
@@ -354,7 +497,7 @@ pub struct CommsRuntime {
     public_key: PubKey,
     router: Arc<Router>,
     trusted_peers: Arc<RwLock<TrustedPeers>>,
-    inbox: Arc<Mutex<crate::Inbox>>,
+    inbox: Arc<AsyncMutex<crate::Inbox>>,
     inbox_notify: Arc<tokio::sync::Notify>,
     config: ResolvedCommsConfig,
     listener_handles: Vec<ListenerHandle>,
@@ -362,6 +505,7 @@ pub struct CommsRuntime {
     keypair: Arc<Keypair>,
     dismiss_flag: AtomicBool,
     subscriber_registry: crate::event_injector::SubscriberRegistry,
+    interaction_stream_registry: InteractionStreamRegistry,
 }
 
 impl CommsRuntime {
@@ -388,7 +532,7 @@ impl CommsRuntime {
             public_key,
             router: Arc::new(router),
             trusted_peers,
-            inbox: Arc::new(Mutex::new(inbox)),
+            inbox: Arc::new(AsyncMutex::new(inbox)),
             inbox_notify,
             config: config.clone(),
             listener_handles: Vec::new(),
@@ -396,6 +540,7 @@ impl CommsRuntime {
             keypair: Arc::new(keypair),
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
+            interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register(config.name, runtime.public_key, inbox_sender);
         Ok(runtime)
@@ -432,7 +577,7 @@ impl CommsRuntime {
             public_key,
             router: Arc::new(router),
             trusted_peers,
-            inbox: Arc::new(Mutex::new(inbox)),
+            inbox: Arc::new(AsyncMutex::new(inbox)),
             inbox_notify,
             config,
             listener_handles: Vec::new(),
@@ -440,6 +585,7 @@ impl CommsRuntime {
             keypair: Arc::new(keypair),
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
+            interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
         };
         InprocRegistry::global().register(name, runtime.public_key, inbox_sender);
         Ok(runtime)
@@ -552,6 +698,43 @@ impl CommsRuntime {
             self.router.inbox_sender().clone(),
             self.subscriber_registry.clone(),
         ))
+    }
+
+    fn register_interaction_stream(
+        &self,
+        interaction_id: Uuid,
+        body: String,
+        source: meerkat_core::InputSource,
+    ) -> Result<(), SendError> {
+        let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(4096);
+        self.subscriber_registry
+            .lock()
+            .insert(interaction_id, sender.clone());
+        self.interaction_stream_registry.lock().insert(
+            interaction_id,
+            StreamRegistryEntry::reserved(sender, receiver),
+        );
+
+        if let Err(error) = self
+            .router
+            .inbox_sender()
+            .send(crate::types::InboxItem::PlainEvent {
+                body,
+                source: PlainEventSource::from(source),
+                interaction_id: Some(interaction_id),
+            })
+        {
+            self.interaction_stream_registry
+                .lock()
+                .remove(&interaction_id);
+            self.subscriber_registry.lock().remove(&interaction_id);
+            return Err(match error {
+                crate::inbox::InboxError::Full => SendError::Validation("input queue full".into()),
+                crate::inbox::InboxError::Closed => SendError::InputClosed,
+            });
+        }
+
+        Ok(())
     }
 
     pub async fn drain_messages(&self) -> Vec<CommsMessage> {

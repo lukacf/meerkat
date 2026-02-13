@@ -821,7 +821,7 @@ impl CommsRuntime {
         kind: crate::types::MessageKind,
     ) -> Result<(), SendError> {
         self.router
-            .send_with_fallback(peer_name, kind.clone())
+            .send(peer_name, kind)
             .await
             .map_err(map_router_send_error)
     }

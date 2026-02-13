@@ -113,7 +113,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
         "peer_message" => {
             let body = input.body.ok_or("peer_message requires 'body' field")?;
             ctx.router
-                .send_with_fallback(&input.to, crate::types::MessageKind::Message { body })
+                .send(&input.to, crate::types::MessageKind::Message { body })
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "status": "sent", "kind": "peer_message" }))
@@ -122,7 +122,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
             let intent = input.intent.ok_or("peer_request requires 'intent' field")?;
             let params = input.params.unwrap_or(json!({}));
             ctx.router
-                .send_with_fallback(
+                .send(
                     &input.to,
                     crate::types::MessageKind::Request { intent, params },
                 )
@@ -146,7 +146,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
             };
             let result = input.result.unwrap_or(Value::Null);
             ctx.router
-                .send_with_fallback(
+                .send(
                     &input.to,
                     crate::types::MessageKind::Response {
                         in_reply_to,

@@ -31,12 +31,41 @@ use uuid::Uuid;
 
 use crate::agent::types::{DrainedMessage, drain_inbox_item};
 
+/// Reservation lifecycle state machine.
+///
+/// State transitions:
+/// - Reserved → Attached (stream consumer attaches)
+/// - Reserved → Expired (TTL elapsed without attach)
+/// - Attached → Completed (terminal event received)
+/// - Attached → ClosedEarly (consumer drops stream before terminal)
+/// - Any terminal state → cannot re-attach
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReservationState {
+    Reserved,
+    Attached,
+    Completed,
+    Expired,
+    ClosedEarly,
+}
+
+impl ReservationState {
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Expired | Self::ClosedEarly
+        )
+    }
+}
+
+/// Default reservation TTL (time from Reserved to Expired if not attached).
+const RESERVATION_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug)]
 struct StreamRegistryEntry {
+    state: ReservationState,
     _sender: mpsc::Sender<meerkat_core::AgentEvent>,
-    _sender_attached: bool,
-    receiver_attached: bool,
     receiver: Option<Receiver<meerkat_core::AgentEvent>>,
+    created_at: std::time::Instant,
 }
 
 impl StreamRegistryEntry {
@@ -45,10 +74,20 @@ impl StreamRegistryEntry {
         receiver: Receiver<meerkat_core::AgentEvent>,
     ) -> Self {
         Self {
+            state: ReservationState::Reserved,
             _sender: sender,
-            _sender_attached: false,
-            receiver_attached: false,
             receiver: Some(receiver),
+            created_at: std::time::Instant::now(),
+        }
+    }
+
+    /// CAS-style state transition. Returns true if transition succeeded.
+    fn transition(&mut self, from: ReservationState, to: ReservationState) -> bool {
+        if self.state == from {
+            self.state = to;
+            true
+        } else {
+            false
         }
     }
 }
@@ -62,12 +101,22 @@ struct InteractionStream {
 }
 
 impl InteractionStream {
-    fn finish(self: &mut Self) {
+    fn finish(&mut self) {
         if let Some(mut receiver) = self.receiver.take() {
-            // Drain any remaining items to avoid holding a blocked channel.
             receiver.close();
         }
-        self.registry.lock().remove(&self.id);
+        let mut registry = self.registry.lock();
+        if let Some(entry) = registry.get_mut(&self.id) {
+            // CAS: only transition to ClosedEarly if still Attached.
+            // If already Completed (terminal event won the race), leave it.
+            if entry.transition(ReservationState::Attached, ReservationState::ClosedEarly) {
+                tracing::debug!(interaction_id = %self.id, "stream closed early by consumer");
+            }
+            // Clean up terminal entries.
+            if entry.state.is_terminal() {
+                registry.remove(&self.id);
+            }
+        }
     }
 }
 
@@ -154,18 +203,41 @@ impl CoreCommsRuntime for CommsRuntime {
                 let entry = registry
                     .get_mut(&id)
                     .ok_or(StreamError::NotReserved(interaction_id.clone()))?;
-                if entry.receiver_attached {
-                    return Err(StreamError::AlreadyAttached(interaction_id));
+
+                match entry.state {
+                    ReservationState::Reserved => {
+                        // Check TTL
+                        if entry.created_at.elapsed() > RESERVATION_TTL {
+                            entry.state = ReservationState::Expired;
+                            registry.remove(&id);
+                            return Err(StreamError::Timeout(format!(
+                                "reservation expired for interaction {}",
+                                interaction_id.0
+                            )));
+                        }
+                        let receiver = entry.receiver.take().ok_or_else(|| {
+                            StreamError::Internal(
+                                "interaction stream receiver missing".to_string(),
+                            )
+                        })?;
+                        entry.state = ReservationState::Attached;
+                        Ok(Box::pin(InteractionStream {
+                            id,
+                            receiver: Some(receiver),
+                            registry: self.interaction_stream_registry.clone(),
+                        }))
+                    }
+                    ReservationState::Attached => {
+                        Err(StreamError::AlreadyAttached(interaction_id))
+                    }
+                    state if state.is_terminal() => {
+                        Err(StreamError::NotReserved(interaction_id))
+                    }
+                    _ => Err(StreamError::Internal(format!(
+                        "unexpected reservation state for {}",
+                        interaction_id.0
+                    ))),
                 }
-                let receiver = entry.receiver.take().ok_or_else(|| {
-                    StreamError::Internal("interaction stream receiver missing".to_string())
-                })?;
-                entry.receiver_attached = true;
-                Ok(Box::pin(InteractionStream {
-                    id,
-                    receiver: Some(receiver),
-                    registry: self.interaction_stream_registry.clone(),
-                }))
             }
         }
     }
@@ -392,7 +464,8 @@ impl CoreCommsRuntime for CommsRuntime {
         let mut registry = self.interaction_stream_registry.lock();
         match registry.get(&id.0) {
             Some(entry) => {
-                if !entry.receiver_attached {
+                // If not yet attached to a stream consumer, clean up.
+                if entry.state == ReservationState::Reserved {
                     registry.remove(&id.0);
                 }
                 sender
@@ -699,6 +772,39 @@ impl CommsRuntime {
             }
             Err(err) => Err(map_router_send_error(err)),
         }
+    }
+
+    /// Mark an interaction stream as completed (terminal event received).
+    ///
+    /// Uses CAS to ensure exactly-once cleanup: if the consumer already closed
+    /// the stream (ClosedEarly), this is a no-op.
+    pub fn mark_interaction_complete(&self, interaction_id: Uuid) {
+        let mut registry = self.interaction_stream_registry.lock();
+        if let Some(entry) = registry.get_mut(&interaction_id) {
+            if entry.transition(ReservationState::Attached, ReservationState::Completed) {
+                tracing::debug!(
+                    interaction_id = %interaction_id,
+                    "interaction stream completed by terminal event"
+                );
+                registry.remove(&interaction_id);
+            }
+        }
+    }
+
+    /// Reap expired reservations that were never attached within the TTL.
+    pub fn reap_expired_reservations(&self) {
+        let mut registry = self.interaction_stream_registry.lock();
+        registry.retain(|id, entry| {
+            if entry.state == ReservationState::Reserved
+                && entry.created_at.elapsed() > RESERVATION_TTL
+            {
+                tracing::debug!(interaction_id = %id, "reservation expired (TTL)");
+                entry.state = ReservationState::Expired;
+                false
+            } else {
+                true
+            }
+        });
     }
 
     pub fn router_arc(&self) -> Arc<Router> {
@@ -1578,5 +1684,142 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- M4: Reservation FSM + concurrency tests ---
+
+    #[tokio::test]
+    async fn test_m4_duplicate_close_is_safe() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("dup-close-{suffix}")).unwrap();
+        let session_id = meerkat_core::SessionId::new();
+
+        let cmd = CommsCommand::Input {
+            session_id: session_id.clone(),
+            body: "hello".to_string(),
+            source: meerkat_core::InputSource::Rpc,
+            stream: InputStreamMode::ReserveInteraction,
+            allow_self_session: true,
+        };
+        let receipt = CoreCommsRuntime::send(&runtime, cmd).await.unwrap();
+        let iid = match receipt {
+            SendReceipt::InputAccepted { interaction_id, .. } => interaction_id,
+            _ => panic!("expected InputAccepted"),
+        };
+
+        let stream = CoreCommsRuntime::stream(
+            &runtime,
+            StreamScope::Interaction(iid.clone()),
+        )
+        .unwrap();
+        // Drop stream → ClosedEarly
+        drop(stream);
+
+        // Second attach after close → NotReserved (entry cleaned up)
+        let result = CoreCommsRuntime::stream(
+            &runtime,
+            StreamScope::Interaction(iid.clone()),
+        );
+        assert!(matches!(result, Err(StreamError::NotReserved(_))));
+    }
+
+    #[tokio::test]
+    async fn test_m4_mark_interaction_complete_cleans_up() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("complete-{suffix}")).unwrap();
+        let session_id = meerkat_core::SessionId::new();
+
+        let cmd = CommsCommand::Input {
+            session_id: session_id.clone(),
+            body: "hello".to_string(),
+            source: meerkat_core::InputSource::Rpc,
+            stream: InputStreamMode::ReserveInteraction,
+            allow_self_session: true,
+        };
+        let receipt = CoreCommsRuntime::send(&runtime, cmd).await.unwrap();
+        let iid = match receipt {
+            SendReceipt::InputAccepted { interaction_id, .. } => interaction_id,
+            _ => panic!("expected InputAccepted"),
+        };
+
+        let _stream = CoreCommsRuntime::stream(
+            &runtime,
+            StreamScope::Interaction(iid.clone()),
+        )
+        .unwrap();
+
+        // Simulate terminal event
+        runtime.mark_interaction_complete(iid.0);
+
+        // Registry entry should be cleaned up
+        let registry = runtime.interaction_stream_registry.lock();
+        assert!(
+            !registry.contains_key(&iid.0),
+            "completed entry should be cleaned from registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_m4_reap_expired_reservations() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("reap-{suffix}")).unwrap();
+
+        // Manually insert an entry with an old timestamp
+        let id = Uuid::new_v4();
+        let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(16);
+        {
+            let mut entry = StreamRegistryEntry::reserved(sender, receiver);
+            entry.created_at =
+                std::time::Instant::now() - std::time::Duration::from_secs(60);
+            runtime.interaction_stream_registry.lock().insert(id, entry);
+        }
+
+        runtime.reap_expired_reservations();
+
+        let registry = runtime.interaction_stream_registry.lock();
+        assert!(
+            !registry.contains_key(&id),
+            "expired reservation should have been reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_m4_attach_after_completed_returns_not_reserved() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("post-comp-{suffix}")).unwrap();
+        let session_id = meerkat_core::SessionId::new();
+
+        let cmd = CommsCommand::Input {
+            session_id: session_id.clone(),
+            body: "hello".to_string(),
+            source: meerkat_core::InputSource::Rpc,
+            stream: InputStreamMode::ReserveInteraction,
+            allow_self_session: true,
+        };
+        let receipt = CoreCommsRuntime::send(&runtime, cmd).await.unwrap();
+        let iid = match receipt {
+            SendReceipt::InputAccepted { interaction_id, .. } => interaction_id,
+            _ => panic!("expected InputAccepted"),
+        };
+
+        // Attach
+        let _stream = CoreCommsRuntime::stream(
+            &runtime,
+            StreamScope::Interaction(iid.clone()),
+        )
+        .unwrap();
+
+        // Complete
+        runtime.mark_interaction_complete(iid.0);
+
+        // Try to attach again → NotReserved
+        let result = CoreCommsRuntime::stream(
+            &runtime,
+            StreamScope::Interaction(iid.clone()),
+        );
+        assert!(
+            matches!(result, Err(StreamError::NotReserved(_))),
+            "attach after completed should return NotReserved"
+        );
     }
 }

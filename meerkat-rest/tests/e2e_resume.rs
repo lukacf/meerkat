@@ -64,6 +64,7 @@ async fn inner_test_rest_resume_metadata() {
         event_tx,
         session_service,
         builder_slot,
+        webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
     };
 
     let app = router(state_run);
@@ -123,7 +124,7 @@ async fn inner_test_rest_resume_metadata() {
 
     let state_resume = AppState {
         store_path: store_path.clone(),
-        default_model: "gpt-4o-mini".into(),
+        default_model: "gpt-5.2".into(),
         max_tokens: 7,
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
@@ -135,6 +136,7 @@ async fn inner_test_rest_resume_metadata() {
         event_tx: tokio::sync::broadcast::channel(16).0,
         session_service: session_service2,
         builder_slot: builder_slot2,
+        webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
     };
 
     let app = router(state_resume);

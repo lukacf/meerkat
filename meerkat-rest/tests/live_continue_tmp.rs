@@ -47,6 +47,7 @@ async fn integration_real_live_continue_hangs() {
         event_tx,
         session_service,
         builder_slot,
+        webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
     };
 
     let app = router(state);

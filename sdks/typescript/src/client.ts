@@ -210,29 +210,52 @@ export class MeerkatClient {
   }
 
   /**
-   * Push an external event into a session's inbox.
-   *
-   * The event is queued for processing at the next turn boundary
-   * (in host mode). Does NOT trigger an immediate LLM call.
+   * Send a canonical comms command to a session.
    *
    * @param sessionId - Target session ID
-   * @param payload - Event payload (any JSON-serializable value)
-   * @param source - Optional source identifier (e.g. "github", "webhook")
-   * @returns Object with `{ queued: true }` on success
+   * @param command - Command fields (kind, to, body, intent, params, etc.)
+   * @returns Receipt info on success
    */
-  async pushEvent(
+  async send(
     sessionId: string,
-    payload: unknown,
-    source?: string,
-  ): Promise<{ queued: boolean }> {
-    const params: Record<string, unknown> = {
+    command: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return (await this.request("comms/send", {
       session_id: sessionId,
-      payload,
-    };
-    if (source !== undefined) {
-      params.source = source;
-    }
-    return (await this.request("event/push", params)) as { queued: boolean };
+      ...command,
+    })) as Record<string, unknown>;
+  }
+
+  /**
+   * Send a command and open a stream in one call.
+   *
+   * @param sessionId - Target session ID
+   * @param command - Command fields (kind, to, body, etc.)
+   * @returns Receipt and stream info
+   */
+  async sendAndStream(
+    sessionId: string,
+    command: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return (await this.request("comms/send", {
+      session_id: sessionId,
+      stream: "reserve_interaction",
+      ...command,
+    })) as Record<string, unknown>;
+  }
+
+  /**
+   * List peers visible to a session's comms runtime.
+   *
+   * @param sessionId - Target session ID
+   * @returns Object with `{ peers: [...] }`
+   */
+  async peers(
+    sessionId: string,
+  ): Promise<{ peers: Array<Record<string, unknown>> }> {
+    return (await this.request("comms/peers", {
+      session_id: sessionId,
+    })) as { peers: Array<Record<string, unknown>> };
   }
 
   // --- Internal ---

@@ -260,26 +260,29 @@ class MeerkatClient:
         """Merge-patch runtime configuration. Returns updated config."""
         return await self._request("config/patch", patch)
 
-    async def push_event(
-        self, session_id: str, payload, source: Optional[str] = None
-    ) -> dict:
-        """Push an external event into a session's inbox.
-
-        The event is queued for processing at the next turn boundary
-        (in host mode). Does NOT trigger an immediate LLM call.
+    async def send(self, session_id: str, **kwargs) -> dict:
+        """Send a canonical comms command to a session.
 
         Args:
             session_id: Target session ID.
-            payload: Event payload (any JSON-serializable value).
-            source: Optional source identifier (e.g. "github", "webhook").
+            **kwargs: Command fields (kind, to, body, intent, params, etc.)
 
         Returns:
-            dict with {"queued": true} on success.
+            dict with receipt info on success.
         """
-        params = {"session_id": session_id, "payload": payload}
-        if source is not None:
-            params["source"] = source
-        return await self._request("event/push", params)
+        params = {"session_id": session_id, **kwargs}
+        return await self._request("comms/send", params)
+
+    async def peers(self, session_id: str) -> dict:
+        """List peers visible to a session's comms runtime.
+
+        Args:
+            session_id: Target session ID.
+
+        Returns:
+            dict with {"peers": [...]} on success.
+        """
+        return await self._request("comms/peers", {"session_id": session_id})
 
     # --- Internal ---
 

@@ -12,6 +12,10 @@ pub mod skills;
 mod state;
 
 use crate::budget::Budget;
+use crate::comms::{
+    CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
+    StreamError, StreamScope,
+};
 use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
 use crate::hooks::HookEngine;
@@ -179,6 +183,41 @@ pub trait AgentSessionStore: Send + Sync {
 /// Trait for comms runtime that can be used with the agent
 #[async_trait]
 pub trait CommsRuntime: Send + Sync {
+    /// Dispatch a canonical comms command.
+    async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
+        Err(SendError::Unsupported(
+            "send not implemented for this CommsRuntime".to_string(),
+        ))
+    }
+
+    /// Open a stream for a session or interaction scope.
+    fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
+        let scope_desc = match scope {
+            StreamScope::Session(session_id) => format!("session {}", session_id),
+            StreamScope::Interaction(interaction_id) => format!("interaction {}", interaction_id.0),
+        };
+        Err(StreamError::NotFound(scope_desc))
+    }
+
+    /// List peers visible to this runtime.
+    async fn peers(&self) -> Vec<PeerDirectoryEntry> {
+        Vec::new()
+    }
+
+    /// Send a command and open a scoped stream in one call.
+    async fn send_and_stream(
+        &self,
+        cmd: CommsCommand,
+    ) -> Result<(SendReceipt, EventStream), SendAndStreamError> {
+        let receipt = self.send(cmd).await?;
+        Err(SendAndStreamError::StreamAttach {
+            receipt,
+            error: StreamError::Internal(
+                "send_and_stream is not implemented for this runtime".to_string(),
+            ),
+        })
+    }
+
     /// Drain comms inbox and return messages formatted for the LLM
     async fn drain_messages(&self) -> Vec<String>;
     /// Get a notification when new messages arrive
@@ -222,6 +261,14 @@ pub trait CommsRuntime: Send + Sync {
         _id: &crate::interaction::InteractionId,
     ) -> Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>> {
         None
+    }
+
+    /// Take and clear the one-shot sender for an interaction-scoped stream.
+    fn take_interaction_stream_sender(
+        &self,
+        _id: &crate::interaction::InteractionId,
+    ) -> Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>> {
+        self.interaction_subscriber(_id)
     }
 }
 

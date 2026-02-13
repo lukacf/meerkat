@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod budget;
+pub mod comms;
 pub mod compact;
 pub mod config;
 pub mod config_store;
@@ -37,6 +38,11 @@ pub use agent::{
     CommsRuntime, FilteredToolDispatcher, LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
+pub use comms::{
+    CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
+    PeerDirectorySource, PeerName, SendAndStreamError, SendError, SendReceipt, StreamError,
+    StreamScope,
+};
 pub use compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 

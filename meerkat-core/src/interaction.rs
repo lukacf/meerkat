@@ -12,6 +12,12 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InteractionId(pub Uuid);
 
+impl std::fmt::Display for InteractionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Typed status for response interactions.
 ///
 /// Mirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.

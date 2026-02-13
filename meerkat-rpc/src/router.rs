@@ -1,15 +1,25 @@
 //! Method router - dispatches JSON-RPC requests to the correct handler.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(feature = "comms")]
+use std::collections::HashMap;
+#[cfg(feature = "comms")]
 use futures::StreamExt;
+#[cfg(feature = "comms")]
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::mpsc;
+#[cfg(feature = "comms")]
+use tokio::sync::Mutex;
+#[cfg(feature = "comms")]
+use tokio::sync::oneshot;
+#[cfg(feature = "comms")]
 use tokio::task::JoinHandle;
+#[cfg(feature = "comms")]
 use uuid::Uuid;
 
 use meerkat_core::ConfigStore;
+#[cfg(feature = "comms")]
 use meerkat_core::comms::StreamScope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::types::SessionId;
@@ -19,6 +29,7 @@ use crate::handlers;
 use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
+#[cfg(feature = "comms")]
 const COMMS_STREAM_CONTRACT_VERSION: &str = "0.3.0";
 
 // ---------------------------------------------------------------------------
@@ -49,6 +60,7 @@ impl NotificationSink {
         let _ = self.tx.send(notification).await;
     }
 
+    #[cfg(feature = "comms")]
     /// Emit a scoped comms stream event as a JSON-RPC notification.
     async fn emit_comms_stream_event(
         &self,
@@ -69,6 +81,7 @@ impl NotificationSink {
     }
 }
 
+#[cfg(feature = "comms")]
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum StreamScopeState {
@@ -76,6 +89,7 @@ enum StreamScopeState {
     Interaction { interaction_id: String },
 }
 
+#[cfg(feature = "comms")]
 impl StreamScopeState {
     fn session(session_id: &SessionId) -> Self {
         Self::Session {
@@ -90,6 +104,7 @@ impl StreamScopeState {
     }
 }
 
+#[cfg(feature = "comms")]
 struct StreamForwarder {
     stop_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
@@ -105,6 +120,7 @@ pub struct MethodRouter {
     runtime: Arc<SessionRuntime>,
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
+    #[cfg(feature = "comms")]
     active_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
 }
 
@@ -119,6 +135,7 @@ impl MethodRouter {
             runtime,
             config_store,
             notification_sink,
+            #[cfg(feature = "comms")]
             active_streams: Arc::new(Mutex::new(HashMap::new())),
         }
     }

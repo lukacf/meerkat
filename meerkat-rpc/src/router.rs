@@ -106,9 +106,7 @@ impl MethodRouter {
             "comms/send" => handlers::comms::handle_send(id, params, &self.runtime).await,
             #[cfg(feature = "comms")]
             "comms/peers" => handlers::comms::handle_peers(id, params, &self.runtime).await,
-            // BRIDGE(M7→M12): Legacy event/push kept for internal backward compat.
-            #[cfg(feature = "comms")]
-            "event/push" => handlers::event::handle_push(id, params, &self.runtime).await,
+            // M12: event/push removed. Use comms/send instead.
             "capabilities/get" => {
                 let config = self.config_store.get().await.unwrap_or_default();
                 handlers::capabilities::handle_get(id, &config)

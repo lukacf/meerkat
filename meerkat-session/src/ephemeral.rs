@@ -93,6 +93,8 @@ struct SessionHandle {
     /// Subscribable event injector for pushing external events.
     /// Extracted from the agent before it moves into its task.
     event_injector: Option<Arc<dyn meerkat_core::SubscribableInjector>>,
+    /// Optional comms runtime for host-mode commands and stream attachment.
+    comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +159,15 @@ pub trait SessionAgent: Send {
     /// Callers can use `inject()` for fire-and-forget or
     /// `inject_with_subscription()` for interaction-scoped streaming.
     fn event_injector(&self) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+        None
+    }
+
+    /// Get the comms runtime used by this agent, if any.
+    ///
+    /// Called once before the agent moves into its dedicated task. The returned
+    /// runtime is stored in the session handle for surfaces that need comms
+    /// command execution and stream attachment.
+    fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
         None
     }
 }
@@ -238,6 +249,17 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .and_then(|h| h.event_injector.clone())
     }
 
+    /// Get the comms runtime for a session, if available.
+    pub async fn comms_runtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .and_then(|h| h.comms_runtime.clone())
+    }
+
     /// Wait for a session to be registered.
     ///
     /// Returns when the next session handle is stored. Used by CLI `--stdin`
@@ -302,6 +324,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
         // Extract the event injector before the agent moves into its task.
         let event_injector = agent.event_injector();
+        let comms_runtime = agent.comms_runtime();
 
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
@@ -333,6 +356,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             _capacity_permit: capacity_permit,
             created_at,
             event_injector,
+            comms_runtime,
         };
 
         // Acquire turn lock for the first turn (cannot fail — fresh session)

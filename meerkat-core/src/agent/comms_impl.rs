@@ -22,6 +22,11 @@ where
         self.comms_runtime.as_deref()
     }
 
+    /// Get a shared handle to the comms runtime, if enabled.
+    pub fn comms_arc(&self) -> Option<std::sync::Arc<dyn CommsRuntime>> {
+        self.comms_runtime.clone()
+    }
+
     /// Drain comms inbox and inject messages into session.
     /// Returns true if any messages were injected.
     ///

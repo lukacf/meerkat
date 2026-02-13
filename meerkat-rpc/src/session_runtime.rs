@@ -320,6 +320,14 @@ impl SessionRuntime {
         self.service.event_injector(session_id).await
     }
 
+    /// Get the comms runtime for a session, if available.
+    pub async fn comms_runtime(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.service.comms_runtime(session_id).await
+    }
+
     /// Shut down the runtime, closing all sessions.
     pub async fn shutdown(&self) {
         // Clear pending sessions.

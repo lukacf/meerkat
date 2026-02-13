@@ -133,7 +133,7 @@ Hierarchical agent spawning with tools: `agent_spawn`, `agent_fork`, `agent_stat
 
 ### Inter-Agent Communication & External Events
 
-**Agent-to-agent comms:** Ed25519-signed peer-to-peer messaging via `send_message`, `send_request`, `send_response`, `list_peers`. Host mode (`--host`) keeps agent alive listening for messages. Signed listeners use CBOR + Ed25519 with trusted peer verification.
+**Agent-to-agent comms:** Ed25519-signed peer-to-peer messaging via `send_message`, `send_request`, `send_response`, `list_peers`. Host mode (`--host`) keeps agent alive listening for messages. Signed listeners use CBOR + Ed25519 with trusted peer verification. `list_peers` returns discoverable peers from both configured `TrustedPeers` and active in-process registrations (`InprocRegistry`), excluding self and de-duplicating by name.
 
 **External event ingestion:** External systems (webhooks, scripts, stdin) can push events into a running agent's inbox. All events flow through the `SubscribableInjector` trait (which extends `EventInjector`) into a bounded inbox, drained at turn boundaries (or continuously in host mode) and injected as user messages.
 
@@ -144,7 +144,7 @@ Hierarchical agent spawning with tools: `agent_spawn`, `agent_fork`, `agent_stat
 | RPC | `event/push` method | `rpc` | None (implicit) |
 | Comms | TCP/UDS plain listeners | `tcp`/`uds` | `auth = "none"` required |
 
-**Interaction-scoped streaming (Rust SDK):** When injecting events programmatically, use `inject_with_subscription()` instead of `inject()` to get a dedicated `mpsc::Receiver<AgentEvent>` scoped to that interaction. Events (`TextDelta`, `ToolCallRequested`, etc.) are mirrored to the subscriber during the turn that processes the injected message. The stream ends with exactly one terminal event: `InteractionComplete { result }` or `InteractionFailed { error }`. Backpressure drops intermediate events (with a `StreamTruncated` marker) but never the terminal. Requires host mode with events and comms enabled. The service's `event_injector(&session_id)` returns `Arc<dyn SubscribableInjector>`.
+**Interaction-scoped streaming (Rust SDK):** When injecting events programmatically, use `inject_with_subscription()` instead of `inject()` to get a dedicated `mpsc::Receiver<AgentEvent>` scoped to that interaction. Events (`TextDelta`, `ToolCallRequested`, etc.) are mirrored to the subscriber during the turn that processes the injected message. The stream ends with exactly one terminal event: `InteractionComplete { result }` or `InteractionFailed { error }`. Backpressure drops intermediate events (with a `StreamTruncated` marker) but never the terminal. Requires host mode with a configured primary `event_tx` (typically via `AgentBuildConfig.event_tx`, then `run_host_mode()`) and comms enabled. The service's `event_injector(&session_id)` returns `Arc<dyn SubscribableInjector>`.
 
 **Auth model:** Signed (Ed25519) listeners always run for agent-to-agent comms. When `auth = "none"`, a separate plain-text listener starts on `event_address` for unauthenticated external events. The signed listener is never replaced. REST webhook auth uses `RKAT_WEBHOOK_SECRET` env var with constant-time comparison (`subtle::ConstantTimeEq`).
 

@@ -124,10 +124,11 @@ pub trait SessionAgent: Send {
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
     /// Run the agent in host mode: process prompt then stay alive for comms.
-    async fn run_host_mode_with_events(
+    ///
+    /// Event streaming should use the agent's build-time configured event channel.
+    async fn run_host_mode(
         &mut self,
         prompt: String,
-        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
     /// Stage skill references to resolve and inject on the next turn.
@@ -594,7 +595,7 @@ async fn session_task<A: SessionAgent>(
                                 + '_,
                         >,
                     > = if host_mode {
-                        Box::pin(agent.run_host_mode_with_events(prompt, agent_event_tx.clone()))
+                        Box::pin(agent.run_host_mode(prompt))
                     } else {
                         Box::pin(agent.run_with_events(prompt, agent_event_tx.clone()))
                     };

@@ -12,6 +12,7 @@ use crate::sub_agent::SubAgentManager;
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime};
 
@@ -32,6 +33,7 @@ pub struct AgentBuilder {
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     pub(super) skill_engine: Option<Arc<dyn crate::skills::SkillEngine>>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
+    pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
 }
 
 impl AgentBuilder {
@@ -52,6 +54,7 @@ impl AgentBuilder {
             memory_store: None,
             skill_engine: None,
             event_tap: None,
+            default_event_tx: None,
         }
     }
 
@@ -206,6 +209,7 @@ impl AgentBuilder {
             event_tap: self
                 .event_tap
                 .unwrap_or_else(crate::event_tap::new_event_tap),
+            default_event_tx: self.default_event_tx,
             host_drain_active: false,
         }
     }
@@ -219,6 +223,16 @@ impl AgentBuilder {
     /// Set the event tap for interaction-scoped streaming.
     pub fn with_event_tap(mut self, tap: crate::event_tap::EventTap) -> Self {
         self.event_tap = Some(tap);
+        self
+    }
+
+    /// Set a default event channel used when run methods are called without
+    /// per-call event channels.
+    pub fn with_default_event_tx(
+        mut self,
+        event_tx: mpsc::Sender<crate::event::AgentEvent>,
+    ) -> Self {
+        self.default_event_tx = Some(event_tx);
         self
     }
 }

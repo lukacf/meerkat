@@ -300,7 +300,11 @@ Send a response to a previously received request.
 </Accordion>
 
 <Accordion title="list_peers">
-List all trusted peers and their addresses.
+List all discoverable peers and their addresses.
+
+This includes both configured trusted peers and in-process peers currently
+registered in `InprocRegistry`. Results are de-duplicated by name and exclude
+the current agent.
 
 **Input**: Empty object `{}`
 
@@ -321,7 +325,9 @@ List all trusted peers and their addresses.
 
 ### Tool availability
 
-Comms tools are conditionally available based on whether any trusted peers are configured. The `CommsToolSurface::peer_availability()` function creates an `Availability` predicate that hides the tools from the LLM when no peers exist.
+Comms tools are conditionally available based on peer/trust configuration in the
+surface. `CommsToolSurface::peer_availability()` currently checks the
+`TrustedPeers` set.
 
 ## Inbox
 
@@ -671,7 +677,9 @@ while let Some(event) = sub.events.recv().await {
 
 **Requirements:**
 
-- The agent must be running in **host mode** with events (`run_host_mode_with_events`).
+- The agent must be running in **host mode** with a configured primary
+  `event_tx` channel (typically via `AgentBuildConfig.event_tx`, used by
+  `run_host_mode()`).
 - **Comms must be enabled.** Without comms, `event_injector()` returns `None`.
 
 ## Security

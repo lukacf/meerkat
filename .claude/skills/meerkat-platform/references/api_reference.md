@@ -535,7 +535,7 @@ while let Some(event) = sub.events.recv().await {
 }
 ```
 
-Guarantees: no cross-talk between concurrent interactions, exactly one terminal event, backpressure drops intermediate events (with `StreamTruncated` marker) but never the terminal. Requires host mode with events and comms enabled.
+Guarantees: no cross-talk between concurrent interactions, exactly one terminal event, backpressure drops intermediate events (with `StreamTruncated` marker) but never the terminal. Requires host mode with a configured primary `event_tx` (typically `AgentBuildConfig.event_tx` + `run_host_mode()`) and comms enabled.
 
 ---
 

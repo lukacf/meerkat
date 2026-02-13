@@ -260,6 +260,9 @@ where
     pub pending_skill_references: Option<Vec<crate::skills::SkillId>>,
     /// Per-interaction event tap for streaming events to subscribers.
     pub(crate) event_tap: crate::event_tap::EventTap,
+    /// Optional default event channel configured at build time.
+    /// Used by run methods when no per-call event channel is provided.
+    pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
     /// When true, the host loop owns the inbox drain cycle.
     /// `drain_comms_inbox()` becomes a no-op to avoid stealing
     /// interaction-scoped messages through the legacy path.

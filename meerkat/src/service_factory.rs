@@ -43,12 +43,11 @@ impl SessionAgent for FactoryAgent {
         self.agent.run_with_events(prompt, event_tx).await
     }
 
-    async fn run_host_mode_with_events(
+    async fn run_host_mode(
         &mut self,
         prompt: String,
-        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.agent.run_host_mode_with_events(prompt, event_tx).await
+        self.agent.run_host_mode(prompt).await
     }
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillId>>) {

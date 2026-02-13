@@ -225,6 +225,16 @@ impl InprocRegistry {
     pub fn peer_names(&self) -> Vec<String> {
         self.state.read().names.keys().cloned().collect()
     }
+
+    /// List all registered peers as `(name, pubkey)` tuples.
+    pub fn peers(&self) -> Vec<(String, PubKey)> {
+        self.state
+            .read()
+            .peers
+            .values()
+            .map(|peer| (peer.name.clone(), peer.pubkey))
+            .collect()
+    }
 }
 
 impl Default for InprocRegistry {
@@ -415,6 +425,20 @@ mod tests {
         assert!(names.contains(&"agent-0".to_string()));
         assert!(names.contains(&"agent-1".to_string()));
         assert!(names.contains(&"agent-2".to_string()));
+    }
+
+    #[test]
+    fn test_registry_peers_snapshot() {
+        let registry = InprocRegistry::new();
+        let keypair = make_keypair();
+        let pubkey = keypair.public_key();
+        let (_, sender) = Inbox::new();
+        registry.register("agent-a", pubkey, sender);
+
+        let peers = registry.peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].0, "agent-a");
+        assert_eq!(peers[0].1, pubkey);
     }
 
     #[test]

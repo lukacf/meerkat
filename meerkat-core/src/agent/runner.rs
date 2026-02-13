@@ -556,6 +556,8 @@ where
         user_input: String,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
+        let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
+
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
 
@@ -581,7 +583,8 @@ where
             .await;
         }
 
-        self.run_started_hooks(&run_prompt, event_tx.as_ref()).await?;
+        self.run_started_hooks(&run_prompt, event_tx.as_ref())
+            .await?;
 
         match self.run_loop(event_tx.clone()).await {
             Ok(mut result) => {
@@ -590,9 +593,7 @@ where
                 Ok(result)
             }
             Err(err) => {
-                if let Err(hook_err) =
-                    self.run_failed_hooks(&err, event_tx.as_ref()).await
-                {
+                if let Err(hook_err) = self.run_failed_hooks(&err, event_tx.as_ref()).await {
                     tracing::warn!(?hook_err, "run_failed hook execution failed");
                 }
                 if let Some(ref tx) = event_tx {
@@ -620,6 +621,8 @@ where
         &mut self,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
+        let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
+
         let pending_prompt = self.session.messages().last().and_then(|m| match m {
             Message::User(u) => Some(u.content.clone()),
             _ => None,
@@ -655,9 +658,7 @@ where
                 Ok(result)
             }
             Err(err) => {
-                if let Err(hook_err) =
-                    self.run_failed_hooks(&err, event_tx.as_ref()).await
-                {
+                if let Err(hook_err) = self.run_failed_hooks(&err, event_tx.as_ref()).await {
                     tracing::warn!(?hook_err, "run_failed hook execution failed");
                 }
                 if let Some(ref tx) = event_tx {

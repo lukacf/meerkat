@@ -62,12 +62,13 @@ impl SessionAgent for MockAgent {
         })
     }
 
-    async fn run_host_mode_with_events(
+    async fn run_host_mode(
         &mut self,
         prompt: String,
-        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        // Mock host mode delegates to regular run for testing purposes
+        // Mock host mode delegates to regular run for testing purposes.
+        // Session task forwards events from the shared internal channel.
+        let (event_tx, _event_rx) = mpsc::channel(16);
         self.run_with_events(prompt, event_tx).await
     }
 

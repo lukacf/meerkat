@@ -27,7 +27,7 @@ icon: "wrench"
 | `send_message` | Comms | Yes | `comms` | Send text to a peer |
 | `send_request` | Comms | Yes | `comms` | Send a request to a peer |
 | `send_response` | Comms | Yes | `comms` | Respond to a request |
-| `list_peers` | Comms | Yes | `comms` | List trusted peers |
+| `list_peers` | Comms | Yes | `comms` | List discoverable peers (trusted + inproc) |
 
 ## Enabling and disabling tools
 
@@ -769,7 +769,13 @@ Send a response back to a previous request from a peer.
 </Accordion>
 
 <Accordion title="list_peers">
-List all trusted peers and their connection status.
+List all discoverable peers and their connection status.
+
+Returns the union of:
+- configured trusted peers (`TrustedPeers`)
+- in-process peers currently registered in `InprocRegistry`
+
+Peers are de-duplicated by name and the current agent ("self") is excluded.
 
 **Default enabled:** Yes (when comms is active)
 

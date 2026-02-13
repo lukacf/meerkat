@@ -78,6 +78,7 @@ where
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         use std::time::Duration;
+        let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
 
         // Host loop owns the inbox drain cycle — suppress inner-loop drains
         // to preserve interaction-scoped subscriber correlation.
@@ -756,6 +757,45 @@ mod tests {
         // In non-events mode, subscriber is dropped immediately, so receiver should be closed
         // (no events sent, channel just closes)
         assert!(sub_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_host_mode_uses_default_event_channel_when_configured() {
+        let interaction = make_interaction(
+            InteractionContent::Message {
+                body: "hello".into(),
+            },
+            "hello",
+        );
+
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            interaction,
+        ]));
+        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(4096);
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .with_default_event_tx(event_tx)
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let _result = agent.run_host_mode("".into()).await.unwrap();
+
+        let mut saw_run_started = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, AgentEvent::RunStarted { .. }) {
+                saw_run_started = true;
+                break;
+            }
+        }
+        assert!(
+            saw_run_started,
+            "expected RunStarted on default host-mode event channel"
+        );
     }
 
     #[tokio::test]

@@ -950,6 +950,9 @@ impl AgentFactory {
 
         // 12e. Wire shared event tap (shared with LLM adapter)
         builder = builder.with_event_tap(event_tap);
+        if let Some(tx) = build_config.event_tx {
+            builder = builder.with_default_event_tx(tx);
+        }
 
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;

@@ -279,7 +279,8 @@ while let Some(event) = sub.events.recv().await {
 - The primary `event_tx` channel is unaffected
 
 **Requirements:**
-- Agent must be in host mode with events
+- Agent must be in host mode with a configured primary `event_tx`
+  (for example via `AgentBuildConfig.event_tx`, then `run_host_mode()`)
 - Comms must be enabled
 </Accordion>
 

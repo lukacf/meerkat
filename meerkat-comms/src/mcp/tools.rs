@@ -3,10 +3,12 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::InprocRegistry;
 #[cfg(test)]
 use crate::{CommsConfig, Keypair};
 use crate::{Router, Status, TrustedPeers};
@@ -160,18 +162,39 @@ async fn handle_send_response(
 }
 
 async fn handle_list_peers(ctx: &ToolContext) -> Result<Value, String> {
+    let self_pubkey = ctx.router.keypair_arc().public_key();
     let peers = ctx.trusted_peers.read().await;
-    let peer_list: Vec<Value> = peers
+    let mut peer_map: BTreeMap<String, Value> = peers
         .peers
         .iter()
+        .filter(|p| p.pubkey != self_pubkey)
         .map(|p| {
-            json!({
-                "name": p.name,
-                "peer_id": p.pubkey.to_peer_id(),
-                "address": p.addr
-            })
+            (
+                p.name.clone(),
+                json!({
+                    "name": p.name,
+                    "peer_id": p.pubkey.to_peer_id(),
+                    "address": p.addr
+                }),
+            )
         })
         .collect();
+    drop(peers);
+
+    for (name, pubkey) in InprocRegistry::global().peers() {
+        if pubkey == self_pubkey {
+            continue;
+        }
+        peer_map.entry(name.clone()).or_insert_with(|| {
+            json!({
+                "name": name,
+                "peer_id": pubkey.to_peer_id(),
+                "address": format!("inproc://{}", name),
+            })
+        });
+    }
+
+    let peer_list: Vec<Value> = peer_map.into_values().collect();
 
     Ok(json!({ "peers": peer_list }))
 }
@@ -202,6 +225,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_list_peers() {
+        InprocRegistry::global().clear();
+
         let keypair = Keypair::generate();
         let trusted_peers = TrustedPeers {
             peers: vec![TrustedPeer {
@@ -227,7 +252,48 @@ mod tests {
         let result = handle_tools_call(&ctx, "list_peers", &json!({})).await;
         assert!(result.is_ok());
         let val = result.unwrap();
-        assert_eq!(val["peers"].as_array().unwrap().len(), 1);
-        assert_eq!(val["peers"][0]["name"], "test-peer");
+        let peers = val["peers"].as_array().expect("peers should be array");
+        assert!(peers.iter().any(|p| p["name"] == "test-peer"));
+
+        InprocRegistry::global().clear();
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_peers_includes_inproc_registered_peers() {
+        InprocRegistry::global().clear();
+
+        let self_keypair = Keypair::generate();
+        let self_pubkey = self_keypair.public_key();
+        let (_, self_sender) = crate::Inbox::new();
+        InprocRegistry::global().register("self-agent", self_pubkey, self_sender);
+
+        let peer_keypair = Keypair::generate();
+        let peer_pubkey = peer_keypair.public_key();
+        let (_, peer_sender) = crate::Inbox::new();
+        InprocRegistry::global().register("peer-agent", peer_pubkey, peer_sender);
+
+        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+        let (_, inbox_sender) = crate::Inbox::new();
+        let router = Arc::new(Router::with_shared_peers(
+            self_keypair,
+            trusted_peers.clone(),
+            CommsConfig::default(),
+            inbox_sender,
+        ));
+
+        let ctx = ToolContext {
+            router,
+            trusted_peers,
+        };
+
+        let result = handle_tools_call(&ctx, "list_peers", &json!({})).await;
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        let peers = val["peers"].as_array().expect("peers should be array");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0]["name"], "peer-agent");
+        assert_eq!(peers[0]["address"], "inproc://peer-agent");
+
+        InprocRegistry::global().clear();
     }
 }

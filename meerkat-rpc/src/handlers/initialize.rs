@@ -44,7 +44,10 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "capabilities/get".to_string(),
             ];
             #[cfg(feature = "comms")]
-            m.push("event/push".to_string());
+            {
+                m.push("comms/send".to_string());
+                m.push("comms/peers".to_string());
+            }
             m
         },
     };

@@ -3,7 +3,11 @@
 //! Each sub-module handles a group of JSON-RPC methods.
 
 pub mod capabilities;
+#[cfg(feature = "comms")]
+pub mod comms;
 pub mod config;
+// BRIDGE(M7→M12): Legacy event/push handler, kept for internal reference.
+// Remove when M12 eradicates all legacy surfaces.
 #[cfg(feature = "comms")]
 pub mod event;
 pub mod initialize;

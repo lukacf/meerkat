@@ -41,15 +41,6 @@ pub use meerkat_core::{
     AgentError,
     // Events
     AgentEvent,
-    // Event injection
-    EventInjector,
-    EventInjectorError,
-    InteractionSubscription,
-    SubscribableInjector,
-    // Interaction types
-    InteractionContent,
-    InteractionId,
-    ResponseStatus,
     AgentLlmClient,
     AgentSessionStore,
     AgentToolDispatcher,
@@ -91,6 +82,9 @@ pub use meerkat_core::{
     HookRunOverrides,
     HookRuntimeConfig,
     HooksConfig,
+    // Interaction types
+    InteractionContent,
+    InteractionId,
     LlmStreamResult,
     // State
     LoopState,
@@ -106,6 +100,7 @@ pub use meerkat_core::{
     // Provider
     Provider,
     ProviderConfig,
+    ResponseStatus,
     ResultShape,
     RetryConfig,
     // Retry
@@ -146,6 +141,12 @@ pub use meerkat_core::{
 pub use meerkat_comms::agent::{CommsContent, CommsMessage, CommsStatus};
 #[cfg(feature = "comms")]
 pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CoreCommsConfig};
+#[cfg(feature = "comms")]
+pub use meerkat_core::{
+    CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
+    PeerDirectorySource, PeerName, SendAndStreamError, SendError, SendReceipt, StreamError,
+    StreamScope,
+};
 
 // Re-export client types
 pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};

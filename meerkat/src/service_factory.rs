@@ -4,6 +4,10 @@
 //! traits so any surface can create a `SessionService` backed by the standard factory.
 
 use async_trait::async_trait;
+use meerkat_core::comms::{
+    CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
+    StreamError, StreamScope,
+};
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError};
 use meerkat_core::types::{RunResult, SessionId};
@@ -30,6 +34,50 @@ impl FactoryAgent {
     /// Access the underlying agent mutably.
     pub fn agent_mut(&mut self) -> &mut DynAgent {
         &mut self.agent
+    }
+
+    /// Access the current session for inspection.
+    pub fn session(&self) -> &Session {
+        self.agent.session()
+    }
+
+    /// Send a canonical comms command through the wrapped agent runtime.
+    pub async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
+        let runtime = self
+            .agent
+            .comms()
+            .ok_or_else(|| SendError::Unsupported("comms runtime is not configured".to_string()))?;
+        runtime.send(cmd).await
+    }
+
+    /// Open a command/event stream for a logical session or interaction scope.
+    pub fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
+        let runtime = self
+            .agent
+            .comms()
+            .ok_or_else(|| StreamError::NotFound("comms runtime is not configured".to_string()))?;
+        runtime.stream(scope)
+    }
+
+    /// Send a command and open a command stream in one call.
+    pub async fn send_and_stream(
+        &self,
+        cmd: CommsCommand,
+    ) -> Result<(SendReceipt, EventStream), SendAndStreamError> {
+        let runtime = self.agent.comms().ok_or_else(|| {
+            SendAndStreamError::Send(SendError::Unsupported(
+                "comms runtime is not configured".to_string(),
+            ))
+        })?;
+        runtime.send_and_stream(cmd).await
+    }
+
+    /// List peers discoverable to this agent runtime.
+    pub async fn peers(&self) -> Vec<PeerDirectoryEntry> {
+        match self.agent.comms() {
+            Some(runtime) => runtime.peers().await,
+            None => Vec::new(),
+        }
     }
 }
 
@@ -181,4 +229,145 @@ pub fn build_ephemeral_service(
 ) -> EphemeralSessionService<FactoryAgentBuilder> {
     let builder = FactoryAgentBuilder::new(factory, config);
     EphemeralSessionService::new(builder, max_sessions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::stream;
+    use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+    use meerkat_core::Config;
+    use meerkat_core::comms::{InputSource, InputStreamMode};
+    use std::pin::Pin;
+    use tempfile::TempDir;
+
+    struct MockLlmClient;
+
+    #[async_trait]
+    impl LlmClient for MockLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>,
+        > {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    async fn build_factory_agent_with_mock(
+        temp: &TempDir,
+        mut build_config: AgentBuildConfig,
+    ) -> FactoryAgent {
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+        let agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+        FactoryAgent { agent }
+    }
+
+    fn mock_input_cmd(session_id: &SessionId, stream: InputStreamMode) -> CommsCommand {
+        CommsCommand::Input {
+            session_id: session_id.clone(),
+            body: "hello".to_string(),
+            source: InputSource::Rpc,
+            stream,
+            allow_self_session: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_factory_agent_send_without_comms_runtime_is_unsupported() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = build_factory_agent_with_mock(
+            &temp,
+            AgentBuildConfig {
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+        )
+        .await;
+        let session_id = agent.session().id().clone();
+        let result = agent
+            .send(mock_input_cmd(&session_id, InputStreamMode::None))
+            .await;
+        assert!(matches!(result, Err(SendError::Unsupported(_))));
+
+        let stream = agent.stream(StreamScope::Session(session_id.clone()));
+        assert!(matches!(stream, Err(StreamError::NotFound(_))));
+
+        let stream_result = agent
+            .send_and_stream(mock_input_cmd(
+                &session_id,
+                InputStreamMode::ReserveInteraction,
+            ))
+            .await;
+        assert!(matches!(
+            stream_result,
+            Err(SendAndStreamError::Send(SendError::Unsupported(_)))
+        ));
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn test_factory_agent_send_and_stream_opens_interaction_stream() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+        build_config.host_mode = true;
+        build_config.comms_name = Some("factory-agent-comms".to_string());
+
+        let agent = build_factory_agent_with_mock(&temp, build_config).await;
+        let session_id = agent.session().id().clone();
+        let (receipt, stream) = agent
+            .send_and_stream(mock_input_cmd(
+                &session_id,
+                InputStreamMode::ReserveInteraction,
+            ))
+            .await
+            .expect("send_and_stream should reserve and open stream");
+
+        let interaction_id = match receipt {
+            SendReceipt::InputAccepted {
+                interaction_id,
+                stream_reserved,
+            } => {
+                assert!(stream_reserved);
+                interaction_id
+            }
+            _ => panic!("unexpected receipt variant"),
+        };
+
+        assert!(matches!(
+            agent.stream(StreamScope::Interaction(interaction_id.clone())),
+            Err(StreamError::AlreadyAttached(_))
+        ));
+
+        drop(stream);
+
+        let peers = agent.peers().await;
+        assert!(
+            peers.is_empty(),
+            "comms runtime should be configured but no trusted peers are registered"
+        );
+    }
 }

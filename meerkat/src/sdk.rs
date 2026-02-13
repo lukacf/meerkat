@@ -5,12 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::{cmp, collections::HashSet};
 
-use crate::{
-    AgentFactory, AgentToolDispatcher, Config, HookEngine, HooksConfig, ToolError,
-    ToolGatewayBuilder,
-};
+use crate::{AgentFactory, AgentToolDispatcher, Config, HookEngine, HooksConfig};
 #[cfg(feature = "comms")]
-use crate::{CommsRuntime, CoreCommsConfig};
+use crate::{CommsRuntime, CoreCommsConfig, ToolError, ToolGatewayBuilder};
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::{AgentEvent, format_verbose_event};

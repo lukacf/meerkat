@@ -45,6 +45,7 @@ use crate::{create_default_hook_engine, resolve_layered_hooks_config};
 /// Ephemeral in-process store used when no storage backend feature is enabled.
 #[cfg(not(feature = "memory-store"))]
 #[derive(Default)]
+#[allow(dead_code)]
 struct EphemeralSessionStore {
     sessions: RwLock<HashMap<SessionId, Session>>,
 }
@@ -471,6 +472,7 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
+        #[allow(unused_variables)]
         skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let builder = BuiltinDispatcherConfig {
@@ -482,6 +484,7 @@ impl AgentFactory {
         };
         #[cfg(not(feature = "sub-agents"))]
         {
+            #[allow(unused_mut)]
             let mut composite = CompositeDispatcher::new(
                 builder.store,
                 &builder.config,
@@ -715,6 +718,7 @@ impl AgentFactory {
         let effective_subagents = build_config
             .override_subagents
             .unwrap_or(self.enable_subagents);
+        #[allow(unused_mut)]
         let (mut tools, mut tool_usage_instructions) = self
             .build_tool_dispatcher_for_agent_with_overrides(
                 config,

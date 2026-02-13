@@ -248,17 +248,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_peers_includes_inproc() {
-        InprocRegistry::global().clear();
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let self_name = format!("self-{suffix}");
+        let peer_name = format!("peer-{suffix}");
 
         let self_keypair = Keypair::generate();
         let self_pubkey = self_keypair.public_key();
         let (_, self_sender) = crate::Inbox::new();
-        InprocRegistry::global().register("self-agent", self_pubkey, self_sender);
+        InprocRegistry::global().register(&self_name, self_pubkey, self_sender);
 
         let peer_keypair = Keypair::generate();
         let peer_pubkey = peer_keypair.public_key();
         let (_, peer_sender) = crate::Inbox::new();
-        InprocRegistry::global().register("peer-agent", peer_pubkey, peer_sender);
+        InprocRegistry::global().register(&peer_name, peer_pubkey, peer_sender);
 
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, inbox_sender) = crate::Inbox::new();
@@ -278,10 +280,8 @@ mod tests {
         assert!(result.is_ok());
         let val = result.unwrap();
         let peers = val["peers"].as_array().expect("peers should be array");
-        assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0]["name"], "peer-agent");
-
-        InprocRegistry::global().clear();
+        let matched: Vec<_> = peers.iter().filter(|p| p["name"] == peer_name).collect();
+        assert_eq!(matched.len(), 1);
     }
 
     #[tokio::test]

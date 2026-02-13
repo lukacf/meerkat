@@ -202,7 +202,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 let mut registry = self.interaction_stream_registry.lock();
                 let entry = registry
                     .get_mut(&id)
-                    .ok_or(StreamError::NotReserved(interaction_id.clone()))?;
+                    .ok_or(StreamError::NotReserved(interaction_id))?;
 
                 match entry.state {
                     ReservationState::Reserved => {
@@ -265,7 +265,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 }
                 InputStreamMode::ReserveInteraction => {
                     let interaction_id = Uuid::new_v4();
-                    self.register_interaction_stream(interaction_id, body, source.into())?;
+                    self.register_interaction_stream(interaction_id, body, source)?;
 
                     Ok(SendReceipt::InputAccepted {
                         interaction_id: meerkat_core::InteractionId(interaction_id),
@@ -288,10 +288,7 @@ impl CoreCommsRuntime for CommsRuntime {
             } => self
                 .send_peer_command(
                     &to.0,
-                    crate::types::MessageKind::Request {
-                        intent: intent,
-                        params: params,
-                    },
+                    crate::types::MessageKind::Request { intent, params },
                 )
                 .await
                 .map(|_| SendReceipt::PeerRequestSent {
@@ -457,9 +454,7 @@ impl CoreCommsRuntime for CommsRuntime {
         id: &meerkat_core::InteractionId,
     ) -> Option<tokio::sync::mpsc::Sender<meerkat_core::AgentEvent>> {
         let sender = self.subscriber_registry.lock().remove(&id.0);
-        if sender.is_none() {
-            return None;
-        }
+        sender.as_ref()?;
 
         let mut registry = self.interaction_stream_registry.lock();
         match registry.get(&id.0) {

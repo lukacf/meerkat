@@ -3,7 +3,9 @@
 //! Provides HTTP endpoints for running and managing Meerkat agents:
 //! - POST /sessions - Create and run a new agent
 //! - POST /sessions/:id/messages - Continue an existing session
-//! - POST /sessions/:id/event - Push an external event to a session
+//! - POST /comms/send - Send a canonical comms command
+//! - GET /comms/peers - List peers visible to a session
+//! - POST /sessions/:id/event - (legacy) Push an external event to a session
 //! - GET /sessions/:id - Get session details
 //! - GET /sessions/:id/events - SSE stream for agent events
 //!
@@ -320,6 +322,9 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/messages", post(continue_session))
         .route("/sessions/{id}/events", get(session_events))
+        .route("/comms/send", post(comms_send))
+        .route("/comms/peers", get(comms_peers))
+        // BRIDGE(M11→M12): Legacy event push endpoint.
         .route("/sessions/{id}/event", post(push_event))
         .route(
             "/config",
@@ -333,6 +338,210 @@ pub fn router(state: AppState) -> Router {
 /// Health check endpoint
 async fn health_check() -> &'static str {
     "ok"
+}
+
+/// Canonical comms send request body.
+#[derive(Debug, Deserialize)]
+pub struct CommsSendRequest {
+    pub session_id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub intent: Option<String>,
+    #[serde(default)]
+    pub params: Option<Value>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub stream: Option<String>,
+    #[serde(default)]
+    pub allow_self_session: Option<bool>,
+}
+
+/// Canonical comms peers request body.
+#[derive(Debug, Deserialize)]
+pub struct CommsPeersRequest {
+    pub session_id: String,
+}
+
+/// POST /comms/send — dispatch a canonical comms command.
+async fn comms_send(
+    State(state): State<AppState>,
+    Json(req): Json<CommsSendRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = SessionId::parse(&req.session_id)
+        .map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+
+    let comms = state
+        .session_service
+        .comms_runtime(&session_id)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "Session not found or comms not enabled: {session_id}"
+            ))
+        })?;
+
+    use meerkat_core::comms::*;
+    let cmd = match req.kind.as_str() {
+        "input" => {
+            let body = req
+                .body
+                .ok_or_else(|| ApiError::BadRequest("input requires 'body'".into()))?;
+            let source = match req.source.as_deref() {
+                Some("tcp") => InputSource::Tcp,
+                Some("uds") => InputSource::Uds,
+                Some("stdin") => InputSource::Stdin,
+                Some("webhook") => InputSource::Webhook,
+                _ => InputSource::Rpc,
+            };
+            let stream_mode = match req.stream.as_deref() {
+                Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
+                _ => InputStreamMode::None,
+            };
+            CommsCommand::Input {
+                session_id: session_id.clone(),
+                body,
+                source,
+                stream: stream_mode,
+                allow_self_session: req.allow_self_session.unwrap_or(false),
+            }
+        }
+        "peer_message" => {
+            let to = req
+                .to
+                .ok_or_else(|| ApiError::BadRequest("peer_message requires 'to'".into()))?;
+            CommsCommand::PeerMessage {
+                to: PeerName(to),
+                body: req.body.unwrap_or_default(),
+            }
+        }
+        "peer_request" => {
+            let to = req
+                .to
+                .ok_or_else(|| ApiError::BadRequest("peer_request requires 'to'".into()))?;
+            let intent = req
+                .intent
+                .ok_or_else(|| ApiError::BadRequest("peer_request requires 'intent'".into()))?;
+            CommsCommand::PeerRequest {
+                to: PeerName(to),
+                intent,
+                params: req.params.unwrap_or(json!({})),
+                stream: InputStreamMode::None,
+            }
+        }
+        "peer_response" => {
+            let to = req
+                .to
+                .ok_or_else(|| ApiError::BadRequest("peer_response requires 'to'".into()))?;
+            let in_reply_to_str = req.in_reply_to.ok_or_else(|| {
+                ApiError::BadRequest("peer_response requires 'in_reply_to'".into())
+            })?;
+            let in_reply_to = uuid::Uuid::parse_str(&in_reply_to_str)
+                .map_err(|_| ApiError::BadRequest(format!("invalid UUID: {in_reply_to_str}")))?;
+            let status = match req.status.as_deref() {
+                Some("accepted") => meerkat_core::ResponseStatus::Accepted,
+                Some("failed") => meerkat_core::ResponseStatus::Failed,
+                _ => meerkat_core::ResponseStatus::Completed,
+            };
+            CommsCommand::PeerResponse {
+                to: PeerName(to),
+                in_reply_to: meerkat_core::InteractionId(in_reply_to),
+                status,
+                result: req.result.unwrap_or(Value::Null),
+            }
+        }
+        other => {
+            return Err(ApiError::BadRequest(format!("unknown kind: {other}")));
+        }
+    };
+
+    match comms.send(cmd).await {
+        Ok(receipt) => {
+            let result = match receipt {
+                SendReceipt::InputAccepted {
+                    interaction_id,
+                    stream_reserved,
+                } => json!({
+                    "kind": "input_accepted",
+                    "interaction_id": interaction_id.0.to_string(),
+                    "stream_reserved": stream_reserved,
+                }),
+                SendReceipt::PeerMessageSent {
+                    envelope_id,
+                    acked,
+                } => json!({
+                    "kind": "peer_message_sent",
+                    "envelope_id": envelope_id.to_string(),
+                    "acked": acked,
+                }),
+                SendReceipt::PeerRequestSent {
+                    envelope_id,
+                    interaction_id,
+                    stream_reserved,
+                } => json!({
+                    "kind": "peer_request_sent",
+                    "envelope_id": envelope_id.to_string(),
+                    "interaction_id": interaction_id.0.to_string(),
+                    "stream_reserved": stream_reserved,
+                }),
+                SendReceipt::PeerResponseSent {
+                    envelope_id,
+                    in_reply_to,
+                } => json!({
+                    "kind": "peer_response_sent",
+                    "envelope_id": envelope_id.to_string(),
+                    "in_reply_to": in_reply_to.0.to_string(),
+                }),
+            };
+            Ok(Json(result))
+        }
+        Err(e) => Err(ApiError::Internal(e.to_string())),
+    }
+}
+
+/// GET /comms/peers — list peers visible to a session's comms runtime.
+async fn comms_peers(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<CommsPeersRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = SessionId::parse(&params.session_id)
+        .map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+
+    let comms = state
+        .session_service
+        .comms_runtime(&session_id)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "Session not found or comms not enabled: {session_id}"
+            ))
+        })?;
+
+    let peers = comms.peers().await;
+    let entries: Vec<Value> = peers
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name.0,
+                "peer_id": p.peer_id,
+                "address": p.address,
+                "source": format!("{:?}", p.source),
+                "sendable_kinds": p.sendable_kinds,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "peers": entries })))
 }
 
 /// Push an external event to a session's inbox.

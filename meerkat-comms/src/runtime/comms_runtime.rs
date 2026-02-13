@@ -871,14 +871,19 @@ impl CommsRuntime {
     /// the stream (ClosedEarly), this is a no-op.
     pub fn mark_interaction_complete(&self, interaction_id: Uuid) {
         let mut registry = self.interaction_stream_registry.lock();
+        let mut should_remove = false;
         if let Some(entry) = registry.get_mut(&interaction_id) {
             if entry.transition(ReservationState::Attached, ReservationState::Completed) {
                 tracing::debug!(
                     interaction_id = %interaction_id,
                     "interaction stream completed by terminal event"
                 );
-                registry.remove(&interaction_id);
+                should_remove = true;
             }
+        }
+        if should_remove {
+            self.subscriber_registry.lock().remove(&interaction_id);
+            registry.remove(&interaction_id);
         }
     }
 
@@ -1139,6 +1144,7 @@ mod tests {
     use crate::event_injector::CommsEventInjector;
     use crate::identity::Signature;
     use crate::types::{Envelope, InboxItem, MessageKind, Status};
+    use futures::StreamExt;
     use meerkat_core::SubscribableInjector;
     use meerkat_core::{
         SendError,
@@ -1149,6 +1155,7 @@ mod tests {
         types::SessionId,
     };
     use uuid::Uuid;
+    use tokio::time::{timeout, Duration};
 
     fn clear_inproc_registry() {
         InprocRegistry::global().clear();
@@ -1837,7 +1844,7 @@ mod tests {
             _ => panic!("expected InputAccepted"),
         };
 
-        let _stream = CoreCommsRuntime::stream(
+        let mut stream = CoreCommsRuntime::stream(
             &runtime,
             StreamScope::Interaction(iid.clone()),
         )
@@ -1845,6 +1852,11 @@ mod tests {
 
         // Simulate terminal event
         runtime.mark_interaction_complete(iid.0);
+
+        let terminal = timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("stream should terminate promptly after completion");
+        assert!(terminal.is_none());
 
         // Registry entry should be cleaned up
         let registry = runtime.interaction_stream_registry.lock();

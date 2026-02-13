@@ -378,6 +378,8 @@ async fn comms_send(
     State(state): State<AppState>,
     Json(req): Json<CommsSendRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    use meerkat_core::comms::SendReceipt;
+
     let session_id = SessionId::parse(&req.session_id)
         .map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
 
@@ -391,89 +393,7 @@ async fn comms_send(
             ))
         })?;
 
-    use meerkat_core::comms::*;
-    let cmd = match req.kind.as_str() {
-        "input" => {
-            let body = req
-                .body
-                .ok_or_else(|| ApiError::BadRequest("input requires 'body'".into()))?;
-            let source = match req.source.as_deref() {
-                Some("tcp") => InputSource::Tcp,
-                Some("uds") => InputSource::Uds,
-                Some("stdin") => InputSource::Stdin,
-                Some("webhook") => InputSource::Webhook,
-                Some("rpc") | None => InputSource::Rpc,
-                Some(other) => {
-                    return Err(ApiError::BadRequest(format!(
-                        "invalid source: {other}"
-                    )));
-                }
-            };
-            let stream_mode = match req.stream.as_deref() {
-                Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
-                _ => InputStreamMode::None,
-            };
-            CommsCommand::Input {
-                session_id: session_id.clone(),
-                body,
-                source,
-                stream: stream_mode,
-                allow_self_session: req.allow_self_session.unwrap_or(false),
-            }
-        }
-        "peer_message" => {
-            let to = req
-                .to
-                .ok_or_else(|| ApiError::BadRequest("peer_message requires 'to'".into()))?;
-            CommsCommand::PeerMessage {
-                to: PeerName(to),
-                body: req.body.unwrap_or_default(),
-            }
-        }
-        "peer_request" => {
-            let to = req
-                .to
-                .ok_or_else(|| ApiError::BadRequest("peer_request requires 'to'".into()))?;
-            let intent = req
-                .intent
-                .ok_or_else(|| ApiError::BadRequest("peer_request requires 'intent'".into()))?;
-            CommsCommand::PeerRequest {
-                to: PeerName(to),
-                intent,
-                params: req.params.unwrap_or(json!({})),
-                stream: InputStreamMode::None,
-            }
-        }
-        "peer_response" => {
-            let to = req
-                .to
-                .ok_or_else(|| ApiError::BadRequest("peer_response requires 'to'".into()))?;
-            let in_reply_to_str = req.in_reply_to.ok_or_else(|| {
-                ApiError::BadRequest("peer_response requires 'in_reply_to'".into())
-            })?;
-            let in_reply_to = uuid::Uuid::parse_str(&in_reply_to_str)
-                .map_err(|_| ApiError::BadRequest(format!("invalid UUID: {in_reply_to_str}")))?;
-            let status = match req.status.as_deref() {
-                Some("accepted") => meerkat_core::ResponseStatus::Accepted,
-                Some("completed") | None => meerkat_core::ResponseStatus::Completed,
-                Some("failed") => meerkat_core::ResponseStatus::Failed,
-                Some(other) => {
-                    return Err(ApiError::BadRequest(format!(
-                        "invalid status: {other}"
-                    )));
-                }
-            };
-            CommsCommand::PeerResponse {
-                to: PeerName(to),
-                in_reply_to: meerkat_core::InteractionId(in_reply_to),
-                status,
-                result: req.result.unwrap_or(Value::Null),
-            }
-        }
-        other => {
-            return Err(ApiError::BadRequest(format!("unknown kind: {other}")));
-        }
-    };
+    let cmd = build_comms_command(&req, &session_id)?;
 
     match comms.send(cmd).await {
         Ok(receipt) => {
@@ -486,10 +406,7 @@ async fn comms_send(
                     "interaction_id": interaction_id.0.to_string(),
                     "stream_reserved": stream_reserved,
                 }),
-                SendReceipt::PeerMessageSent {
-                    envelope_id,
-                    acked,
-                } => json!({
+                SendReceipt::PeerMessageSent { envelope_id, acked } => json!({
                     "kind": "peer_message_sent",
                     "envelope_id": envelope_id.to_string(),
                     "acked": acked,
@@ -516,6 +433,107 @@ async fn comms_send(
             Ok(Json(result))
         }
         Err(e) => Err(ApiError::Internal(e.to_string())),
+    }
+}
+
+fn build_comms_command(
+    req: &CommsSendRequest,
+    session_id: &SessionId,
+) -> Result<meerkat_core::comms::CommsCommand, ApiError> {
+    use meerkat_core::comms::*;
+
+    let to_name = |value: String| PeerName(value);
+
+    match req.kind.as_str() {
+        "input" => {
+            let body = req
+                .body
+                .clone()
+                .ok_or_else(|| ApiError::BadRequest("input requires 'body'".into()))?;
+            let source = match req.source.as_deref() {
+                Some("tcp") => InputSource::Tcp,
+                Some("uds") => InputSource::Uds,
+                Some("stdin") => InputSource::Stdin,
+                Some("webhook") => InputSource::Webhook,
+                Some("rpc") | None => InputSource::Rpc,
+                Some(other) => {
+                    return Err(ApiError::BadRequest(format!("invalid source: {other}")));
+                }
+            };
+            let stream = match req.stream.as_deref() {
+                Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
+                Some("none") | None => InputStreamMode::None,
+                Some(other) => {
+                    return Err(ApiError::BadRequest(format!("invalid stream: {other}")));
+                }
+            };
+            Ok(CommsCommand::Input {
+                session_id: session_id.clone(),
+                body,
+                source,
+                stream,
+                allow_self_session: req.allow_self_session.unwrap_or(false),
+            })
+        }
+        "peer_message" => {
+            let to = req
+                .to
+                .clone()
+                .ok_or_else(|| ApiError::BadRequest("peer_message requires 'to'".into()))?;
+            Ok(CommsCommand::PeerMessage {
+                to: to_name(to),
+                body: req.body.clone().unwrap_or_default(),
+            })
+        }
+        "peer_request" => {
+            let to = req
+                .to
+                .clone()
+                .ok_or_else(|| ApiError::BadRequest("peer_request requires 'to'".into()))?;
+            let intent = req
+                .intent
+                .clone()
+                .ok_or_else(|| ApiError::BadRequest("peer_request requires 'intent'".into()))?;
+            let stream = match req.stream.as_deref() {
+                Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
+                Some("none") | None => InputStreamMode::None,
+                Some(other) => {
+                    return Err(ApiError::BadRequest(format!("invalid stream: {other}")));
+                }
+            };
+            Ok(CommsCommand::PeerRequest {
+                to: to_name(to),
+                intent,
+                params: req.params.clone().unwrap_or(json!({})),
+                stream,
+            })
+        }
+        "peer_response" => {
+            let to = req
+                .to
+                .clone()
+                .ok_or_else(|| ApiError::BadRequest("peer_response requires 'to'".into()))?;
+            let in_reply_to_str = req.in_reply_to.clone().ok_or_else(|| {
+                ApiError::BadRequest("peer_response requires 'in_reply_to'".into())
+            })?;
+            let in_reply_to = uuid::Uuid::parse_str(&in_reply_to_str)
+                .map_err(|_| ApiError::BadRequest(format!("invalid UUID: {in_reply_to_str}")))?;
+            let status = match req.status.as_deref() {
+                Some("accepted") => meerkat_core::ResponseStatus::Accepted,
+                Some("completed") | None => meerkat_core::ResponseStatus::Completed,
+                Some("failed") => meerkat_core::ResponseStatus::Failed,
+                Some(other) => {
+                    return Err(ApiError::BadRequest(format!("invalid status: {other}")));
+                }
+            };
+            Ok(CommsCommand::PeerResponse {
+                to: to_name(to),
+                in_reply_to: meerkat_core::InteractionId(in_reply_to),
+                status,
+                result: req.result.clone().unwrap_or(Value::Null),
+            })
+        }
+        other => Err(ApiError::BadRequest(format!("unknown kind: {other}"))),
     }
 }
 
@@ -1146,6 +1164,78 @@ mod tests {
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
         assert!(!req.host_mode);
         assert!(req.comms_name.is_none());
+    }
+
+    #[test]
+    fn test_build_comms_command_peer_request_invalid_stream() {
+        let req = CommsSendRequest {
+            session_id: "sid_123".to_string(),
+            kind: "peer_request".to_string(),
+            to: Some("alice".to_string()),
+            body: None,
+            intent: Some("ask".to_string()),
+            params: None,
+            in_reply_to: None,
+            status: None,
+            result: None,
+            source: None,
+            stream: Some("invalid".to_string()),
+            allow_self_session: None,
+        };
+        let session_id = meerkat_core::SessionId::new();
+        let err = build_comms_command(&req, &session_id).expect_err("invalid stream should fail");
+        match err {
+            ApiError::BadRequest(msg) => assert_eq!(msg, "invalid stream: invalid"),
+            _ => panic!("expected bad request"),
+        }
+    }
+
+    #[test]
+    fn test_build_comms_command_peer_response_invalid_status() {
+        let req = CommsSendRequest {
+            session_id: "sid_123".to_string(),
+            kind: "peer_response".to_string(),
+            to: Some("alice".to_string()),
+            body: None,
+            intent: None,
+            params: None,
+            in_reply_to: Some(uuid::Uuid::new_v4().to_string()),
+            status: Some("almost-done".to_string()),
+            result: None,
+            source: None,
+            stream: None,
+            allow_self_session: None,
+        };
+        let session_id = meerkat_core::SessionId::new();
+        let err = build_comms_command(&req, &session_id).expect_err("invalid status should fail");
+        match err {
+            ApiError::BadRequest(msg) => assert_eq!(msg, "invalid status: almost-done"),
+            _ => panic!("expected bad request"),
+        }
+    }
+
+    #[test]
+    fn test_build_comms_command_invalid_source() {
+        let req = CommsSendRequest {
+            session_id: "sid_123".to_string(),
+            kind: "input".to_string(),
+            to: None,
+            body: Some("hi".to_string()),
+            intent: None,
+            params: None,
+            in_reply_to: None,
+            status: None,
+            result: None,
+            source: Some("webhookd".to_string()),
+            stream: None,
+            allow_self_session: None,
+        };
+        let session_id = meerkat_core::SessionId::new();
+        let err = build_comms_command(&req, &session_id).expect_err("invalid source should fail");
+        match err {
+            ApiError::BadRequest(msg) => assert_eq!(msg, "invalid source: webhookd"),
+            _ => panic!("expected bad request"),
+        }
     }
 
     #[cfg(not(feature = "comms"))]

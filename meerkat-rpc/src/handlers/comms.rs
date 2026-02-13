@@ -1,5 +1,7 @@
 //! `comms/*` handlers — canonical comms command dispatch and peer discovery.
 
+pub const COMMS_STREAM_CONTRACT_VERSION: &str = "0.3.0";
+
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -102,14 +104,13 @@ pub async fn handle_send(
                     "interaction_id": interaction_id.0.to_string(),
                     "stream_reserved": stream_reserved,
                 }),
-                meerkat_core::comms::SendReceipt::PeerMessageSent {
-                    envelope_id,
-                    acked,
-                } => serde_json::json!({
-                    "kind": "peer_message_sent",
-                    "envelope_id": envelope_id.to_string(),
-                    "acked": acked,
-                }),
+                meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
+                    serde_json::json!({
+                        "kind": "peer_message_sent",
+                        "envelope_id": envelope_id.to_string(),
+                        "acked": acked,
+                    })
+                }
                 meerkat_core::comms::SendReceipt::PeerRequestSent {
                     envelope_id,
                     interaction_id,
@@ -416,5 +417,77 @@ mod tests {
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert_eq!(errors[0]["field"], "body");
+    }
+
+    #[test]
+    fn test_build_comms_command_peer_request_invalid_stream() {
+        let params = CommsSendParams {
+            session_id: "sid_1".to_string(),
+            kind: "peer_request".to_string(),
+            to: Some("alice".to_string()),
+            body: None,
+            intent: Some("ask".to_string()),
+            params: None,
+            in_reply_to: None,
+            status: None,
+            result: None,
+            source: None,
+            stream: Some("invalid".to_string()),
+            allow_self_session: None,
+        };
+        let session_id = meerkat_core::SessionId::new();
+        let result = build_comms_command(&params, &session_id);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors[0]["field"], "stream");
+        assert_eq!(errors[0]["issue"], "invalid_value");
+    }
+
+    #[test]
+    fn test_build_comms_command_peer_response_invalid_status() {
+        let params = CommsSendParams {
+            session_id: "sid_1".to_string(),
+            kind: "peer_response".to_string(),
+            to: Some("alice".to_string()),
+            body: None,
+            intent: None,
+            params: None,
+            in_reply_to: Some(uuid::Uuid::new_v4().to_string()),
+            status: Some("almost-done".to_string()),
+            result: None,
+            source: None,
+            stream: None,
+            allow_self_session: None,
+        };
+        let session_id = meerkat_core::SessionId::new();
+        let result = build_comms_command(&params, &session_id);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors[0]["field"], "status");
+        assert_eq!(errors[0]["issue"], "invalid_value");
+    }
+
+    #[test]
+    fn test_build_comms_command_input_invalid_source() {
+        let params = CommsSendParams {
+            session_id: "sid_1".to_string(),
+            kind: "input".to_string(),
+            to: None,
+            body: Some("hi".to_string()),
+            intent: None,
+            params: None,
+            in_reply_to: None,
+            status: None,
+            result: None,
+            source: Some("webhookd".to_string()),
+            stream: None,
+            allow_self_session: None,
+        };
+        let session_id = meerkat_core::SessionId::new();
+        let result = build_comms_command(&params, &session_id);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors[0]["field"], "source");
+        assert_eq!(errors[0]["issue"], "invalid_value");
     }
 }

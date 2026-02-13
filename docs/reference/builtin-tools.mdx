@@ -686,7 +686,10 @@ Get the current date and time. Returns ISO 8601 formatted datetime and Unix time
 
 Comms tools enable inter-agent communication. They require the `comms` Cargo feature (`dep:meerkat-comms`) and the factory-level `enable_comms` flag. Unlike other tool categories, comms tools are provided as a separate `CommsToolSurface` dispatcher (implementing `AgentToolDispatcher`) and composed via `ToolGateway`, NOT bundled into `CompositeDispatcher`.
 
-Comms tools are only shown to the agent when at least one trusted peer is configured (controlled by `CommsToolSurface::peer_availability()`).
+Comms tools are only shown to the agent when at least one peer is discoverable
+(controlled by `CommsToolSurface::peer_availability()`). The check passes when
+either `TrustedPeers` has entries or `InprocRegistry` has a peer other than
+self.
 
 Tool definitions (name, description, input schema) are dynamically loaded from `meerkat_comms::tools_list()`.
 

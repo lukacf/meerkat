@@ -250,9 +250,11 @@ pub fn compose_tools_with_comms(
     tool_usage_instructions: String,
     runtime: &CommsRuntime,
 ) -> Result<(Arc<dyn AgentToolDispatcher>, String), ToolError> {
+    let router = runtime.router_arc();
     let trusted_peers = runtime.trusted_peers_shared();
-    let comms_surface = CommsToolSurface::new(runtime.router_arc(), trusted_peers.clone());
-    let availability = CommsToolSurface::peer_availability(trusted_peers);
+    let self_pubkey = router.keypair_arc().public_key();
+    let comms_surface = CommsToolSurface::new(router, trusted_peers.clone());
+    let availability = CommsToolSurface::peer_availability(trusted_peers, self_pubkey);
 
     let gateway = ToolGatewayBuilder::new()
         .add_dispatcher(base_tools)

@@ -326,8 +326,8 @@ the current agent.
 ### Tool availability
 
 Comms tools are conditionally available based on peer/trust configuration in the
-surface. `CommsToolSurface::peer_availability()` currently checks the
-`TrustedPeers` set.
+surface. `CommsToolSurface::peer_availability()` checks whether either
+`TrustedPeers` has entries or `InprocRegistry` contains a peer other than self.
 
 ## Inbox
 

@@ -16,7 +16,7 @@ use meerkat_core::comms::{
 };
 use meerkat_core::config::PlainEventSource;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -293,10 +293,10 @@ impl CoreCommsRuntime for CommsRuntime {
                 }
             }
             CommsCommand::PeerMessage { to, body } => self
-                .send_peer_command(&to.0, crate::types::MessageKind::Message { body })
+                .send_peer_command(to.as_str(), crate::types::MessageKind::Message { body })
                 .await
-                .map(|_| SendReceipt::PeerMessageSent {
-                    envelope_id: Uuid::new_v4(),
+                .map(|envelope_id| SendReceipt::PeerMessageSent {
+                    envelope_id,
                     acked: false,
                 }),
             CommsCommand::PeerRequest {
@@ -320,22 +320,28 @@ impl CoreCommsRuntime for CommsRuntime {
                     );
                 }
 
-                if let Err(e) = self
-                    .send_peer_command(&to.0, crate::types::MessageKind::Request { intent, params })
+                let envelope_id = match self
+                    .send_peer_command(
+                        to.as_str(),
+                        crate::types::MessageKind::Request { intent, params },
+                    )
                     .await
                 {
-                    if stream_reserved {
-                        // Clean up reservation on send failure.
-                        self.interaction_stream_registry
-                            .lock()
-                            .remove(&interaction_id);
-                        self.subscriber_registry.lock().remove(&interaction_id);
+                    Ok(id) => id,
+                    Err(e) => {
+                        if stream_reserved {
+                            // Clean up reservation on send failure.
+                            self.interaction_stream_registry
+                                .lock()
+                                .remove(&interaction_id);
+                            self.subscriber_registry.lock().remove(&interaction_id);
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
-                }
+                };
 
                 Ok(SendReceipt::PeerRequestSent {
-                    envelope_id: Uuid::new_v4(),
+                    envelope_id,
                     interaction_id: meerkat_core::InteractionId(interaction_id),
                     stream_reserved,
                 })
@@ -353,7 +359,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 };
 
                 self.send_peer_command(
-                    &to.0,
+                    to.as_str(),
                     crate::types::MessageKind::Response {
                         in_reply_to: in_reply_to.0,
                         status,
@@ -361,8 +367,8 @@ impl CoreCommsRuntime for CommsRuntime {
                     },
                 )
                 .await
-                .map(|_| SendReceipt::PeerResponseSent {
-                    envelope_id: Uuid::new_v4(),
+                .map(|envelope_id| SendReceipt::PeerResponseSent {
+                    envelope_id,
                     in_reply_to,
                 })
             }
@@ -420,20 +426,26 @@ impl CoreCommsRuntime for CommsRuntime {
                     StreamRegistryEntry::reserved(sender, receiver),
                 );
 
-                if let Err(e) = self
-                    .send_peer_command(&to.0, crate::types::MessageKind::Request { intent, params })
+                let envelope_id = match self
+                    .send_peer_command(
+                        to.as_str(),
+                        crate::types::MessageKind::Request { intent, params },
+                    )
                     .await
                 {
-                    // Clean up reservation on send failure.
-                    self.interaction_stream_registry
-                        .lock()
-                        .remove(&interaction_id);
-                    self.subscriber_registry.lock().remove(&interaction_id);
-                    return Err(SendAndStreamError::Send(e));
-                }
+                    Ok(id) => id,
+                    Err(e) => {
+                        // Clean up reservation on send failure.
+                        self.interaction_stream_registry
+                            .lock()
+                            .remove(&interaction_id);
+                        self.subscriber_registry.lock().remove(&interaction_id);
+                        return Err(SendAndStreamError::Send(e));
+                    }
+                };
 
                 let receipt = SendReceipt::PeerRequestSent {
-                    envelope_id: Uuid::new_v4(),
+                    envelope_id,
                     interaction_id: meerkat_core::InteractionId(interaction_id),
                     stream_reserved: true,
                 };
@@ -782,7 +794,8 @@ impl CommsRuntime {
     }
     /// Canonical peer resolver.
     ///
-    /// Discovery and sendability are tied only to the trusted peer list.
+    /// Discovery and sendability are derived from trusted peers, with in-proc peers
+    /// included when auth is disabled.
     async fn resolve_peer_directory(&self) -> Vec<PeerDirectoryEntry> {
         let sendable_kinds = vec![
             "peer_message".to_string(),
@@ -792,20 +805,79 @@ impl CommsRuntime {
 
         let mut peers: std::collections::HashMap<String, PeerDirectoryEntry> =
             std::collections::HashMap::new();
+        let inproc_by_name: std::collections::HashMap<String, crate::identity::PubKey> =
+            InprocRegistry::global().peers().into_iter().collect();
+        let mut trusted_names = HashSet::new();
+        let mut trusted_pubkeys = HashSet::new();
 
         {
             let trusted = self.trusted_peers.read().await;
             for peer in &trusted.peers {
-                if peer.name == self.config.name {
+                if peer.name == self.config.name || peer.pubkey == self.public_key {
                     continue;
                 }
+                trusted_names.insert(peer.name.clone());
+                trusted_pubkeys.insert(peer.pubkey);
+                let source = if inproc_by_name
+                    .get(&peer.name)
+                    .is_some_and(|key| *key == peer.pubkey)
+                {
+                    PeerDirectorySource::TrustedAndInproc
+                } else {
+                    PeerDirectorySource::Trusted
+                };
+                let name = match PeerName::new(peer.name.clone()) {
+                    Ok(name) => name,
+                    Err(_) => {
+                        tracing::warn!(
+                            peer_name = %peer.name,
+                            peer_id = %peer.pubkey.to_peer_id(),
+                            "skipping invalid peer name in trusted peers"
+                        );
+                        continue;
+                    }
+                };
                 peers.insert(
                     peer.name.clone(),
                     PeerDirectoryEntry {
-                        name: PeerName(peer.name.clone()),
+                        name,
                         peer_id: peer.pubkey.to_peer_id(),
                         address: peer.addr.clone(),
-                        source: PeerDirectorySource::Trusted,
+                        source,
+                        sendable_kinds: sendable_kinds.clone(),
+                        capabilities: serde_json::json!({}),
+                    },
+                );
+            }
+        }
+
+        if !self.config.require_peer_auth {
+            for (name, pubkey) in inproc_by_name {
+                let name = match PeerName::new(name.clone()) {
+                    Ok(name) => name,
+                    Err(_) => {
+                        tracing::warn!(
+                            peer_name = %name,
+                            peer_id = %pubkey.to_peer_id(),
+                            "skipping invalid inproc peer name"
+                        );
+                        continue;
+                    }
+                };
+                let peer_name_str = name.as_string();
+                if trusted_names.contains(name.as_str()) || trusted_pubkeys.contains(&pubkey) {
+                    continue;
+                }
+                if peer_name_str == self.config.name || pubkey == self.public_key {
+                    continue;
+                }
+                peers.insert(
+                    peer_name_str.clone(),
+                    PeerDirectoryEntry {
+                        name,
+                        peer_id: pubkey.to_peer_id(),
+                        address: format!("inproc://{peer_name_str}"),
+                        source: PeerDirectorySource::Inproc,
                         sendable_kinds: sendable_kinds.clone(),
                         capabilities: serde_json::json!({}),
                     },
@@ -821,7 +893,7 @@ impl CommsRuntime {
         &self,
         peer_name: &str,
         kind: crate::types::MessageKind,
-    ) -> Result<(), SendError> {
+    ) -> Result<Uuid, SendError> {
         self.router
             .send(peer_name, kind)
             .await
@@ -1572,7 +1644,8 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&format!("sender-{suffix}")).unwrap();
 
         let cmd = CommsCommand::PeerMessage {
-            to: PeerName("missing-peer".to_string()),
+            to: PeerName::new("missing-peer".to_string())
+                .expect("missing-peer is a valid peer name"),
             body: "hello".to_string(),
         };
 
@@ -1610,7 +1683,7 @@ mod tests {
         }
 
         let cmd = CommsCommand::PeerMessage {
-            to: PeerName(receiver_name),
+            to: PeerName::new(receiver_name).expect("receiver_name is a valid peer name"),
             body: "greeting".to_string(),
         };
 
@@ -1640,7 +1713,7 @@ mod tests {
         let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
         let cmd = CommsCommand::PeerMessage {
-            to: PeerName(receiver_name.clone()),
+            to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
             body: "inproc-only hello".to_string(),
         };
 
@@ -1700,7 +1773,7 @@ mod tests {
         let receiver_pubkey = receiver.public_key();
 
         let cmd = CommsCommand::PeerMessage {
-            to: PeerName(receiver_name.clone()),
+            to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
             body: "hello without trusted".to_string(),
         };
 
@@ -1758,12 +1831,12 @@ mod tests {
         let peers = CoreCommsRuntime::peers(&sender).await;
         let receiver_entries: Vec<_> = peers
             .iter()
-            .filter(|entry| entry.name.0 == receiver_name)
+            .filter(|entry| entry.name.as_str() == receiver_name)
             .collect();
         assert_eq!(receiver_entries.len(), 1, "peer should appear in peers()");
 
         let send_cmd = CommsCommand::PeerMessage {
-            to: PeerName(receiver_name.clone()),
+            to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
             body: "hello trusted peer".to_string(),
         };
         let receipt = CoreCommsRuntime::send(&sender, send_cmd).await;
@@ -1822,20 +1895,23 @@ mod tests {
         }
 
         let peers = CoreCommsRuntime::peers(&runtime).await;
-        let names: Vec<_> = peers.iter().map(|entry| entry.name.0.clone()).collect();
+        let names: Vec<_> = peers.iter().map(|entry| entry.name.as_string()).collect();
         assert!(names.iter().any(|name| name == &peer_name));
         assert!(!names.iter().any(|name| name == &runtime_name));
 
         let matched: Vec<_> = peers
             .iter()
-            .filter(|entry| entry.name.0 == peer_name)
+            .filter(|entry| entry.name.as_str() == peer_name)
             .collect();
         assert_eq!(matched.len(), 1);
 
         let peer = matched[0];
         assert!(
-            peer.source == PeerDirectorySource::Trusted,
-            "expected Trusted, got {:?}",
+            matches!(
+                peer.source,
+                PeerDirectorySource::Trusted | PeerDirectorySource::TrustedAndInproc
+            ),
+            "expected Trusted or TrustedAndInproc, got {:?}",
             peer.source
         );
         assert_eq!(peer.address, format!("inproc://{peer_name}"));
@@ -1864,7 +1940,10 @@ mod tests {
         }
 
         let all_peers = CoreCommsRuntime::peers(&runtime).await;
-        let peers: Vec<_> = all_peers.iter().filter(|e| e.name.0 == peer_name).collect();
+        let peers: Vec<_> = all_peers
+            .iter()
+            .filter(|e| e.name.as_str() == peer_name)
+            .collect();
         assert_eq!(
             peers.len(),
             1,
@@ -1896,7 +1975,7 @@ mod tests {
                 assert!(
                     !matches!(result, Err(SendError::PeerNotFound(_))),
                     "peer '{}' advertised kind '{}' but send failed with PeerNotFound",
-                    entry.name.0,
+                    entry.name.as_str(),
                     kind
                 );
             }
@@ -2013,7 +2092,7 @@ mod tests {
         }
 
         let cmd = CommsCommand::PeerMessage {
-            to: PeerName(peer_name),
+            to: PeerName::new(peer_name).expect("peer_name is a valid peer name"),
             body: "not streamable".to_string(),
         };
         let result = CoreCommsRuntime::send_and_stream(&runtime, cmd).await;

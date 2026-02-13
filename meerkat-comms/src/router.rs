@@ -124,7 +124,7 @@ impl Router {
         peers.remove(pubkey)
     }
 
-    pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<(), SendError> {
+    pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<Uuid, SendError> {
         let peer = {
             let peers = self.trusted_peers.read().await;
             peers.get_by_name(peer_name).cloned()
@@ -186,7 +186,7 @@ impl Router {
         stream: &mut S,
         envelope: Envelope,
         wait_for_ack: bool,
-    ) -> Result<(), SendError>
+    ) -> Result<Uuid, SendError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -222,7 +222,7 @@ impl Router {
                         if in_reply_to != sent_id {
                             return Err(SendError::PeerOffline);
                         }
-                        Ok(())
+                        Ok(sent_id)
                     } else {
                         Err(SendError::PeerOffline)
                     }
@@ -230,11 +230,11 @@ impl Router {
                 _ => Err(SendError::PeerOffline),
             }
         } else {
-            Ok(())
+            Ok(sent_id)
         }
     }
 
-    pub async fn send_message(&self, peer_name: &str, body: String) -> Result<(), SendError> {
+    pub async fn send_message(&self, peer_name: &str, body: String) -> Result<Uuid, SendError> {
         self.send(peer_name, MessageKind::Message { body }).await
     }
 
@@ -243,7 +243,7 @@ impl Router {
         peer_name: &str,
         intent: String,
         params: serde_json::Value,
-    ) -> Result<(), SendError> {
+    ) -> Result<Uuid, SendError> {
         self.send(peer_name, MessageKind::Request { intent, params })
             .await
     }
@@ -254,7 +254,7 @@ impl Router {
         in_reply_to: Uuid,
         status: Status,
         result: serde_json::Value,
-    ) -> Result<(), SendError> {
+    ) -> Result<Uuid, SendError> {
         self.send(
             peer_name,
             MessageKind::Response {

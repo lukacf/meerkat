@@ -195,7 +195,8 @@ impl InprocRegistry {
     /// This bypasses network transport entirely, delivering the envelope
     /// directly to the peer's inbox.
     ///
-    /// Returns Ok(()) if the message was delivered, or an error if:
+    /// Returns the generated envelope ID when the message was delivered, or
+    /// an error if:
     /// - The peer is not found in the registry
     /// - The peer's inbox has been closed
     pub fn send(
@@ -203,7 +204,7 @@ impl InprocRegistry {
         from_keypair: &Keypair,
         to_name: &str,
         kind: MessageKind,
-    ) -> Result<(), InprocSendError> {
+    ) -> Result<uuid::Uuid, InprocSendError> {
         self.send_with_signature(from_keypair, to_name, kind, true)
     }
 
@@ -216,7 +217,7 @@ impl InprocRegistry {
         to_name: &str,
         kind: MessageKind,
         sign_envelope: bool,
-    ) -> Result<(), InprocSendError> {
+    ) -> Result<uuid::Uuid, InprocSendError> {
         // Look up the peer
         let (to_pubkey, sender) = self
             .get_by_name(to_name)
@@ -235,6 +236,7 @@ impl InprocRegistry {
         }
 
         // Deliver directly to inbox
+        let envelope_id = envelope.id;
         sender
             .send(InboxItem::External { envelope })
             .map_err(|err| match err {
@@ -242,7 +244,7 @@ impl InprocRegistry {
                 InboxError::Full => InprocSendError::InboxFull,
             })?;
 
-        Ok(())
+        Ok(envelope_id)
     }
 
     /// List all registered peer names.

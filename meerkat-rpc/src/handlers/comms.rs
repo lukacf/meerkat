@@ -86,7 +86,9 @@ pub async fn handle_send(
                 serde_json::json!({
                     "code": "invalid_command",
                     "message": "Command validation failed",
-                    "details": details,
+                    "details": meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(
+                        &details
+                    ),
                 })
                 .to_string(),
             );
@@ -174,7 +176,7 @@ pub async fn handle_peers(
         .iter()
         .map(|p| {
             serde_json::json!({
-                "name": p.name.0,
+                "name": p.name.to_string(),
                 "peer_id": p.peer_id,
                 "address": p.address,
                 "source": format!("{:?}", p.source),
@@ -187,169 +189,25 @@ pub async fn handle_peers(
     RpcResponse::success(id, serde_json::json!({ "peers": entries }))
 }
 
-/// Build a `CommsCommand` from the validated wire params.
 fn build_comms_command(
     params: &CommsSendParams,
     session_id: &meerkat_core::SessionId,
-) -> Result<meerkat_core::comms::CommsCommand, Vec<serde_json::Value>> {
-    use meerkat_core::comms::*;
-
-    let mut errors = Vec::new();
-
-    match params.kind.as_str() {
-        "input" => {
-            let body = match &params.body {
-                Some(b) => b.clone(),
-                None => {
-                    errors.push(serde_json::json!({
-                        "field": "body", "issue": "required_field"
-                    }));
-                    String::new()
-                }
-            };
-            if !errors.is_empty() {
-                return Err(errors);
-            }
-            let source = match params.source.as_deref() {
-                Some("tcp") => InputSource::Tcp,
-                Some("uds") => InputSource::Uds,
-                Some("stdin") => InputSource::Stdin,
-                Some("webhook") => InputSource::Webhook,
-                Some("rpc") | None => InputSource::Rpc,
-                Some(other) => {
-                    errors.push(serde_json::json!({
-                        "field": "source", "issue": "invalid_value", "got": other
-                    }));
-                    return Err(errors);
-                }
-            };
-            let stream = match params.stream.as_deref() {
-                Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
-                Some("none") | None => InputStreamMode::None,
-                Some(other) => {
-                    errors.push(serde_json::json!({
-                        "field": "stream", "issue": "invalid_value", "got": other
-                    }));
-                    return Err(errors);
-                }
-            };
-            Ok(CommsCommand::Input {
-                session_id: session_id.clone(),
-                body,
-                source,
-                stream,
-                allow_self_session: params.allow_self_session.unwrap_or(false),
-            })
-        }
-        "peer_message" => {
-            let to = match &params.to {
-                Some(t) => PeerName(t.clone()),
-                None => {
-                    errors.push(serde_json::json!({
-                        "field": "to", "issue": "required_field"
-                    }));
-                    return Err(errors);
-                }
-            };
-            let body = params.body.clone().unwrap_or_default();
-            Ok(CommsCommand::PeerMessage { to, body })
-        }
-        "peer_request" => {
-            let to = match &params.to {
-                Some(t) => PeerName(t.clone()),
-                None => {
-                    errors.push(serde_json::json!({
-                        "field": "to", "issue": "required_field"
-                    }));
-                    return Err(errors);
-                }
-            };
-            let intent = match &params.intent {
-                Some(i) => i.clone(),
-                None => {
-                    errors.push(serde_json::json!({
-                        "field": "intent", "issue": "required_field"
-                    }));
-                    return Err(errors);
-                }
-            };
-            if !errors.is_empty() {
-                return Err(errors);
-            }
-            let p = params.params.clone().unwrap_or(serde_json::json!({}));
-            let stream = match params.stream.as_deref() {
-                Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
-                Some("none") | None => InputStreamMode::None,
-                Some(other) => {
-                    errors.push(serde_json::json!({
-                        "field": "stream", "issue": "invalid_value", "got": other
-                    }));
-                    return Err(errors);
-                }
-            };
-            Ok(CommsCommand::PeerRequest {
-                to,
-                intent,
-                params: p,
-                stream,
-            })
-        }
-        "peer_response" => {
-            let to = match &params.to {
-                Some(t) => PeerName(t.clone()),
-                None => {
-                    errors.push(serde_json::json!({
-                        "field": "to", "issue": "required_field"
-                    }));
-                    return Err(errors);
-                }
-            };
-            let in_reply_to = match &params.in_reply_to {
-                Some(id_str) => match uuid::Uuid::parse_str(id_str) {
-                    Ok(id) => meerkat_core::InteractionId(id),
-                    Err(_) => {
-                        errors.push(serde_json::json!({
-                            "field": "in_reply_to", "issue": "invalid_uuid", "got": id_str
-                        }));
-                        return Err(errors);
-                    }
-                },
-                None => {
-                    errors.push(serde_json::json!({
-                        "field": "in_reply_to", "issue": "required_field"
-                    }));
-                    return Err(errors);
-                }
-            };
-            let status = match params.status.as_deref() {
-                Some("accepted") => meerkat_core::ResponseStatus::Accepted,
-                Some("completed") | None => meerkat_core::ResponseStatus::Completed,
-                Some("failed") => meerkat_core::ResponseStatus::Failed,
-                Some(other) => {
-                    errors.push(serde_json::json!({
-                        "field": "status", "issue": "invalid_value", "got": other
-                    }));
-                    return Err(errors);
-                }
-            };
-            if !errors.is_empty() {
-                return Err(errors);
-            }
-            let result = params.result.clone().unwrap_or(serde_json::json!(null));
-            Ok(CommsCommand::PeerResponse {
-                to,
-                in_reply_to,
-                status,
-                result,
-            })
-        }
-        other => {
-            errors.push(serde_json::json!({
-                "field": "kind", "issue": "unknown_kind", "got": other
-            }));
-            Err(errors)
-        }
-    }
+) -> Result<meerkat_core::comms::CommsCommand, Vec<meerkat_core::comms::CommsCommandValidationError>>
+{
+    let request = meerkat_core::comms::CommsCommandRequest {
+        kind: params.kind.clone(),
+        to: params.to.clone(),
+        body: params.body.clone(),
+        intent: params.intent.clone(),
+        params: params.params.clone(),
+        in_reply_to: params.in_reply_to.clone(),
+        status: params.status.clone(),
+        result: params.result.clone(),
+        source: params.source.clone(),
+        stream: params.stream.clone(),
+        allow_self_session: params.allow_self_session,
+    };
+    request.parse(session_id)
 }
 
 #[cfg(test)]
@@ -392,7 +250,9 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
         let result = build_comms_command(&params, &session_id);
         assert!(result.is_err());
-        let errors = result.unwrap_err();
+        let errors = meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(
+            &result.unwrap_err(),
+        );
         assert_eq!(errors[0]["issue"], "unknown_kind");
     }
 
@@ -415,7 +275,9 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
         let result = build_comms_command(&params, &session_id);
         assert!(result.is_err());
-        let errors = result.unwrap_err();
+        let errors = meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(
+            &result.unwrap_err(),
+        );
         assert_eq!(errors[0]["field"], "body");
     }
 
@@ -438,7 +300,9 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
         let result = build_comms_command(&params, &session_id);
         assert!(result.is_err());
-        let errors = result.unwrap_err();
+        let errors = meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(
+            &result.unwrap_err(),
+        );
         assert_eq!(errors[0]["field"], "stream");
         assert_eq!(errors[0]["issue"], "invalid_value");
     }
@@ -462,7 +326,9 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
         let result = build_comms_command(&params, &session_id);
         assert!(result.is_err());
-        let errors = result.unwrap_err();
+        let errors = meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(
+            &result.unwrap_err(),
+        );
         assert_eq!(errors[0]["field"], "status");
         assert_eq!(errors[0]["issue"], "invalid_value");
     }
@@ -486,7 +352,9 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
         let result = build_comms_command(&params, &session_id);
         assert!(result.is_err());
-        let errors = result.unwrap_err();
+        let errors = meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(
+            &result.unwrap_err(),
+        );
         assert_eq!(errors[0]["field"], "source");
         assert_eq!(errors[0]["issue"], "invalid_value");
     }

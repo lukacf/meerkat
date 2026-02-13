@@ -8,10 +8,11 @@ use crate::event::AgentEvent;
 use crate::interaction::{InteractionId, ResponseStatus};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::pin::Pin;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PeerName(pub String);
+pub struct PeerName(String);
 
 impl PeerName {
     /// Create a new peer name if it passes basic validation.
@@ -28,6 +29,10 @@ impl PeerName {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn as_string(&self) -> String {
+        self.0.clone()
     }
 }
 
@@ -49,6 +54,263 @@ impl From<PeerName> for String {
     }
 }
 
+/// Build inputs for canonical comms command parsing.
+#[derive(Debug, Clone, Default)]
+pub struct CommsCommandRequest {
+    pub kind: String,
+    pub to: Option<String>,
+    pub body: Option<String>,
+    pub intent: Option<String>,
+    pub params: Option<serde_json::Value>,
+    pub in_reply_to: Option<String>,
+    pub status: Option<String>,
+    pub result: Option<serde_json::Value>,
+    pub source: Option<String>,
+    pub stream: Option<String>,
+    pub allow_self_session: Option<bool>,
+}
+
+/// Validation failure for one command field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommsCommandValidationError {
+    pub field: String,
+    pub issue: String,
+    pub got: Option<String>,
+}
+
+impl CommsCommandValidationError {
+    fn new(field: impl Into<String>, issue: impl Into<String>, got: Option<String>) -> Self {
+        Self {
+            field: field.into(),
+            issue: issue.into(),
+            got,
+        }
+    }
+
+    pub fn to_json_value(&self) -> serde_json::Value {
+        match &self.got {
+            Some(got) => json!({
+                "field": self.field,
+                "issue": self.issue,
+                "got": got,
+            }),
+            None => json!({
+                "field": self.field,
+                "issue": self.issue,
+            }),
+        }
+    }
+}
+
+impl CommsCommandRequest {
+    pub fn parse(
+        &self,
+        session_id: &crate::types::SessionId,
+    ) -> Result<CommsCommand, Vec<CommsCommandValidationError>> {
+        let mut errors = Vec::new();
+
+        let kind = self.kind.as_str();
+        match kind {
+            "input" => {
+                let Some(body) = self.body.clone() else {
+                    errors.push(CommsCommandValidationError::new(
+                        "body",
+                        "required_field",
+                        None,
+                    ));
+                    return Err(errors);
+                };
+
+                let source = match self.source.as_deref() {
+                    Some("tcp") => InputSource::Tcp,
+                    Some("uds") => InputSource::Uds,
+                    Some("stdin") => InputSource::Stdin,
+                    Some("webhook") => InputSource::Webhook,
+                    Some("rpc") | None => InputSource::Rpc,
+                    Some(other) => {
+                        errors.push(CommsCommandValidationError::new(
+                            "source",
+                            "invalid_value",
+                            Some(other.to_string()),
+                        ));
+                        return Err(errors);
+                    }
+                };
+
+                let stream = match self.stream.as_deref() {
+                    Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
+                    Some("none") | None => InputStreamMode::None,
+                    Some(other) => {
+                        errors.push(CommsCommandValidationError::new(
+                            "stream",
+                            "invalid_value",
+                            Some(other.to_string()),
+                        ));
+                        return Err(errors);
+                    }
+                };
+
+                Ok(CommsCommand::Input {
+                    session_id: session_id.clone(),
+                    body,
+                    source,
+                    stream,
+                    allow_self_session: self.allow_self_session.unwrap_or(false),
+                })
+            }
+            "peer_message" => {
+                let to = to_peer_name(&self.to, &mut errors);
+                if let Some(to) = to {
+                    Ok(CommsCommand::PeerMessage {
+                        to,
+                        body: self.body.clone().unwrap_or_default(),
+                    })
+                } else {
+                    Err(errors)
+                }
+            }
+            "peer_request" => {
+                let to = to_peer_name(&self.to, &mut errors);
+                let intent = match self.intent.clone() {
+                    Some(intent) => intent,
+                    None => {
+                        errors.push(CommsCommandValidationError::new(
+                            "intent",
+                            "required_field",
+                            None,
+                        ));
+                        return Err(errors);
+                    }
+                };
+                let stream = match self.stream.as_deref() {
+                    Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
+                    Some("none") | None => InputStreamMode::None,
+                    Some(other) => {
+                        errors.push(CommsCommandValidationError::new(
+                            "stream",
+                            "invalid_value",
+                            Some(other.to_string()),
+                        ));
+                        return Err(errors);
+                    }
+                };
+                if errors.is_empty() {
+                    let to = match to {
+                        Some(to) => to,
+                        None => {
+                            return Err(errors);
+                        }
+                    };
+                    Ok(CommsCommand::PeerRequest {
+                        to,
+                        intent,
+                        params: self.params.clone().unwrap_or_default(),
+                        stream,
+                    })
+                } else {
+                    Err(errors)
+                }
+            }
+            "peer_response" => {
+                let to = to_peer_name(&self.to, &mut errors);
+                let in_reply_to = match &self.in_reply_to {
+                    Some(in_reply_to) => match uuid::Uuid::parse_str(in_reply_to) {
+                        Ok(id) => crate::interaction::InteractionId(id),
+                        Err(_) => {
+                            errors.push(CommsCommandValidationError::new(
+                                "in_reply_to",
+                                "invalid_uuid",
+                                Some(in_reply_to.to_string()),
+                            ));
+                            return Err(errors);
+                        }
+                    },
+                    None => {
+                        errors.push(CommsCommandValidationError::new(
+                            "in_reply_to",
+                            "required_field",
+                            None,
+                        ));
+                        return Err(errors);
+                    }
+                };
+                let status = match self.status.as_deref() {
+                    Some("accepted") => crate::ResponseStatus::Accepted,
+                    Some("completed") | None => crate::ResponseStatus::Completed,
+                    Some("failed") => crate::ResponseStatus::Failed,
+                    Some(other) => {
+                        errors.push(CommsCommandValidationError::new(
+                            "status",
+                            "invalid_value",
+                            Some(other.to_string()),
+                        ));
+                        return Err(errors);
+                    }
+                };
+                if errors.is_empty() {
+                    let to = match to {
+                        Some(to) => to,
+                        None => {
+                            return Err(errors);
+                        }
+                    };
+                    Ok(CommsCommand::PeerResponse {
+                        to,
+                        in_reply_to,
+                        status,
+                        result: self.result.clone().unwrap_or(serde_json::Value::Null),
+                    })
+                } else {
+                    Err(errors)
+                }
+            }
+            other => {
+                errors.push(CommsCommandValidationError::new(
+                    "kind",
+                    "unknown_kind",
+                    Some(other.to_string()),
+                ));
+                Err(errors)
+            }
+        }
+    }
+
+    pub fn validation_errors_to_json(
+        errors: &[CommsCommandValidationError],
+    ) -> Vec<serde_json::Value> {
+        errors
+            .iter()
+            .map(CommsCommandValidationError::to_json_value)
+            .collect()
+    }
+}
+
+fn to_peer_name(
+    value: &Option<String>,
+    errors: &mut Vec<CommsCommandValidationError>,
+) -> Option<PeerName> {
+    match value {
+        Some(name) => match PeerName::new(name) {
+            Ok(peer) => Some(peer),
+            Err(_) => {
+                errors.push(CommsCommandValidationError::new(
+                    "to",
+                    "invalid_value",
+                    Some(name.clone()),
+                ));
+                None
+            }
+        },
+        None => {
+            errors.push(CommsCommandValidationError::new(
+                "to",
+                "required_field",
+                None,
+            ));
+            None
+        }
+    }
+}
 /// Source for an input event posted to an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -286,7 +548,7 @@ mod tests {
             sendable_kinds: vec!["peer_message".to_string()],
             capabilities: Value::Object(Default::default()),
         };
-        assert_eq!(entry.name.0, "agent");
+        assert_eq!(entry.name.as_str(), "agent");
         assert_eq!(entry.source, PeerDirectorySource::Inproc);
         Ok(())
     }

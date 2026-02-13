@@ -8,7 +8,6 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
 #[cfg(test)]
 use crate::{CommsConfig, Keypair};
@@ -108,56 +107,115 @@ pub async fn handle_tools_call(
 }
 
 async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, String> {
-    match input.kind.as_str() {
-        "peer_message" => {
-            let body = input.body.ok_or("peer_message requires 'body' field")?;
+    let request = meerkat_core::comms::CommsCommandRequest {
+        kind: input.kind,
+        to: Some(input.to),
+        body: input.body,
+        intent: input.intent,
+        params: input.params,
+        in_reply_to: input.in_reply_to,
+        status: input.status,
+        result: input.result,
+        source: None,
+        stream: None,
+        allow_self_session: None,
+    };
+    let command = request
+        .parse(&meerkat_core::SessionId::new())
+        .map_err(format_comms_command_error)?;
+
+    let kind = command.command_kind().to_string();
+    match command {
+        meerkat_core::comms::CommsCommand::Input { .. } => {
+            Err("input command is not supported by MCP send".to_string())
+        }
+        meerkat_core::comms::CommsCommand::PeerMessage { to, body } => {
             ctx.router
-                .send(&input.to, crate::types::MessageKind::Message { body })
+                .send(to.as_str(), crate::types::MessageKind::Message { body })
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(json!({ "status": "sent", "kind": "peer_message" }))
+            Ok(json!({ "status": "sent", "kind": kind }))
         }
-        "peer_request" => {
-            let intent = input.intent.ok_or("peer_request requires 'intent' field")?;
-            let params = input.params.unwrap_or(json!({}));
+        meerkat_core::comms::CommsCommand::PeerRequest {
+            to, intent, params, ..
+        } => {
             ctx.router
                 .send(
-                    &input.to,
+                    to.as_str(),
                     crate::types::MessageKind::Request { intent, params },
                 )
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(json!({ "status": "sent", "kind": "peer_request" }))
+            Ok(json!({ "status": "sent", "kind": kind }))
         }
-        "peer_response" => {
-            let in_reply_to_str = input
-                .in_reply_to
-                .ok_or("peer_response requires 'in_reply_to' field")?;
-            let in_reply_to: Uuid = in_reply_to_str
-                .parse()
-                .map_err(|_| format!("invalid UUID for in_reply_to: {in_reply_to_str}"))?;
-            let status_str = input.status.as_deref().unwrap_or("completed");
-            let status = match status_str {
-                "accepted" => Status::Accepted,
-                "completed" => Status::Completed,
-                "failed" => Status::Failed,
-                other => return Err(format!("invalid status: {other}")),
+        meerkat_core::comms::CommsCommand::PeerResponse {
+            to,
+            in_reply_to,
+            status,
+            result,
+        } => {
+            let status = match status {
+                meerkat_core::ResponseStatus::Accepted => Status::Accepted,
+                meerkat_core::ResponseStatus::Completed => Status::Completed,
+                meerkat_core::ResponseStatus::Failed => Status::Failed,
             };
-            let result = input.result.unwrap_or(Value::Null);
             ctx.router
                 .send(
-                    &input.to,
+                    to.as_str(),
                     crate::types::MessageKind::Response {
-                        in_reply_to,
+                        in_reply_to: in_reply_to.0,
                         status,
                         result,
                     },
                 )
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(json!({ "status": "sent", "kind": "peer_response" }))
+            Ok(json!({ "status": "sent", "kind": kind }))
         }
-        other => Err(format!("unknown send kind: {other}")),
+    }
+}
+
+fn format_comms_command_error(
+    errors: Vec<meerkat_core::comms::CommsCommandValidationError>,
+) -> String {
+    let errors = meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&errors);
+    if let Some(first) = errors.first() {
+        let field = first["field"].as_str().unwrap_or("command");
+        let issue = first["issue"].as_str().unwrap_or("invalid");
+        let got = first["got"].as_str();
+        match (field, issue) {
+            ("body", "required_field") => "peer_message requires body".to_string(),
+            ("to", "required_field") => "to is required".to_string(),
+            ("intent", "required_field") => "peer_request requires intent".to_string(),
+            ("in_reply_to", "required_field") => "peer_response requires in_reply_to".to_string(),
+            ("in_reply_to", "invalid_uuid") => got.map_or_else(
+                || "invalid in_reply_to".to_string(),
+                |value| format!("invalid UUID for in_reply_to: {value}"),
+            ),
+            ("status", "invalid_value") => got.map_or_else(
+                || "invalid status".to_string(),
+                |value| format!("invalid status: {value}"),
+            ),
+            ("to", "invalid_value") => got.map_or_else(
+                || "invalid peer name".to_string(),
+                |value| format!("invalid to: {value}"),
+            ),
+            ("source", "invalid_value") => got.map_or_else(
+                || "invalid source".to_string(),
+                |value| format!("invalid source: {value}"),
+            ),
+            ("stream", "invalid_value") => got.map_or_else(
+                || "invalid stream".to_string(),
+                |value| format!("invalid stream: {value}"),
+            ),
+            ("kind", "unknown_kind") => got.map_or_else(
+                || "unknown kind".to_string(),
+                |value| format!("unknown kind: {value}"),
+            ),
+            _ => issue.to_string(),
+        }
+    } else {
+        "invalid command".to_string()
     }
 }
 

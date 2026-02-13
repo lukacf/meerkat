@@ -440,101 +440,65 @@ fn build_comms_command(
     req: &CommsSendRequest,
     session_id: &SessionId,
 ) -> Result<meerkat_core::comms::CommsCommand, ApiError> {
-    use meerkat_core::comms::*;
+    let request = meerkat_core::comms::CommsCommandRequest {
+        kind: req.kind.clone(),
+        to: req.to.clone(),
+        body: req.body.clone(),
+        intent: req.intent.clone(),
+        params: req.params.clone(),
+        in_reply_to: req.in_reply_to.clone(),
+        status: req.status.clone(),
+        result: req.result.clone(),
+        source: req.source.clone(),
+        stream: req.stream.clone(),
+        allow_self_session: req.allow_self_session,
+    };
 
-    let to_name = |value: String| PeerName(value);
-
-    match req.kind.as_str() {
-        "input" => {
-            let body = req
-                .body
-                .clone()
-                .ok_or_else(|| ApiError::BadRequest("input requires 'body'".into()))?;
-            let source = match req.source.as_deref() {
-                Some("tcp") => InputSource::Tcp,
-                Some("uds") => InputSource::Uds,
-                Some("stdin") => InputSource::Stdin,
-                Some("webhook") => InputSource::Webhook,
-                Some("rpc") | None => InputSource::Rpc,
-                Some(other) => {
-                    return Err(ApiError::BadRequest(format!("invalid source: {other}")));
+    request.parse(session_id).map_err(|errors| {
+        let json_errors =
+            meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&errors);
+        let msg = if let Some(first) = json_errors.first() {
+            let field = first["field"].as_str().unwrap_or("command");
+            let issue = first["issue"].as_str().unwrap_or("invalid");
+            let got = first["got"].as_str();
+            match (field, issue) {
+                ("source", "invalid_value") => got.map_or_else(
+                    || "invalid source".to_string(),
+                    |got| format!("invalid source: {got}"),
+                ),
+                ("stream", "invalid_value") => got.map_or_else(
+                    || "invalid stream".to_string(),
+                    |got| format!("invalid stream: {got}"),
+                ),
+                ("status", "invalid_value") => got.map_or_else(
+                    || "invalid status".to_string(),
+                    |got| format!("invalid status: {got}"),
+                ),
+                ("kind", "unknown_kind") => got.map_or_else(
+                    || "unknown kind".to_string(),
+                    |got| format!("unknown kind: {got}"),
+                ),
+                ("body", "required_field") => "input requires 'body'".to_string(),
+                ("to", "required_field") => "to is required".to_string(),
+                ("intent", "required_field") => "peer_request requires 'intent'".to_string(),
+                ("in_reply_to", "required_field") => {
+                    "peer_response requires 'in_reply_to'".to_string()
                 }
-            };
-            let stream = match req.stream.as_deref() {
-                Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
-                Some("none") | None => InputStreamMode::None,
-                Some(other) => {
-                    return Err(ApiError::BadRequest(format!("invalid stream: {other}")));
-                }
-            };
-            Ok(CommsCommand::Input {
-                session_id: session_id.clone(),
-                body,
-                source,
-                stream,
-                allow_self_session: req.allow_self_session.unwrap_or(false),
-            })
-        }
-        "peer_message" => {
-            let to = req
-                .to
-                .clone()
-                .ok_or_else(|| ApiError::BadRequest("peer_message requires 'to'".into()))?;
-            Ok(CommsCommand::PeerMessage {
-                to: to_name(to),
-                body: req.body.clone().unwrap_or_default(),
-            })
-        }
-        "peer_request" => {
-            let to = req
-                .to
-                .clone()
-                .ok_or_else(|| ApiError::BadRequest("peer_request requires 'to'".into()))?;
-            let intent = req
-                .intent
-                .clone()
-                .ok_or_else(|| ApiError::BadRequest("peer_request requires 'intent'".into()))?;
-            let stream = match req.stream.as_deref() {
-                Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
-                Some("none") | None => InputStreamMode::None,
-                Some(other) => {
-                    return Err(ApiError::BadRequest(format!("invalid stream: {other}")));
-                }
-            };
-            Ok(CommsCommand::PeerRequest {
-                to: to_name(to),
-                intent,
-                params: req.params.clone().unwrap_or(json!({})),
-                stream,
-            })
-        }
-        "peer_response" => {
-            let to = req
-                .to
-                .clone()
-                .ok_or_else(|| ApiError::BadRequest("peer_response requires 'to'".into()))?;
-            let in_reply_to_str = req.in_reply_to.clone().ok_or_else(|| {
-                ApiError::BadRequest("peer_response requires 'in_reply_to'".into())
-            })?;
-            let in_reply_to = uuid::Uuid::parse_str(&in_reply_to_str)
-                .map_err(|_| ApiError::BadRequest(format!("invalid UUID: {in_reply_to_str}")))?;
-            let status = match req.status.as_deref() {
-                Some("accepted") => meerkat_core::ResponseStatus::Accepted,
-                Some("completed") | None => meerkat_core::ResponseStatus::Completed,
-                Some("failed") => meerkat_core::ResponseStatus::Failed,
-                Some(other) => {
-                    return Err(ApiError::BadRequest(format!("invalid status: {other}")));
-                }
-            };
-            Ok(CommsCommand::PeerResponse {
-                to: to_name(to),
-                in_reply_to: meerkat_core::InteractionId(in_reply_to),
-                status,
-                result: req.result.clone().unwrap_or(Value::Null),
-            })
-        }
-        other => Err(ApiError::BadRequest(format!("unknown kind: {other}"))),
-    }
+                ("in_reply_to", "invalid_uuid") => got.map_or_else(
+                    || "invalid UUID".to_string(),
+                    |got| format!("invalid UUID: {got}"),
+                ),
+                ("to", "invalid_value") => got.map_or_else(
+                    || "invalid peer name".to_string(),
+                    |got| format!("invalid to: {got}"),
+                ),
+                _ => issue.to_string(),
+            }
+        } else {
+            "invalid command".to_string()
+        };
+        ApiError::BadRequest(msg)
+    })
 }
 
 /// GET /comms/peers — list peers visible to a session's comms runtime.
@@ -560,7 +524,7 @@ async fn comms_peers(
         .iter()
         .map(|p| {
             json!({
-                "name": p.name.0,
+                "name": p.name.to_string(),
                 "peer_id": p.peer_id,
                 "address": p.address,
                 "source": format!("{:?}", p.source),

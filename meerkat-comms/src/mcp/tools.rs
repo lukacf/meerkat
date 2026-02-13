@@ -113,7 +113,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
         "peer_message" => {
             let body = input.body.ok_or("peer_message requires 'body' field")?;
             ctx.router
-                .send_message(&input.to, body)
+                .send_with_fallback(&input.to, crate::types::MessageKind::Message { body })
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "status": "sent", "kind": "peer_message" }))
@@ -122,7 +122,10 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
             let intent = input.intent.ok_or("peer_request requires 'intent' field")?;
             let params = input.params.unwrap_or(json!({}));
             ctx.router
-                .send_request(&input.to, intent, params)
+                .send_with_fallback(
+                    &input.to,
+                    crate::types::MessageKind::Request { intent, params },
+                )
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "status": "sent", "kind": "peer_request" }))
@@ -143,7 +146,14 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
             };
             let result = input.result.unwrap_or(Value::Null);
             ctx.router
-                .send_response(&input.to, in_reply_to, status, result)
+                .send_with_fallback(
+                    &input.to,
+                    crate::types::MessageKind::Response {
+                        in_reply_to,
+                        status,
+                        result,
+                    },
+                )
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "status": "sent", "kind": "peer_response" }))
@@ -285,6 +295,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_send_via_inproc_fallback() {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let sender_name = format!("sender-{suffix}");
+        let receiver_name = format!("receiver-{suffix}");
+
+        // Set up sender (the agent calling the tool)
+        let sender_keypair = Keypair::generate();
+        let (_, sender_inbox_sender) = crate::Inbox::new();
+        InprocRegistry::global().register(
+            &sender_name,
+            sender_keypair.public_key(),
+            sender_inbox_sender,
+        );
+
+        // Set up receiver in InprocRegistry (NOT in TrustedPeers)
+        let receiver_keypair = Keypair::generate();
+        let (mut receiver_inbox, receiver_inbox_sender) = crate::Inbox::new();
+        InprocRegistry::global().register(
+            &receiver_name,
+            receiver_keypair.public_key(),
+            receiver_inbox_sender,
+        );
+
+        // Router has empty TrustedPeers — receiver is only in InprocRegistry
+        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+        let (_, router_inbox_sender) = crate::Inbox::new();
+        let router = Arc::new(Router::with_shared_peers(
+            sender_keypair,
+            trusted_peers.clone(),
+            CommsConfig::default(),
+            router_inbox_sender,
+        ));
+
+        let ctx = ToolContext {
+            router,
+            trusted_peers,
+        };
+
+        // Send a peer_message — should fall back to inproc
+        let result = handle_tools_call(
+            &ctx,
+            "send",
+            &json!({
+                "kind": "peer_message",
+                "to": receiver_name,
+                "body": "hello via inproc"
+            }),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "send should succeed via inproc fallback: {:?}",
+            result.err()
+        );
+        let val = result.unwrap();
+        assert_eq!(val["status"], "sent");
+
+        // Verify message was delivered to receiver's inbox
+        let items = receiver_inbox.try_drain();
+        assert_eq!(items.len(), 1, "receiver should have 1 message");
+    }
+
+    #[tokio::test]
     async fn test_unknown_tool_returns_error() {
         let keypair = Keypair::generate();
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
@@ -301,11 +375,15 @@ mod tests {
         };
 
         // Legacy tool names should no longer be recognized
-        assert!(handle_tools_call(&ctx, "send_message", &json!({}))
-            .await
-            .is_err());
-        assert!(handle_tools_call(&ctx, "list_peers", &json!({}))
-            .await
-            .is_err());
+        assert!(
+            handle_tools_call(&ctx, "send_message", &json!({}))
+                .await
+                .is_err()
+        );
+        assert!(
+            handle_tools_call(&ctx, "list_peers", &json!({}))
+                .await
+                .is_err()
+        );
     }
 }

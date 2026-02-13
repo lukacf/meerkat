@@ -50,10 +50,7 @@ enum ReservationState {
 
 impl ReservationState {
     fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::Expired | Self::ClosedEarly
-        )
+        matches!(self, Self::Completed | Self::Expired | Self::ClosedEarly)
     }
 }
 
@@ -216,9 +213,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             )));
                         }
                         let receiver = entry.receiver.take().ok_or_else(|| {
-                            StreamError::Internal(
-                                "interaction stream receiver missing".to_string(),
-                            )
+                            StreamError::Internal("interaction stream receiver missing".to_string())
                         })?;
                         entry.state = ReservationState::Attached;
                         Ok(Box::pin(InteractionStream {
@@ -227,12 +222,8 @@ impl CoreCommsRuntime for CommsRuntime {
                             registry: self.interaction_stream_registry.clone(),
                         }))
                     }
-                    ReservationState::Attached => {
-                        Err(StreamError::AlreadyAttached(interaction_id))
-                    }
-                    state if state.is_terminal() => {
-                        Err(StreamError::NotReserved(interaction_id))
-                    }
+                    ReservationState::Attached => Err(StreamError::AlreadyAttached(interaction_id)),
+                    state if state.is_terminal() => Err(StreamError::NotReserved(interaction_id)),
                     _ => Err(StreamError::Internal(format!(
                         "unexpected reservation state for {}",
                         interaction_id.0
@@ -262,10 +253,9 @@ impl CoreCommsRuntime for CommsRuntime {
                 }
                 match stream {
                     InputStreamMode::None => {
-                        let injector =
-                            CoreCommsRuntime::event_injector(self).ok_or_else(|| {
-                                SendError::Unsupported("event injector unavailable".into())
-                            })?;
+                        let injector = CoreCommsRuntime::event_injector(self).ok_or_else(|| {
+                            SendError::Unsupported("event injector unavailable".into())
+                        })?;
                         injector
                             .inject(body, PlainEventSource::from(source))
                             .map_err(map_event_injector_error)?;
@@ -313,10 +303,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 }
 
                 if let Err(e) = self
-                    .send_peer_command(
-                        &to.0,
-                        crate::types::MessageKind::Request { intent, params },
-                    )
+                    .send_peer_command(&to.0, crate::types::MessageKind::Request { intent, params })
                     .await
                 {
                     if stream_reserved {
@@ -416,10 +403,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 );
 
                 if let Err(e) = self
-                    .send_peer_command(
-                        &to.0,
-                        crate::types::MessageKind::Request { intent, params },
-                    )
+                    .send_peer_command(&to.0, crate::types::MessageKind::Request { intent, params })
                     .await
                 {
                     // Clean up reservation on send failure.
@@ -581,15 +565,6 @@ fn map_router_send_error(err: crate::router::SendError) -> SendError {
         crate::router::SendError::PeerOffline => SendError::PeerOffline,
         crate::router::SendError::Transport(_) | crate::router::SendError::Io(_) => {
             SendError::Internal(err.to_string())
-        }
-    }
-}
-
-fn map_inproc_send_error(err: crate::inproc::InprocSendError) -> SendError {
-    match err {
-        crate::inproc::InprocSendError::PeerNotFound(peer) => SendError::PeerNotFound(peer),
-        crate::inproc::InprocSendError::InboxClosed | crate::inproc::InprocSendError::InboxFull => {
-            SendError::PeerOffline
         }
     }
 }
@@ -845,24 +820,10 @@ impl CommsRuntime {
         peer_name: &str,
         kind: crate::types::MessageKind,
     ) -> Result<(), SendError> {
-        let primary = self.router.send(peer_name, kind.clone()).await;
-        match primary {
-            Ok(()) => {
-                tracing::debug!(peer = peer_name, route = "trusted", "peer command sent");
-                Ok(())
-            }
-            Err(crate::router::SendError::PeerNotFound(_)) => {
-                tracing::debug!(
-                    peer = peer_name,
-                    route = "inproc",
-                    "trusted peer not found, trying inproc fallback"
-                );
-                InprocRegistry::global()
-                    .send(&self.keypair, peer_name, kind)
-                    .map_err(map_inproc_send_error)
-            }
-            Err(err) => Err(map_router_send_error(err)),
-        }
+        self.router
+            .send_with_fallback(peer_name, kind.clone())
+            .await
+            .map_err(map_router_send_error)
     }
 
     /// Mark an interaction stream as completed (terminal event received).
@@ -1154,10 +1115,8 @@ mod tests {
         interaction::InteractionId,
         types::SessionId,
     };
+    use tokio::time::{Duration, timeout};
     use uuid::Uuid;
-    use tokio::time::{timeout, Duration};
-
-
 
     fn test_runtime_config(name: &str, tmp: &tempfile::TempDir) -> ResolvedCommsConfig {
         ResolvedCommsConfig {
@@ -1413,7 +1372,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_send_input_no_reservation() {
-
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("input-nores-{suffix}")).unwrap();
 
@@ -1446,7 +1404,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_send_input_reserves_stream() {
-
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("input-res-{suffix}")).unwrap();
 
@@ -1484,7 +1441,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_stream_attachment_duplicate_attach_fails() {
-
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("dup-attach-{suffix}")).unwrap();
 
@@ -1524,7 +1480,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_stream_not_reserved_before_send() {
-
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("pre-send-{suffix}")).unwrap();
         let random = InteractionId(Uuid::new_v4());
@@ -1556,7 +1511,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_send_and_stream_input_returns_stream_and_receipt() {
-
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("sas-{suffix}")).unwrap();
 
@@ -1812,19 +1766,13 @@ mod tests {
             _ => panic!("expected InputAccepted"),
         };
 
-        let stream = CoreCommsRuntime::stream(
-            &runtime,
-            StreamScope::Interaction(iid.clone()),
-        )
-        .unwrap();
+        let stream =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid.clone())).unwrap();
         // Drop stream → ClosedEarly
         drop(stream);
 
         // Second attach after close → NotReserved (entry cleaned up)
-        let result = CoreCommsRuntime::stream(
-            &runtime,
-            StreamScope::Interaction(iid.clone()),
-        );
+        let result = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid.clone()));
         assert!(matches!(result, Err(StreamError::NotReserved(_))));
     }
 
@@ -1847,11 +1795,8 @@ mod tests {
             _ => panic!("expected InputAccepted"),
         };
 
-        let mut stream = CoreCommsRuntime::stream(
-            &runtime,
-            StreamScope::Interaction(iid.clone()),
-        )
-        .unwrap();
+        let mut stream =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid.clone())).unwrap();
 
         // Simulate terminal event
         runtime.mark_interaction_complete(iid.0);
@@ -1879,8 +1824,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(16);
         {
             let mut entry = StreamRegistryEntry::reserved(sender, receiver);
-            entry.created_at =
-                std::time::Instant::now() - std::time::Duration::from_secs(60);
+            entry.created_at = std::time::Instant::now() - std::time::Duration::from_secs(60);
             runtime.interaction_stream_registry.lock().insert(id, entry);
         }
 
@@ -1942,7 +1886,13 @@ mod tests {
         match result {
             Err(SendAndStreamError::StreamAttach { receipt, error }) => {
                 assert!(
-                    matches!(receipt, SendReceipt::InputAccepted { stream_reserved: false, .. }),
+                    matches!(
+                        receipt,
+                        SendReceipt::InputAccepted {
+                            stream_reserved: false,
+                            ..
+                        }
+                    ),
                     "receipt should indicate no stream reserved"
                 );
                 assert!(matches!(error, StreamError::NotFound(_)));
@@ -1972,20 +1922,14 @@ mod tests {
         };
 
         // Attach
-        let _stream = CoreCommsRuntime::stream(
-            &runtime,
-            StreamScope::Interaction(iid.clone()),
-        )
-        .unwrap();
+        let _stream =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid.clone())).unwrap();
 
         // Complete
         runtime.mark_interaction_complete(iid.0);
 
         // Try to attach again → NotReserved
-        let result = CoreCommsRuntime::stream(
-            &runtime,
-            StreamScope::Interaction(iid.clone()),
-        );
+        let result = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(iid.clone()));
         assert!(
             matches!(result, Err(StreamError::NotReserved(_))),
             "attach after completed should return NotReserved"

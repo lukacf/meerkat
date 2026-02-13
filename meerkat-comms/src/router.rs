@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::identity::{Keypair, Signature};
 use crate::inbox::InboxSender;
-use crate::inproc::InprocRegistry;
+use crate::inproc::{InprocRegistry, InprocSendError};
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{MAX_PAYLOAD_SIZE, PeerAddr, TransportError};
 use crate::trust::{TrustedPeer, TrustedPeers};
@@ -46,6 +46,14 @@ pub enum SendError {
     Transport(#[from] TransportError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[inline]
+fn map_inproc_send_error(err: InprocSendError) -> SendError {
+    match err {
+        InprocSendError::PeerNotFound(peer) => SendError::PeerNotFound(peer),
+        InprocSendError::InboxClosed | InprocSendError::InboxFull => SendError::PeerOffline,
+    }
 }
 
 pub struct Router {
@@ -154,6 +162,22 @@ impl Router {
                         _ => SendError::PeerOffline,
                     })
             }
+        }
+    }
+
+    /// Send a message to a peer, checking trusted peers first and falling back
+    /// to the process-local inproc registry when needed.
+    pub async fn send_with_fallback(
+        &self,
+        peer_name: &str,
+        kind: MessageKind,
+    ) -> Result<(), SendError> {
+        match self.send(peer_name, kind.clone()).await {
+            Ok(()) => Ok(()),
+            Err(SendError::PeerNotFound(_)) => InprocRegistry::global()
+                .send(&self.keypair, peer_name, kind)
+                .map_err(map_inproc_send_error),
+            Err(err) => Err(err),
         }
     }
 

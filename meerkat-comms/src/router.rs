@@ -60,6 +60,7 @@ pub struct Router {
     keypair: Arc<Keypair>,
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     config: CommsConfig,
+    require_peer_auth: bool,
     inbox_sender: InboxSender,
 }
 
@@ -69,11 +70,13 @@ impl Router {
         trusted_peers: TrustedPeers,
         config: CommsConfig,
         inbox_sender: InboxSender,
+        require_peer_auth: bool,
     ) -> Self {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
             config,
+            require_peer_auth,
             inbox_sender,
         }
     }
@@ -83,11 +86,13 @@ impl Router {
         trusted_peers: Arc<RwLock<TrustedPeers>>,
         config: CommsConfig,
         inbox_sender: InboxSender,
+        require_peer_auth: bool,
     ) -> Self {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
             config,
+            require_peer_auth,
             inbox_sender,
         }
     }
@@ -120,11 +125,24 @@ impl Router {
     }
 
     pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<(), SendError> {
-        let trusted = {
+        let peer = {
             let peers = self.trusted_peers.read().await;
             peers.get_by_name(peer_name).cloned()
-        };
-        let peer = trusted.ok_or_else(|| SendError::PeerNotFound(peer_name.to_string()))?;
+        }
+        .or_else(|| {
+            if self.require_peer_auth {
+                None
+            } else {
+                InprocRegistry::global()
+                    .get_by_name(peer_name)
+                    .map(|(pubkey, _)| crate::TrustedPeer {
+                        name: peer_name.to_string(),
+                        pubkey,
+                        addr: format!("inproc://{peer_name}"),
+                    })
+            }
+        })
+        .ok_or_else(|| SendError::PeerNotFound(peer_name.to_string()))?;
         let wait_for_ack = should_wait_for_ack(&kind);
         let addr = PeerAddr::parse(&peer.addr)?;
         let mut envelope = Envelope {
@@ -134,7 +152,9 @@ impl Router {
             kind,
             sig: Signature::new([0u8; 64]),
         };
-        envelope.sign(&self.keypair);
+        if self.require_peer_auth {
+            envelope.sign(&self.keypair);
+        }
 
         match addr {
             PeerAddr::Uds(path) => {
@@ -150,7 +170,12 @@ impl Router {
             PeerAddr::Inproc(_) => {
                 let registry = InprocRegistry::global();
                 registry
-                    .send(&self.keypair, peer_name, envelope.kind)
+                    .send_with_signature(
+                        &self.keypair,
+                        peer_name,
+                        envelope.kind,
+                        self.require_peer_auth,
+                    )
                     .map_err(map_inproc_send_error)
             }
         }
@@ -180,14 +205,18 @@ impl Router {
                 Ok(Some(Ok(frame))) => {
                     // Validate ACK: signature, sender, recipient, and in_reply_to
                     if let MessageKind::Ack { in_reply_to } = frame.envelope.kind {
-                        if !frame.envelope.verify() {
-                            return Err(SendError::PeerOffline);
-                        }
-                        if frame.envelope.from != sent_to {
-                            return Err(SendError::PeerOffline);
-                        }
-                        // Verify ACK is addressed to us (prevents misrouted/injected ACKs)
-                        if frame.envelope.to != self.keypair.public_key() {
+                        if self.require_peer_auth {
+                            if !frame.envelope.verify() {
+                                return Err(SendError::PeerOffline);
+                            }
+                            if frame.envelope.from != sent_to {
+                                return Err(SendError::PeerOffline);
+                            }
+                            // Verify ACK is addressed to us (prevents misrouted/injected ACKs)
+                            if frame.envelope.to != self.keypair.public_key() {
+                                return Err(SendError::PeerOffline);
+                            }
+                        } else if frame.envelope.to != self.keypair.public_key() {
                             return Err(SendError::PeerOffline);
                         }
                         if in_reply_to != sent_id {

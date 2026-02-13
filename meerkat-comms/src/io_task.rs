@@ -2,8 +2,8 @@
 //!
 //! Each incoming connection spawns an IO task that:
 //! 1. Reads envelope (with length-prefix framing)
-//! 2. Verifies signature
-//! 3. Checks sender in trusted list
+//! 2. Verifies signature (optional)
+//! 3. Checks sender in trusted list (when peer-auth is enabled)
 //! 4. If valid: sends Ack immediately (unless it's an Ack or Response)
 //! 5. Enqueues to inbox
 //! 6. Closes connection (or keeps alive)
@@ -29,10 +29,12 @@ use crate::types::{Envelope, InboxItem, MessageKind};
 /// # Arguments
 /// * `stream` - The async read/write stream (e.g., TcpStream or UnixStream)
 /// * `keypair` - Our keypair for signing acks
+/// * `require_peer_auth` - Whether to enforce signature+trusted-peer validation
 /// * `trusted` - The list of trusted peers
 /// * `inbox_sender` - Channel to send validated messages to the inbox
 pub async fn handle_connection<S>(
     stream: S,
+    require_peer_auth: bool,
     keypair: &Keypair,
     trusted: &TrustedPeers,
     inbox_sender: &InboxSender,
@@ -55,8 +57,8 @@ where
         }
     };
 
-    // Verify signature
-    if !envelope.verify() {
+    // Verify signature (when peer auth is enabled).
+    if require_peer_auth && !envelope.verify() {
         tracing::warn!(
             "Dropped message {} from {:?}: invalid signature",
             envelope.id,
@@ -66,7 +68,7 @@ where
     }
 
     // Check trust
-    if !trusted.is_trusted(&envelope.from) {
+    if require_peer_auth && !trusted.is_trusted(&envelope.from) {
         tracing::warn!(
             "Dropped message {} from {:?}: sender not trusted",
             envelope.id,
@@ -291,7 +293,8 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        let result = handle_connection(server, &receiver_keypair, &trusted, &inbox_sender).await;
+        let result =
+            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
         assert!(result.is_ok()); // Silent drop, not an error
 
         // No item in inbox
@@ -324,12 +327,100 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        let result = handle_connection(server, &receiver_keypair, &trusted, &inbox_sender).await;
+        let result =
+            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
         assert!(result.is_ok()); // Silent drop, not an error
 
         // No item in inbox
         let items = inbox.try_drain();
         assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_io_task_accepts_invalid_signature_when_auth_disabled() {
+        let sender_keypair = make_keypair();
+        let receiver_keypair = make_keypair();
+        let trusted = make_trusted_peers(&make_keypair().public_key());
+        let (mut inbox, inbox_sender) = Inbox::new();
+
+        let envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: sender_keypair.public_key(),
+            to: receiver_keypair.public_key(),
+            kind: MessageKind::Message {
+                body: "hello".to_string(),
+            },
+            sig: Signature::new([0u8; 64]), // Invalid signature
+        };
+        let bytes = envelope_to_bytes(&envelope).await;
+        let expected_id = envelope.id;
+
+        let (client, server) = tokio::io::duplex(4096);
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
+        tokio::spawn(async move {
+            client_write.write_all(&bytes).await.unwrap();
+        });
+
+        handle_connection(server, false, &receiver_keypair, &trusted, &inbox_sender)
+            .await
+            .unwrap();
+
+        let ack = read_one_envelope(&mut client_read).await.unwrap();
+        match ack.kind {
+            MessageKind::Ack { in_reply_to } => assert_eq!(in_reply_to, expected_id),
+            _ => panic!("expected Ack"),
+        }
+
+        let items = inbox.try_drain();
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            InboxItem::External { envelope } => assert_eq!(envelope.id, expected_id),
+            _ => panic!("expected External"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_io_task_accepts_untrusted_sender_when_auth_disabled() {
+        let sender_keypair = make_keypair();
+        let receiver_keypair = make_keypair();
+        let untrusted_keypair = make_keypair();
+        let trusted = make_trusted_peers(&untrusted_keypair.public_key()); // not relevant in no-auth mode
+        let (mut inbox, inbox_sender) = Inbox::new();
+
+        let envelope = make_signed_envelope(
+            &sender_keypair, // not in trusted list
+            receiver_keypair.public_key(),
+            MessageKind::Message {
+                body: "hello".to_string(),
+            },
+        );
+        let bytes = envelope_to_bytes(&envelope).await;
+        let expected_id = envelope.id;
+
+        let (client, server) = tokio::io::duplex(4096);
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
+        tokio::spawn(async move {
+            client_write.write_all(&bytes).await.unwrap();
+        });
+
+        handle_connection(server, false, &receiver_keypair, &trusted, &inbox_sender)
+            .await
+            .unwrap();
+
+        let ack = read_one_envelope(&mut client_read).await.unwrap();
+        match ack.kind {
+            MessageKind::Ack { in_reply_to } => assert_eq!(in_reply_to, expected_id),
+            _ => panic!("expected Ack"),
+        }
+
+        let items = inbox.try_drain();
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            InboxItem::External { envelope } => assert_eq!(envelope.id, expected_id),
+            _ => panic!("expected External"),
+        }
     }
 
     #[tokio::test]
@@ -359,7 +450,7 @@ mod tests {
 
         // Handle connection
         let handle = tokio::spawn(async move {
-            handle_connection(server, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
         });
 
         // Read ack from client side
@@ -403,7 +494,7 @@ mod tests {
             let _ = client_read.read(&mut buf).await;
         });
 
-        handle_connection(server, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
             .await
             .unwrap();
 
@@ -443,7 +534,7 @@ mod tests {
         });
 
         let handle = tokio::spawn(async move {
-            handle_connection(server, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
         });
 
         // Should receive an ack
@@ -482,7 +573,7 @@ mod tests {
         });
 
         let handle = tokio::spawn(async move {
-            handle_connection(server, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
         });
 
         // Should receive an ack
@@ -518,7 +609,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
             .await
             .unwrap();
 
@@ -552,7 +643,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
             .await
             .unwrap();
 
@@ -590,7 +681,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
             .await
             .unwrap();
 
@@ -627,7 +718,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
             .await
             .unwrap();
 

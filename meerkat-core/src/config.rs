@@ -930,6 +930,12 @@ pub struct CommsRuntimeConfig {
     /// Address for agent-to-agent (signed) listener.
     pub address: Option<String>,
     pub auth: CommsAuthMode,
+    /// Whether inter-agent peer traffic requires cryptographic validation.
+    ///
+    /// - `true`: messages require signatures and trusted-sender checks.
+    /// - `false`: signatures are not verified and outgoing peer envelopes are
+    ///   sent without signing.
+    pub require_peer_auth: bool,
     /// Address for the plain-text external event listener.
     /// Only active when `auth = "none"`. Accepts newline-delimited JSON or text.
     pub event_address: Option<String>,
@@ -942,6 +948,7 @@ impl Default for CommsRuntimeConfig {
             mode: CommsRuntimeMode::Inproc,
             address: None,
             auth: CommsAuthMode::default(),
+            require_peer_auth: true,
             event_address: None,
             auto_enable_for_subagents: false,
         }
@@ -1826,6 +1833,7 @@ gemini = ["gemini-3-flash-preview"]
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: CommsRuntimeConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.auth, CommsAuthMode::Open);
+        assert!(parsed.require_peer_auth);
 
         // Explicit ed25519
         let toml_str = r#"
@@ -1835,12 +1843,14 @@ auto_enable_for_subagents = false
 "#;
         let parsed: CommsRuntimeConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.auth, CommsAuthMode::Ed25519);
+        assert!(parsed.require_peer_auth);
     }
 
     #[test]
     fn test_comms_runtime_config_default_has_open_auth() {
         let config = CommsRuntimeConfig::default();
         assert_eq!(config.auth, CommsAuthMode::Open);
+        assert!(config.require_peer_auth);
     }
 
     // === PlainEventSource tests ===
@@ -1879,12 +1889,14 @@ auto_enable_for_subagents = false
 mode = "tcp"
 address = "127.0.0.1:4200"
 auth = "none"
+require_peer_auth = false
 event_address = "127.0.0.1:4201"
 auto_enable_for_subagents = false
 "#;
         let parsed: CommsRuntimeConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.event_address.as_deref(), Some("127.0.0.1:4201"));
         assert_eq!(parsed.auth, CommsAuthMode::Open);
+        assert!(!parsed.require_peer_auth);
     }
 
     #[test]

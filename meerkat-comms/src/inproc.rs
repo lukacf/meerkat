@@ -154,6 +154,15 @@ impl InprocRegistry {
             .map(|p| p.sender.clone())
     }
 
+    /// Look up an inproc peer name by public key.
+    pub fn get_name_by_pubkey(&self, pubkey: &PubKey) -> Option<String> {
+        self.state
+            .read()
+            .peers
+            .get(pubkey)
+            .map(|peer| peer.name.clone())
+    }
+
     /// Check if a peer is registered.
     pub fn contains(&self, pubkey: &PubKey) -> bool {
         self.state.read().peers.contains_key(pubkey)
@@ -195,6 +204,19 @@ impl InprocRegistry {
         to_name: &str,
         kind: MessageKind,
     ) -> Result<(), InprocSendError> {
+        self.send_with_signature(from_keypair, to_name, kind, true)
+    }
+
+    /// Send a message directly to an inproc peer.
+    ///
+    /// If `sign_envelope` is false, the envelope is sent unsigned.
+    pub fn send_with_signature(
+        &self,
+        from_keypair: &Keypair,
+        to_name: &str,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<(), InprocSendError> {
         // Look up the peer
         let (to_pubkey, sender) = self
             .get_by_name(to_name)
@@ -208,7 +230,9 @@ impl InprocRegistry {
             kind,
             sig: Signature::new([0u8; 64]),
         };
-        envelope.sign(from_keypair);
+        if sign_envelope {
+            envelope.sign(from_keypair);
+        }
 
         // Deliver directly to inbox
         sender

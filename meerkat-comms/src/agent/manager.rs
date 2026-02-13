@@ -91,6 +91,7 @@ impl CommsManager {
             config.trusted_peers,
             config.comms_config,
             inbox_sender.clone(),
+            true,
         );
         let keypair = router.keypair_arc();
         let router = Arc::new(router);
@@ -142,7 +143,7 @@ impl CommsManager {
         let items = self.inbox.try_drain();
         items
             .iter()
-            .filter_map(|item| CommsMessage::from_inbox_item(item, &self.trusted_peers))
+            .filter_map(|item| CommsMessage::from_inbox_item(item, &self.trusted_peers, true))
             .collect()
     }
 
@@ -155,7 +156,7 @@ impl CommsManager {
     pub async fn recv_message(&mut self) -> Option<CommsMessage> {
         loop {
             let item = self.inbox.recv().await?;
-            if let Some(msg) = CommsMessage::from_inbox_item(&item, &self.trusted_peers) {
+            if let Some(msg) = CommsMessage::from_inbox_item(&item, &self.trusted_peers, true) {
                 return Some(msg);
             }
             // Skip acks and unknown peers, continue waiting

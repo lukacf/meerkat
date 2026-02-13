@@ -110,6 +110,7 @@ mod tests {
             trusted_peers.clone(),
             CommsConfig::default(),
             inbox_sender,
+            true,
         ));
         (router, trusted_peers)
     }

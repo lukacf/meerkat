@@ -155,7 +155,7 @@ impl CoreCommsRuntime for CommsRuntime {
 
         let drained: Vec<DrainedMessage> = items
             .iter()
-            .filter_map(|item| drain_inbox_item(item, &trusted))
+            .filter_map(|item| drain_inbox_item(item, &trusted, self.require_peer_auth))
             .collect();
 
         // Check for DISMISS in authenticated messages
@@ -468,7 +468,7 @@ impl CoreCommsRuntime for CommsRuntime {
 
         let drained: Vec<DrainedMessage> = items
             .iter()
-            .filter_map(|item| drain_inbox_item(item, &trusted))
+            .filter_map(|item| drain_inbox_item(item, &trusted, self.require_peer_auth))
             .collect();
 
         // Check for DISMISS in authenticated messages
@@ -611,6 +611,7 @@ pub struct CommsRuntime {
     listener_handles: Vec<ListenerHandle>,
     listeners_started: bool,
     keypair: Arc<Keypair>,
+    require_peer_auth: bool,
     dismiss_flag: AtomicBool,
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
@@ -635,6 +636,7 @@ impl CommsRuntime {
             trusted_peers.clone(),
             config.comms_config.clone(),
             inbox_sender.clone(),
+            config.require_peer_auth,
         );
         let runtime = Self {
             public_key,
@@ -646,6 +648,7 @@ impl CommsRuntime {
             listener_handles: Vec::new(),
             listeners_started: false,
             keypair: Arc::new(keypair),
+            require_peer_auth: config.require_peer_auth,
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
@@ -673,6 +676,7 @@ impl CommsRuntime {
             event_listen_uds: None,
             comms_config: comms_config.clone(),
             auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: true,
             allow_external_unauthenticated: false,
         };
         let router = Router::with_shared_peers(
@@ -680,6 +684,7 @@ impl CommsRuntime {
             trusted_peers.clone(),
             comms_config,
             inbox_sender.clone(),
+            true,
         );
         let runtime = Self {
             public_key,
@@ -691,6 +696,7 @@ impl CommsRuntime {
             listener_handles: Vec::new(),
             listeners_started: false,
             keypair: Arc::new(keypair),
+            require_peer_auth: true,
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
@@ -714,6 +720,7 @@ impl CommsRuntime {
                 path,
                 self.keypair.clone(),
                 self.trusted_peers.clone(),
+                self.require_peer_auth,
                 inbox_sender.clone(),
             )
             .await?;
@@ -725,6 +732,7 @@ impl CommsRuntime {
                 &addr.to_string(),
                 self.keypair.clone(),
                 self.trusted_peers.clone(),
+                self.require_peer_auth,
                 inbox_sender.clone(),
             )
             .await?;
@@ -922,7 +930,9 @@ impl CommsRuntime {
         let trusted = self.trusted_peers.read().await;
         items
             .into_iter()
-            .filter_map(|item| CommsMessage::from_inbox_item(&item, &trusted))
+            .filter_map(|item| {
+                CommsMessage::from_inbox_item(&item, &trusted, self.require_peer_auth)
+            })
             .collect()
     }
 
@@ -933,10 +943,9 @@ impl CommsRuntime {
                 let items = inbox.try_drain();
                 if !items.is_empty() {
                     let trusted = self.trusted_peers.read().await;
-                    if let Some(msg) = items
-                        .into_iter()
-                        .find_map(|item| CommsMessage::from_inbox_item(&item, &trusted))
-                    {
+                    if let Some(msg) = items.into_iter().find_map(|item| {
+                        CommsMessage::from_inbox_item(&item, &trusted, self.require_peer_auth)
+                    }) {
                         return Some(msg);
                     }
                 }
@@ -974,6 +983,7 @@ async fn spawn_uds_listener(
     path: &Path,
     keypair: Arc<Keypair>,
     trusted: Arc<RwLock<TrustedPeers>>,
+    require_peer_auth: bool,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
     use tokio::net::UnixListener;
@@ -993,7 +1003,14 @@ async fn spawn_uds_listener(
                 (keypair.clone(), trusted.clone(), inbox_sender.clone());
             tokio::spawn(async move {
                 let trusted_snapshot = trusted.read().await.clone();
-                let _ = handle_connection(stream, &keypair, &trusted_snapshot, &inbox_sender).await;
+                let _ = handle_connection(
+                    stream,
+                    require_peer_auth,
+                    &keypair,
+                    &trusted_snapshot,
+                    &inbox_sender,
+                )
+                .await;
             });
         }
     });
@@ -1004,6 +1021,7 @@ async fn spawn_tcp_listener(
     addr: &str,
     keypair: Arc<Keypair>,
     trusted: Arc<RwLock<TrustedPeers>>,
+    require_peer_auth: bool,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
     let listener = TcpListener::bind(addr).await?;
@@ -1013,7 +1031,14 @@ async fn spawn_tcp_listener(
                 (keypair.clone(), trusted.clone(), inbox_sender.clone());
             tokio::spawn(async move {
                 let trusted_snapshot = trusted.read().await.clone();
-                let _ = handle_connection(stream, &keypair, &trusted_snapshot, &inbox_sender).await;
+                let _ = handle_connection(
+                    stream,
+                    require_peer_auth,
+                    &keypair,
+                    &trusted_snapshot,
+                    &inbox_sender,
+                )
+                .await;
             });
         }
     });
@@ -1125,6 +1150,7 @@ mod tests {
             trusted_peers_path: tmp.path().join("trusted_peers.json"),
             comms_config: crate::CommsConfig::default(),
             auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: true,
             allow_external_unauthenticated: false,
         }
     }
@@ -1159,6 +1185,7 @@ mod tests {
             trusted_peers_path: tmp.path().join("trusted_peers.json"),
             comms_config: crate::CommsConfig::default(),
             auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: true,
             allow_external_unauthenticated: false,
         };
 
@@ -1184,6 +1211,7 @@ mod tests {
             trusted_peers_path: tmp.path().join("trusted_peers.json"),
             comms_config: crate::CommsConfig::default(),
             auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: true,
             allow_external_unauthenticated: false,
         };
 
@@ -1210,6 +1238,7 @@ mod tests {
             trusted_peers_path: tmp.path().join("trusted_peers.json"),
             comms_config: crate::CommsConfig::default(),
             auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: true,
             allow_external_unauthenticated: false,
         };
 
@@ -1623,6 +1652,77 @@ mod tests {
 
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
         assert_eq!(interactions.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_core_send_peer_message_succeeds_without_trusted_entry_when_auth_disabled() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("sender-ipc-no-auth-{suffix}");
+        let receiver_name = format!("receiver-ipc-no-auth-{suffix}");
+        let sender_tmp = tempfile::tempdir().unwrap();
+        let receiver_tmp = tempfile::tempdir().unwrap();
+
+        let sender_config = ResolvedCommsConfig {
+            enabled: true,
+            name: sender_name.clone(),
+            identity_dir: sender_tmp.path().join("identity"),
+            trusted_peers_path: sender_tmp.path().join("trusted_peers.json"),
+            comms_config: crate::CommsConfig::default(),
+            auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: false,
+            listen_uds: None,
+            listen_tcp: None,
+            event_listen_tcp: None,
+            #[cfg(unix)]
+            event_listen_uds: None,
+            allow_external_unauthenticated: false,
+        };
+
+        let receiver_config = ResolvedCommsConfig {
+            enabled: true,
+            name: receiver_name.clone(),
+            identity_dir: receiver_tmp.path().join("identity"),
+            trusted_peers_path: receiver_tmp.path().join("trusted_peers.json"),
+            comms_config: crate::CommsConfig::default(),
+            auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: false,
+            listen_uds: None,
+            listen_tcp: None,
+            event_listen_tcp: None,
+            #[cfg(unix)]
+            event_listen_uds: None,
+            allow_external_unauthenticated: false,
+        };
+
+        let sender = CommsRuntime::new(sender_config).await.unwrap();
+        let receiver = CommsRuntime::new(receiver_config).await.unwrap();
+        let sender_pubkey = sender.public_key();
+        let receiver_pubkey = receiver.public_key();
+
+        let cmd = CommsCommand::PeerMessage {
+            to: PeerName(receiver_name.clone()),
+            body: "hello without trusted".to_string(),
+        };
+
+        let receipt = CoreCommsRuntime::send(&sender, cmd).await;
+        match receipt {
+            Ok(SendReceipt::PeerMessageSent {
+                envelope_id: _,
+                acked,
+            }) => assert!(!acked),
+            other => panic!("Expected peer message receipt, got: {other:?}"),
+        }
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(interactions[0].from, sender_name);
+        assert!(matches!(
+            &interactions[0].content,
+            meerkat_core::InteractionContent::Message { body } if body == "hello without trusted"
+        ));
+
+        assert!(crate::InprocRegistry::global().unregister(&sender_pubkey));
+        assert!(crate::InprocRegistry::global().unregister(&receiver_pubkey));
     }
 
     #[tokio::test]

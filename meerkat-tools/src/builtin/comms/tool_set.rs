@@ -63,6 +63,7 @@ mod tests {
             trusted_peers.clone(),
             CommsConfig::default(),
             inbox_sender,
+            true,
         ));
 
         let tool_set = CommsToolSet::new(router, trusted_peers);

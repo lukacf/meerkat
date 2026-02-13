@@ -129,6 +129,7 @@ mod tests {
             trusted_peers.clone(),
             CommsConfig::default(),
             inbox_sender,
+            true,
         ));
         CommsToolState::new(router, trusted_peers)
     }

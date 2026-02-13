@@ -82,6 +82,7 @@ pub async fn spawn_uds_listener(
                         let trusted_snapshot = trusted.read().await.clone();
                         if let Err(e) = handle_connection(
                             stream,
+                            true,
                             keypair.as_ref(),
                             &trusted_snapshot,
                             &inbox_sender,
@@ -137,6 +138,7 @@ pub async fn spawn_tcp_listener(
                         let trusted_snapshot = trusted.read().await.clone();
                         if let Err(e) = handle_connection(
                             stream,
+                            true,
                             keypair.as_ref(),
                             &trusted_snapshot,
                             &inbox_sender,

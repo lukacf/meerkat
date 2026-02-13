@@ -32,6 +32,7 @@ pub struct CoreCommsConfig {
     pub ack_timeout_secs: u64,
     pub max_message_bytes: u32,
     pub auth: CommsAuthMode,
+    pub require_peer_auth: bool,
     /// Allow binding plain event listener to non-loopback addresses.
     /// This is a prompt injection vector — only enable with explicit intent.
     pub allow_external_unauthenticated: bool,
@@ -52,6 +53,7 @@ impl Default for CoreCommsConfig {
             ack_timeout_secs: 30,
             max_message_bytes: 1_048_576,
             auth: CommsAuthMode::default(),
+            require_peer_auth: true,
             allow_external_unauthenticated: false,
         }
     }
@@ -97,6 +99,7 @@ impl CoreCommsConfig {
                 max_message_bytes: self.max_message_bytes,
             },
             auth: self.auth,
+            require_peer_auth: self.require_peer_auth,
             allow_external_unauthenticated: self.allow_external_unauthenticated,
         }
     }
@@ -120,5 +123,6 @@ pub struct ResolvedCommsConfig {
     pub trusted_peers_path: PathBuf,
     pub comms_config: CommsConfig,
     pub auth: CommsAuthMode,
+    pub require_peer_auth: bool,
     pub allow_external_unauthenticated: bool,
 }

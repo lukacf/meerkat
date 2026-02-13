@@ -224,6 +224,7 @@ mod tests {
             trusted_peers.clone(),
             CommsConfig::default(),
             inbox_sender,
+            true,
         ));
 
         let ctx = ToolContext {
@@ -251,6 +252,7 @@ mod tests {
             trusted_peers.clone(),
             CommsConfig::default(),
             router_inbox_sender,
+            true,
         ));
 
         let ctx = ToolContext {
@@ -282,6 +284,7 @@ mod tests {
             trusted_peers.clone(),
             CommsConfig::default(),
             inbox_sender,
+            true,
         ));
         let ctx = ToolContext {
             router,

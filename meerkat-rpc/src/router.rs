@@ -30,7 +30,7 @@ use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
 #[cfg(feature = "comms")]
-const COMMS_STREAM_CONTRACT_VERSION: &str = "0.3.0";
+use crate::handlers::comms::COMMS_STREAM_CONTRACT_VERSION;
 
 // ---------------------------------------------------------------------------
 // NotificationSink
@@ -383,28 +383,27 @@ impl MethodRouter {
         };
 
         let mut active_streams = self.active_streams.lock().await;
-        let stream = match active_streams.remove(&stream_id) {
-            Some(stream) => stream,
+        let already_closed = match active_streams.remove(&stream_id) {
+            Some(stream) => {
+                drop(active_streams);
+                if let Some(stop_tx) = stream.stop_tx {
+                    let _ = stop_tx.send(());
+                }
+                stream.task.abort();
+                false
+            }
             None => {
-                return RpcResponse::error(
-                    id,
-                    error::INVALID_PARAMS,
-                    format!("Stream not found: {stream_id}"),
-                );
+                drop(active_streams);
+                true
             }
         };
-        drop(active_streams);
-
-        if let Some(stop_tx) = stream.stop_tx {
-            let _ = stop_tx.send(());
-        }
-        stream.task.abort();
 
         RpcResponse::success(
             id,
             json!({
                 "stream_id": stream_id.to_string(),
                 "closed": true,
+                "already_closed": already_closed,
             }),
         )
     }
@@ -630,12 +629,15 @@ mod tests {
         let closed = result_value(&close_resp);
         assert_eq!(closed["closed"], true);
 
+        // Idempotent: second close succeeds with already_closed=true.
         let close_again_req = make_request(
             "comms/stream_close",
             serde_json::json!({"stream_id": stream_id}),
         );
         let close_again_resp = router.dispatch(close_again_req).await.unwrap();
-        assert_eq!(error_code(&close_again_resp), error::INVALID_PARAMS);
+        let close_again = result_value(&close_again_resp);
+        assert_eq!(close_again["closed"], true);
+        assert_eq!(close_again["already_closed"], true);
     }
 
     /// 2. Unknown method returns METHOD_NOT_FOUND error.

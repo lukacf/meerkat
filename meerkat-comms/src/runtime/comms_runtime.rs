@@ -1157,9 +1157,7 @@ mod tests {
     use uuid::Uuid;
     use tokio::time::{timeout, Duration};
 
-    fn clear_inproc_registry() {
-        InprocRegistry::global().clear();
-    }
+
 
     fn test_runtime_config(name: &str, tmp: &tempfile::TempDir) -> ResolvedCommsConfig {
         ResolvedCommsConfig {
@@ -1415,8 +1413,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_send_input_no_reservation() {
-        clear_inproc_registry();
-        let runtime = CommsRuntime::inproc_only("input-no-reservation").unwrap();
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("input-nores-{suffix}")).unwrap();
 
         let cmd = CommsCommand::Input {
             session_id: SessionId::new(),
@@ -1447,8 +1446,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_send_input_reserves_stream() {
-        clear_inproc_registry();
-        let runtime = CommsRuntime::inproc_only("input-with-reserve").unwrap();
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("input-res-{suffix}")).unwrap();
 
         let cmd = CommsCommand::Input {
             session_id: SessionId::new(),
@@ -1484,8 +1484,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_stream_attachment_duplicate_attach_fails() {
-        clear_inproc_registry();
-        let runtime = CommsRuntime::inproc_only("stream-duplicate-attach").unwrap();
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("dup-attach-{suffix}")).unwrap();
 
         let cmd = CommsCommand::Input {
             session_id: SessionId::new(),
@@ -1523,8 +1524,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_stream_not_reserved_before_send() {
-        clear_inproc_registry();
-        let runtime = CommsRuntime::inproc_only("stream-before-send").unwrap();
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("pre-send-{suffix}")).unwrap();
         let random = InteractionId(Uuid::new_v4());
 
         let missing = CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(random));
@@ -1554,8 +1556,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_core_send_and_stream_input_returns_stream_and_receipt() {
-        clear_inproc_registry();
-        let runtime = CommsRuntime::inproc_only("send-and-stream").unwrap();
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("sas-{suffix}")).unwrap();
 
         let cmd = CommsCommand::Input {
             session_id: SessionId::new(),

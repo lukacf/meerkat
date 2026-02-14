@@ -1819,7 +1819,7 @@ mod tests {
         let err = resolve_host_mode(true).expect_err("host mode should be rejected");
         assert!(
             err.to_string()
-                .contains("--host-mode requires comms support")
+                .contains("host_mode requires comms support")
         );
     }
 

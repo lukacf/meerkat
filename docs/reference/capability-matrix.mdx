@@ -30,18 +30,19 @@ Meerkat is modular. Every feature is opt-in. This matrix shows what works in eac
 
 ## Error codes
 
-Deterministic error codes across all surfaces. Every `SessionError` variant maps to a stable
+Deterministic error codes across all surfaces. The canonical mapping is defined in
+`meerkat-contracts` (`ErrorCode`). Every `SessionError` variant maps to a stable
 string code and a transport-specific representation:
 
 | `SessionError` | Code | JSON-RPC | REST | MCP | CLI |
 |----------------|------|----------|------|-----|-----|
-| `NotFound` | `SESSION_NOT_FOUND` | -32001 | 404 | tool error | exit 1 |
-| `Busy` | `SESSION_BUSY` | -32002 | 409 | tool error | exit 1 |
-| `PersistenceDisabled` | `SESSION_PERSISTENCE_DISABLED` | -32003 | 501 | tool error | stderr |
-| `CompactionDisabled` | `SESSION_COMPACTION_DISABLED` | -32004 | 501 | tool error | stderr |
-| `NotRunning` | `SESSION_NOT_RUNNING` | -32005 | 409 | tool error | exit 1 |
-| `Store` | `SESSION_STORE_ERROR` | -32000 | 500 | tool error | exit 1 |
-| `Agent` | `AGENT_ERROR` | -32000 | 500 | tool error | exit 1 |
+| `NotFound` | `SESSION_NOT_FOUND` | -32001 | 404 | tool error | exit 10 |
+| `Busy` | `SESSION_BUSY` | -32002 | 409 | tool error | exit 11 |
+| `NotRunning` | `SESSION_NOT_RUNNING` | -32003 | 409 | tool error | exit 12 |
+| `PersistenceDisabled` | `CAPABILITY_UNAVAILABLE` | -32020 | 501 | tool error | exit 40 |
+| `CompactionDisabled` | `CAPABILITY_UNAVAILABLE` | -32020 | 501 | tool error | exit 40 |
+| `Store` | `INTERNAL_ERROR` | -32603 | 500 | tool error | exit 1 |
+| `Agent` | `AGENT_ERROR` | -32013 | 500 | tool error | exit 30 |
 
 ### Transport error mapping summary
 
@@ -49,8 +50,7 @@ string code and a transport-specific representation:
   JSON-RPC error object carries the string code (e.g. `SESSION_NOT_FOUND`).
 - **REST**: HTTP status codes (404, 409, 500, 501). Error body includes `{ "code": "...", "message": "..." }`.
 - **MCP Server**: Tool calls return `is_error: true` with the error message and code in the content.
-- **CLI**: Non-zero exit codes. `exit 1` for errors, `exit 2` for budget exhaustion. Error
-  details printed to stderr.
+- **CLI**: Non-zero exit codes. Each `ErrorCode` maps to a stable exit code (see [CLI exit codes](/cli/configuration#exit-codes)). Error details printed to stderr.
 
 ## Pick only what you need
 

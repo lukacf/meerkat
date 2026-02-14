@@ -20,7 +20,7 @@ See [providers](/concepts/providers) for the full list of environment variables 
 
 | Scope | Path |
 |-------|------|
-| User | `~/.config/rkat/config.toml` |
+| User | `~/.rkat/config.toml` |
 | Project | `.rkat/config.toml` |
 
 Project config overrides user config. CLI flags override both.
@@ -100,8 +100,18 @@ Sessions are stored in the user's data directory:
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Error |
-| 2 | Budget exhausted (graceful termination) |
+| 1 | Internal error |
+| 2 | Invalid parameters |
+| 10 | Session not found |
+| 11 | Session busy |
+| 12 | Session not running |
+| 20 | Provider error |
+| 21 | Budget exhausted |
+| 22 | Hook denied |
+| 30 | Agent error |
+| 40 | Capability unavailable |
+| 41 | Skill not found |
+| 42 | Skill resolution failed |
 
 ## See also
 

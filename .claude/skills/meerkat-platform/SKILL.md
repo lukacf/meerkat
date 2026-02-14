@@ -125,7 +125,7 @@ Domain-specific knowledge injection. Activated via `/skill-ref` in messages, `sk
 
 ### Hooks
 
-8 lifecycle hook points (RunStarted, PreLlmRequest, PostLlmResponse, PreToolExecution, PostToolExecution, TurnBoundary, RunCompleted, RunFailed) for policy enforcement, logging, and content modification.
+8 lifecycle hook points (`RunStarted`, `PreLlmRequest`, `PostLlmResponse`, `PreToolExecution`, `PostToolExecution`, `TurnBoundary`, `RunCompleted`, `RunFailed`) with 3 capabilities (`Observe`, `Guardrail`, `Rewrite`) and 3 runtimes (in-process, command, HTTP) for policy enforcement, logging, and content modification.
 
 ### Sub-Agents
 

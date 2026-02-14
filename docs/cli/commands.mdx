@@ -10,6 +10,7 @@ icon: "terminal"
 
 | Command | Example | Purpose |
 |---------|---------|---------|
+| `init` | `rkat init` | Initialize project config |
 | `run` | `rkat run "prompt"` | Execute an agent with a prompt |
 | `resume` | `rkat resume <ID> "prompt"` | Continue a previous session |
 | `sessions list` | `rkat sessions list` | List stored sessions |
@@ -18,6 +19,19 @@ icon: "terminal"
 | `mcp list` | `rkat mcp list` | List configured MCP servers |
 | `config` | `rkat config get` | Get, set, or patch configuration |
 | `rpc` | `rkat rpc` | Start the JSON-RPC stdio server |
+| `capabilities` | `rkat capabilities` | Show runtime capabilities |
+
+---
+
+## init
+
+Initialize a project config directory.
+
+```bash
+rkat init
+```
+
+Creates `.rkat/config.toml` with sensible defaults for the current project.
 
 ---
 
@@ -243,6 +257,45 @@ rkat rpc
 The server reads/writes newline-delimited JSON-RPC 2.0 on stdin/stdout. Unlike `run`/`resume`, it keeps agents alive between turns.
 
 See the [RPC reference](/api/rpc) for the full protocol specification.
+
+---
+
+## capabilities
+
+Show runtime capabilities -- what features are compiled in and enabled by config.
+
+```bash
+rkat capabilities
+```
+
+Lists every known capability (sessions, structured output, hooks, builtins, shell, comms, sub-agents, memory, skills, MCP) with its current status: `Available`, `DisabledByPolicy`, or `NotCompiled`.
+
+---
+
+## config
+
+Manage configuration.
+
+### get
+
+```bash
+rkat config get [--format toml|json]
+```
+
+### set
+
+```bash
+rkat config set --file config.toml
+rkat config set --json '{"agent":{"model":"gpt-5.2"}}'
+rkat config set --toml '[agent]\nmodel = "gpt-5.2"'
+```
+
+### patch
+
+```bash
+rkat config patch --json '{"budget":{"max_tokens":50000}}'
+rkat config patch --file patch.json
+```
 
 ---
 

@@ -47,6 +47,8 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
 | `POST` | `/sessions/{id}/event` | Push an external event into a session |
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
 | `GET` | `/sessions/{id}/events` | SSE stream for real-time updates |
+| `POST` | `/comms/send` | Push comms message into a session (comms feature) |
+| `GET` | `/comms/peers` | List discoverable peers (comms feature) |
 | `GET` | `/health` | Liveness check |
 | `GET` | `/capabilities` | Runtime capabilities |
 | `GET` | `/config` | Read config |
@@ -435,17 +437,29 @@ Event types:
 | Event | Description |
 |-------|-------------|
 | `session_loaded` | Emitted on connect with session metadata |
-| `run_started` | Turn execution began |
+| `run_started` | Agent execution began |
+| `run_completed` | Agent run finished |
+| `run_failed` | Agent run failed |
 | `turn_started` | New LLM call within the turn |
 | `text_delta` | Streaming text chunk from LLM |
+| `text_complete` | Full text for this turn |
 | `tool_call_requested` | LLM wants to call a tool |
+| `tool_result_received` | Tool result processed |
+| `turn_completed` | LLM call finished |
 | `tool_execution_started` | Tool dispatch began |
 | `tool_execution_completed` | Tool returned a result |
-| `turn_completed` | LLM call finished |
-| `run_completed` | Turn execution finished successfully |
-| `run_failed` | Turn execution failed |
+| `tool_execution_timed_out` | Tool exceeded timeout |
+| `compaction_started` | Context compaction began |
+| `compaction_completed` | Compaction finished |
+| `compaction_failed` | Compaction failed |
 | `budget_warning` | Approaching resource limits |
 | `retrying` | Retrying after transient error |
+| `hook_started` | Hook execution began |
+| `hook_completed` | Hook finished |
+| `hook_failed` | Hook execution failed |
+| `hook_denied` | Hook blocked operation |
+| `skills_resolved` | Skills loaded for turn |
+| `skill_resolution_failed` | Skill resolution failed |
 | `done` | Emitted when the broadcast channel closes |
 
 ### GET /health
@@ -456,9 +470,9 @@ Returns `"ok"` (HTTP 200). Use for liveness checks.
 
 Returns runtime capabilities with status resolved against config.
 
-```json Response
+```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 1, "patch": 0},
+  "contract_version": {"major": 0, "minor": 2, "patch": 0},
   "capabilities": [
     {
       "id": "sessions",
@@ -474,6 +488,8 @@ Returns runtime capabilities with status resolved against config.
 }
 ```
 
+The full response includes all capabilities: `sessions`, `streaming`, `structured_output`, `hooks`, `builtins`, `shell`, `comms`, `sub_agents`, `memory_store`, `skills`. See the [RPC capabilities endpoint](/api/rpc#capabilitiesget) for the complete example.
+
 ### GET /config
 
 Returns the current `Config` object.
@@ -485,6 +501,55 @@ Sets the entire config. Body: full `Config` JSON.
 ### PATCH /config
 
 RFC 7396 merge patch on the config. Body: partial JSON.
+
+### POST /comms/send
+
+Push a comms message into a running session. Requires the `comms` feature.
+
+<CodeGroup>
+```json Request
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "payload": {"alert": "build failed", "repo": "main"},
+  "source": "ci-pipeline"
+}
+```
+
+```json Response (202 Accepted)
+{"queued": true}
+```
+</CodeGroup>
+
+<ParamField body="session_id" type="string" required>
+  Session ID to push the event to.
+</ParamField>
+
+<ParamField body="payload" type="any JSON" required>
+  Any JSON value. Serialized and injected as event body.
+</ParamField>
+
+<ParamField body="source" type="string">
+  Optional source label.
+</ParamField>
+
+<Note>
+Unlike `POST /sessions/{id}/event` (which uses `RKAT_WEBHOOK_SECRET` header auth),
+`/comms/send` has **no authentication**. It is intended for trusted internal callers
+that already know the session ID.
+</Note>
+
+### GET /comms/peers
+
+List discoverable peers. Requires the `comms` feature.
+
+```json Response
+{
+  "peers": [
+    {"name": "reviewer", "address": "127.0.0.1:4201"},
+    {"name": "coordinator", "address": "inproc"}
+  ]
+}
+```
 
 ## Error responses
 
@@ -499,24 +564,31 @@ All errors are returned as JSON with an HTTP status code:
 
 | HTTP Status | Code | When |
 |-------------|------|------|
-| 400 | `BAD_REQUEST` | Invalid parameters, session ID mismatch, host_mode without comms |
-| 404 | `NOT_FOUND` | Session does not exist |
-| 500 | `CONFIGURATION_ERROR` | Config store read/write failure |
+| 400 | `INVALID_PARAMS` | Invalid parameters, session ID mismatch, host_mode without comms |
+| 403 | `HOOK_DENIED` | Hook blocked the operation |
+| 404 | `SESSION_NOT_FOUND` | Session does not exist |
+| 404 | `SKILL_NOT_FOUND` | Requested skill does not exist |
+| 409 | `SESSION_BUSY` | Turn already in progress |
+| 409 | `SESSION_NOT_RUNNING` | Session not in running state |
+| 422 | `SKILL_RESOLUTION_FAILED` | Skill resolution error |
+| 429 | `BUDGET_EXHAUSTED` | Resource limits reached |
 | 500 | `AGENT_ERROR` | LLM provider error, tool dispatch failure, agent loop error |
 | 500 | `INTERNAL_ERROR` | Store initialization failure, unexpected server error |
+| 501 | `CAPABILITY_UNAVAILABLE` | Required capability not compiled in or disabled |
+| 502 | `PROVIDER_ERROR` | LLM provider issue (missing key, auth failure) |
 
 <CodeGroup>
 ```json Session not found
 {
   "error": "Session not found: 01936f8a-7b2c-7000-8000-000000000099",
-  "code": "NOT_FOUND"
+  "code": "SESSION_NOT_FOUND"
 }
 ```
 
 ```json Bad request
 {
   "error": "Session ID mismatch: path=abc body=def",
-  "code": "BAD_REQUEST"
+  "code": "INVALID_PARAMS"
 }
 ```
 </CodeGroup>

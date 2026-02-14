@@ -129,6 +129,11 @@ curl -X POST http://localhost:3000/sessions/sid_abc/event \
 
 Response: `202 ACCEPTED` with `{"queued": true}`. Returns `503` if inbox full, `404` if session not found. Auth via `RKAT_WEBHOOK_SECRET` env var with constant-time comparison.
 
+### Comms endpoints (comms feature)
+
+- `POST /comms/send` — Push comms message into a session
+- `GET /comms/peers` — List discoverable peers
+
 ### Other endpoints
 
 - `GET /sessions/{id}` — Session details
@@ -185,6 +190,36 @@ All methods use JSON-RPC 2.0 over newline-delimited JSON on stdin/stdout.
 ```
 
 Response: `{"result": {"queued": true}}`. The `payload` is any JSON value. Optional `source` is prepended as `[source: ci-pipeline]` metadata. Error `-32603` if inbox full, `-32602` if session not found.
+
+### comms/peers
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"comms/peers","params":{
+  "session_id": "sid_abc123"
+}}
+```
+
+Response: list of discoverable peers from configured `TrustedPeers` and active in-process registrations.
+
+### comms/stream_open
+
+```json
+{"jsonrpc":"2.0","id":5,"method":"comms/stream_open","params":{
+  "session_id": "sid_abc123"
+}}
+```
+
+Opens a scoped event stream for a session. Events are emitted as `comms/stream_event` notifications.
+
+### comms/stream_close
+
+```json
+{"jsonrpc":"2.0","id":6,"method":"comms/stream_close","params":{
+  "session_id": "sid_abc123"
+}}
+```
+
+Closes a previously opened scoped event stream.
 
 ### Other methods
 
@@ -947,25 +982,33 @@ command = ["python", ".rkat/hooks/audit.py"]
 | Event Type | Fields | Description |
 |-----------|--------|-------------|
 | `run_started` | `session_id`, `prompt` | Agent execution began |
+| `run_completed` | `session_id`, `result`, `usage` | Agent run finished |
+| `run_failed` | `session_id`, `error` | Agent run failed |
 | `turn_started` | `turn_number` | New LLM turn started |
 | `text_delta` | `delta` | Incremental text output |
 | `text_complete` | `content` | Full text for turn |
-| `tool_call_requested` | `name`, `id`, `args` | Tool call dispatched |
-| `tool_execution_started` | `name`, `id` | Tool began executing |
-| `tool_execution_completed` | `name`, `id`, `result` | Tool finished |
-| `tool_execution_timed_out` | `name`, `id` | Tool exceeded timeout |
-| `tool_result_received` | `name`, `result` | Tool result processed |
-| `turn_completed` | `usage`, `stop_reason` | LLM turn finished |
-| `run_completed` | `usage` | Agent run finished |
-| `run_failed` | `error` | Agent run failed |
-| `budget_warning` | `reason` | Budget threshold reached |
-| `compaction_started` | | Context compaction began |
-| `compaction_completed` | `removed`, `retained` | Compaction finished |
-| `retrying` | `attempt`, `delay_ms`, `error` | Retrying after error |
+| `tool_call_requested` | `id`, `name`, `args` | Tool call dispatched |
+| `tool_result_received` | `id`, `name`, `is_error` | Tool result processed |
+| `turn_completed` | `stop_reason`, `usage` | LLM turn finished |
+| `tool_execution_started` | `id`, `name` | Tool began executing |
+| `tool_execution_completed` | `id`, `name`, `result`, `is_error`, `duration_ms` | Tool finished |
+| `tool_execution_timed_out` | `id`, `name`, `timeout_ms` | Tool exceeded timeout |
+| `compaction_started` | `input_tokens`, `estimated_history_tokens`, `message_count` | Context compaction began |
+| `compaction_completed` | `summary_tokens`, `messages_before`, `messages_after` | Compaction finished |
+| `compaction_failed` | `error` | Compaction failed |
+| `budget_warning` | `budget_type`, `used`, `limit`, `percent` | Budget threshold reached |
+| `retrying` | `attempt`, `max_attempts`, `error`, `delay_ms` | Retrying after error |
 | `hook_started` | `hook_id`, `point` | Hook execution began |
-| `hook_completed` | `hook_id`, `decision` | Hook finished |
-| `hook_denied` | `hook_id`, `reason` | Hook blocked operation |
-| `skills_resolved` | `ids` | Skills loaded for turn |
+| `hook_completed` | `hook_id`, `point`, `duration_ms` | Hook finished |
+| `hook_failed` | `hook_id`, `point`, `error` | Hook execution failed |
+| `hook_denied` | `hook_id`, `point`, `reason_code`, `message`, `payload` | Hook blocked operation |
+| `hook_rewrite_applied` | `hook_id`, `point`, `patch` | Hook rewrote content |
+| `hook_patch_published` | `hook_id`, `point`, `envelope` | Hook published a patch |
+| `skills_resolved` | `skills`, `injection_bytes` | Skills loaded for turn |
+| `skill_resolution_failed` | `reference`, `error` | Skill resolution failed |
+| `interaction_complete` | `interaction_id`, `result` | Interaction-scoped stream completed |
+| `interaction_failed` | `interaction_id`, `error` | Interaction-scoped stream failed |
+| `stream_truncated` | `reason` | Backpressure dropped intermediate events |
 
 ---
 
@@ -987,18 +1030,31 @@ command = ["python", ".rkat/hooks/audit.py"]
 | Code | Number | Description |
 |------|--------|-------------|
 | `INVALID_PARAMS` | -32602 | Bad parameters |
+| `INTERNAL_ERROR` | -32603 | Internal error |
 | `SESSION_NOT_FOUND` | -32001 | Session doesn't exist |
 | `SESSION_BUSY` | -32002 | Turn in progress |
+| `SESSION_NOT_RUNNING` | -32003 | Session not in running state |
 | `PROVIDER_ERROR` | -32010 | LLM provider error |
 | `BUDGET_EXHAUSTED` | -32011 | Budget exceeded |
 | `HOOK_DENIED` | -32012 | Hook blocked operation |
 | `AGENT_ERROR` | -32013 | Internal agent error |
+| `CAPABILITY_UNAVAILABLE` | -32020 | Required capability missing |
+| `SKILL_NOT_FOUND` | -32021 | Skill doesn't exist |
+| `SKILL_RESOLUTION_FAILED` | -32022 | Skill resolution error |
 
 ### REST
 
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
-| `BAD_REQUEST` | 400 | Invalid request |
-| `NOT_FOUND` | 404 | Session not found |
-| `CONFIGURATION_ERROR` | 500 | Config issue |
-| `AGENT_ERROR` | 500 | Agent failure |
+| `INVALID_PARAMS` | 400 | Invalid request |
+| `SESSION_NOT_FOUND` | 404 | Session not found |
+| `SESSION_BUSY` | 409 | Turn in progress |
+| `SESSION_NOT_RUNNING` | 409 | Session not in running state |
+| `PROVIDER_ERROR` | 502 | LLM provider error |
+| `BUDGET_EXHAUSTED` | 429 | Budget exceeded |
+| `HOOK_DENIED` | 403 | Hook blocked operation |
+| `AGENT_ERROR` | 500 | Internal agent error |
+| `CAPABILITY_UNAVAILABLE` | 501 | Required capability missing |
+| `SKILL_NOT_FOUND` | 404 | Skill doesn't exist |
+| `SKILL_RESOLUTION_FAILED` | 422 | Skill resolution error |
+| `INTERNAL_ERROR` | 500 | Internal error |

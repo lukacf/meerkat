@@ -59,9 +59,13 @@ meerkat-session   → Session service orchestration (EphemeralSessionService, De
                                session-compaction (DefaultCompactor)
 meerkat-memory    → Semantic memory (HnswMemoryStore via hnsw_rs + redb, SimpleMemoryStore for tests)
 meerkat-mcp       → MCP protocol client, McpRouter for tool routing
-meerkat-mcp-server → Expose Meerkat as MCP tools (meerkat_run, meerkat_resume)
+meerkat-mcp-server → Expose Meerkat as MCP tools (meerkat_run, meerkat_resume, meerkat_config, meerkat_capabilities)
 meerkat-rpc       → JSON-RPC stdio server (stateful SessionRuntime, IDE/desktop integration)
 meerkat-rest      → Optional REST API server
+meerkat-comms     → Inter-agent communication (Ed25519-signed messaging, transports, trust model)
+meerkat-contracts → Wire types, capability registry, error codes (canonical over all surfaces)
+meerkat-skills    → Skill loading, resolution, rendering (filesystem, git, HTTP, embedded sources)
+meerkat-hooks     → Hook infrastructure (in-process, command, HTTP runtimes)
 meerkat-cli       → CLI binary (produces `rkat`)
 meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 ```
@@ -82,7 +86,7 @@ meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 
 **Session lifecycle:** All four surfaces (CLI, REST, MCP Server, JSON-RPC) route through `SessionService` for the full session lifecycle (create/turn/interrupt/read/list/archive). `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Surfaces stage per-request config via `build_config_slot` before calling `create_session()`.
 
-**Capability matrix:** See `docs/CAPABILITY_MATRIX.md` for build profiles, error codes, and feature behavior. See `docs/SESSION_CONTRACTS.md` for concurrency, durability, and compaction semantics.
+**Capability matrix:** See `docs/reference/capability-matrix.mdx` for build profiles, error codes, and feature behavior. See `docs/reference/session-contracts.mdx` for concurrency, durability, and compaction semantics.
 
 **`.rkat/sessions/` files** are derived projection output (materialized by `SessionProjector`), NOT canonical state. Deleting them and replaying from the event store produces identical content.
 
@@ -100,7 +104,7 @@ rkat mcp list
 rkat mcp remove <name>
 ```
 
-Config stored in `.rkat/mcp.toml` (project) or `~/.config/rkat/mcp.toml` (user).
+Config stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user).
 
 ## JSON-RPC Stdio Server
 
@@ -122,11 +126,16 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 | `session/archive` | Remove session |
 | `turn/start` | Start a new turn on existing session |
 | `turn/interrupt` | Cancel in-flight turn |
+| `comms/send` | Push external event into session (comms feature) |
+| `comms/peers` | List discoverable peers (comms feature) |
+| `comms/stream_open` | Open scoped comms event stream (comms feature) |
+| `comms/stream_close` | Close scoped comms stream (comms feature) |
+| `capabilities/get` | List runtime capabilities |
 | `config/get` | Read config |
 | `config/set` | Replace config |
 | `config/patch` | Merge-patch config |
 
-**Notifications** (server -> client): `session/event` with `AgentEvent` payload, emitted during turns.
+**Notifications** (server -> client): `session/event` with `AgentEvent` payload, emitted during turns. `comms/stream_event` for scoped comms event streams (comms feature).
 
 **Architecture:** Each session gets a dedicated tokio task that exclusively owns the `Agent` (no mutex needed for `cancel(&mut self)`). The `SessionRuntime` dispatches commands via channels. `AgentFactory.build_agent()` consolidates the agent construction pipeline shared across all surfaces.
 

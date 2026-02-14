@@ -35,13 +35,13 @@ string code and a transport-specific representation:
 
 | `SessionError` | Code | JSON-RPC | REST | MCP | CLI |
 |----------------|------|----------|------|-----|-----|
-| `NotFound` | `SESSION_NOT_FOUND` | -32001 | 404 | tool error | exit 1 |
-| `Busy` | `SESSION_BUSY` | -32002 | 409 | tool error | exit 1 |
-| `PersistenceDisabled` | `SESSION_PERSISTENCE_DISABLED` | -32003 | 501 | tool error | stderr |
-| `CompactionDisabled` | `SESSION_COMPACTION_DISABLED` | -32004 | 501 | tool error | stderr |
-| `NotRunning` | `SESSION_NOT_RUNNING` | -32005 | 409 | tool error | exit 1 |
-| `Store` | `SESSION_STORE_ERROR` | -32000 | 500 | tool error | exit 1 |
-| `Agent` | `AGENT_ERROR` | -32000 | 500 | tool error | exit 1 |
+| `NotFound` | `SESSION_NOT_FOUND` | -32001 | 404 | tool error | exit 10 |
+| `Busy` | `SESSION_BUSY` | -32002 | 409 | tool error | exit 11 |
+| `NotRunning` | `SESSION_NOT_RUNNING` | -32003 | 409 | tool error | exit 12 |
+| `PersistenceDisabled` | `CAPABILITY_UNAVAILABLE` | -32020 | 501 | tool error | exit 40 |
+| `CompactionDisabled` | `CAPABILITY_UNAVAILABLE` | -32020 | 501 | tool error | exit 40 |
+| `Store` | `INTERNAL_ERROR` | -32603 | 500 | tool error | exit 1 |
+| `Agent` | `AGENT_ERROR` | -32013 | 500 | tool error | exit 30 |
 
 ### Transport error mapping summary
 

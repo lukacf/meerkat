@@ -490,7 +490,7 @@ Returns the runtime capability set with status resolved against config.
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 1, "patch": 0},
+  "contract_version": {"major": 0, "minor": 2, "patch": 0},
   "capabilities": [
     {
       "id": "sessions",
@@ -500,6 +500,11 @@ Returns the runtime capability set with status resolved against config.
     {
       "id": "structured_output",
       "description": "Structured output extraction with JSON schema",
+      "status": "Available"
+    },
+    {
+      "id": "hooks",
+      "description": "Lifecycle hooks for tool and turn events",
       "status": "Available"
     },
     {
@@ -516,6 +521,16 @@ Returns the runtime capability set with status resolved against config.
       "id": "comms",
       "description": "Inter-agent communication",
       "status": {"NotCompiled": {"feature": "comms"}}
+    },
+    {
+      "id": "sub_agents",
+      "description": "Sub-agent forking and spawning",
+      "status": "Available"
+    },
+    {
+      "id": "skills",
+      "description": "Skill loading and injection",
+      "status": "Available"
     }
   ]
 }

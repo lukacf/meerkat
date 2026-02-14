@@ -53,7 +53,7 @@ Those tools excel at interactive development with rich terminal UIs. Meerkat has
 
 ```toml
 [dependencies]
-meerkat = "0.1"
+meerkat = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 

@@ -28,7 +28,10 @@ graph TD
     TOOLS["meerkat-tools<br/>Registry / Validation"]
     MEMORY["meerkat-memory<br/>HNSW / Simple"]
     HOOKS["meerkat-hooks<br/>In-proc / Command / HTTP"]
-    MCPSERVER["meerkat-mcp-server<br/>meerkat_run / meerkat_resume"]
+    MCPSERVER["meerkat-mcp-server<br/>meerkat_run / meerkat_resume<br/>meerkat_config / meerkat_capabilities"]
+    COMMS["meerkat-comms<br/>Ed25519 / Transports / Trust"]
+    CONTRACTS["meerkat-contracts<br/>Wire types / Capabilities / Error codes"]
+    SKILLS["meerkat-skills<br/>Filesystem / Git / HTTP / Embedded"]
 
     CORE["meerkat-core<br/>Traits, agent loop, types<br/>SessionService trait, SessionError"]
 
@@ -40,6 +43,9 @@ graph TD
     FACADE --> MEMORY
     FACADE --> HOOKS
     FACADE --> MCPSERVER
+    FACADE --> COMMS
+    FACADE --> CONTRACTS
+    FACADE --> SKILLS
 
     CLIENT --> CORE
     SESSION --> CORE
@@ -49,6 +55,9 @@ graph TD
     MEMORY --> CORE
     HOOKS --> CORE
     MCPSERVER --> CORE
+    COMMS --> CORE
+    CONTRACTS --> CORE
+    SKILLS --> CORE
 ```
 
 <Note>
@@ -202,6 +211,53 @@ MCP protocol client implementation:
 - **McpConnection**: manages stdio connection to MCP server
 - **McpRouter**: routes tool calls to appropriate MCP servers (implements `AgentToolDispatcher`)
 - **Protocol handling**: initialize, tools/list, tools/call
+</Accordion>
+
+<Accordion title="meerkat-mcp-server">
+MCP server exposing Meerkat as tools for other MCP clients:
+
+- **meerkat_run**: start a new agent session with a prompt
+- **meerkat_resume**: continue a session or provide tool results for pending calls
+- **meerkat_config**: get, set, or patch server configuration
+- **meerkat_capabilities**: query runtime capabilities
+
+Tools with `handler: "callback"` support a callback pattern where the MCP client executes tools and returns results via `meerkat_resume`.
+</Accordion>
+
+<Accordion title="meerkat-comms">
+Inter-agent communication system:
+
+- **CommsRuntime**: runtime for peer-to-peer agent messaging
+- **Ed25519 identity**: cryptographic signing and verification of messages
+- **Trust model**: `TrustedPeers` with explicit peer verification
+- **Transports**: inproc (in-process), TCP, and UDS
+- **Inbox**: bounded message queue drained at turn boundaries
+- **Message types**: `Message`, `Request`, `Response`, `Ack`
+- **Host mode**: keeps agent alive listening for messages
+
+Feature-gated behind `comms`.
+</Accordion>
+
+<Accordion title="meerkat-contracts">
+Canonical wire types and capability model shared across all surfaces:
+
+- **Wire types**: `WireRunResult`, `WireSessionInfo`, `WireEvent`, `WireUsage`, `WireError`
+- **Capabilities**: `CapabilityId`, `CapabilityStatus`, `CapabilityRegistration`, `CapabilitiesResponse`
+- **Error codes**: `ErrorCode` with stable projections to JSON-RPC codes, HTTP status, and CLI exit codes
+- **Contract version**: semver versioning for API compatibility (`0.2.0`)
+- **Parameter types**: `CoreCreateParams`, `StructuredOutputParams`, `HookParams`, `CommsParams`, `SkillsParams`
+</Accordion>
+
+<Accordion title="meerkat-skills">
+Skill loading, resolution, and rendering:
+
+- **DefaultSkillEngine**: resolves and renders skills from multiple sources
+- **Sources**: `FilesystemSkillSource`, `EmbeddedSkillSource`, `InMemorySkillSource`, `CompositeSkillSource`
+- **Frontmatter parsing**: YAML metadata with capability gating
+- **Rendering**: inventory section for system prompt, injection block for per-turn context
+- **Discovery tools**: `browse_skills` and `load_skill` (when builtins enabled)
+
+Feature-gated behind `skills`.
 </Accordion>
 
 <Accordion title="meerkat-rpc">

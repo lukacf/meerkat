@@ -470,7 +470,7 @@ Returns `"ok"` (HTTP 200). Use for liveness checks.
 
 Returns runtime capabilities with status resolved against config.
 
-```json Response
+```json Response (abbreviated)
 {
   "contract_version": {"major": 0, "minor": 2, "patch": 0},
   "capabilities": [
@@ -487,6 +487,8 @@ Returns runtime capabilities with status resolved against config.
   ]
 }
 ```
+
+The full response includes all capabilities: `sessions`, `streaming`, `structured_output`, `hooks`, `builtins`, `shell`, `comms`, `sub_agents`, `memory_store`, `skills`. See the [RPC capabilities endpoint](/api/rpc#capabilitiesget) for the complete example.
 
 ### GET /config
 
@@ -529,6 +531,12 @@ Push a comms message into a running session. Requires the `comms` feature.
 <ParamField body="source" type="string">
   Optional source label.
 </ParamField>
+
+<Note>
+Unlike `POST /sessions/{id}/event` (which uses `RKAT_WEBHOOK_SECRET` header auth),
+`/comms/send` has **no authentication**. It is intended for trusted internal callers
+that already know the session ID.
+</Note>
 
 ### GET /comms/peers
 

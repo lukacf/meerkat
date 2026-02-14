@@ -30,7 +30,8 @@ Meerkat is modular. Every feature is opt-in. This matrix shows what works in eac
 
 ## Error codes
 
-Deterministic error codes across all surfaces. Every `SessionError` variant maps to a stable
+Deterministic error codes across all surfaces. The canonical mapping is defined in
+`meerkat-contracts` (`ErrorCode`). Every `SessionError` variant maps to a stable
 string code and a transport-specific representation:
 
 | `SessionError` | Code | JSON-RPC | REST | MCP | CLI |
@@ -49,8 +50,7 @@ string code and a transport-specific representation:
   JSON-RPC error object carries the string code (e.g. `SESSION_NOT_FOUND`).
 - **REST**: HTTP status codes (404, 409, 500, 501). Error body includes `{ "code": "...", "message": "..." }`.
 - **MCP Server**: Tool calls return `is_error: true` with the error message and code in the content.
-- **CLI**: Non-zero exit codes. `exit 1` for errors, `exit 2` for budget exhaustion. Error
-  details printed to stderr.
+- **CLI**: Non-zero exit codes. Each `ErrorCode` maps to a stable exit code (see [CLI exit codes](/cli/configuration#exit-codes)). Error details printed to stderr.
 
 ## Pick only what you need
 

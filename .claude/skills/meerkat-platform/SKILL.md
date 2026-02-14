@@ -133,7 +133,9 @@ Hierarchical agent spawning with tools: `agent_spawn`, `agent_fork`, `agent_stat
 
 ### Inter-Agent Communication & External Events
 
-**Agent-to-agent comms:** Ed25519-signed peer-to-peer messaging via `send` (with `kind=peer_message`, `kind=peer_request`, or `kind=peer_response`) and `peers`. Host mode (`--host`) keeps agent alive listening for messages. Signed listeners use CBOR + Ed25519 with trusted peer verification. `peers` returns discoverable peers from both configured `TrustedPeers` and active in-process registrations (`InprocRegistry`), excluding self and de-duplicating by name.
+**Agent-to-agent comms:** Ed25519-signed peer-to-peer messaging via `send` (with `kind=peer_message`, `kind=peer_request`, or `kind=peer_response`) and `peers`. Host mode (`--host`) keeps agent alive listening for messages. Signed listeners use CBOR + Ed25519 with trusted peer verification. `peers` returns discoverable peers from both configured `TrustedPeers` and active in-process registrations (`InprocRegistry`), excluding self and de-duplicating by name. Each peer can carry `PeerMeta` (description + labels) so orchestrators can reason about peer capabilities.
+
+**Peer metadata (`PeerMeta`):** Agents can advertise supplementary discovery metadata — a description and arbitrary key/value labels. The peer's canonical routing name is always `comms_name` (set via `--comms-name`); `PeerMeta` carries *additional* context. Set via CLI (`--agent-description`, `--agent-label key=value`), `AgentBuildConfig.peer_meta`, or surface request params. Flows through `CommsRuntime` → `InprocRegistry` → `peers()` output. Persisted in `SessionMetadata.peer_meta` for deterministic resume.
 
 **External event ingestion:** External systems (webhooks, scripts, stdin) can push events into a running agent's inbox. All events flow through the `SubscribableInjector` trait (which extends `EventInjector`) into a bounded inbox, drained at turn boundaries (or continuously in host mode) and injected as user messages.
 

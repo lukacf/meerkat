@@ -666,9 +666,10 @@ async fn handle_meerkat_resume(
         override_subagents: None,
         override_memory: None,
         preload_skills: None,
-        peer_meta: input.peer_meta.clone().or_else(|| {
-            stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())
-        }),
+        peer_meta: input
+            .peer_meta
+            .clone()
+            .or_else(|| stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())),
     };
 
     // Try start_turn on the live session first (it may still be alive

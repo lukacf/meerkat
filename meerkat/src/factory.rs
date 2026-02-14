@@ -770,10 +770,14 @@ impl AgentFactory {
                 .project_root
                 .clone()
                 .unwrap_or_else(|| self.store_path.clone());
-            let runtime =
-                build_comms_runtime_from_config(config, base_dir, comms_name, build_config.peer_meta.clone())
-                    .await
-                    .map_err(BuildAgentError::Comms)?;
+            let runtime = build_comms_runtime_from_config(
+                config,
+                base_dir,
+                comms_name,
+                build_config.peer_meta.clone(),
+            )
+            .await
+            .map_err(BuildAgentError::Comms)?;
             Some(runtime)
         } else {
             None

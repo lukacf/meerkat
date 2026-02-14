@@ -798,6 +798,11 @@ impl CommsRuntime {
     ///
     /// Call this after construction to advertise [`PeerMeta`] to other
     /// in-process agents via [`InprocRegistry::peers()`].
+    ///
+    /// Internally re-registers with [`InprocRegistry::register_with_meta`],
+    /// which replaces the full entry (including inbox sender). This is safe
+    /// because the sender is cloned from the same router and pending
+    /// deliveries are unaffected.
     pub fn set_peer_meta(&self, meta: crate::PeerMeta) {
         InprocRegistry::global().register_with_meta(
             &self.config.name,
@@ -806,6 +811,7 @@ impl CommsRuntime {
             meta,
         );
     }
+
     /// Canonical peer resolver.
     ///
     /// Discovery and sendability are derived from trusted peers, with in-proc peers
@@ -823,7 +829,7 @@ impl CommsRuntime {
         let inproc_by_name: std::collections::HashMap<String, crate::identity::PubKey> =
             inproc_peers
                 .iter()
-                .map(|(name, pubkey, _meta)| (name.clone(), *pubkey))
+                .map(|p| (p.name.clone(), p.pubkey))
                 .collect();
         let mut trusted_names = HashSet::new();
         let mut trusted_pubkeys = HashSet::new();
@@ -864,44 +870,44 @@ impl CommsRuntime {
                         source,
                         sendable_kinds: sendable_kinds.clone(),
                         capabilities: serde_json::json!({}),
-                        description: peer.meta.description.clone(),
-                        labels: peer.meta.labels.clone(),
+                        meta: peer.meta.clone(),
                     },
                 );
             }
         }
 
         if !self.config.require_peer_auth {
-            for (raw_name, pubkey, meta) in &inproc_peers {
-                let name = match PeerName::new(raw_name.clone()) {
+            for inproc in &inproc_peers {
+                let name = match PeerName::new(inproc.name.clone()) {
                     Ok(name) => name,
                     Err(_) => {
                         tracing::warn!(
-                            peer_name = %raw_name,
-                            peer_id = %pubkey.to_peer_id(),
+                            peer_name = %inproc.name,
+                            peer_id = %inproc.pubkey.to_peer_id(),
                             "skipping invalid inproc peer name"
                         );
                         continue;
                     }
                 };
                 let peer_name_str = name.as_string();
-                if trusted_names.contains(name.as_str()) || trusted_pubkeys.contains(pubkey) {
+                if trusted_names.contains(name.as_str())
+                    || trusted_pubkeys.contains(&inproc.pubkey)
+                {
                     continue;
                 }
-                if peer_name_str == self.config.name || *pubkey == self.public_key {
+                if peer_name_str == self.config.name || inproc.pubkey == self.public_key {
                     continue;
                 }
                 peers.insert(
                     peer_name_str.clone(),
                     PeerDirectoryEntry {
                         name,
-                        peer_id: pubkey.to_peer_id(),
+                        peer_id: inproc.pubkey.to_peer_id(),
                         address: format!("inproc://{peer_name_str}"),
                         source: PeerDirectorySource::Inproc,
                         sendable_kinds: sendable_kinds.clone(),
                         capabilities: serde_json::json!({}),
-                        description: meta.description.clone(),
-                        labels: meta.labels.clone(),
+                        meta: inproc.meta.clone(),
                     },
                 );
             }

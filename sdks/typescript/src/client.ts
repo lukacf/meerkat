@@ -12,6 +12,12 @@ import type {
 } from "./generated/types.js";
 import { CONTRACT_VERSION } from "./generated/types.js";
 
+/** Supplementary discovery metadata for a comms peer. */
+export interface PeerMeta {
+  description?: string;
+  labels?: Record<string, string>;
+}
+
 export class MeerkatClient {
   private process: ChildProcess | null = null;
   private requestId = 0;
@@ -118,7 +124,7 @@ export class MeerkatClient {
     enable_memory?: boolean;
     host_mode?: boolean;
     comms_name?: string;
-    peer_meta?: { name: string; description?: string; labels?: Record<string, string> };
+    peer_meta?: PeerMeta;
     provider_params?: Record<string, unknown>;
     preload_skills?: string[];
     skill_references?: string[];

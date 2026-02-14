@@ -516,12 +516,10 @@ async fn main() -> anyhow::Result<ExitCode> {
             stdin,
         } => {
             let peer_meta = if agent_description.is_some() || !agent_label.is_empty() {
-                let mut meta = meerkat_core::PeerMeta::new(
-                    comms_name.as_deref().unwrap_or_default(),
-                );
-                meta.description = agent_description;
-                meta.labels = agent_label.into_iter().collect();
-                Some(meta)
+                Some(meerkat_core::PeerMeta {
+                    description: agent_description,
+                    labels: agent_label.into_iter().collect(),
+                })
             } else {
                 None
             };

@@ -29,6 +29,14 @@ use crate::inbox::{InboxError, InboxSender};
 use crate::peer_meta::PeerMeta;
 use crate::types::{Envelope, InboxItem, MessageKind};
 
+/// Snapshot of an inproc peer returned by [`InprocRegistry::peers()`].
+#[derive(Debug, Clone)]
+pub struct InprocPeerInfo {
+    pub name: String,
+    pub pubkey: PubKey,
+    pub meta: PeerMeta,
+}
+
 /// Global inproc registry instance.
 static GLOBAL_REGISTRY: OnceLock<InprocRegistry> = OnceLock::new();
 
@@ -266,13 +274,17 @@ impl InprocRegistry {
         self.state.read().names.keys().cloned().collect()
     }
 
-    /// List all registered peers as `(name, pubkey, meta)` tuples.
-    pub fn peers(&self) -> Vec<(String, PubKey, PeerMeta)> {
+    /// List all registered peers.
+    pub fn peers(&self) -> Vec<InprocPeerInfo> {
         self.state
             .read()
             .peers
             .values()
-            .map(|peer| (peer.name.clone(), peer.pubkey, peer.meta.clone()))
+            .map(|peer| InprocPeerInfo {
+                name: peer.name.clone(),
+                pubkey: peer.pubkey,
+                meta: peer.meta.clone(),
+            })
             .collect()
     }
 }
@@ -477,8 +489,8 @@ mod tests {
 
         let peers = registry.peers();
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].0, "agent-a");
-        assert_eq!(peers[0].1, pubkey);
+        assert_eq!(peers[0].name, "agent-a");
+        assert_eq!(peers[0].pubkey, pubkey);
     }
 
     #[test]
@@ -605,7 +617,7 @@ mod tests {
         let pubkey = keypair.public_key();
         let (_, sender) = Inbox::new();
 
-        let meta = PeerMeta::new("code-reviewer")
+        let meta = PeerMeta::default()
             .with_description("Reviews code for style issues")
             .with_label("lang", "rust");
 
@@ -613,9 +625,9 @@ mod tests {
 
         let peers = registry.peers();
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].0, "reviewer");
-        assert_eq!(peers[0].1, pubkey);
-        assert_eq!(peers[0].2, meta);
+        assert_eq!(peers[0].name, "reviewer");
+        assert_eq!(peers[0].pubkey, pubkey);
+        assert_eq!(peers[0].meta, meta);
     }
 
     #[test]
@@ -629,6 +641,6 @@ mod tests {
 
         let peers = registry.peers();
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].2, PeerMeta::default());
+        assert_eq!(peers[0].meta, PeerMeta::default());
     }
 }

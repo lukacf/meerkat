@@ -434,10 +434,8 @@ pub struct PeerDirectoryEntry {
     pub source: PeerDirectorySource,
     pub sendable_kinds: Vec<String>,
     pub capabilities: serde_json::Value,
-    /// Human-readable description of what this peer does.
-    pub description: Option<String>,
-    /// Arbitrary key/value labels for the peer.
-    pub labels: std::collections::BTreeMap<String, String>,
+    /// Supplementary discovery metadata (description, labels).
+    pub meta: crate::PeerMeta,
 }
 
 /// Canonical payload for registering a trusted peer through a runtime seam.
@@ -551,8 +549,7 @@ mod tests {
             source: PeerDirectorySource::Inproc,
             sendable_kinds: vec!["peer_message".to_string()],
             capabilities: Value::Object(Default::default()),
-            description: None,
-            labels: std::collections::BTreeMap::new(),
+            meta: crate::PeerMeta::default(),
         };
         assert_eq!(entry.name.as_str(), "agent");
         assert_eq!(entry.source, PeerDirectorySource::Inproc);

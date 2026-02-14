@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn test_trusted_peer_with_meta() {
-        let meta = PeerMeta::new("reviewer")
+        let meta = PeerMeta::default()
             .with_description("Reviews code")
             .with_label("lang", "rust");
 
@@ -556,7 +556,10 @@ mod tests {
         let decoded: TrustedPeer = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.meta, meta);
         assert_eq!(decoded.meta.description.as_deref(), Some("Reviews code"));
-        assert_eq!(decoded.meta.labels.get("lang").map(String::as_str), Some("rust"));
+        assert_eq!(
+            decoded.meta.labels.get("lang").map(String::as_str),
+            Some("rust")
+        );
     }
 
     #[test]

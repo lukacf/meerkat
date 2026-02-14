@@ -396,6 +396,8 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 | Flag | Description |
 |------|-------------|
 | `--comms-name <NAME>` | Agent name for peer identification. Enables comms if set. |
+| `--agent-description <TEXT>` | Human-readable description shown to peers via `peers()` |
+| `--agent-label key=value` | Metadata label (repeatable). Shown to peers via `peers()` |
 | `--comms-listen-tcp <ADDR>` | TCP address to listen on for signed comms (e.g., `"0.0.0.0:4200"`) |
 | `--no-comms` | Disable inter-agent communication entirely |
 | `--host` | Run in host mode (stay alive for comms messages and events after initial prompt) |
@@ -404,6 +406,48 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 <Note>
 All comms flags require the `comms` feature at compile time (`#[cfg(feature = "comms")]`).
 </Note>
+
+### Peer metadata
+
+Agents can advertise a description and arbitrary labels so that peers can discover *what* each agent does — not just its name. This metadata flows through to the `peers()` tool output.
+
+```bash
+# Agent with description and labels
+rkat run --comms-name reviewer \
+  --agent-description "Reviews pull requests for style issues" \
+  --agent-label lang=rust \
+  --agent-label team=infra \
+  --host "You review code when asked."
+```
+
+Via the Rust SDK:
+
+```rust
+use meerkat_core::PeerMeta;
+
+let build_config = AgentBuildConfig {
+    host_mode: true,
+    comms_name: Some("reviewer".to_string()),
+    peer_meta: Some(PeerMeta::default()
+        .with_description("Reviews pull requests for style issues")
+        .with_label("lang", "rust")),
+    ..AgentBuildConfig::new("claude-sonnet-4-5")
+};
+```
+
+When another agent calls `peers()`, the output includes the metadata:
+
+```json
+{
+  "peers": [{
+    "name": "reviewer",
+    "peer_id": "ed25519:...",
+    "address": "inproc://reviewer",
+    "description": "Reviews pull requests for style issues",
+    "labels": {"lang": "rust", "team": "infra"}
+  }]
+}
+```
 
 ### Host mode
 
@@ -468,13 +512,15 @@ let build_config = AgentBuildConfig {
     model: "claude-sonnet-4-5".to_string(),
     host_mode: true,
     comms_name: Some("my-agent".to_string()),
+    peer_meta: Some(PeerMeta::default()
+        .with_description("Coordinates sub-agents")),
     ..AgentBuildConfig::new("claude-sonnet-4-5")
 };
 
 let agent = factory.build_agent(build_config, &config).await?;
 ```
 
-The factory validates `comms_name`, creates the runtime, composes tools, attaches the runtime to the agent, and records `host_mode` in `SessionMetadata`.
+The factory validates `comms_name`, creates the runtime, composes tools, attaches the runtime to the agent, and records `host_mode` and `peer_meta` in `SessionMetadata`.
 </Accordion>
 
 <Accordion title="Using CommsAgent directly">

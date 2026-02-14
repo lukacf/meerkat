@@ -919,9 +919,10 @@ async fn continue_session(
                 override_subagents: Some(tooling.subagents),
                 override_memory: None,
                 preload_skills: None,
-                peer_meta: req.peer_meta.clone().or_else(|| {
-                    stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())
-                }),
+                peer_meta: req
+                    .peer_meta
+                    .clone()
+                    .or_else(|| stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())),
             };
 
             // Hold slot lock across staging + create to prevent races.

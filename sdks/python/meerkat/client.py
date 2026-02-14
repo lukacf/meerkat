@@ -359,7 +359,7 @@ class MeerkatClient:
             params["host_mode"] = True
         if comms_name:
             params["comms_name"] = comms_name
-        if peer_meta:
+        if peer_meta is not None:
             params["peer_meta"] = peer_meta
         if provider_params:
             params["provider_params"] = provider_params

@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-14
+
+### Added
+
+#### Comms Command Plane Redesign
+- Canonical `send` and `peers` tools replacing 4 legacy tools (`send_message`, `send_request`, `send_response`, `list_peers`)
+  - `send`: unified command dispatch with flat `kind` discriminator for all comms operations
+  - `peers`: list all visible peers
+- `comms/send` and `comms/peers` RPC methods with flat-schema validation
+- `POST /comms/send` and `GET /comms/peers` REST endpoints
+- Python SDK methods: `send()` and `peers()` replacing `push_event()`
+- TypeScript SDK methods: `send()`, `send_and_stream()`, and `peers()` replacing `pushEvent()`
+- Optional peer authentication with fallback to in-process peer context
+- `TrustedAndInproc` trust source for hybrid peer resolution
+
+#### Interaction-Scoped Event Streaming
+- `EventTap` mechanism for scoped event subscription per interaction
+- `SubscribableInjector` extending `EventInjector` with `inject_with_subscription()` for dedicated interaction streams
+- `InteractionSubscription`, `InteractionId`, `InteractionContent`, and `ResponseStatus` types in meerkat-core
+- Host-mode interaction FSM with scoped event delivery
+- Terminal completion events (`InteractionComplete`, `InteractionFailed`) for stream lifecycle management
+
+#### CD Infrastructure
+- Version parity verification: `make verify-version-parity` enforces Rust workspace, Python SDK, TypeScript SDK, and contract version alignment as a CI gate
+- Schema freshness check: `make verify-schema-freshness` detects stale committed schema artifacts
+- `cargo-release` configuration with pre-release hook that bumps SDK versions, regenerates schemas, and verifies parity
+- Release scripts: `scripts/verify-version-parity.sh`, `scripts/bump-sdk-versions.sh`, `scripts/release-hook.sh`, `scripts/verify-schema-freshness.sh`
+- `make regen-schemas` target for re-emitting schemas and running SDK codegen
+- `make release-preflight` for full pre-release checklist (CI + schema freshness)
+- `make publish-dry-run` for cargo publish readiness checks across all crates
+
+### Changed
+
+#### Versioning (Breaking)
+- Package version and contract version are now lock-stepped (both `0.3.0`)
+- Contract version bumped to `0.3.0` reflecting comms API changes
+- All schema artifacts and SDK generated types regenerated for contract version `0.3.0`
+
+#### Comms API (Breaking)
+- Comms tools reduced from 4 to 2: `send` (with `kind` discriminator) and `peers`
+- RPC: `event/push` removed, replaced by `comms/send`
+- REST: `POST /sessions/{id}/event` deprecated in favor of `POST /comms/send`
+- SDK: `push_event()`/`pushEvent()` removed; use `send()`/`peers()` instead
+
+#### Host Mode
+- Strict state transitions via `.transition()` instead of raw assignment
+- Interaction processing classified into individual vs batched modes
+- Host drain state reset on all exit paths
+
+#### Dependencies
+- Removed vendored `hnsw_rs` (was unmodified upstream v0.3.3); now resolved from crates.io
+- `verify-version-parity` wired into `make ci` pipeline
+
+### Fixed
+- `ToolUse` args deserialization robust under Message buffering with custom deserializer
+- Idempotent `stream_close` preventing duplicate close errors
+- Comms stream completion cleanup preventing reservation leaks
+- Comms self-input guard preventing agents from responding to their own messages
+- E2E test model names updated to canonical providers (`gpt-5.2`, `gemini-3-pro-preview`)
+- Clippy fix: `.or_insert_with(Vec::new)` → `.or_default()` in `SessionProjector`
+
+### Removed
+- 4 legacy comms tools (`send_message`, `send_request`, `send_response`, `list_peers`) -- now return "Unknown tool"
+- `event/push` RPC method
+- `push_event()`/`pushEvent()` SDK methods
+- `vendor/hnsw_rs/` directory and `[patch.crates-io]` section
+
 ## [0.2.0] - 2026-02-12
 
 ### Added
@@ -173,6 +240,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/lukacf/meerkat/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lukacf/meerkat/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lukacf/meerkat/releases/tag/v0.1.0

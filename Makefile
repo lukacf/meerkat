@@ -10,7 +10,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix lint lint-feature-matrix fmt fmt-check audit ci clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory
+.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix lint lint-feature-matrix fmt fmt-check audit ci clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions release-preflight publish-dry-run
 
 # Default target
 all: ci
@@ -89,10 +89,10 @@ test-feature-matrix-surface:
 	cargo check -p meerkat-rest --no-default-features --features comms
 	cargo check -p meerkat-mcp-server --no-default-features
 	cargo check -p meerkat-mcp-server --no-default-features --features comms
-	cargo check -p meerkat-cli --no-default-features
-	cargo check -p meerkat-cli --no-default-features --features mcp
-	cargo test -p meerkat-cli --no-default-features --features mcp -- --nocapture
-	cargo check -p meerkat-cli --no-default-features --features comms,mcp
+	cargo check -p rkat --no-default-features
+	cargo check -p rkat --no-default-features --features mcp
+	cargo test -p rkat --no-default-features --features mcp -- --nocapture
+	cargo check -p rkat --no-default-features --features comms,mcp
 
 # Session capability matrix (A-F builds from spec)
 test-session-matrix:
@@ -124,7 +124,7 @@ lint-feature-matrix:
 	cargo clippy -p meerkat-tools --no-default-features --features comms,mcp
 	cargo clippy -p meerkat --no-default-features --features openai,memory-store
 	cargo clippy -p meerkat --features all-providers,comms,mcp,sub-agents
-	cargo clippy -p meerkat-cli --no-default-features --features mcp
+	cargo clippy -p rkat --no-default-features --features mcp
 	cargo clippy -p meerkat-rpc --no-default-features
 
 # Check formatting
@@ -148,7 +148,7 @@ audit-alt:
 	cargo audit
 
 # Full CI pipeline - runs everything
-ci: fmt-check legacy-surface-gate lint lint-feature-matrix test-all test-minimal test-feature-matrix audit
+ci: fmt-check legacy-surface-gate verify-version-parity lint lint-feature-matrix test-all test-minimal test-feature-matrix audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Milestone 0 gate: ensure legacy public surface names are either removed
@@ -220,6 +220,67 @@ bench:
 	@echo "$(GREEN)Running benchmarks...$(NC)"
 	cargo bench --workspace
 
+# ── Version parity & release targets ────────────────────────────────────────
+
+# Hard gate: Rust workspace, Python SDK, TypeScript SDK, and contract versions must match
+verify-version-parity:
+	@scripts/verify-version-parity.sh
+
+# Verify committed schema artifacts match freshly emitted ones
+verify-schema-freshness:
+	@scripts/verify-schema-freshness.sh
+
+# Bump Python + TypeScript SDK versions to match Cargo workspace version
+bump-sdk-versions:
+	@scripts/bump-sdk-versions.sh
+
+# Re-emit schemas and regenerate SDK types from Rust source of truth
+regen-schemas:
+	@echo "$(GREEN)Emitting schemas...$(NC)"
+	cargo run -p meerkat-contracts --features schema --bin emit-schemas
+	@echo "$(GREEN)Running SDK codegen...$(NC)"
+	python3 tools/sdk-codegen/generate.py
+	@echo "$(GREEN)Schemas and SDK types regenerated$(NC)"
+
+# Full pre-release checklist
+release-preflight: ci verify-schema-freshness
+	@echo ""
+	@echo "$(GREEN)Pre-release checklist:$(NC)"
+	@echo "  1. CHANGELOG.md [Unreleased] section populated?"
+	@grep -q '## \[Unreleased\]' CHANGELOG.md && echo "     [Unreleased] section exists" || echo "     $(RED)WARNING: no [Unreleased] section$(NC)"
+	@if git diff --quiet CHANGELOG.md 2>/dev/null; then \
+		echo "  $(YELLOW)   WARNING: CHANGELOG.md has no uncommitted changes$(NC)"; \
+	else \
+		echo "     CHANGELOG.md has pending changes"; \
+	fi
+	@echo "  2. All CI checks passed (above)"
+	@echo "  3. Schema artifacts are fresh (above)"
+	@echo ""
+	@echo "$(GREEN)Ready to release. Run:$(NC)"
+	@echo "  cargo release <patch|minor|major>"
+
+# Dry-run cargo publish for all publishable crates
+publish-dry-run:
+	@echo "$(GREEN)Checking publish readiness...$(NC)"
+	@FAIL=0; \
+	for pkg in meerkat-core meerkat-contracts meerkat-client meerkat-store \
+	           meerkat-tools meerkat-session meerkat-memory meerkat-mcp \
+	           meerkat-mcp-server meerkat-hooks meerkat-skills meerkat-comms \
+	           meerkat-rpc meerkat-rest meerkat; do \
+		printf "  %-25s" "$$pkg..."; \
+		if cargo publish -p $$pkg --dry-run 2>&1 | grep -q "error"; then \
+			echo "$(RED)FAIL$(NC)"; \
+			FAIL=1; \
+		else \
+			echo "$(GREEN)OK$(NC)"; \
+		fi; \
+	done; \
+	if [ $$FAIL -ne 0 ]; then \
+		echo "$(RED)Some crates are not publish-ready$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)All crates are publish-ready$(NC)"
+
 # Verify version matches tag (for release validation)
 verify-version:
 	@echo "$(GREEN)Verifying version...$(NC)"
@@ -257,4 +318,12 @@ help:
 	@echo "  $(GREEN)clean$(NC)         - Remove build artifacts"
 	@echo "  $(GREEN)install-hooks$(NC) - Install git hooks"
 	@echo "  $(GREEN)verify-version$(NC)- Verify Cargo.toml version matches git tag"
+	@echo ""
+	@echo "Release targets:"
+	@echo "  $(GREEN)verify-version-parity$(NC) - Check Rust/Python/TS version + contract parity"
+	@echo "  $(GREEN)verify-schema-freshness$(NC)- Check committed schemas match Rust source"
+	@echo "  $(GREEN)bump-sdk-versions$(NC)     - Bump Python + TS versions to match Cargo"
+	@echo "  $(GREEN)regen-schemas$(NC)         - Re-emit schemas + run SDK codegen"
+	@echo "  $(GREEN)release-preflight$(NC)     - Full pre-release checklist (CI + freshness)"
+	@echo "  $(GREEN)publish-dry-run$(NC)       - Dry-run cargo publish for all crates"
 	@echo "  $(GREEN)help$(NC)          - Show this help message"

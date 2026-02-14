@@ -760,54 +760,56 @@ mod scenario_06_hooks {
         // 1. Observer on RunStarted
         // 2. Guardrail on PreLlmRequest (always Allow)
         // 3. Rewriter on PostLlmResponse (appends " [REVIEWED]")
-        let mut hooks_config = HooksConfig::default();
-        hooks_config.entries = vec![
-            HookEntryConfig {
-                id: HookId::new("observer"),
-                enabled: true,
-                point: HookPoint::RunStarted,
-                mode: HookExecutionMode::Foreground,
-                capability: HookCapability::Observe,
-                priority: 100,
-                failure_policy: None,
-                timeout_ms: None,
-                runtime: HookRuntimeConfig::new(
-                    "in_process",
-                    Some(serde_json::json!({"name": "observer"})),
-                )
-                .unwrap(),
-            },
-            HookEntryConfig {
-                id: HookId::new("guardrail"),
-                enabled: true,
-                point: HookPoint::PreLlmRequest,
-                mode: HookExecutionMode::Foreground,
-                capability: HookCapability::Guardrail,
-                priority: 90,
-                failure_policy: None,
-                timeout_ms: None,
-                runtime: HookRuntimeConfig::new(
-                    "in_process",
-                    Some(serde_json::json!({"name": "guardrail"})),
-                )
-                .unwrap(),
-            },
-            HookEntryConfig {
-                id: HookId::new("rewriter"),
-                enabled: true,
-                point: HookPoint::PostLlmResponse,
-                mode: HookExecutionMode::Foreground,
-                capability: HookCapability::Rewrite,
-                priority: 80,
-                failure_policy: None,
-                timeout_ms: None,
-                runtime: HookRuntimeConfig::new(
-                    "in_process",
-                    Some(serde_json::json!({"name": "rewriter"})),
-                )
-                .unwrap(),
-            },
-        ];
+        let hooks_config = HooksConfig {
+            entries: vec![
+                HookEntryConfig {
+                    id: HookId::new("observer"),
+                    enabled: true,
+                    point: HookPoint::RunStarted,
+                    mode: HookExecutionMode::Foreground,
+                    capability: HookCapability::Observe,
+                    priority: 100,
+                    failure_policy: None,
+                    timeout_ms: None,
+                    runtime: HookRuntimeConfig::new(
+                        "in_process",
+                        Some(serde_json::json!({"name": "observer"})),
+                    )
+                    .unwrap(),
+                },
+                HookEntryConfig {
+                    id: HookId::new("guardrail"),
+                    enabled: true,
+                    point: HookPoint::PreLlmRequest,
+                    mode: HookExecutionMode::Foreground,
+                    capability: HookCapability::Guardrail,
+                    priority: 90,
+                    failure_policy: None,
+                    timeout_ms: None,
+                    runtime: HookRuntimeConfig::new(
+                        "in_process",
+                        Some(serde_json::json!({"name": "guardrail"})),
+                    )
+                    .unwrap(),
+                },
+                HookEntryConfig {
+                    id: HookId::new("rewriter"),
+                    enabled: true,
+                    point: HookPoint::PostLlmResponse,
+                    mode: HookExecutionMode::Foreground,
+                    capability: HookCapability::Rewrite,
+                    priority: 80,
+                    failure_policy: None,
+                    timeout_ms: None,
+                    runtime: HookRuntimeConfig::new(
+                        "in_process",
+                        Some(serde_json::json!({"name": "rewriter"})),
+                    )
+                    .unwrap(),
+                },
+            ],
+            ..Default::default()
+        };
 
         let engine = DefaultHookEngine::new(hooks_config);
 

@@ -842,9 +842,7 @@ mod sanity {
         assert!(!tools.is_empty(), "Should have comms tools");
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(tool_names.contains(&"send_message"));
-        assert!(tool_names.contains(&"send_request"));
-        assert!(tool_names.contains(&"send_response"));
-        assert!(tool_names.contains(&"list_peers"));
+        assert!(tool_names.contains(&"send"));
+        assert!(tool_names.contains(&"peers"));
     }
 }

@@ -194,9 +194,15 @@ async fn integration_real_uds_message_exchange() {
     // Spawn B's IO task
     let handle_b = tokio::spawn(async move {
         let (stream, _) = listener_b.accept().await.unwrap();
-        handle_connection(stream, &peer_b_keypair, &peer_b_trust, &inbox_sender_b)
-            .await
-            .unwrap();
+        handle_connection(
+            stream,
+            true,
+            &peer_b_keypair,
+            &peer_b_trust,
+            &inbox_sender_b,
+        )
+        .await
+        .unwrap();
     });
 
     // Peer A sends a message
@@ -206,6 +212,7 @@ async fn integration_real_uds_message_exchange() {
         peer_a_trust,
         CommsConfig::default(),
         inbox_sender_a,
+        true,
     );
     router_a
         .send_message("peer-b", "Hello from A!".to_string())
@@ -247,9 +254,15 @@ async fn integration_real_tcp_message_exchange() {
     // Spawn B's IO task
     let handle_b = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        handle_connection(stream, &peer_b_keypair, &peer_b_trust, &inbox_sender_b)
-            .await
-            .unwrap();
+        handle_connection(
+            stream,
+            true,
+            &peer_b_keypair,
+            &peer_b_trust,
+            &inbox_sender_b,
+        )
+        .await
+        .unwrap();
     });
 
     // Peer A sends a message
@@ -259,6 +272,7 @@ async fn integration_real_tcp_message_exchange() {
         peer_a_trust,
         CommsConfig::default(),
         inbox_sender_a,
+        true,
     );
     router_a
         .send_message("peer-b", "Hello via TCP!".to_string())
@@ -310,6 +324,7 @@ async fn integration_real_request_response_flow() {
         let (stream, _) = listener_b.accept().await.unwrap();
         handle_connection(
             stream,
+            true,
             &peer_b_keypair,
             &peer_b_trust_clone,
             &inbox_sender_b,
@@ -325,6 +340,7 @@ async fn integration_real_request_response_flow() {
         peer_a_trust.clone(),
         CommsConfig::default(),
         inbox_sender_a,
+        true,
     );
     router_a
         .send_request("peer-b", "review-pr".to_string(), json!({"pr": 42}))
@@ -375,7 +391,14 @@ async fn integration_real_untrusted_rejected() {
         // This will reject the message due to untrusted sender
         // The connection handler should complete (possibly with error due to untrusted sender)
         // What matters is the message is NOT delivered to inbox
-        handle_connection(stream, &peer_b_keypair, &peer_b_trust, &inbox_sender_b).await
+        handle_connection(
+            stream,
+            true,
+            &peer_b_keypair,
+            &peer_b_trust,
+            &inbox_sender_b,
+        )
+        .await
     });
 
     // A sends a message (will connect, but B will reject it as untrusted)
@@ -385,6 +408,7 @@ async fn integration_real_untrusted_rejected() {
         peer_a_trust,
         CommsConfig::default(),
         inbox_sender_a,
+        true,
     );
     let send_result = router_a.send_message("peer-b", "Hello!".to_string()).await;
 
@@ -463,16 +487,28 @@ async fn integration_real_concurrent_multi_peer() {
     // Spawn B's and C's handlers
     let handle_b = tokio::spawn(async move {
         let (stream, _) = listener_b.accept().await.unwrap();
-        handle_connection(stream, &peer_b_keypair, &peer_b_trust, &inbox_sender_b)
-            .await
-            .unwrap();
+        handle_connection(
+            stream,
+            true,
+            &peer_b_keypair,
+            &peer_b_trust,
+            &inbox_sender_b,
+        )
+        .await
+        .unwrap();
     });
 
     let handle_c = tokio::spawn(async move {
         let (stream, _) = listener_c.accept().await.unwrap();
-        handle_connection(stream, &peer_c_keypair, &peer_c_trust, &inbox_sender_c)
-            .await
-            .unwrap();
+        handle_connection(
+            stream,
+            true,
+            &peer_c_keypair,
+            &peer_c_trust,
+            &inbox_sender_c,
+        )
+        .await
+        .unwrap();
     });
 
     // A sends messages to both B and C concurrently
@@ -482,6 +518,7 @@ async fn integration_real_concurrent_multi_peer() {
         peer_a_trust,
         CommsConfig::default(),
         inbox_sender_a,
+        true,
     );
 
     let send_b = router_a.send_message("peer-b", "Hello B!".to_string());

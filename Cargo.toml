@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -97,22 +97,22 @@ subtle = "2.6"
 tempfile = "3.14"
 
 # Internal crates
-meerkat-core = { version = "0.2.0", path = "meerkat-core" }
-meerkat-client = { version = "0.2.0", path = "meerkat-client", default-features = false }
-meerkat-store = { version = "0.2.0", path = "meerkat-store", default-features = false }
-meerkat-tools = { version = "0.2.0", path = "meerkat-tools", default-features = false }
-meerkat-mcp = { version = "0.2.0", path = "meerkat-mcp" }
-meerkat-mcp-server = { version = "0.2.0", path = "meerkat-mcp-server" }
-meerkat-cli = { version = "0.2.0", path = "meerkat-cli" }
-meerkat-rest = { version = "0.2.0", path = "meerkat-rest" }
-meerkat = { version = "0.2.0", path = "meerkat", default-features = false }
-meerkat-comms = { version = "0.2.0", path = "meerkat-comms" }
-meerkat-hooks = { version = "0.2.0", path = "meerkat-hooks" }
-meerkat-rpc = { version = "0.2.0", path = "meerkat-rpc" }
-meerkat-session = { version = "0.2.0", path = "meerkat-session", default-features = false }
-meerkat-memory = { version = "0.2.0", path = "meerkat-memory", default-features = false }
-meerkat-contracts = { version = "0.2.0", path = "meerkat-contracts", default-features = false }
-meerkat-skills = { version = "0.2.0", path = "meerkat-skills" }
+meerkat-core = { version = "0.3.0", path = "meerkat-core" }
+meerkat-client = { version = "0.3.0", path = "meerkat-client", default-features = false }
+meerkat-store = { version = "0.3.0", path = "meerkat-store", default-features = false }
+meerkat-tools = { version = "0.3.0", path = "meerkat-tools", default-features = false }
+meerkat-mcp = { version = "0.3.0", path = "meerkat-mcp" }
+meerkat-mcp-server = { version = "0.3.0", path = "meerkat-mcp-server" }
+meerkat-cli = { version = "0.3.0", path = "meerkat-cli" }
+meerkat-rest = { version = "0.3.0", path = "meerkat-rest" }
+meerkat = { version = "0.3.0", path = "meerkat", default-features = false }
+meerkat-comms = { version = "0.3.0", path = "meerkat-comms" }
+meerkat-hooks = { version = "0.3.0", path = "meerkat-hooks" }
+meerkat-rpc = { version = "0.3.0", path = "meerkat-rpc" }
+meerkat-session = { version = "0.3.0", path = "meerkat-session", default-features = false }
+meerkat-memory = { version = "0.3.0", path = "meerkat-memory", default-features = false }
+meerkat-contracts = { version = "0.3.0", path = "meerkat-contracts", default-features = false }
+meerkat-skills = { version = "0.3.0", path = "meerkat-skills" }
 
 
 [workspace.lints.rust]
@@ -142,5 +142,13 @@ doc_markdown = "allow"
 match_bool = "allow"
 items_after_statements = "allow"
 
-[patch.crates-io]
-hnsw_rs = { path = "vendor/hnsw_rs" }
+[workspace.metadata.release]
+shared-version = true
+tag-name = "v{{version}}"
+pre-release-commit-message = "chore: release v{{version}}"
+tag-message = "Release v{{version}}"
+# Bump SDK versions + regenerate schemas before committing
+pre-release-hook = ["scripts/release-hook.sh", "{{version}}"]
+# Require manual publish until hnsw_rs patch is resolved
+publish = false
+push = true

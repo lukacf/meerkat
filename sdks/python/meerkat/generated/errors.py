@@ -1,18 +1,27 @@
-"""Generated error types for Meerkat SDK.
+"""Generated error types for Meerkat SDK."""
 
-Re-exports from meerkat.errors to avoid duplicate class hierarchies.
-"""
 
-from meerkat.errors import (
-    CapabilityUnavailableError,
-    MeerkatError,
-    SessionNotFoundError,
-    SkillNotFoundError,
-)
+class MeerkatError(Exception):
+    """Base error for Meerkat SDK."""
 
-__all__ = [
-    "MeerkatError",
-    "CapabilityUnavailableError",
-    "SessionNotFoundError",
-    "SkillNotFoundError",
-]
+    def __init__(self, code: str, message: str, details=None, capability_hint=None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details
+        self.capability_hint = capability_hint
+
+
+class CapabilityUnavailableError(MeerkatError):
+    """Raised when a capability is not available."""
+    pass
+
+
+class SessionNotFoundError(MeerkatError):
+    """Raised when a session is not found."""
+    pass
+
+
+class SkillNotFoundError(MeerkatError):
+    """Raised when a skill reference cannot be resolved."""
+    pass

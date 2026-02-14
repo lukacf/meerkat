@@ -104,6 +104,7 @@ async fn integration_real_router_send() {
         trusted_peers,
         CommsConfig::default(),
         inbox_sender,
+        true,
     );
 
     let listener = match bind_uds_or_skip(&sock_path) {
@@ -143,7 +144,13 @@ async fn integration_real_router_resolves_peer_name() {
         "tcp://127.0.0.1:9999",
     );
     let (_, inbox_sender) = meerkat_comms::Inbox::new();
-    let router = Router::new(keypair, trusted_peers, CommsConfig::default(), inbox_sender);
+    let router = Router::new(
+        keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        inbox_sender,
+        true,
+    );
 
     let result = router
         .send_message("unknown-peer", "hello".to_string())
@@ -176,6 +183,7 @@ async fn integration_real_router_connects_to_peer() {
         trusted_peers,
         CommsConfig::default(),
         inbox_sender,
+        true,
     );
 
     // No server listening - should fail with IO error
@@ -205,6 +213,7 @@ async fn integration_real_router_signs_envelope() {
         trusted_peers,
         CommsConfig::default(),
         inbox_sender,
+        true,
     );
 
     let listener = match bind_uds_or_skip(&sock_path) {
@@ -256,7 +265,7 @@ async fn integration_real_router_waits_for_ack() {
         ..Default::default()
     };
     let (_, inbox_sender) = meerkat_comms::Inbox::new();
-    let router = Router::new(our_keypair, trusted_peers, config, inbox_sender);
+    let router = Router::new(our_keypair, trusted_peers, config, inbox_sender, true);
 
     let listener = match bind_uds_or_skip(&sock_path) {
         Some(listener) => listener,
@@ -304,7 +313,7 @@ async fn integration_real_router_timeout_returns_offline() {
         ..Default::default()
     };
     let (_, inbox_sender) = meerkat_comms::Inbox::new();
-    let router = Router::new(our_keypair, trusted_peers, config, inbox_sender);
+    let router = Router::new(our_keypair, trusted_peers, config, inbox_sender, true);
 
     let listener = match bind_uds_or_skip(&sock_path) {
         Some(listener) => listener,
@@ -345,6 +354,7 @@ async fn integration_real_send_message() {
         trusted_peers,
         CommsConfig::default(),
         inbox_sender,
+        true,
     );
 
     let listener = match bind_uds_or_skip(&sock_path) {
@@ -404,6 +414,7 @@ async fn integration_real_send_request() {
         trusted_peers,
         CommsConfig::default(),
         inbox_sender,
+        true,
     );
 
     let listener = match bind_uds_or_skip(&sock_path) {
@@ -467,6 +478,7 @@ async fn integration_real_send_response() {
         trusted_peers,
         CommsConfig::default(),
         inbox_sender,
+        true,
     );
     let request_id = Uuid::new_v4();
 
@@ -524,7 +536,7 @@ async fn integration_real_send_response_no_ack_wait() {
         ..Default::default()
     };
     let (_, inbox_sender) = meerkat_comms::Inbox::new();
-    let router = Router::new(our_keypair, trusted_peers, config, inbox_sender);
+    let router = Router::new(our_keypair, trusted_peers, config, inbox_sender, true);
 
     let listener = match bind_uds_or_skip(&sock_path) {
         Some(listener) => listener,
@@ -591,6 +603,7 @@ async fn integration_real_router_inproc_send() {
         trusted_peers,
         CommsConfig::default(),
         inbox_sender,
+        true,
     );
 
     // Send via router
@@ -643,6 +656,7 @@ async fn integration_real_router_inproc_peer_not_found() {
         trusted_peers,
         CommsConfig::default(),
         inbox_sender,
+        true,
     );
 
     // Send should fail - peer not in registry
@@ -687,6 +701,7 @@ async fn integration_real_router_inproc_request_response() {
         trusted_peers,
         CommsConfig::default(),
         inbox_sender,
+        true,
     );
 
     // Send request

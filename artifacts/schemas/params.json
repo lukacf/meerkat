@@ -19,17 +19,25 @@
   },
   "SkillsParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Skills parameters (Phase 3).",
+    "description": "Skills parameters for session/turn requests.\n\n`preload_skills`: Pre-load these skills at session creation.\n`None` or empty = inventory-only mode (no pre-loading).\n`Some([])` is normalized to `None` to prevent silent misconfiguration.\n\n`skill_references`: Skill IDs to resolve and inject for this turn.\n`None` or empty = no per-turn skill injection.",
     "properties": {
+      "preload_skills": {
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
       "skill_references": {
         "items": {
           "type": "string"
         },
-        "type": "array"
-      },
-      "skills_enabled": {
-        "default": false,
-        "type": "boolean"
+        "type": [
+          "array",
+          "null"
+        ]
       }
     },
     "title": "SkillsParams",

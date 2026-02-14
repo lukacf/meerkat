@@ -164,6 +164,49 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-rpc/src/router.rs` - JSON-RPC method dispatch
 - `meerkat-rpc/src/server.rs` - RPC server main loop
 
+## CI/CD and Versioning
+
+### Running CI
+
+```bash
+make ci          # Full CI: fmt, lint, feature matrix, tests, audit, version parity
+make test        # Fast tests only (unit + integration-fast)
+make lint        # Clippy with all features
+make fmt         # Auto-fix formatting
+```
+
+### Version Parity Contract
+
+There are two version numbers that must stay in lock-step:
+
+| Concept | Source of truth | Must match |
+|---------|----------------|------------|
+| **Package version** | `workspace.package.version` in `Cargo.toml` | `sdks/python/pyproject.toml`, `sdks/typescript/package.json` |
+| **Contract version** | `ContractVersion::CURRENT` in `meerkat-contracts/src/version.rs` | `artifacts/schemas/version.json`, SDK `CONTRACT_VERSION` |
+
+**`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
+
+```bash
+make regen-schemas           # Re-emit schemas + regenerate SDK types
+make verify-version-parity   # Confirm everything is in sync
+```
+
+### Releasing
+
+```bash
+make release-preflight       # Full CI + schema freshness + changelog check
+cargo release patch          # Bump, tag, push (uses cargo-release)
+```
+
+`cargo-release` automatically calls `scripts/release-hook.sh` which bumps SDK versions, regenerates schemas, verifies parity, and stages all files for the release commit.
+
+### Key Rules for AI Agents
+
+- **Never bump `workspace.package.version` without also running `scripts/bump-sdk-versions.sh`** -- the CI gate will catch drift
+- **Never change types in `meerkat-contracts` without running `make regen-schemas`** -- schema artifacts and SDK types will be stale
+- **Always run `make test` (or `cargo rct`) before committing** -- pre-commit hooks enforce this
+- **`ContractVersion::CURRENT` must equal `workspace.package.version`** -- they are lock-stepped
+
 ## Testing with Multiple Providers
 
 When running tests or demos that involve multiple LLM providers/models, use these model names:

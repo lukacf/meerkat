@@ -1,13 +1,13 @@
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.2.0
+Contract version: 0.3.0
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
-CONTRACT_VERSION = "0.2.0"
+CONTRACT_VERSION = "0.3.0"
 
 
 @dataclass
@@ -34,14 +34,11 @@ class WireRunResult:
 
 @dataclass
 class WireEvent:
-    """Event notification from the RPC server.
-
-    .. deprecated::
-        The streaming API (``StreamingTurn``) yields raw event dicts directly.
-        This type is retained for backward compatibility only.
-    """
+    """Event from agent execution stream."""
     session_id: str = ''
+    sequence: int = 0
     event: Optional[dict] = None
+    contract_version: str = ''
 
 
 @dataclass
@@ -49,7 +46,7 @@ class CapabilityEntry:
     """A single capability status."""
     id: str = ''
     description: str = ''
-    status: str = 'Available'
+    status: str = 'available'
 
 
 @dataclass
@@ -71,3 +68,4 @@ class SkillsParams:
     """Skills parameters (available because skills capability is compiled)."""
     skills_enabled: bool = False
     skill_references: list = field(default_factory=list)
+

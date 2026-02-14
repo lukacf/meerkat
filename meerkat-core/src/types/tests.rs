@@ -795,6 +795,86 @@ mod ordered_transcript_types {
         }
     }
 
+    #[test]
+    fn test_message_block_assistant_tool_use_roundtrip() {
+        let message = Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![
+                AssistantBlock::Text {
+                    text: "Checking files".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::ToolUse {
+                    id: "tool_789".to_string(),
+                    name: "read_dir".to_string(),
+                    args: RawValue::from_string(r#"{"path":"/tmp","recursive":false}"#.to_string())
+                        .unwrap(),
+                    meta: None,
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+        });
+
+        let json = serde_json::to_string(&message).unwrap();
+        let parsed: Message = serde_json::from_str(&json).unwrap();
+
+        // Ensure persisted JSON with block_assistant role and tool_use args can be roundtripped.
+        let persisted_json = r#"{
+            "role": "block_assistant",
+            "blocks": [
+                {
+                    "block_type": "text",
+                    "data": {"text": "Checking files"}
+                },
+                {
+                    "block_type": "tool_use",
+                    "data": {
+                        "id": "tool_789",
+                        "name": "read_dir",
+                        "args": {"path": "/tmp", "recursive": false}
+                    }
+                }
+            ],
+            "stop_reason": "tool_use"
+        }"#;
+
+        let persisted_roundtrip: Message = serde_json::from_str(persisted_json).unwrap();
+        match persisted_roundtrip {
+            Message::BlockAssistant(parsed_message) => {
+                assert_eq!(parsed_message.blocks.len(), 2);
+                assert_eq!(parsed_message.stop_reason, StopReason::ToolUse);
+                match &parsed_message.blocks[1] {
+                    AssistantBlock::ToolUse { id, name, args, .. } => {
+                        assert_eq!(id, "tool_789");
+                        assert_eq!(name, "read_dir");
+                        let args_value: Value = serde_json::from_str(args.get()).unwrap();
+                        assert_eq!(args_value["path"], "/tmp");
+                        assert_eq!(args_value["recursive"], false);
+                    }
+                    _ => panic!("Expected ToolUse block"),
+                }
+            }
+            _ => panic!("Expected BlockAssistant message"),
+        };
+
+        match parsed {
+            Message::BlockAssistant(parsed_message) => {
+                assert_eq!(parsed_message.blocks.len(), 2);
+                assert_eq!(parsed_message.stop_reason, StopReason::ToolUse);
+                match &parsed_message.blocks[1] {
+                    AssistantBlock::ToolUse { id, name, args, .. } => {
+                        assert_eq!(id, "tool_789");
+                        assert_eq!(name, "read_dir");
+                        let args_value: Value = serde_json::from_str(args.get()).unwrap();
+                        assert_eq!(args_value["path"], "/tmp");
+                        assert_eq!(args_value["recursive"], false);
+                    }
+                    _ => panic!("Expected ToolUse block"),
+                }
+            }
+            _ => panic!("Expected BlockAssistant message"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // ToolCallView::parse_args tests
     // -----------------------------------------------------------------------

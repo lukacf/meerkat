@@ -1,6 +1,6 @@
 {
   "name": "@meerkat/sdk",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "TypeScript SDK for Meerkat agent runtime",
   "type": "module",
   "main": "./dist/index.js",

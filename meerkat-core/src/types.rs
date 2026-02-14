@@ -52,10 +52,11 @@ pub enum ProviderMeta {
     },
 }
 
-/// A block of content in an assistant message, preserving order.
+/// Deserializes `Box<RawValue>` from a possibly-buffered serde value.
 ///
-/// Uses adjacently tagged serde representation to support `Box<RawValue>` in ToolUse.
-/// Internally tagged enums don't work with RawValue due to buffering requirements.
+/// `Message` uses internally-tagged serde representation, which buffers enum
+/// content during dispatch. In that path, `RawValue` cannot deserialize directly.
+/// This converts via `Value` so ToolUse arguments survive that buffering step.
 fn deserialize_tool_use_args<'de, D>(deserializer: D) -> Result<Box<RawValue>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -65,6 +66,11 @@ where
     RawValue::from_string(raw).map_err(serde::de::Error::custom)
 }
 
+/// A block of content in an assistant message, preserving order.
+///
+/// Uses adjacently tagged serde representation to support `Box<RawValue>` in
+/// ToolUse, with a custom deserializer on `args` to tolerate Message-level
+/// internal enum buffering.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "block_type", content = "data", rename_all = "snake_case")]

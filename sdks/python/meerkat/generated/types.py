@@ -68,4 +68,3 @@ class SkillsParams:
     """Skills parameters (available because skills capability is compiled)."""
     skills_enabled: bool = False
     skill_references: list = field(default_factory=list)
-

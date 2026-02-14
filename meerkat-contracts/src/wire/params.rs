@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use meerkat_core::{HookRunOverrides, OutputSchema, Provider};
+use meerkat_core::{HookRunOverrides, OutputSchema, PeerMeta, Provider};
 
 /// Core session creation parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +40,9 @@ pub struct CommsParams {
     pub host_mode: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comms_name: Option<String>,
+    /// Friendly metadata for peer discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_meta: Option<PeerMeta>,
 }
 
 /// Hook parameters.

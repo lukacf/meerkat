@@ -10,6 +10,7 @@
 //! - `push_batch()` adds multiple messages with a single timestamp update
 
 use crate::Provider;
+use crate::peer_meta::PeerMeta;
 use crate::types::{Message, SessionId, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
@@ -337,6 +338,9 @@ pub struct SessionMetadata {
     pub tooling: SessionTooling,
     pub host_mode: bool,
     pub comms_name: Option<String>,
+    /// Friendly metadata for peer discovery (populated when comms is enabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_meta: Option<PeerMeta>,
 }
 
 /// Key used to store SessionMetadata in Session metadata map.

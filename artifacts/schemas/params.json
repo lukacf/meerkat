@@ -1,5 +1,32 @@
 {
   "CommsParams": {
+    "$defs": {
+      "PeerMeta": {
+        "description": "Metadata attached to a peer for discovery and orchestration.\n\nAgents can use this to advertise their purpose, capabilities, or\nany other context that helps peers decide who to interact with.\n\n# Serde\n\nAll fields are optional-friendly: `description` is skipped when `None`,\n`labels` is skipped when empty, so a minimal JSON payload is just\n`{\"name\": \"...\"}`.",
+        "properties": {
+          "description": {
+            "description": "What this agent does (e.g. \"Reviews pull requests for style issues\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Arbitrary key/value labels (e.g. `{\"lang\": \"rust\", \"team\": \"infra\"}`).\n\n`BTreeMap` keeps keys sorted for deterministic serialization.",
+            "type": "object"
+          },
+          "name": {
+            "default": "",
+            "description": "Friendly name for this agent (e.g. \"code-reviewer\").",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Comms parameters.",
     "properties": {
@@ -12,6 +39,17 @@
       "host_mode": {
         "default": false,
         "type": "boolean"
+      },
+      "peer_meta": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PeerMeta"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Friendly metadata for peer discovery."
       }
     },
     "title": "CommsParams",

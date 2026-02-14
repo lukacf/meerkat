@@ -118,6 +118,7 @@ export class MeerkatClient {
     enable_memory?: boolean;
     host_mode?: boolean;
     comms_name?: string;
+    peer_meta?: { name: string; description?: string; labels?: Record<string, string> };
     provider_params?: Record<string, unknown>;
     preload_skills?: string[];
     skill_references?: string[];

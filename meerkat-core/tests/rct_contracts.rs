@@ -95,6 +95,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
         },
         host_mode: true,
         comms_name: Some("agent-a".to_string()),
+        peer_meta: None,
     };
 
     let json = serde_json::to_value(&metadata)?;
@@ -243,6 +244,7 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
         tooling: meerkat_core::SessionTooling::default(),
         host_mode: false,
         comms_name: None,
+        peer_meta: None,
     };
 
     let encoded = serde_json::to_value(&metadata)?;

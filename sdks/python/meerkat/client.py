@@ -105,6 +105,7 @@ class MeerkatClient:
             enable_builtins: bool = False, enable_shell: bool = False,
             enable_subagents: bool = False, enable_memory: bool = False,
             host_mode: bool = False, comms_name: Optional[str] = None,
+            peer_meta: Optional[dict] = None,
             provider_params: Optional[dict] = None,
             preload_skills: Optional[list[str]] = None,
             skill_references: Optional[list[str]] = None) -> WireRunResult:
@@ -112,7 +113,7 @@ class MeerkatClient:
         params = self._build_create_params(prompt, model, provider, system_prompt,
             max_tokens, output_schema, structured_output_retries, hooks_override,
             enable_builtins, enable_shell, enable_subagents, enable_memory,
-            host_mode, comms_name, provider_params, preload_skills, skill_references)
+            host_mode, comms_name, peer_meta, provider_params, preload_skills, skill_references)
         result = await self._request("session/create", params)
         return self._parse_run_result(result)
 
@@ -138,6 +139,7 @@ class MeerkatClient:
             enable_builtins: bool = False, enable_shell: bool = False,
             enable_subagents: bool = False, enable_memory: bool = False,
             host_mode: bool = False, comms_name: Optional[str] = None,
+            peer_meta: Optional[dict] = None,
             provider_params: Optional[dict] = None,
             preload_skills: Optional[list[str]] = None,
             skill_references: Optional[list[str]] = None) -> StreamingTurn:
@@ -160,7 +162,7 @@ class MeerkatClient:
         params = self._build_create_params(prompt, model, provider, system_prompt,
             max_tokens, output_schema, structured_output_retries, hooks_override,
             enable_builtins, enable_shell, enable_subagents, enable_memory,
-            host_mode, comms_name, provider_params, preload_skills, skill_references)
+            host_mode, comms_name, peer_meta, provider_params, preload_skills, skill_references)
         self._request_id += 1
         request_id = self._request_id
         event_queue = self._dispatcher.subscribe_pending_stream(request_id)
@@ -324,6 +326,7 @@ class MeerkatClient:
         enable_memory: bool,
         host_mode: bool,
         comms_name: Optional[str],
+        peer_meta: Optional[dict],
         provider_params: Optional[dict],
         preload_skills: Optional[list[str]] = None,
         skill_references: Optional[list[str]] = None,
@@ -356,6 +359,8 @@ class MeerkatClient:
             params["host_mode"] = True
         if comms_name:
             params["comms_name"] = comms_name
+        if peer_meta:
+            params["peer_meta"] = peer_meta
         if provider_params:
             params["provider_params"] = provider_params
         if preload_skills is not None:

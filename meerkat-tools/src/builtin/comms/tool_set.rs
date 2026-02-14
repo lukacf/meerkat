@@ -54,6 +54,7 @@ mod tests {
                 name: "test-peer".to_string(),
                 pubkey: peer_keypair.public_key(),
                 addr: "tcp://127.0.0.1:4200".to_string(),
+                meta: meerkat_comms::PeerMeta::default(),
             }],
         };
         let trusted_peers = Arc::new(RwLock::new(trusted_peers));

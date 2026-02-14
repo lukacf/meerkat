@@ -44,6 +44,7 @@ fn make_trusted_peers_with_addr(
             name: name.to_string(),
             pubkey: *pubkey,
             addr: addr.to_string(),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     }
 }

@@ -133,6 +133,8 @@ pub struct AgentBuildConfig {
     pub host_mode: bool,
     /// Name for the comms participant (required when `host_mode` is `true`).
     pub comms_name: Option<String>,
+    /// Friendly metadata for peer discovery (flows to `InprocRegistry` and `peers()` output).
+    pub peer_meta: Option<meerkat_core::PeerMeta>,
     /// Resume from an existing session instead of starting fresh.
     pub resume_session: Option<Session>,
     /// Budget limits. If `None`, uses `Config::budget_limits()`.
@@ -181,6 +183,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("structured_output_retries", &self.structured_output_retries)
             .field("host_mode", &self.host_mode)
             .field("comms_name", &self.comms_name)
+            .field("peer_meta", &self.peer_meta)
             .field("resume_session", &self.resume_session.is_some())
             .field("budget_limits", &self.budget_limits)
             .field("event_tx", &self.event_tx.is_some())
@@ -208,6 +211,7 @@ impl AgentBuildConfig {
             hooks_override: HookRunOverrides::default(),
             host_mode: false,
             comms_name: None,
+            peer_meta: None,
             resume_session: None,
             budget_limits: None,
             event_tx: None,
@@ -766,9 +770,10 @@ impl AgentFactory {
                 .project_root
                 .clone()
                 .unwrap_or_else(|| self.store_path.clone());
-            let runtime = build_comms_runtime_from_config(config, base_dir, comms_name)
-                .await
-                .map_err(BuildAgentError::Comms)?;
+            let runtime =
+                build_comms_runtime_from_config(config, base_dir, comms_name, build_config.peer_meta.clone())
+                    .await
+                    .map_err(BuildAgentError::Comms)?;
             Some(runtime)
         } else {
             None
@@ -974,6 +979,7 @@ impl AgentFactory {
             },
             host_mode: build_config.host_mode,
             comms_name: build_config.comms_name,
+            peer_meta: build_config.peer_meta,
         };
         if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
             tracing::warn!("Failed to store session metadata: {}", err);

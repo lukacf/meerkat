@@ -19,6 +19,7 @@ pub mod interaction;
 pub mod mcp_config;
 pub mod memory;
 pub mod ops;
+pub mod peer_meta;
 pub mod prompt;
 pub mod provider;
 pub mod retry;
@@ -45,6 +46,7 @@ pub use comms::{
 };
 pub use compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
+pub use peer_meta::PeerMeta;
 
 pub use config::{
     AgentConfig, BudgetConfig, CommsAuthMode, CommsRuntimeConfig, CommsRuntimeMode, Config,

@@ -50,6 +50,15 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..truncate_at]
 }
 
+/// Parse a `key=value` label for `--agent-label`.
+#[cfg(feature = "comms")]
+fn parse_label(s: &str) -> Result<(String, String), String> {
+    let (key, value) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected key=value, got: {s}"))?;
+    Ok((key.to_string(), value.to_string()))
+}
+
 /// Spawn a task that handles verbose event output
 fn spawn_event_handler(
     mut agent_event_rx: mpsc::Receiver<AgentEvent>,
@@ -130,6 +139,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Initialize local project config from the global template
     Init,
@@ -209,6 +219,16 @@ enum Commands {
         #[cfg(feature = "comms")]
         #[arg(long = "no-comms")]
         no_comms: bool,
+
+        /// Human-readable description of this agent (shown to peers via `peers()`)
+        #[cfg(feature = "comms")]
+        #[arg(long = "agent-description")]
+        agent_description: Option<String>,
+
+        /// Metadata label for this agent (key=value, repeatable)
+        #[cfg(feature = "comms")]
+        #[arg(long = "agent-label", value_parser = parse_label)]
+        agent_label: Vec<(String, String)>,
 
         // === Built-in tools flags ===
         /// Enable built-in tools (tasks, shell). Adds task management tools.
@@ -486,6 +506,8 @@ async fn main() -> anyhow::Result<ExitCode> {
             comms_name,
             comms_listen_tcp,
             no_comms,
+            agent_description,
+            agent_label,
             enable_builtins,
             enable_shell,
             no_subagents,
@@ -493,10 +515,21 @@ async fn main() -> anyhow::Result<ExitCode> {
             host,
             stdin,
         } => {
+            let peer_meta = if agent_description.is_some() || !agent_label.is_empty() {
+                let mut meta = meerkat_core::PeerMeta::new(
+                    comms_name.as_deref().unwrap_or_default(),
+                );
+                meta.description = agent_description;
+                meta.labels = agent_label.into_iter().collect();
+                Some(meta)
+            } else {
+                None
+            };
             let comms_overrides = CommsOverrides {
                 name: comms_name,
                 listen_tcp: comms_listen_tcp,
                 disabled: no_comms,
+                peer_meta,
             };
 
             handle_run_command(
@@ -785,6 +818,7 @@ struct CommsOverrides {
     name: Option<String>,
     listen_tcp: Option<String>,
     disabled: bool,
+    peer_meta: Option<meerkat_core::PeerMeta>,
 }
 
 async fn resolve_config_store() -> anyhow::Result<(Box<dyn ConfigStore>, PathBuf)> {
@@ -1158,6 +1192,7 @@ async fn run_agent(
         override_subagents: None,
         override_memory: None,
         preload_skills: None,
+        peer_meta: comms_overrides.peer_meta.clone(),
     };
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
@@ -1426,6 +1461,7 @@ async fn resume_session(
         override_subagents: None,
         override_memory: None,
         preload_skills: None,
+        peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
     };
 
     // Build the session service and stage the build config

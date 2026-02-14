@@ -6,6 +6,7 @@ pub mod identity;
 pub mod inbox;
 pub mod inproc;
 pub mod io_task;
+pub mod peer_meta;
 pub mod router;
 pub mod transport;
 pub mod trust;
@@ -26,6 +27,7 @@ pub use io_task::{IoTaskError, handle_connection};
 pub use router::{CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, Router, SendError};
 pub use transport::codec::{EnvelopeFrame, TransportCodec};
 pub use transport::{PeerAddr, TransportError};
+pub use peer_meta::PeerMeta;
 pub use trust::{TrustError, TrustedPeer, TrustedPeers};
 pub use types::{Envelope, InboxItem, MessageKind, Status};
 

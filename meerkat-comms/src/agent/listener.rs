@@ -179,6 +179,7 @@ mod tests {
                 name: name.to_string(),
                 pubkey: *pubkey,
                 addr: "tcp://127.0.0.1:4200".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         }
     }

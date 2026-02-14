@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::identity::{IdentityError, PubKey};
+use crate::peer_meta::PeerMeta;
 
 /// Errors that can occur during trust operations.
 #[derive(Debug, Error)]
@@ -28,6 +29,8 @@ pub struct TrustedPeer {
     pub pubkey: PubKey,
     /// Address to reach the peer (e.g., "uds:///tmp/meerkat.sock" or "tcp://host:port").
     pub addr: String,
+    /// Friendly metadata for peer discovery.
+    pub meta: PeerMeta,
 }
 
 // Custom serde to serialize pubkey as "ed25519:..." string per spec
@@ -37,10 +40,13 @@ impl Serialize for TrustedPeer {
         S: Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("TrustedPeer", 3)?;
+        // Always emit 4 fields; meta uses skip_serializing_if internally
+        // but at the struct level we always include it for forward compat.
+        let mut s = serializer.serialize_struct("TrustedPeer", 4)?;
         s.serialize_field("name", &self.name)?;
         s.serialize_field("pubkey", &self.pubkey.to_peer_id())?;
         s.serialize_field("addr", &self.addr)?;
+        s.serialize_field("meta", &self.meta)?;
         s.end()
     }
 }
@@ -55,6 +61,9 @@ impl<'de> Deserialize<'de> for TrustedPeer {
             name: String,
             pubkey: String,
             addr: String,
+            /// Backward compat: missing meta deserializes as Default.
+            #[serde(default)]
+            meta: PeerMeta,
         }
         let helper = TrustedPeerHelper::deserialize(deserializer)?;
         let pubkey = PubKey::from_peer_id(&helper.pubkey).map_err(serde::de::Error::custom)?;
@@ -62,6 +71,7 @@ impl<'de> Deserialize<'de> for TrustedPeer {
             name: helper.name,
             pubkey,
             addr: helper.addr,
+            meta: helper.meta,
         })
     }
 }
@@ -165,6 +175,7 @@ mod tests {
             name: "test-peer".to_string(),
             pubkey: PubKey::new([42u8; 32]),
             addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: PeerMeta::default(),
         };
         assert_eq!(peer.name, "test-peer");
         assert_eq!(peer.pubkey.as_bytes()[0], 42);
@@ -178,6 +189,7 @@ mod tests {
                 name: "peer1".to_string(),
                 pubkey: PubKey::new([1u8; 32]),
                 addr: "uds:///tmp/test.sock".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
         assert_eq!(peers.peers.len(), 1);
@@ -190,6 +202,7 @@ mod tests {
             name: "coding-meerkat".to_string(),
             pubkey: PubKey::new([7u8; 32]),
             addr: "uds:///tmp/meerkat-coding.sock".to_string(),
+            meta: crate::PeerMeta::default(),
         };
         let json = serde_json::to_string(&peer).unwrap();
         let decoded: TrustedPeer = serde_json::from_str(&json).unwrap();
@@ -204,11 +217,13 @@ mod tests {
                     name: "peer1".to_string(),
                     pubkey: PubKey::new([1u8; 32]),
                     addr: "tcp://192.168.1.50:4200".to_string(),
+                    meta: crate::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "peer2".to_string(),
                     pubkey: PubKey::new([2u8; 32]),
                     addr: "uds:///tmp/peer2.sock".to_string(),
+                    meta: crate::PeerMeta::default(),
                 },
             ],
         };
@@ -246,6 +261,7 @@ mod tests {
                 name: "test-peer".to_string(),
                 pubkey: PubKey::new([1u8; 32]),
                 addr: "tcp://localhost:4200".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
         peers.save(&path).await.unwrap();
@@ -264,6 +280,7 @@ mod tests {
                 name: "trusted".to_string(),
                 pubkey,
                 addr: "tcp://localhost:4200".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
         assert!(peers.is_trusted(&pubkey));
@@ -276,6 +293,7 @@ mod tests {
                 name: "trusted".to_string(),
                 pubkey: PubKey::new([1u8; 32]),
                 addr: "tcp://localhost:4200".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
         let unknown = PubKey::new([99u8; 32]);
@@ -290,6 +308,7 @@ mod tests {
                 name: "the-peer".to_string(),
                 pubkey,
                 addr: "tcp://localhost:4200".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
         let found = peers.get_peer(&pubkey);
@@ -308,11 +327,13 @@ mod tests {
                     name: "alpha".to_string(),
                     pubkey: PubKey::new([1u8; 32]),
                     addr: "tcp://localhost:4201".to_string(),
+                    meta: crate::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "beta".to_string(),
                     pubkey: PubKey::new([2u8; 32]),
                     addr: "tcp://localhost:4202".to_string(),
+                    meta: crate::PeerMeta::default(),
                 },
             ],
         };
@@ -332,6 +353,7 @@ mod tests {
                 name: "coding-meerkat".to_string(),
                 pubkey: PubKey::new([7u8; 32]),
                 addr: "uds:///tmp/meerkat-coding.sock".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
         let json = serde_json::to_string_pretty(&peers).unwrap();
@@ -362,11 +384,13 @@ mod tests {
                     name: "peer1".to_string(),
                     pubkey: PubKey::new([1u8; 32]),
                     addr: "tcp://192.168.1.50:4200".to_string(),
+                    meta: crate::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "peer2".to_string(),
                     pubkey: PubKey::new([2u8; 32]),
                     addr: "uds:///tmp/peer2.sock".to_string(),
+                    meta: crate::PeerMeta::default(),
                 },
             ],
         };
@@ -385,6 +409,7 @@ mod tests {
             name: "new-peer".to_string(),
             pubkey: PubKey::new([42u8; 32]),
             addr: "uds:///tmp/new.sock".to_string(),
+            meta: crate::PeerMeta::default(),
         };
         peers.upsert(peer);
 
@@ -399,6 +424,7 @@ mod tests {
                 name: "original".to_string(),
                 pubkey: PubKey::new([42u8; 32]),
                 addr: "uds:///tmp/original.sock".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
 
@@ -407,6 +433,7 @@ mod tests {
             name: "updated".to_string(),
             pubkey: PubKey::new([42u8; 32]),
             addr: "uds:///tmp/updated.sock".to_string(),
+            meta: crate::PeerMeta::default(),
         };
         peers.upsert(updated);
 
@@ -423,11 +450,13 @@ mod tests {
                     name: "peer1".to_string(),
                     pubkey: PubKey::new([1u8; 32]),
                     addr: "tcp://localhost:4201".to_string(),
+                    meta: crate::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "peer2".to_string(),
                     pubkey: PubKey::new([2u8; 32]),
                     addr: "tcp://localhost:4202".to_string(),
+                    meta: crate::PeerMeta::default(),
                 },
             ],
         };
@@ -448,6 +477,7 @@ mod tests {
                 name: "peer1".to_string(),
                 pubkey: PubKey::new([1u8; 32]),
                 addr: "tcp://localhost:4201".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
         assert!(!peers_with_one.is_empty());
@@ -463,6 +493,7 @@ mod tests {
                 name: "peer1".to_string(),
                 pubkey: PubKey::new([1u8; 32]),
                 addr: "tcp://localhost:4201".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
         assert!(peers_with_one.has_peers());
@@ -479,11 +510,13 @@ mod tests {
                     name: "peer1".to_string(),
                     pubkey: PubKey::new([1u8; 32]),
                     addr: "tcp://localhost:4201".to_string(),
+                    meta: crate::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "peer2".to_string(),
                     pubkey: PubKey::new([2u8; 32]),
                     addr: "tcp://localhost:4202".to_string(),
+                    meta: crate::PeerMeta::default(),
                 },
             ],
         };
@@ -497,11 +530,45 @@ mod tests {
                 name: "peer1".to_string(),
                 pubkey: PubKey::new([1u8; 32]),
                 addr: "tcp://localhost:4201".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
 
         let removed = peers.remove(&PubKey::new([99u8; 32]));
         assert!(!removed);
         assert_eq!(peers.peers.len(), 1);
+    }
+
+    #[test]
+    fn test_trusted_peer_with_meta() {
+        let meta = PeerMeta::new("reviewer")
+            .with_description("Reviews code")
+            .with_label("lang", "rust");
+
+        let peer = TrustedPeer {
+            name: "reviewer".to_string(),
+            pubkey: PubKey::new([42u8; 32]),
+            addr: "inproc://reviewer".to_string(),
+            meta: meta.clone(),
+        };
+
+        let json = serde_json::to_string(&peer).unwrap();
+        let decoded: TrustedPeer = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.meta, meta);
+        assert_eq!(decoded.meta.description.as_deref(), Some("Reviews code"));
+        assert_eq!(decoded.meta.labels.get("lang").map(String::as_str), Some("rust"));
+    }
+
+    #[test]
+    fn test_trusted_peer_without_meta_backward_compat() {
+        // Pre-PeerMeta JSON (no "meta" field) — should deserialize with Default meta.
+        let json = r#"{
+            "name": "legacy-peer",
+            "pubkey": "ed25519:KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=",
+            "addr": "tcp://127.0.0.1:4200"
+        }"#;
+        let peer: TrustedPeer = serde_json::from_str(json).unwrap();
+        assert_eq!(peer.name, "legacy-peer");
+        assert_eq!(peer.meta, PeerMeta::default());
     }
 }

@@ -238,6 +238,9 @@ pub struct CreateSessionRequest {
     /// Agent name for inter-agent communication. Required for host_mode.
     #[serde(default)]
     pub comms_name: Option<String>,
+    /// Friendly metadata for peer discovery.
+    #[serde(default)]
+    pub peer_meta: Option<meerkat_core::PeerMeta>,
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
@@ -278,6 +281,9 @@ pub struct ContinueSessionRequest {
     /// Agent name for inter-agent communication. Required for host_mode.
     #[serde(default)]
     pub comms_name: Option<String>,
+    /// Friendly metadata for peer discovery.
+    #[serde(default)]
+    pub peer_meta: Option<meerkat_core::PeerMeta>,
     /// Enable verbose event logging (server-side).
     #[serde(default)]
     pub verbose: bool,
@@ -731,6 +737,7 @@ async fn create_session(
         override_subagents: req.enable_subagents,
         override_memory: req.enable_memory,
         preload_skills: None,
+        peer_meta: req.peer_meta.clone(),
     };
 
     // Hold the slot lock across staging + create to prevent concurrent
@@ -912,6 +919,9 @@ async fn continue_session(
                 override_subagents: Some(tooling.subagents),
                 override_memory: None,
                 preload_skills: None,
+                peer_meta: req.peer_meta.clone().or_else(|| {
+                    stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())
+                }),
             };
 
             // Hold slot lock across staging + create to prevent races.

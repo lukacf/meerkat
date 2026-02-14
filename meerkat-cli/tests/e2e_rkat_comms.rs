@@ -166,6 +166,7 @@ ack_timeout_secs = 30
                 name: peer.name.clone(),
                 pubkey: peer.public_key(),
                 addr: format!("tcp://{}", peer.tcp_addr()),
+                meta: meerkat_comms::PeerMeta::default(),
             })
             .collect();
 
@@ -568,6 +569,7 @@ trusted_peers_path = "{}"
             name: "bob-uds".to_string(),
             pubkey: instance_b.public_key(),
             addr: format!("uds://{}", uds_b.display()),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
     peers_a
@@ -581,6 +583,7 @@ trusted_peers_path = "{}"
             name: "alice-uds".to_string(),
             pubkey: instance_a.public_key(),
             addr: format!("uds://{}", uds_a.display()),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
     peers_b

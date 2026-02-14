@@ -79,7 +79,7 @@ pub fn tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "peers",
-            "description": "List all visible peers and their connection info",
+            "description": "List all visible peers with connection info and optional metadata (description, labels)",
             "inputSchema": schema_for::<PeersInput>()
         }),
     ]
@@ -227,14 +227,18 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
         .iter()
         .filter(|p| p.pubkey != self_pubkey)
         .map(|p| {
-            (
-                p.name.clone(),
-                json!({
-                    "name": p.name,
-                    "peer_id": p.pubkey.to_peer_id(),
-                    "address": p.addr
-                }),
-            )
+            let mut entry = json!({
+                "name": p.name,
+                "peer_id": p.pubkey.to_peer_id(),
+                "address": p.addr
+            });
+            if let Some(desc) = &p.meta.description {
+                entry["description"] = json!(desc);
+            }
+            if !p.meta.labels.is_empty() {
+                entry["labels"] = json!(p.meta.labels);
+            }
+            (p.name.clone(), entry)
         })
         .collect();
     drop(peers);
@@ -273,6 +277,7 @@ mod tests {
                 name: "test-peer".to_string(),
                 pubkey: PubKey::new([1u8; 32]),
                 addr: "tcp://127.0.0.1:4200".to_string(),
+                meta: crate::PeerMeta::default(),
             }],
         };
         let trusted_peers = Arc::new(RwLock::new(trusted_peers));

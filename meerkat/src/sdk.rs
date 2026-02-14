@@ -171,6 +171,7 @@ pub async fn build_comms_runtime_from_config(
     config: &Config,
     base_dir: impl AsRef<Path>,
     comms_name: &str,
+    peer_meta: Option<meerkat_core::PeerMeta>,
 ) -> Result<CommsRuntime, String> {
     // Parse the optional event listener address (for external plain-text events)
     let event_listen_tcp = config
@@ -183,9 +184,9 @@ pub async fn build_comms_runtime_from_config(
         })
         .transpose()?;
 
-    match config.comms.mode {
+    let runtime = match config.comms.mode {
         CommsRuntimeMode::Inproc => CommsRuntime::inproc_only(comms_name)
-            .map_err(|e| format!("Failed to create inproc comms runtime: {}", e)),
+            .map_err(|e| format!("Failed to create inproc comms runtime: {}", e))?,
         CommsRuntimeMode::Tcp => {
             let address = config
                 .comms
@@ -204,14 +205,13 @@ pub async fn build_comms_runtime_from_config(
                 ..Default::default()
             };
             let resolved = comms.resolve_paths(base_dir.as_ref());
-            let mut runtime = CommsRuntime::new(resolved)
+            let mut rt = CommsRuntime::new(resolved)
                 .await
                 .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
-            runtime
-                .start_listeners()
+            rt.start_listeners()
                 .await
                 .map_err(|e| format!("Failed to start comms listeners: {}", e))?;
-            Ok(runtime)
+            rt
         }
         CommsRuntimeMode::Uds => {
             let address = config
@@ -228,16 +228,21 @@ pub async fn build_comms_runtime_from_config(
                 ..Default::default()
             };
             let resolved = comms.resolve_paths(base_dir.as_ref());
-            let mut runtime = CommsRuntime::new(resolved)
+            let mut rt = CommsRuntime::new(resolved)
                 .await
                 .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
-            runtime
-                .start_listeners()
+            rt.start_listeners()
                 .await
                 .map_err(|e| format!("Failed to start comms listeners: {}", e))?;
-            Ok(runtime)
+            rt
         }
+    };
+
+    if let Some(meta) = peer_meta {
+        runtime.set_peer_meta(meta);
     }
+
+    Ok(runtime)
 }
 
 /// Compose a tool dispatcher with comms tools and append usage instructions.

@@ -263,6 +263,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         },
         host_mode: false,
         comms_name: None,
+        peer_meta: None,
     };
     session.set_session_metadata(original_metadata).unwrap();
 

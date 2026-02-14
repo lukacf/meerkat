@@ -890,8 +890,7 @@ impl CommsRuntime {
                     }
                 };
                 let peer_name_str = name.as_string();
-                if trusted_names.contains(name.as_str())
-                    || trusted_pubkeys.contains(&inproc.pubkey)
+                if trusted_names.contains(name.as_str()) || trusted_pubkeys.contains(&inproc.pubkey)
                 {
                     continue;
                 }

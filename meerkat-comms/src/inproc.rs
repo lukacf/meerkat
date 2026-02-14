@@ -26,7 +26,16 @@ use uuid::Uuid;
 
 use crate::identity::{Keypair, PubKey, Signature};
 use crate::inbox::{InboxError, InboxSender};
+use crate::peer_meta::PeerMeta;
 use crate::types::{Envelope, InboxItem, MessageKind};
+
+/// Snapshot of an inproc peer returned by [`InprocRegistry::peers()`].
+#[derive(Debug, Clone)]
+pub struct InprocPeerInfo {
+    pub name: String,
+    pub pubkey: PubKey,
+    pub meta: PeerMeta,
+}
 
 /// Global inproc registry instance.
 static GLOBAL_REGISTRY: OnceLock<InprocRegistry> = OnceLock::new();
@@ -37,6 +46,7 @@ struct InprocPeer {
     name: String,
     pubkey: PubKey,
     sender: InboxSender,
+    meta: PeerMeta,
 }
 
 /// Internal state protected by a single lock to prevent deadlocks.
@@ -90,11 +100,23 @@ impl InprocRegistry {
     /// If an agent with the same name but different pubkey exists, the old
     /// agent will be evicted (both from peers and names maps).
     pub fn register(&self, name: impl Into<String>, pubkey: PubKey, sender: InboxSender) {
+        self.register_with_meta(name, pubkey, sender, PeerMeta::default())
+    }
+
+    /// Register an agent's inbox with associated [`PeerMeta`].
+    pub fn register_with_meta(
+        &self,
+        name: impl Into<String>,
+        pubkey: PubKey,
+        sender: InboxSender,
+        meta: PeerMeta,
+    ) {
         let name = name.into();
         let peer = InprocPeer {
             name: name.clone(),
             pubkey,
             sender,
+            meta,
         };
 
         let mut state = self.state.write();
@@ -252,13 +274,17 @@ impl InprocRegistry {
         self.state.read().names.keys().cloned().collect()
     }
 
-    /// List all registered peers as `(name, pubkey)` tuples.
-    pub fn peers(&self) -> Vec<(String, PubKey)> {
+    /// List all registered peers.
+    pub fn peers(&self) -> Vec<InprocPeerInfo> {
         self.state
             .read()
             .peers
             .values()
-            .map(|peer| (peer.name.clone(), peer.pubkey))
+            .map(|peer| InprocPeerInfo {
+                name: peer.name.clone(),
+                pubkey: peer.pubkey,
+                meta: peer.meta.clone(),
+            })
             .collect()
     }
 }
@@ -463,8 +489,8 @@ mod tests {
 
         let peers = registry.peers();
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].0, "agent-a");
-        assert_eq!(peers[0].1, pubkey);
+        assert_eq!(peers[0].name, "agent-a");
+        assert_eq!(peers[0].pubkey, pubkey);
     }
 
     #[test]
@@ -582,5 +608,39 @@ mod tests {
 
         // Clean up
         registry.unregister(&keypair.public_key());
+    }
+
+    #[test]
+    fn test_registry_register_with_meta() {
+        let registry = InprocRegistry::new();
+        let keypair = make_keypair();
+        let pubkey = keypair.public_key();
+        let (_, sender) = Inbox::new();
+
+        let meta = PeerMeta::default()
+            .with_description("Reviews code for style issues")
+            .with_label("lang", "rust");
+
+        registry.register_with_meta("reviewer", pubkey, sender, meta.clone());
+
+        let peers = registry.peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].name, "reviewer");
+        assert_eq!(peers[0].pubkey, pubkey);
+        assert_eq!(peers[0].meta, meta);
+    }
+
+    #[test]
+    fn test_registry_peers_returns_default_meta_for_plain_register() {
+        let registry = InprocRegistry::new();
+        let keypair = make_keypair();
+        let pubkey = keypair.public_key();
+        let (_, sender) = Inbox::new();
+
+        registry.register("plain-agent", pubkey, sender);
+
+        let peers = registry.peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].meta, PeerMeta::default());
     }
 }

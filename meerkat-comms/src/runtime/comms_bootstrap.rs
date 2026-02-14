@@ -76,6 +76,7 @@ impl CommsBootstrap {
                     name: parent.parent_name,
                     pubkey: PubKey::new(parent.parent_pubkey),
                     addr: parent.parent_addr,
+                    meta: crate::PeerMeta::default(),
                 };
                 runtime
                     .trusted_peers_shared()

@@ -60,6 +60,7 @@ pub fn create_child_trusted_peers(parent_context: &ParentCommsContext) -> Truste
             name: parent_context.parent_name.clone(),
             pubkey: PubKey::new(parent_context.parent_pubkey),
             addr: parent_context.parent_addr.clone(),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     }
 }
@@ -182,6 +183,7 @@ pub fn create_child_peer_entry(
         name: child_name.to_string(),
         pubkey: PubKey::new(child_pubkey),
         addr: child_addr.to_string(),
+        meta: meerkat_comms::PeerMeta::default(),
     }
 }
 
@@ -311,6 +313,7 @@ pub async fn spawn_sub_agent_dyn(
                         name: name.clone(),
                         pubkey: PubKey::new(info.pubkey),
                         addr: info.addr.clone(),
+                        meta: meerkat_comms::PeerMeta::default(),
                     };
                     let mut peers = parent_peers.write().await;
                     peers.upsert(child_peer);

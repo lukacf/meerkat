@@ -101,6 +101,9 @@ pub struct MeerkatRunInput {
     /// Agent name for inter-agent communication. Required for host_mode.
     #[serde(default)]
     pub comms_name: Option<String>,
+    /// Friendly metadata for peer discovery (name, description, labels).
+    #[serde(default)]
+    pub peer_meta: Option<meerkat_core::PeerMeta>,
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
@@ -226,6 +229,9 @@ pub struct MeerkatResumeInput {
     /// Agent name for inter-agent communication. Required for host_mode.
     #[serde(default)]
     pub comms_name: Option<String>,
+    /// Friendly metadata for peer discovery.
+    #[serde(default)]
+    pub peer_meta: Option<meerkat_core::PeerMeta>,
     /// Optional model override for resume.
     #[serde(default)]
     pub model: Option<String>,
@@ -500,6 +506,7 @@ async fn handle_meerkat_run(
         hooks_override: input.hooks_override.clone().unwrap_or_default(),
         host_mode,
         comms_name: input.comms_name.clone(),
+        peer_meta: input.peer_meta.clone(),
         resume_session: Some(session),
         budget_limits: None,
         event_tx: None, // wired by the service
@@ -659,6 +666,10 @@ async fn handle_meerkat_resume(
         override_subagents: None,
         override_memory: None,
         preload_skills: None,
+        peer_meta: input
+            .peer_meta
+            .clone()
+            .or_else(|| stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())),
     };
 
     // Try start_turn on the live session first (it may still be alive
@@ -1082,6 +1093,7 @@ mod tests {
                 builtin_config: None,
                 host_mode: true,
                 comms_name: None, // Missing!
+                peer_meta: None,
                 hooks_override: None,
             },
             None,

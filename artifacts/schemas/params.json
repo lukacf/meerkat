@@ -1,5 +1,27 @@
 {
   "CommsParams": {
+    "$defs": {
+      "PeerMeta": {
+        "description": "Supplementary metadata attached to a peer for discovery.\n\nThe peer's routing name lives in `TrustedPeer.name` / `comms_name`.\n`PeerMeta` carries additional context: what the agent does and\narbitrary key/value labels.\n\n# Serde\n\nBoth fields use `skip_serializing_if`, so `PeerMeta::default()`\nserializes to `{}`.",
+        "properties": {
+          "description": {
+            "description": "What this agent does (e.g. \"Reviews pull requests for style issues\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Arbitrary key/value labels (e.g. `{\"lang\": \"rust\", \"team\": \"infra\"}`).\n\n`BTreeMap` keeps keys sorted for deterministic serialization.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Comms parameters.",
     "properties": {
@@ -12,6 +34,17 @@
       "host_mode": {
         "default": false,
         "type": "boolean"
+      },
+      "peer_meta": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PeerMeta"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Friendly metadata for peer discovery."
       }
     },
     "title": "CommsParams",

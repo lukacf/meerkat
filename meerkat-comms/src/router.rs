@@ -139,6 +139,7 @@ impl Router {
                         name: peer_name.to_string(),
                         pubkey,
                         addr: format!("inproc://{peer_name}"),
+                        meta: crate::PeerMeta::default(),
                     })
             }
         })

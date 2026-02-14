@@ -301,6 +301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             name: "agent-b".to_string(),
             pubkey: pubkey_b,
             addr: format!("tcp://{}", addr_b),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
 
@@ -309,6 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             name: "agent-a".to_string(),
             pubkey: pubkey_a,
             addr: format!("tcp://{}", addr_a),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
 

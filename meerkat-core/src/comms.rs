@@ -434,6 +434,8 @@ pub struct PeerDirectoryEntry {
     pub source: PeerDirectorySource,
     pub sendable_kinds: Vec<String>,
     pub capabilities: serde_json::Value,
+    /// Supplementary discovery metadata (description, labels).
+    pub meta: crate::PeerMeta,
 }
 
 /// Canonical payload for registering a trusted peer through a runtime seam.
@@ -547,6 +549,7 @@ mod tests {
             source: PeerDirectorySource::Inproc,
             sendable_kinds: vec!["peer_message".to_string()],
             capabilities: Value::Object(Default::default()),
+            meta: crate::PeerMeta::default(),
         };
         assert_eq!(entry.name.as_str(), "agent");
         assert_eq!(entry.source, PeerDirectorySource::Inproc);

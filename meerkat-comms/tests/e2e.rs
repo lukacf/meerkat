@@ -57,6 +57,7 @@ fn setup_mutual_trust(
             name: name_b.to_string(),
             pubkey: *pubkey_b,
             addr: addr_b.to_string(),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
 
@@ -66,6 +67,7 @@ fn setup_mutual_trust(
             name: name_a.to_string(),
             pubkey: *pubkey_a,
             addr: addr_a.to_string(),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
 
@@ -375,6 +377,7 @@ async fn integration_real_untrusted_rejected() {
             name: "peer-b".to_string(),
             pubkey: peer_b_keypair.public_key(),
             addr: addr_b.clone(),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
 
@@ -445,11 +448,13 @@ async fn integration_real_concurrent_multi_peer() {
                 name: "peer-b".to_string(),
                 pubkey: peer_b_keypair.public_key(),
                 addr: addr_b.clone(),
+                meta: meerkat_comms::PeerMeta::default(),
             },
             TrustedPeer {
                 name: "peer-c".to_string(),
                 pubkey: peer_c_keypair.public_key(),
                 addr: addr_c.clone(),
+                meta: meerkat_comms::PeerMeta::default(),
             },
         ],
     };
@@ -460,6 +465,7 @@ async fn integration_real_concurrent_multi_peer() {
             name: "peer-a".to_string(),
             pubkey: peer_a_keypair.public_key(),
             addr: addr_a.clone(),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
 
@@ -469,6 +475,7 @@ async fn integration_real_concurrent_multi_peer() {
             name: "peer-a".to_string(),
             pubkey: peer_a_keypair.public_key(),
             addr: addr_a.clone(),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
 

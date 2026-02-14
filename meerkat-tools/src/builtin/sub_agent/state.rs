@@ -654,6 +654,7 @@ mod tests {
             name: "sub-agent-test".to_string(),
             pubkey: child_pubkey,
             addr: "uds:///tmp/sub-agent-test.sock".to_string(),
+            meta: meerkat_comms::PeerMeta::default(),
         };
 
         {

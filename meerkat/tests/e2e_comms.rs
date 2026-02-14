@@ -289,6 +289,7 @@ async fn create_agent_pair(
             name: "agent-b".to_string(),
             pubkey: pubkey_b,
             addr: format!("tcp://{}", addr_b),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
 
@@ -297,6 +298,7 @@ async fn create_agent_pair(
             name: "agent-a".to_string(),
             pubkey: pubkey_a,
             addr: format!("tcp://{}", addr_a),
+            meta: meerkat_comms::PeerMeta::default(),
         }],
     };
 
@@ -602,11 +604,13 @@ mod three_agent_coordination {
                     name: "agent-b".to_string(),
                     pubkey: pubkey_b,
                     addr: format!("tcp://{}", addr_b),
+                    meta: meerkat_comms::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "agent-c".to_string(),
                     pubkey: pubkey_c,
                     addr: format!("tcp://{}", addr_c),
+                    meta: meerkat_comms::PeerMeta::default(),
                 },
             ],
         };
@@ -617,11 +621,13 @@ mod three_agent_coordination {
                     name: "agent-a".to_string(),
                     pubkey: pubkey_a,
                     addr: format!("tcp://{}", addr_a),
+                    meta: meerkat_comms::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "agent-c".to_string(),
                     pubkey: pubkey_c,
                     addr: format!("tcp://{}", addr_c),
+                    meta: meerkat_comms::PeerMeta::default(),
                 },
             ],
         };
@@ -632,11 +638,13 @@ mod three_agent_coordination {
                     name: "agent-a".to_string(),
                     pubkey: pubkey_a,
                     addr: format!("tcp://{}", addr_a),
+                    meta: meerkat_comms::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "agent-b".to_string(),
                     pubkey: pubkey_b,
                     addr: format!("tcp://{}", addr_b),
+                    meta: meerkat_comms::PeerMeta::default(),
                 },
             ],
         };
@@ -814,6 +822,7 @@ mod sanity {
                 name: "test-peer".to_string(),
                 pubkey: keypair.public_key(),
                 addr: "tcp://127.0.0.1:4200".to_string(),
+                meta: meerkat_comms::PeerMeta::default(),
             }],
         };
         assert_eq!(peers.peers.len(), 1);
@@ -829,6 +838,7 @@ mod sanity {
                 name: "peer".to_string(),
                 pubkey: peer_keypair.public_key(),
                 addr: "tcp://127.0.0.1:4200".to_string(),
+                meta: meerkat_comms::PeerMeta::default(),
             }],
         };
 

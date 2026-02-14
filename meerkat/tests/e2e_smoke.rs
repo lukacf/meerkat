@@ -1050,6 +1050,7 @@ mod scenario_08_comms {
                 name: "agent-b".to_string(),
                 pubkey: pubkey_b,
                 addr: format!("tcp://{}", addr_b),
+                meta: meerkat_comms::PeerMeta::default(),
             }],
         };
 
@@ -1058,6 +1059,7 @@ mod scenario_08_comms {
                 name: "agent-a".to_string(),
                 pubkey: pubkey_a,
                 addr: format!("tcp://{}", addr_a),
+                meta: meerkat_comms::PeerMeta::default(),
             }],
         };
 

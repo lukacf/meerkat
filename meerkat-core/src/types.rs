@@ -52,10 +52,25 @@ pub enum ProviderMeta {
     },
 }
 
+/// Deserializes `Box<RawValue>` from a possibly-buffered serde value.
+///
+/// `Message` uses internally-tagged serde representation, which buffers enum
+/// content during dispatch. In that path, `RawValue` cannot deserialize directly.
+/// This converts via `Value` so ToolUse arguments survive that buffering step.
+fn deserialize_tool_use_args<'de, D>(deserializer: D) -> Result<Box<RawValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let raw = serde_json::to_string(&value).map_err(serde::de::Error::custom)?;
+    RawValue::from_string(raw).map_err(serde::de::Error::custom)
+}
+
 /// A block of content in an assistant message, preserving order.
 ///
-/// Uses adjacently tagged serde representation to support `Box<RawValue>` in ToolUse.
-/// Internally tagged enums don't work with RawValue due to buffering requirements.
+/// Uses adjacently tagged serde representation to support `Box<RawValue>` in
+/// ToolUse, with a custom deserializer on `args` to tolerate Message-level
+/// internal enum buffering.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "block_type", content = "data", rename_all = "snake_case")]
@@ -84,6 +99,7 @@ pub enum AssistantBlock {
         id: String,
         name: String,
         /// Arguments as raw JSON - only dispatcher parses this
+        #[serde(deserialize_with = "deserialize_tool_use_args")]
         args: Box<RawValue>,
         /// Provider continuity metadata
         #[serde(skip_serializing_if = "Option::is_none")]

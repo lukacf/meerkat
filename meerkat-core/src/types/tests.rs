@@ -766,6 +766,29 @@ mod ordered_transcript_types {
         }
     }
 
+    fn assert_tool_use_message_roundtrip(
+        raw_message: &Message,
+        expected_args: &Value,
+        expected_id: &str,
+    ) {
+        match raw_message {
+            Message::BlockAssistant(parsed_message) => {
+                assert_eq!(parsed_message.blocks.len(), 2);
+                assert_eq!(parsed_message.stop_reason, StopReason::ToolUse);
+                match &parsed_message.blocks[1] {
+                    AssistantBlock::ToolUse { id, name, args, .. } => {
+                        assert_eq!(id, expected_id);
+                        assert_eq!(name, "read_dir");
+                        let args_value: Value = serde_json::from_str(args.get()).unwrap();
+                        assert_eq!(&args_value, expected_args);
+                    }
+                    _ => panic!("Expected ToolUse block"),
+                }
+            }
+            _ => panic!("Expected BlockAssistant message"),
+        }
+    }
+
     #[test]
     fn test_assistant_block_tool_use_with_gemini_meta() {
         let args = RawValue::from_string(r#"{"query":"test"}"#.to_string()).unwrap();
@@ -792,6 +815,59 @@ mod ordered_transcript_types {
                 }
             }
             _ => panic!("Expected ToolUse block"),
+        }
+    }
+
+    #[test]
+    fn test_message_block_assistant_tool_use_roundtrip() {
+        for (case_id, args_json) in [
+            ("tool_001", r#"{"path":"/tmp","recursive":false}"#),
+            ("tool_002", r#"{}"#),
+            ("tool_003", r#"{"config":{"nested":true}}"#),
+            ("tool_004", r#"[1,2,3]"#),
+            ("tool_005", r#""line1\nline2\\\"quoted\\\"""#),
+        ] {
+            let expected_args: Value = serde_json::from_str(args_json).unwrap();
+            let message = Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![
+                    AssistantBlock::Text {
+                        text: "Checking files".to_string(),
+                        meta: None,
+                    },
+                    AssistantBlock::ToolUse {
+                        id: case_id.to_string(),
+                        name: "read_dir".to_string(),
+                        args: RawValue::from_string(args_json.to_string()).unwrap(),
+                        meta: None,
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+            });
+
+            let json = serde_json::to_string(&message).unwrap();
+            let parsed: Message = serde_json::from_str(&json).unwrap();
+            assert_tool_use_message_roundtrip(&parsed, &expected_args, case_id);
+
+            let persisted_json = serde_json::json!({
+                "role": "block_assistant",
+                "blocks": [
+                    {
+                        "block_type": "text",
+                        "data": {"text": "Checking files"}
+                    },
+                    {
+                        "block_type": "tool_use",
+                        "data": {
+                            "id": case_id,
+                            "name": "read_dir",
+                            "args": expected_args
+                        }
+                    }
+                ],
+                "stop_reason": "tool_use"
+            });
+            let persisted_roundtrip: Message = serde_json::from_value(persisted_json).unwrap();
+            assert_tool_use_message_roundtrip(&persisted_roundtrip, &expected_args, case_id);
         }
     }
 

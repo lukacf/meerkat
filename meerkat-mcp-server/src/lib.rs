@@ -14,9 +14,9 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionError, SessionService, StartTurnRequest,
 };
 use meerkat_core::{
-    AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigStore, FileConfigStore,
-    HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, Session, ToolCallView,
-    format_verbose_event,
+    AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore,
+    FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, Session,
+    ToolCallView, format_verbose_event,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -248,6 +248,7 @@ pub struct MeerkatMcpState {
     realm_id: String,
     backend: String,
     instance_id: Option<String>,
+    expose_paths: bool,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
     _realm_lease: Option<meerkat_store::RealmLeaseGuard>,
 }
@@ -255,11 +256,18 @@ pub struct MeerkatMcpState {
 impl MeerkatMcpState {
     /// Create a new MCP state with a session service backed by `AgentFactory`.
     pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_bootstrap(RuntimeBootstrap::default()).await
+        Self::new_with_bootstrap_and_options(RuntimeBootstrap::default(), false).await
     }
 
     pub async fn new_with_bootstrap(
         bootstrap: RuntimeBootstrap,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_bootstrap_and_options(bootstrap, false).await
+    }
+
+    pub async fn new_with_bootstrap_and_options(
+        bootstrap: RuntimeBootstrap,
+        expose_paths: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let locator = bootstrap.realm.resolve_locator()?;
         let realm_id = locator.realm_id;
@@ -333,6 +341,7 @@ impl MeerkatMcpState {
             realm_id,
             backend: manifest.backend.as_str().to_string(),
             instance_id: bootstrap.realm.instance_id,
+            expose_paths,
             config_runtime,
             _realm_lease: Some(lease),
         })
@@ -391,6 +400,7 @@ impl MeerkatMcpState {
             realm_id,
             backend: "redb".to_string(),
             instance_id: bootstrap.realm.instance_id,
+            expose_paths: false,
             config_runtime,
             _realm_lease: None,
         }
@@ -402,6 +412,10 @@ impl MeerkatMcpState {
 
     pub fn backend(&self) -> &str {
         &self.backend
+    }
+
+    pub fn expose_paths(&self) -> bool {
+        self.expose_paths
     }
 }
 
@@ -649,7 +663,7 @@ async fn handle_meerkat_config(
                 .get()
                 .await
                 .map_err(|e| e.to_string())?;
-            config_envelope_value(snapshot)
+            config_envelope_value(snapshot, state.expose_paths())
         }
         ConfigAction::Set => {
             let config = input
@@ -662,7 +676,7 @@ async fn handle_meerkat_config(
                 .set(config, input.expected_generation)
                 .await
                 .map_err(|e| e.to_string())?;
-            config_envelope_value(snapshot)
+            config_envelope_value(snapshot, state.expose_paths())
         }
         ConfigAction::Patch => {
             let patch = input
@@ -673,13 +687,21 @@ async fn handle_meerkat_config(
                 .patch(ConfigDelta(patch), input.expected_generation)
                 .await
                 .map_err(|e| e.to_string())?;
-            config_envelope_value(snapshot)
+            config_envelope_value(snapshot, state.expose_paths())
         }
     }
 }
 
-fn config_envelope_value(snapshot: meerkat_core::ConfigSnapshot) -> Result<Value, String> {
-    serde_json::to_value(ConfigEnvelope::from(snapshot)).map_err(|e| e.to_string())
+fn config_envelope_value(
+    snapshot: meerkat_core::ConfigSnapshot,
+    expose_paths: bool,
+) -> Result<Value, String> {
+    let policy = if expose_paths {
+        ConfigEnvelopePolicy::Diagnostic
+    } else {
+        ConfigEnvelopePolicy::Public
+    };
+    serde_json::to_value(ConfigEnvelope::from_snapshot(snapshot, policy)).map_err(|e| e.to_string())
 }
 
 async fn handle_meerkat_run(
@@ -1033,6 +1055,52 @@ mod tests {
         let payload = std::fs::read_to_string(path).expect("hook override fixture must exist");
         serde_json::from_str::<HookRunOverrides>(&payload)
             .expect("hook override fixture must deserialize")
+    }
+
+    #[test]
+    fn test_config_envelope_value_redacts_paths_by_default() {
+        let snapshot = meerkat_core::ConfigSnapshot {
+            config: Config::default(),
+            generation: 1,
+            metadata: Some(meerkat_core::ConfigStoreMetadata {
+                realm_id: Some("team".to_string()),
+                instance_id: Some("mcp-1".to_string()),
+                backend: Some("redb".to_string()),
+                resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
+                    root: "/tmp/root".to_string(),
+                    manifest_path: "/tmp/root/realm_manifest.json".to_string(),
+                    config_path: "/tmp/root/config.toml".to_string(),
+                    sessions_redb_path: "/tmp/root/sessions.redb".to_string(),
+                    sessions_jsonl_dir: "/tmp/root/sessions_jsonl".to_string(),
+                }),
+            }),
+        };
+
+        let value = config_envelope_value(snapshot, false).expect("envelope value");
+        assert!(value.get("resolved_paths").is_none());
+    }
+
+    #[test]
+    fn test_config_envelope_value_includes_paths_when_enabled() {
+        let snapshot = meerkat_core::ConfigSnapshot {
+            config: Config::default(),
+            generation: 1,
+            metadata: Some(meerkat_core::ConfigStoreMetadata {
+                realm_id: Some("team".to_string()),
+                instance_id: Some("mcp-1".to_string()),
+                backend: Some("redb".to_string()),
+                resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
+                    root: "/tmp/root".to_string(),
+                    manifest_path: "/tmp/root/realm_manifest.json".to_string(),
+                    config_path: "/tmp/root/config.toml".to_string(),
+                    sessions_redb_path: "/tmp/root/sessions.redb".to_string(),
+                    sessions_jsonl_dir: "/tmp/root/sessions_jsonl".to_string(),
+                }),
+            }),
+        };
+
+        let value = config_envelope_value(snapshot, true).expect("envelope value");
+        assert!(value.get("resolved_paths").is_some());
     }
 
     #[test]

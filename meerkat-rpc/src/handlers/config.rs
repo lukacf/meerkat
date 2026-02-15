@@ -7,7 +7,8 @@ use serde_json::value::RawValue;
 
 use meerkat_core::config::{Config, ConfigDelta};
 use meerkat_core::{
-    ConfigEnvelope, ConfigRuntime, ConfigRuntimeError, ConfigSnapshot, ConfigStore,
+    ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntime, ConfigRuntimeError, ConfigSnapshot,
+    ConfigStore,
 };
 
 use super::{RpcResponseExt, parse_params};
@@ -34,7 +35,11 @@ struct ConfigPatchPayload {
 }
 
 fn config_response_body(snapshot: ConfigSnapshot) -> Value {
-    serde_json::to_value(ConfigEnvelope::from(snapshot)).unwrap_or_else(|err| {
+    serde_json::to_value(ConfigEnvelope::from_snapshot(
+        snapshot,
+        ConfigEnvelopePolicy::Diagnostic,
+    ))
+    .unwrap_or_else(|err| {
         serde_json::json!({
             "error": format!("Failed to serialize config response: {err}")
         })

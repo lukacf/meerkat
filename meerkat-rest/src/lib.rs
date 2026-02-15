@@ -38,9 +38,9 @@ use meerkat_core::service::{
     StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
-    Config, ConfigDelta, ConfigEnvelope, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
-    RealmSelection, RuntimeBootstrap, SessionLocator, SessionTooling, format_session_ref,
-    format_verbose_event,
+    Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
+    HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionLocator, SessionTooling,
+    format_session_ref, format_verbose_event,
 };
 use meerkat_store::{RealmBackend, RealmOrigin};
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,7 @@ pub struct AppState {
     pub instance_id: Option<String>,
     pub backend: String,
     pub resolved_paths: meerkat_core::ConfigResolvedPaths,
+    pub expose_paths: bool,
     pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
     pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
 }
@@ -89,7 +90,7 @@ pub struct SessionEvent {
 
 impl AppState {
     pub async fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::load_with_bootstrap(RuntimeBootstrap::default()).await
+        Self::load_with_bootstrap_and_options(RuntimeBootstrap::default(), false).await
     }
 
     #[cfg(test)]
@@ -97,18 +98,26 @@ impl AppState {
         let mut bootstrap = RuntimeBootstrap::default();
         bootstrap.realm.state_root = Some(instance_root.join("realms"));
         bootstrap.context.context_root = Some(instance_root.clone());
-        Self::load_from_with_bootstrap(instance_root, bootstrap).await
+        Self::load_from_with_bootstrap(instance_root, bootstrap, false).await
     }
 
     pub async fn load_with_bootstrap(
         bootstrap: RuntimeBootstrap,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::load_from_with_bootstrap(rest_instance_root(), bootstrap).await
+        Self::load_with_bootstrap_and_options(bootstrap, false).await
+    }
+
+    pub async fn load_with_bootstrap_and_options(
+        bootstrap: RuntimeBootstrap,
+        expose_paths: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_from_with_bootstrap(rest_instance_root(), bootstrap, expose_paths).await
     }
 
     async fn load_from_with_bootstrap(
         instance_root: PathBuf,
         bootstrap: RuntimeBootstrap,
+        expose_paths: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (event_tx, _) = broadcast::channel(256);
         let locator = bootstrap.realm.resolve_locator()?;
@@ -220,6 +229,7 @@ impl AppState {
             instance_id,
             backend: manifest.backend.as_str().to_string(),
             resolved_paths,
+            expose_paths,
             config_runtime,
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
         })
@@ -664,7 +674,14 @@ async fn get_config(State(state): State<AppState>) -> Result<Json<ConfigEnvelope
         .get()
         .await
         .map_err(config_runtime_err_to_api)?;
-    Ok(Json(snapshot.into()))
+    Ok(Json(ConfigEnvelope::from_snapshot(
+        snapshot,
+        if state.expose_paths {
+            ConfigEnvelopePolicy::Diagnostic
+        } else {
+            ConfigEnvelopePolicy::Public
+        },
+    )))
 }
 
 /// Replace the current config
@@ -684,7 +701,14 @@ async fn set_config(
         .set(config, expected_generation)
         .await
         .map_err(config_runtime_err_to_api)?;
-    Ok(Json(snapshot.into()))
+    Ok(Json(ConfigEnvelope::from_snapshot(
+        snapshot,
+        if state.expose_paths {
+            ConfigEnvelopePolicy::Diagnostic
+        } else {
+            ConfigEnvelopePolicy::Public
+        },
+    )))
 }
 
 /// Patch the current config using a JSON merge patch
@@ -704,7 +728,14 @@ async fn patch_config(
         .patch(ConfigDelta(delta), expected_generation)
         .await
         .map_err(config_runtime_err_to_api)?;
-    Ok(Json(snapshot.into()))
+    Ok(Json(ConfigEnvelope::from_snapshot(
+        snapshot,
+        if state.expose_paths {
+            ConfigEnvelopePolicy::Diagnostic
+        } else {
+            ConfigEnvelopePolicy::Public
+        },
+    )))
 }
 
 fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError {
@@ -1221,6 +1252,27 @@ mod tests {
             .unwrap();
         assert!(!state.enable_builtins);
         assert!(!state.enable_shell);
+    }
+
+    #[tokio::test]
+    async fn test_config_envelope_redacts_paths_by_default() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let Json(envelope) = get_config(State(state)).await.unwrap();
+        assert!(envelope.resolved_paths.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_config_envelope_includes_paths_when_enabled() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.expose_paths = true;
+        let Json(envelope) = get_config(State(state)).await.unwrap();
+        assert!(envelope.resolved_paths.is_some());
     }
 
     #[test]

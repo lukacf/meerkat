@@ -57,7 +57,9 @@ pub use config::{
     ResolvedSubAgentConfig, RetryConfig, ShellDefaults, StorageConfig, StoreConfig,
     SubAgentsConfig, ToolsConfig,
 };
-pub use config_runtime::{ConfigEnvelope, ConfigRuntime, ConfigRuntimeError, ConfigSnapshot};
+pub use config_runtime::{
+    ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntime, ConfigRuntimeError, ConfigSnapshot,
+};
 pub use config_store::{
     ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, FileConfigStore, MemoryConfigStore,
     TaggedConfigStore,

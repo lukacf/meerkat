@@ -33,20 +33,42 @@ pub struct ConfigEnvelope {
     pub realm_id: Option<String>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_paths: Option<ConfigResolvedPaths>,
 }
 
-impl From<ConfigSnapshot> for ConfigEnvelope {
-    fn from(snapshot: ConfigSnapshot) -> Self {
+/// Policy for exposing diagnostic filesystem paths in config envelopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigEnvelopePolicy {
+    /// Public shape: omit resolved filesystem paths.
+    Public,
+    /// Diagnostic shape: include resolved filesystem paths when available.
+    Diagnostic,
+}
+
+impl ConfigEnvelope {
+    pub fn from_snapshot(snapshot: ConfigSnapshot, policy: ConfigEnvelopePolicy) -> Self {
         let metadata = snapshot.metadata;
+        let resolved_paths = match policy {
+            ConfigEnvelopePolicy::Public => None,
+            ConfigEnvelopePolicy::Diagnostic => {
+                metadata.as_ref().and_then(|m| m.resolved_paths.clone())
+            }
+        };
         Self {
             config: snapshot.config,
             generation: snapshot.generation,
             realm_id: metadata.as_ref().and_then(|m| m.realm_id.clone()),
             instance_id: metadata.as_ref().and_then(|m| m.instance_id.clone()),
             backend: metadata.as_ref().and_then(|m| m.backend.clone()),
-            resolved_paths: metadata.and_then(|m| m.resolved_paths),
+            resolved_paths,
         }
+    }
+}
+
+impl From<ConfigSnapshot> for ConfigEnvelope {
+    fn from(snapshot: ConfigSnapshot) -> Self {
+        Self::from_snapshot(snapshot, ConfigEnvelopePolicy::Diagnostic)
     }
 }
 
@@ -337,5 +359,31 @@ mod tests {
         ));
         assert!(ok_count <= 1);
         assert_eq!(known_failure_count + ok_count, 2);
+    }
+
+    #[test]
+    fn config_envelope_policy_controls_resolved_paths_exposure() {
+        let snapshot = ConfigSnapshot {
+            config: Config::default(),
+            generation: 7,
+            metadata: Some(ConfigStoreMetadata {
+                realm_id: Some("team".to_string()),
+                instance_id: Some("instance".to_string()),
+                backend: Some("redb".to_string()),
+                resolved_paths: Some(ConfigResolvedPaths {
+                    root: "/tmp/root".to_string(),
+                    manifest_path: "/tmp/root/realm_manifest.json".to_string(),
+                    config_path: "/tmp/root/config.toml".to_string(),
+                    sessions_redb_path: "/tmp/root/sessions.redb".to_string(),
+                    sessions_jsonl_dir: "/tmp/root/sessions_jsonl".to_string(),
+                }),
+            }),
+        };
+
+        let public = ConfigEnvelope::from_snapshot(snapshot.clone(), ConfigEnvelopePolicy::Public);
+        assert!(public.resolved_paths.is_none());
+
+        let diagnostic = ConfigEnvelope::from_snapshot(snapshot, ConfigEnvelopePolicy::Diagnostic);
+        assert!(diagnostic.resolved_paths.is_some());
     }
 }

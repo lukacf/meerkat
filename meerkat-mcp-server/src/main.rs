@@ -31,6 +31,9 @@ struct Args {
     /// Optional user-level config root for additive conventions.
     #[arg(long)]
     user_config_root: Option<PathBuf>,
+    /// Expose resolved filesystem paths in config tool responses.
+    #[arg(long, default_value_t = false)]
+    expose_paths: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -57,18 +60,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .realm_backend
         .map(Into::into)
         .map(|b: RealmBackend| b.as_str().to_string());
-    let state = meerkat_mcp_server::MeerkatMcpState::new_with_bootstrap(RuntimeBootstrap {
-        realm: RealmConfig {
-            selection,
-            instance_id: args.instance,
-            backend_hint,
-            state_root: args.state_root,
+    let state = meerkat_mcp_server::MeerkatMcpState::new_with_bootstrap_and_options(
+        RuntimeBootstrap {
+            realm: RealmConfig {
+                selection,
+                instance_id: args.instance,
+                backend_hint,
+                state_root: args.state_root,
+            },
+            context: meerkat_core::ContextConfig {
+                context_root: args.context_root,
+                user_config_root: args.user_config_root,
+            },
         },
-        context: meerkat_core::ContextConfig {
-            context_root: args.context_root,
-            user_config_root: args.user_config_root,
-        },
-    })
+        args.expose_paths,
+    )
     .await?;
     eprintln!(
         "meerkat-mcp-server starting (realm={}, backend={})",

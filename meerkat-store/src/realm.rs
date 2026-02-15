@@ -97,7 +97,7 @@ pub async fn ensure_realm_manifest(
         .map_err(StoreError::Io)?;
     let manifest = RealmManifest {
         realm_id: realm_id.to_string(),
-        backend: backend_hint.unwrap_or_else(|| {
+        backend: backend_hint.unwrap_or({
             #[cfg(feature = "jsonl")]
             {
                 RealmBackend::Jsonl

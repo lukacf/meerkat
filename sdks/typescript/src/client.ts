@@ -103,10 +103,25 @@ export class MeerkatClient {
     if (options?.userConfigRoot) {
       args.push("--user-config-root", options.userConfigRoot);
     }
+    const legacyRequiresNewBinary = Boolean(
+      options?.isolated ||
+        options?.realmId ||
+        options?.instanceId ||
+        options?.realmBackend ||
+        options?.stateRoot ||
+        options?.contextRoot ||
+        options?.userConfigRoot,
+    );
     let command = this.rkatPath;
     if (this.rkatPath === "rkat-rpc") {
       if (!MeerkatClient.commandExists("rkat-rpc")) {
         if (MeerkatClient.commandExists("rkat")) {
+          if (legacyRequiresNewBinary) {
+            throw new MeerkatError(
+              "LEGACY_BINARY_UNSUPPORTED",
+              "Realm/context options require the standalone rkat-rpc binary. Install rkat-rpc and retry.",
+            );
+          }
           command = "rkat";
           args.push("rpc");
         } else {
@@ -117,6 +132,12 @@ export class MeerkatClient {
         }
       }
     } else if (this.rkatPath === "rkat") {
+      if (legacyRequiresNewBinary) {
+        throw new MeerkatError(
+          "LEGACY_BINARY_UNSUPPORTED",
+          "Realm/context options require the standalone rkat-rpc binary. Install rkat-rpc and retry.",
+        );
+      }
       args.push("rpc");
     } else if (!MeerkatClient.commandExists(this.rkatPath)) {
       throw new MeerkatError(

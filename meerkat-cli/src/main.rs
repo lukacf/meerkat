@@ -982,16 +982,9 @@ fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
     Ok(RuntimeScope {
         locator,
         instance_id: cli.instance.clone(),
-        backend_hint: cli.realm_backend.map(Into::into).or({
-            #[cfg(feature = "jsonl-store")]
-            {
-                Some(RealmBackend::Jsonl)
-            }
-            #[cfg(not(feature = "jsonl-store"))]
-            {
-                Some(RealmBackend::Redb)
-            }
-        }),
+        // Only pass an explicit backend hint when the caller asked for one.
+        // Existing realms are always opened using their pinned manifest backend.
+        backend_hint: cli.realm_backend.map(Into::into),
         origin_hint,
         context_root,
         user_config_root,

@@ -215,16 +215,17 @@ impl ShellTool {
         }
 
         let path = self.config.resolve_shell_path_auto_async().await?;
-        if self.config.shell == "nu" {
-            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                if name != "nu" {
-                    warn!(
-                        configured_shell = %self.config.shell,
-                        fallback_shell = %path.display(),
-                        "Nushell not found; falling back to available shell"
-                    );
-                }
-            }
+        if self.config.shell == "nu"
+            && path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|name| name != "nu")
+        {
+            debug!(
+                configured_shell = %self.config.shell,
+                fallback_shell = %path.display(),
+                "Configured shell unavailable; using fallback shell"
+            );
         }
         let mut guard = self.resolved_shell_path.lock().await;
         *guard = Some(path.clone());

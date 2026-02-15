@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
@@ -202,8 +203,17 @@ impl ConfigRuntime {
 
         let state = RuntimeState { generation };
         let body = serde_json::to_string_pretty(&state)?;
-        let tmp = self.state_path.with_extension("tmp");
-        let mut file = tokio::fs::File::create(&tmp).await?;
+        let parent = self
+            .state_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let tmp = parent.join(format!(".config_state.tmp.{}", Uuid::now_v7()));
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .await?;
         file.write_all(body.as_bytes()).await?;
         file.sync_all().await?;
         tokio::fs::rename(&tmp, &self.state_path).await?;

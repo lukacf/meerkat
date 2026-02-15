@@ -648,24 +648,15 @@ pub async fn open_realm_session_store_in(
 }
 
 pub fn fnv1a64_hex(input: &str) -> String {
-    const OFFSET: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
-    let mut hash = OFFSET;
-    for b in input.as_bytes() {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    format!("{hash:016x}")
+    meerkat_core::runtime_bootstrap::fnv1a64_hex(input)
 }
 
 pub fn derive_workspace_realm_id(path: &Path) -> String {
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let key = canonical.to_string_lossy();
-    format!("ws-{}", fnv1a64_hex(&key))
+    meerkat_core::runtime_bootstrap::derive_workspace_realm_id(path)
 }
 
 pub fn generate_realm_id() -> String {
-    format!("realm-{}", Uuid::now_v7())
+    meerkat_core::runtime_bootstrap::generate_realm_id()
 }
 
 #[cfg(test)]

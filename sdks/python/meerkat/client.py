@@ -76,23 +76,42 @@ class MeerkatClient:
                 "INVALID_ARGS",
                 "realm_id and isolated cannot both be set",
             )
+        legacy_requires_new_binary = any(
+            [
+                isolated,
+                realm_id is not None,
+                instance_id is not None,
+                realm_backend is not None,
+                state_root is not None,
+                context_root is not None,
+                user_config_root is not None,
+            ]
+        )
+        if self._legacy_rpc_subcommand and legacy_requires_new_binary:
+            raise MeerkatError(
+                "LEGACY_BINARY_UNSUPPORTED",
+                "Realm/context options require the standalone rkat-rpc binary. "
+                "Install rkat-rpc and retry.",
+            )
         args = []
-        if isolated:
-            args.append("--isolated")
-        if realm_id:
-            args.extend(["--realm", realm_id])
-        if instance_id:
-            args.extend(["--instance", instance_id])
-        if realm_backend:
-            args.extend(["--realm-backend", realm_backend])
-        if state_root:
-            args.extend(["--state-root", state_root])
-        if context_root:
-            args.extend(["--context-root", context_root])
-        if user_config_root:
-            args.extend(["--user-config-root", user_config_root])
         if self._legacy_rpc_subcommand:
-            args.append("rpc")
+            # Legacy fallback path supports only `rkat rpc` with defaults.
+            args = ["rpc"]
+        else:
+            if isolated:
+                args.append("--isolated")
+            if realm_id:
+                args.extend(["--realm", realm_id])
+            if instance_id:
+                args.extend(["--instance", instance_id])
+            if realm_backend:
+                args.extend(["--realm-backend", realm_backend])
+            if state_root:
+                args.extend(["--state-root", state_root])
+            if context_root:
+                args.extend(["--context-root", context_root])
+            if user_config_root:
+                args.extend(["--user-config-root", user_config_root])
         self._process = await asyncio.create_subprocess_exec(
             self._rkat_path, *args,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,

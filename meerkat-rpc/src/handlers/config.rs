@@ -57,6 +57,14 @@ fn runtime_error_to_response(id: Option<RpcId>, err: ConfigRuntimeError) -> RpcR
     }
 }
 
+fn snapshot_from_store(config: Config, config_store: &Arc<dyn ConfigStore>) -> ConfigSnapshot {
+    ConfigSnapshot {
+        config,
+        generation: 0,
+        metadata: config_store.metadata(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -64,19 +72,22 @@ fn runtime_error_to_response(id: Option<RpcId>, err: ConfigRuntimeError) -> RpcR
 /// Handle `config/get`.
 pub async fn handle_get(
     id: Option<RpcId>,
-    _config_store: &Arc<dyn ConfigStore>,
+    config_store: &Arc<dyn ConfigStore>,
     config_runtime: Option<Arc<ConfigRuntime>>,
 ) -> RpcResponse {
-    let Some(runtime) = config_runtime else {
-        return RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            "Config runtime unavailable".to_string(),
-        );
-    };
-    match runtime.get().await {
-        Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
-        Err(e) => runtime_error_to_response(id, e),
+    if let Some(runtime) = config_runtime {
+        match runtime.get().await {
+            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+            Err(e) => runtime_error_to_response(id, e),
+        }
+    } else {
+        match config_store.get().await {
+            Ok(config) => RpcResponse::success(
+                id,
+                config_response_body(snapshot_from_store(config, config_store)),
+            ),
+            Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+        }
     }
 }
 
@@ -84,7 +95,7 @@ pub async fn handle_get(
 pub async fn handle_set(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    _config_store: &Arc<dyn ConfigStore>,
+    config_store: &Arc<dyn ConfigStore>,
     config_runtime: Option<Arc<ConfigRuntime>>,
 ) -> RpcResponse {
     let value: Value = match parse_params(params) {
@@ -107,16 +118,26 @@ pub async fn handle_set(
         }
     };
 
-    let Some(runtime) = config_runtime else {
-        return RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            "Config runtime unavailable".to_string(),
-        );
-    };
-    match runtime.set(config, expected_generation).await {
-        Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
-        Err(e) => runtime_error_to_response(id, e),
+    if let Some(runtime) = config_runtime {
+        match runtime.set(config, expected_generation).await {
+            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+            Err(e) => runtime_error_to_response(id, e),
+        }
+    } else {
+        if expected_generation.is_some() {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "expected_generation requires config runtime".to_string(),
+            );
+        }
+        match config_store.set(config.clone()).await {
+            Ok(()) => RpcResponse::success(
+                id,
+                config_response_body(snapshot_from_store(config, config_store)),
+            ),
+            Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+        }
     }
 }
 
@@ -124,7 +145,7 @@ pub async fn handle_set(
 pub async fn handle_patch(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    _config_store: &Arc<dyn ConfigStore>,
+    config_store: &Arc<dyn ConfigStore>,
     config_runtime: Option<Arc<ConfigRuntime>>,
 ) -> RpcResponse {
     let value: Value = match parse_params(params) {
@@ -141,15 +162,25 @@ pub async fn handle_patch(
             (value, None)
         };
 
-    let Some(runtime) = config_runtime else {
-        return RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            "Config runtime unavailable".to_string(),
-        );
-    };
-    match runtime.patch(ConfigDelta(patch), expected_generation).await {
-        Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
-        Err(e) => runtime_error_to_response(id, e),
+    if let Some(runtime) = config_runtime {
+        match runtime.patch(ConfigDelta(patch), expected_generation).await {
+            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+            Err(e) => runtime_error_to_response(id, e),
+        }
+    } else {
+        if expected_generation.is_some() {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "expected_generation requires config runtime".to_string(),
+            );
+        }
+        match config_store.patch(ConfigDelta(patch)).await {
+            Ok(config) => RpcResponse::success(
+                id,
+                config_response_body(snapshot_from_store(config, config_store)),
+            ),
+            Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+        }
     }
 }

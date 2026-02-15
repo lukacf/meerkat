@@ -344,6 +344,7 @@ impl LlmClient for OpenAiClient {
                 let mut buffer = String::with_capacity(512);
                 let mut assembler = BlockAssembler::new();
                 let mut usage = Usage::default();
+                let mut saw_stream_text_delta = false;
 
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
@@ -377,14 +378,18 @@ impl LlmClient for OpenAiClient {
                                                                     match part_type {
                                                                         "output_text" => {
                                                                             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                                                                assembler.on_text_delta(text, None);
-                                                                                yield LlmEvent::TextDelta { delta: text.to_string(), meta: None };
+                                                                                if !saw_stream_text_delta {
+                                                                                    assembler.on_text_delta(text, None);
+                                                                                    yield LlmEvent::TextDelta { delta: text.to_string(), meta: None };
+                                                                                }
                                                                             }
                                                                         }
                                                                         "refusal" => {
                                                                             if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str()) {
-                                                                                assembler.on_text_delta(refusal, None);
-                                                                                yield LlmEvent::TextDelta { delta: refusal.to_string(), meta: None };
+                                                                                if !saw_stream_text_delta {
+                                                                                    assembler.on_text_delta(refusal, None);
+                                                                                    yield LlmEvent::TextDelta { delta: refusal.to_string(), meta: None };
+                                                                                }
                                                                             }
                                                                         }
                                                                         _ => {}
@@ -526,6 +531,7 @@ impl LlmClient for OpenAiClient {
                             // Handle streaming delta events
                             else if event.event_type == "response.output_text.delta" {
                                 if let Some(delta) = &event.delta {
+                                    saw_stream_text_delta = true;
                                     assembler.on_text_delta(delta, None);
                                     yield LlmEvent::TextDelta { delta: delta.clone(), meta: None };
                                 }

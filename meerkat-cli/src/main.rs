@@ -1712,7 +1712,15 @@ async fn run_agent(
         h.abort();
     }
 
-    // Wait for streaming task to complete (it will end when sender is dropped)
+    // Drop the CLI-held sender clone; remaining senders are owned by session/runtime state.
+    drop(event_tx);
+
+    // Shutdown the session service and MCP connections gracefully.
+    // This drops runtime-held event senders so the receiver can close cleanly.
+    service.shutdown().await;
+    shutdown_mcp(&mcp_adapter).await;
+
+    // Wait for streaming task to complete (it will end when all senders are dropped)
     if let Some(task) = event_task {
         let _ = task.await;
         // Add newline after streaming output
@@ -1720,10 +1728,6 @@ async fn run_agent(
             println!();
         }
     }
-
-    // Shutdown the session service and MCP connections gracefully
-    service.shutdown().await;
-    shutdown_mcp(&mcp_adapter).await;
 
     // Output the result
     match output {

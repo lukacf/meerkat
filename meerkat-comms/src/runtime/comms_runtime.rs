@@ -650,7 +650,8 @@ impl CommsRuntime {
             config.comms_config.clone(),
             inbox_sender.clone(),
             config.require_peer_auth,
-        );
+        )
+        .with_inproc_namespace(config.inproc_namespace.clone());
         let runtime = Self {
             public_key,
             router: Arc::new(router),
@@ -666,11 +667,24 @@ impl CommsRuntime {
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
         };
-        InprocRegistry::global().register(config.name, runtime.public_key, inbox_sender);
+        InprocRegistry::global().register_with_meta_in_namespace(
+            config.inproc_namespace.as_deref().unwrap_or(""),
+            config.name,
+            runtime.public_key,
+            inbox_sender,
+            crate::PeerMeta::default(),
+        );
         Ok(runtime)
     }
 
     pub fn inproc_only(name: &str) -> Result<Self, CommsRuntimeError> {
+        Self::inproc_only_scoped(name, None)
+    }
+
+    pub fn inproc_only_scoped(
+        name: &str,
+        namespace: Option<String>,
+    ) -> Result<Self, CommsRuntimeError> {
         let keypair = Keypair::generate();
         let public_key = keypair.public_key();
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
@@ -680,6 +694,7 @@ impl CommsRuntime {
         let config = ResolvedCommsConfig {
             enabled: true,
             name: name.to_string(),
+            inproc_namespace: namespace.clone(),
             identity_dir: std::path::PathBuf::new(),
             trusted_peers_path: std::path::PathBuf::new(),
             listen_uds: None,
@@ -698,7 +713,8 @@ impl CommsRuntime {
             comms_config,
             inbox_sender.clone(),
             true,
-        );
+        )
+        .with_inproc_namespace(namespace.clone());
         let runtime = Self {
             public_key,
             router: Arc::new(router),
@@ -714,8 +730,32 @@ impl CommsRuntime {
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
         };
-        InprocRegistry::global().register(name, runtime.public_key, inbox_sender);
+        InprocRegistry::global().register_with_meta_in_namespace(
+            namespace.as_deref().unwrap_or(""),
+            name,
+            runtime.public_key,
+            inbox_sender,
+            crate::PeerMeta::default(),
+        );
         Ok(runtime)
+    }
+
+    pub fn participant_name(&self) -> &str {
+        &self.config.name
+    }
+
+    pub fn inproc_namespace(&self) -> Option<&str> {
+        self.config.inproc_namespace.as_deref()
+    }
+
+    pub fn advertised_address(&self) -> String {
+        if let Some(ref uds) = self.config.listen_uds {
+            return format!("uds://{}", uds.display());
+        }
+        if let Some(ref tcp) = self.config.listen_tcp {
+            return format!("tcp://{tcp}");
+        }
+        format!("inproc://{}", self.config.name)
     }
 
     pub async fn start_listeners(&mut self) -> Result<(), CommsRuntimeError> {
@@ -804,7 +844,8 @@ impl CommsRuntime {
     /// because the sender is cloned from the same router and pending
     /// deliveries are unaffected.
     pub fn set_peer_meta(&self, meta: crate::PeerMeta) {
-        InprocRegistry::global().register_with_meta(
+        InprocRegistry::global().register_with_meta_in_namespace(
+            self.config.inproc_namespace.as_deref().unwrap_or(""),
             &self.config.name,
             self.public_key,
             self.router.inbox_sender().clone(),
@@ -825,7 +866,8 @@ impl CommsRuntime {
 
         let mut peers: std::collections::HashMap<String, PeerDirectoryEntry> =
             std::collections::HashMap::new();
-        let inproc_peers = InprocRegistry::global().peers();
+        let inproc_peers = InprocRegistry::global()
+            .peers_in_namespace(self.config.inproc_namespace.as_deref().unwrap_or(""));
         let inproc_by_name: std::collections::HashMap<String, crate::identity::PubKey> =
             inproc_peers
                 .iter()
@@ -1064,7 +1106,10 @@ impl CommsRuntime {
 impl Drop for CommsRuntime {
     fn drop(&mut self) {
         self.shutdown();
-        InprocRegistry::global().unregister(&self.public_key);
+        InprocRegistry::global().unregister_in_namespace(
+            self.config.inproc_namespace.as_deref().unwrap_or(""),
+            &self.public_key,
+        );
     }
 }
 
@@ -1240,6 +1285,7 @@ mod tests {
         ResolvedCommsConfig {
             enabled: true,
             name: name.to_string(),
+            inproc_namespace: None,
             listen_uds: None,
             listen_tcp: None,
             event_listen_tcp: None,
@@ -1275,6 +1321,7 @@ mod tests {
         let config = ResolvedCommsConfig {
             enabled: true,
             name: "test-agent".to_string(),
+            inproc_namespace: None,
             listen_uds: None,
             listen_tcp: None,
             event_listen_tcp: None,
@@ -1301,6 +1348,7 @@ mod tests {
         let config = ResolvedCommsConfig {
             enabled: true,
             name: "test-signed".to_string(),
+            inproc_namespace: None,
             listen_uds: None,
             listen_tcp: Some("127.0.0.1:0".parse().unwrap()),
             event_listen_tcp: None,
@@ -1328,6 +1376,7 @@ mod tests {
         let config = ResolvedCommsConfig {
             enabled: true,
             name: "test-reject".to_string(),
+            inproc_namespace: None,
             listen_uds: None,
             listen_tcp: None,
             event_listen_tcp: Some("0.0.0.0:4201".parse().unwrap()),
@@ -1768,6 +1817,7 @@ mod tests {
         let sender_config = ResolvedCommsConfig {
             enabled: true,
             name: sender_name.clone(),
+            inproc_namespace: None,
             identity_dir: sender_tmp.path().join("identity"),
             trusted_peers_path: sender_tmp.path().join("trusted_peers.json"),
             comms_config: crate::CommsConfig::default(),
@@ -1784,6 +1834,7 @@ mod tests {
         let receiver_config = ResolvedCommsConfig {
             enabled: true,
             name: receiver_name.clone(),
+            inproc_namespace: None,
             identity_dir: receiver_tmp.path().join("identity"),
             trusted_peers_path: receiver_tmp.path().join("trusted_peers.json"),
             comms_config: crate::CommsConfig::default(),

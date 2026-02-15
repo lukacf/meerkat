@@ -173,6 +173,18 @@ pub async fn build_comms_runtime_from_config(
     comms_name: &str,
     peer_meta: Option<meerkat_core::PeerMeta>,
 ) -> Result<CommsRuntime, String> {
+    build_comms_runtime_from_config_scoped(config, base_dir, comms_name, peer_meta, None).await
+}
+
+/// Build a comms runtime from config with optional inproc namespace isolation.
+#[cfg(feature = "comms")]
+pub async fn build_comms_runtime_from_config_scoped(
+    config: &Config,
+    base_dir: impl AsRef<Path>,
+    comms_name: &str,
+    peer_meta: Option<meerkat_core::PeerMeta>,
+    inproc_namespace: Option<String>,
+) -> Result<CommsRuntime, String> {
     // Parse the optional event listener address (for external plain-text events)
     let event_listen_tcp = config
         .comms
@@ -186,8 +198,10 @@ pub async fn build_comms_runtime_from_config(
 
     let runtime =
         match config.comms.mode {
-            CommsRuntimeMode::Inproc => CommsRuntime::inproc_only(comms_name)
-                .map_err(|e| format!("Failed to create inproc comms runtime: {}", e))?,
+            CommsRuntimeMode::Inproc => {
+                CommsRuntime::inproc_only_scoped(comms_name, inproc_namespace.clone())
+                    .map_err(|e| format!("Failed to create inproc comms runtime: {}", e))?
+            }
             CommsRuntimeMode::Tcp => {
                 let address =
                     config.comms.address.as_ref().ok_or_else(|| {
@@ -199,6 +213,7 @@ pub async fn build_comms_runtime_from_config(
                 let comms = CoreCommsConfig {
                     enabled: true,
                     name: comms_name.to_string(),
+                    inproc_namespace: inproc_namespace.clone(),
                     listen_tcp: Some(listen_tcp),
                     auth: config.comms.auth,
                     event_listen_tcp,
@@ -221,6 +236,7 @@ pub async fn build_comms_runtime_from_config(
                 let comms = CoreCommsConfig {
                     enabled: true,
                     name: comms_name.to_string(),
+                    inproc_namespace: inproc_namespace.clone(),
                     listen_uds: Some(std::path::PathBuf::from(address)),
                     auth: config.comms.auth,
                     event_listen_tcp,

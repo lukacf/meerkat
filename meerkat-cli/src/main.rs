@@ -1036,12 +1036,14 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
     let (manifest, session_store) =
         meerkat_store::open_realm_session_store(&scope.realm_id, scope.backend_hint()).await?;
     let store_path = realm_store_path(&manifest, scope);
+    let realm_paths = meerkat_store::realm_paths(&scope.realm_id);
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let project_root = find_project_root(&cwd);
 
     // Max-permissive factory flags: per-request session build overrides
     // control what tools are actually enabled (same pattern as MCP server).
     let factory = AgentFactory::new(store_path)
+        .runtime_root(realm_paths.root.clone())
         .project_root(project_root.unwrap_or(cwd))
         .builtins(true)
         .shell(true)
@@ -1050,7 +1052,6 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
 
     let (config_store, _base_dir) = resolve_config_store(scope).await?;
     let base_store: Arc<dyn meerkat_core::ConfigStore> = Arc::from(config_store);
-    let realm_paths = meerkat_store::realm_paths(&scope.realm_id);
     let tagged = meerkat_core::TaggedConfigStore::new(
         base_store,
         meerkat_core::ConfigStoreMetadata {
@@ -1283,6 +1284,7 @@ async fn run_agent(
     let (manifest, session_store) = create_session_store(scope).await?;
     let factory = AgentFactory::new(realm_store_path(&manifest, scope))
         .session_store(session_store)
+        .runtime_root(meerkat_store::realm_paths(&scope.realm_id).root)
         .project_root(project_root)
         .builtins(enable_builtins)
         .shell(enable_shell)
@@ -1552,6 +1554,7 @@ async fn resume_session(
 
     let factory = AgentFactory::new(realm_store_path(&manifest, scope))
         .session_store(store.clone())
+        .runtime_root(meerkat_store::realm_paths(&scope.realm_id).root)
         .project_root(project_root)
         .builtins(tooling.builtins)
         .shell(tooling.shell)
@@ -1636,6 +1639,7 @@ async fn build_cli_persistent_service(
 
     let factory = AgentFactory::new(realm_store_path(&manifest, scope))
         .session_store(store.clone())
+        .runtime_root(meerkat_store::realm_paths(&scope.realm_id).root)
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
         .shell(config.tools.shell_enabled)

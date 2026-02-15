@@ -162,6 +162,7 @@ impl AppState {
 
         let mut factory = AgentFactory::new(store_path.clone())
             .session_store(session_store.clone())
+            .runtime_root(realm_paths.root.clone())
             .builtins(enable_builtins)
             .shell(enable_shell);
         factory = factory.project_root(instance_root.clone());

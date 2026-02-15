@@ -18,6 +18,11 @@ use std::path::{Path, PathBuf};
 pub struct CoreCommsConfig {
     pub enabled: bool,
     pub name: String,
+    /// Optional namespace for in-process registry isolation.
+    ///
+    /// Agents in different namespaces cannot see or send to each other via
+    /// `inproc://` unless they explicitly share this value.
+    pub inproc_namespace: Option<String>,
     /// Address for signed (Ed25519) agent-to-agent listener.
     pub listen_uds: Option<PathBuf>,
     /// Address for signed (Ed25519) agent-to-agent listener.
@@ -43,6 +48,7 @@ impl Default for CoreCommsConfig {
         Self {
             enabled: false,
             name: "meerkat".to_string(),
+            inproc_namespace: None,
             listen_uds: None,
             listen_tcp: None,
             event_listen_tcp: None,
@@ -87,6 +93,7 @@ impl CoreCommsConfig {
         ResolvedCommsConfig {
             enabled: self.enabled,
             name: self.name.clone(),
+            inproc_namespace: self.inproc_namespace.clone(),
             listen_uds: self.listen_uds.as_ref().map(|p| resolve(p)),
             listen_tcp: self.listen_tcp,
             event_listen_tcp: self.event_listen_tcp,
@@ -110,6 +117,7 @@ impl CoreCommsConfig {
 pub struct ResolvedCommsConfig {
     pub enabled: bool,
     pub name: String,
+    pub inproc_namespace: Option<String>,
     /// Address for signed (Ed25519) agent-to-agent listener.
     pub listen_uds: Option<PathBuf>,
     /// Address for signed (Ed25519) agent-to-agent listener.

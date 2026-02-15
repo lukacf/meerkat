@@ -282,6 +282,7 @@ impl MeerkatMcpState {
         // in SessionBuildOptions control what tools are actually enabled.
         let factory = AgentFactory::new(store_path)
             .session_store(session_store.clone())
+            .runtime_root(realm_paths.root)
             .project_root(project_root)
             .builtins(true)
             .shell(true);
@@ -318,6 +319,7 @@ impl MeerkatMcpState {
         ));
 
         let factory = AgentFactory::new(store_path)
+            .runtime_root(realm_paths.root)
             .project_root(project_root)
             .builtins(true)
             .shell(true);

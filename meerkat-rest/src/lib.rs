@@ -40,9 +40,9 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
-    RuntimeBootstrap, SessionTooling, format_verbose_event,
+    RealmSelection, RuntimeBootstrap, SessionTooling, format_verbose_event,
 };
-use meerkat_store::RealmBackend;
+use meerkat_store::{RealmBackend, RealmOrigin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -119,10 +119,15 @@ impl AppState {
             .as_deref()
             .and_then(parse_backend_hint)
             .or(Some(RealmBackend::Redb));
+        let origin_hint = Some(realm_origin_from_selection(&bootstrap.realm.selection));
         let realms_root = locator.state_root;
-        let (manifest, session_store) =
-            meerkat_store::open_realm_session_store_in(&realms_root, &realm_id, backend_hint)
-                .await?;
+        let (manifest, session_store) = meerkat_store::open_realm_session_store_in(
+            &realms_root,
+            &realm_id,
+            backend_hint,
+            origin_hint,
+        )
+        .await?;
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
         let resolved_paths = meerkat_core::ConfigResolvedPaths {
             root: realm_paths.root.display().to_string(),
@@ -218,6 +223,14 @@ fn parse_backend_hint(raw: &str) -> Option<RealmBackend> {
         "jsonl" => Some(RealmBackend::Jsonl),
         "redb" => Some(RealmBackend::Redb),
         _ => None,
+    }
+}
+
+fn realm_origin_from_selection(selection: &RealmSelection) -> RealmOrigin {
+    match selection {
+        RealmSelection::Explicit { .. } => RealmOrigin::Explicit,
+        RealmSelection::Isolated => RealmOrigin::Generated,
+        RealmSelection::WorkspaceDerived { .. } => RealmOrigin::Workspace,
     }
 }
 

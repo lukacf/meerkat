@@ -15,7 +15,8 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigStore, FileConfigStore,
-    HookRunOverrides, Provider, RuntimeBootstrap, Session, ToolCallView, format_verbose_event,
+    HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, Session, ToolCallView,
+    format_verbose_event,
 };
 use meerkat_tools::find_project_root;
 use schemars::JsonSchema;
@@ -158,9 +159,13 @@ async fn load_config_async(
     realm_id: &str,
     realms_root: &std::path::Path,
     backend_hint: Option<meerkat_store::RealmBackend>,
+    origin_hint: Option<meerkat_store::RealmOrigin>,
     instance_id: Option<&str>,
 ) -> Config {
-    let store = match realm_config_store(realm_id, realms_root, backend_hint, instance_id).await {
+    let store =
+        match realm_config_store(realm_id, realms_root, backend_hint, origin_hint, instance_id)
+            .await
+        {
         Ok(store) => store,
         Err(_) => {
             Arc::new(FileConfigStore::project(resolve_project_root())) as Arc<dyn ConfigStore>
@@ -205,12 +210,14 @@ async fn realm_config_store(
     realm_id: &str,
     realms_root: &std::path::Path,
     backend_hint: Option<meerkat_store::RealmBackend>,
+    origin_hint: Option<meerkat_store::RealmOrigin>,
     instance_id: Option<&str>,
 ) -> Result<Arc<dyn ConfigStore>, String> {
     let (manifest, _) = meerkat_store::open_realm_session_store_in(
         realms_root,
         realm_id,
         backend_hint.or(Some(meerkat_store::RealmBackend::Redb)),
+        origin_hint,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -265,16 +272,22 @@ impl MeerkatMcpState {
             .as_deref()
             .and_then(parse_backend_hint)
             .or(Some(meerkat_store::RealmBackend::Redb));
+        let origin_hint = Some(realm_origin_from_selection(&bootstrap.realm.selection));
         let config = load_config_async(
             &realm_id,
             &realms_root,
             backend_hint,
+            origin_hint,
             bootstrap.realm.instance_id.as_deref(),
         )
         .await;
-        let (manifest, session_store) =
-            meerkat_store::open_realm_session_store_in(&realms_root, &realm_id, backend_hint)
-                .await?;
+        let (manifest, session_store) = meerkat_store::open_realm_session_store_in(
+            &realms_root,
+            &realm_id,
+            backend_hint,
+            origin_hint,
+        )
+        .await?;
         let store_path = realm_store_path(&realms_root, &realm_id, manifest.backend);
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
         let project_root = bootstrap
@@ -330,6 +343,7 @@ impl MeerkatMcpState {
             &realm_id,
             &realms_root,
             Some(meerkat_store::RealmBackend::Redb),
+            Some(meerkat_store::RealmOrigin::Generated),
             bootstrap.realm.instance_id.as_deref(),
         )
         .await;
@@ -380,6 +394,14 @@ fn parse_backend_hint(raw: &str) -> Option<meerkat_store::RealmBackend> {
         "jsonl" => Some(meerkat_store::RealmBackend::Jsonl),
         "redb" => Some(meerkat_store::RealmBackend::Redb),
         _ => None,
+    }
+}
+
+fn realm_origin_from_selection(selection: &RealmSelection) -> meerkat_store::RealmOrigin {
+    match selection {
+        RealmSelection::Explicit { .. } => meerkat_store::RealmOrigin::Explicit,
+        RealmSelection::Isolated => meerkat_store::RealmOrigin::Generated,
+        RealmSelection::WorkspaceDerived { .. } => meerkat_store::RealmOrigin::Workspace,
     }
 }
 

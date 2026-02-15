@@ -29,6 +29,7 @@ use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::types::OutputSchema;
 use meerkat_store::RealmBackend;
+use meerkat_store::RealmOrigin;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -875,6 +876,7 @@ struct RuntimeScope {
     locator: RealmLocator,
     instance_id: Option<String>,
     backend_hint: Option<RealmBackend>,
+    origin_hint: RealmOrigin,
 }
 
 impl RuntimeScope {
@@ -894,6 +896,11 @@ fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> anyhow::Result<R
     };
     let selection =
         RealmConfig::selection_from_inputs(cli.realm.clone(), cli.isolated, default_selection)?;
+    let origin_hint = match &selection {
+        RealmSelection::Explicit { .. } => RealmOrigin::Explicit,
+        RealmSelection::Isolated => RealmOrigin::Generated,
+        RealmSelection::WorkspaceDerived { .. } => RealmOrigin::Workspace,
+    };
     let realm_cfg = RealmConfig {
         selection,
         instance_id: cli.instance.clone(),
@@ -920,6 +927,7 @@ fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> anyhow::Result<R
             }
             CliSurfaceKind::Rpc => Some(RealmBackend::Redb),
         }),
+        origin_hint,
     })
 }
 
@@ -1052,6 +1060,7 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
         &scope.locator.state_root,
         &scope.locator.realm_id,
         scope.backend_hint(),
+        Some(scope.origin_hint),
     )
     .await?;
     let store_path = realm_store_path(&manifest, scope);
@@ -1121,6 +1130,7 @@ async fn create_session_store(
         &scope.locator.state_root,
         &scope.locator.realm_id,
         scope.backend_hint(),
+        Some(scope.origin_hint),
     )
     .await
     .map_err(|e| anyhow::anyhow!("Failed to open realm session store: {e}"))

@@ -24,6 +24,7 @@ pub mod peer_meta;
 pub mod prompt;
 pub mod provider;
 pub mod retry;
+pub mod runtime_bootstrap;
 pub mod schema;
 pub mod service;
 pub mod session;
@@ -89,6 +90,10 @@ pub use ops::{
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
 pub use retry::RetryPolicy;
+pub use runtime_bootstrap::{
+    ContextConfig, RealmConfig, RealmLocator, RealmSelection, RuntimeBootstrap,
+    RuntimeBootstrapError, default_state_root, derive_workspace_realm_id, generate_realm_id,
+};
 pub use schema::{
     CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };

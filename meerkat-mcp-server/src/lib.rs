@@ -15,7 +15,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigStore, FileConfigStore,
-    HookRunOverrides, Provider, Session, ToolCallView, format_verbose_event,
+    HookRunOverrides, Provider, RuntimeBootstrap, Session, ToolCallView, format_verbose_event,
 };
 use meerkat_tools::find_project_root;
 use schemars::JsonSchema;
@@ -24,13 +24,6 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-
-#[derive(Debug, Clone, Default)]
-pub struct RealmBootstrap {
-    pub realm_id: Option<String>,
-    pub instance_id: Option<String>,
-    pub backend_hint: Option<meerkat_store::RealmBackend>,
-}
 
 /// Tool definition provided by the MCP client
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -161,8 +154,13 @@ fn resolve_project_root() -> PathBuf {
     find_project_root(&cwd).unwrap_or(cwd)
 }
 
-async fn load_config_async(bootstrap: &RealmBootstrap) -> Config {
-    let store = match realm_config_store(bootstrap).await {
+async fn load_config_async(
+    realm_id: &str,
+    realms_root: &std::path::Path,
+    backend_hint: Option<meerkat_store::RealmBackend>,
+    instance_id: Option<&str>,
+) -> Config {
+    let store = match realm_config_store(realm_id, realms_root, backend_hint, instance_id).await {
         Ok(store) => store,
         Err(_) => {
             Arc::new(FileConfigStore::project(resolve_project_root())) as Arc<dyn ConfigStore>
@@ -177,19 +175,13 @@ fn resolve_host_mode(requested: bool) -> Result<bool, String> {
     meerkat::surface::resolve_host_mode(requested)
 }
 
-fn resolve_realm_id(bootstrap: &RealmBootstrap) -> String {
-    bootstrap
-        .realm_id
-        .clone()
-        .unwrap_or_else(meerkat_store::generate_realm_id)
-}
-
 fn tagged_realm_config_store(
+    realms_root: &std::path::Path,
     realm_id: &str,
     backend: meerkat_store::RealmBackend,
     instance_id: Option<&str>,
 ) -> Arc<dyn ConfigStore> {
-    let paths = meerkat_store::realm_paths(realm_id);
+    let paths = meerkat_store::realm_paths_in(realms_root, realm_id);
     let base: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(paths.config_path.clone()));
     let tagged = meerkat_core::TaggedConfigStore::new(
         base,
@@ -209,25 +201,33 @@ fn tagged_realm_config_store(
     Arc::new(tagged)
 }
 
-async fn realm_config_store(bootstrap: &RealmBootstrap) -> Result<Arc<dyn ConfigStore>, String> {
-    let realm_id = resolve_realm_id(bootstrap);
-    let (manifest, _) = meerkat_store::open_realm_session_store(
-        &realm_id,
-        bootstrap
-            .backend_hint
-            .or(Some(meerkat_store::RealmBackend::Redb)),
+async fn realm_config_store(
+    realm_id: &str,
+    realms_root: &std::path::Path,
+    backend_hint: Option<meerkat_store::RealmBackend>,
+    instance_id: Option<&str>,
+) -> Result<Arc<dyn ConfigStore>, String> {
+    let (manifest, _) = meerkat_store::open_realm_session_store_in(
+        realms_root,
+        realm_id,
+        backend_hint.or(Some(meerkat_store::RealmBackend::Redb)),
     )
     .await
     .map_err(|e| e.to_string())?;
     Ok(tagged_realm_config_store(
-        &realm_id,
+        realms_root,
+        realm_id,
         manifest.backend,
-        bootstrap.instance_id.as_deref(),
+        instance_id,
     ))
 }
 
-fn realm_store_path(realm_id: &str, backend: meerkat_store::RealmBackend) -> PathBuf {
-    let paths = meerkat_store::realm_paths(realm_id);
+fn realm_store_path(
+    realms_root: &std::path::Path,
+    realm_id: &str,
+    backend: meerkat_store::RealmBackend,
+) -> PathBuf {
+    let paths = meerkat_store::realm_paths_in(realms_root, realm_id);
     match backend {
         meerkat_store::RealmBackend::Jsonl => paths.sessions_jsonl_dir,
         meerkat_store::RealmBackend::Redb => paths.root,
@@ -250,28 +250,42 @@ pub struct MeerkatMcpState {
 impl MeerkatMcpState {
     /// Create a new MCP state with a session service backed by `AgentFactory`.
     pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_bootstrap(RealmBootstrap::default()).await
+        Self::new_with_bootstrap(RuntimeBootstrap::default()).await
     }
 
     pub async fn new_with_bootstrap(
-        bootstrap: RealmBootstrap,
+        bootstrap: RuntimeBootstrap,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let config = load_config_async(&bootstrap).await;
-        let realm_id = resolve_realm_id(&bootstrap);
-        let (manifest, session_store) = meerkat_store::open_realm_session_store(
+        let locator = bootstrap.realm.resolve_locator()?;
+        let realm_id = locator.realm_id;
+        let realms_root = locator.state_root;
+        let backend_hint = bootstrap
+            .realm
+            .backend_hint
+            .as_deref()
+            .and_then(parse_backend_hint)
+            .or(Some(meerkat_store::RealmBackend::Redb));
+        let config = load_config_async(
             &realm_id,
-            bootstrap
-                .backend_hint
-                .or(Some(meerkat_store::RealmBackend::Redb)),
+            &realms_root,
+            backend_hint,
+            bootstrap.realm.instance_id.as_deref(),
         )
-        .await?;
-        let store_path = realm_store_path(&realm_id, manifest.backend);
-        let realm_paths = meerkat_store::realm_paths(&realm_id);
-        let project_root = resolve_project_root();
+        .await;
+        let (manifest, session_store) =
+            meerkat_store::open_realm_session_store_in(&realms_root, &realm_id, backend_hint)
+                .await?;
+        let store_path = realm_store_path(&realms_root, &realm_id, manifest.backend);
+        let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
+        let project_root = bootstrap
+            .context
+            .context_root
+            .unwrap_or_else(resolve_project_root);
         let config_store = tagged_realm_config_store(
+            &realms_root,
             &realm_id,
             manifest.backend,
-            bootstrap.instance_id.as_deref(),
+            bootstrap.realm.instance_id.as_deref(),
         );
         let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
             Arc::clone(&config_store),
@@ -294,7 +308,7 @@ impl MeerkatMcpState {
             service,
             realm_id,
             backend: manifest.backend.as_str().to_string(),
-            instance_id: bootstrap.instance_id,
+            instance_id: bootstrap.realm.instance_id,
             config_runtime,
         })
     }
@@ -302,16 +316,32 @@ impl MeerkatMcpState {
     /// Test constructor that accepts an injected store (avoids opening redb at platform data dir).
     #[cfg(test)]
     pub(crate) async fn new_with_store(store: Arc<dyn SessionStore>) -> Self {
-        let bootstrap = RealmBootstrap::default();
-        let config = load_config_async(&bootstrap).await;
-        let realm_id = resolve_realm_id(&bootstrap);
-        let store_path = realm_store_path(&realm_id, meerkat_store::RealmBackend::Redb);
-        let realm_paths = meerkat_store::realm_paths(&realm_id);
+        let bootstrap = RuntimeBootstrap::default();
+        let locator = match bootstrap.realm.resolve_locator() {
+            Ok(locator) => locator,
+            Err(_) => meerkat_core::RealmLocator {
+                state_root: meerkat_core::default_state_root(),
+                realm_id: meerkat_core::generate_realm_id(),
+            },
+        };
+        let realm_id = locator.realm_id;
+        let realms_root = locator.state_root;
+        let config = load_config_async(
+            &realm_id,
+            &realms_root,
+            Some(meerkat_store::RealmBackend::Redb),
+            bootstrap.realm.instance_id.as_deref(),
+        )
+        .await;
+        let store_path =
+            realm_store_path(&realms_root, &realm_id, meerkat_store::RealmBackend::Redb);
+        let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
         let project_root = resolve_project_root();
         let config_store = tagged_realm_config_store(
+            &realms_root,
             &realm_id,
             meerkat_store::RealmBackend::Redb,
-            bootstrap.instance_id.as_deref(),
+            bootstrap.realm.instance_id.as_deref(),
         );
         let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
             Arc::clone(&config_store),
@@ -331,9 +361,25 @@ impl MeerkatMcpState {
             service,
             realm_id,
             backend: "redb".to_string(),
-            instance_id: bootstrap.instance_id,
+            instance_id: bootstrap.realm.instance_id,
             config_runtime,
         }
+    }
+
+    pub fn realm_id(&self) -> &str {
+        &self.realm_id
+    }
+
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+}
+
+fn parse_backend_hint(raw: &str) -> Option<meerkat_store::RealmBackend> {
+    match raw {
+        "jsonl" => Some(meerkat_store::RealmBackend::Jsonl),
+        "redb" => Some(meerkat_store::RealmBackend::Redb),
+        _ => None,
     }
 }
 

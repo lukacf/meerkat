@@ -11,7 +11,9 @@ use meerkat_core::CommsRuntimeMode;
 use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionQuery, SessionService,
 };
-use meerkat_core::{AgentEvent, SchemaCompat, format_verbose_event};
+use meerkat_core::{
+    AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, format_verbose_event,
+};
 use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
@@ -139,6 +141,9 @@ struct Cli {
     /// Explicit realm ID (opaque). Reuse to share state across surfaces.
     #[arg(long, global = true)]
     realm: Option<String>,
+    /// Start in isolated mode (new generated realm).
+    #[arg(long, global = true)]
+    isolated: bool,
     /// Optional instance ID inside a realm.
     #[arg(long, global = true)]
     instance: Option<String>,
@@ -513,8 +518,8 @@ async fn main() -> anyhow::Result<ExitCode> {
 
     let cli = Cli::parse();
 
-    let cli_scope = resolve_runtime_scope(&cli, CliSurfaceKind::Cli);
-    let rpc_scope = resolve_runtime_scope(&cli, CliSurfaceKind::Rpc);
+    let cli_scope = resolve_runtime_scope(&cli, CliSurfaceKind::Cli)?;
+    let rpc_scope = resolve_runtime_scope(&cli, CliSurfaceKind::Rpc)?;
 
     let result = match cli.command {
         Commands::Init => init_project_config().await,
@@ -867,7 +872,7 @@ enum CliSurfaceKind {
 
 #[derive(Clone)]
 struct RuntimeScope {
-    realm_id: String,
+    locator: RealmLocator,
     instance_id: Option<String>,
     backend_hint: Option<RealmBackend>,
 }
@@ -878,23 +883,29 @@ impl RuntimeScope {
     }
 }
 
-fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> RuntimeScope {
-    let realm_id = if let Some(realm) = &cli.realm {
-        realm.clone()
-    } else {
-        match surface {
-            // CLI ergonomics: stable per-workspace default realm.
-            CliSurfaceKind::Cli => {
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                let root = find_project_root(&cwd).unwrap_or(cwd);
-                meerkat_store::derive_workspace_realm_id(&root)
-            }
-            // Non-CLI surfaces default to isolated realms unless explicit.
-            CliSurfaceKind::Rpc => meerkat_store::generate_realm_id(),
+fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> anyhow::Result<RuntimeScope> {
+    let default_selection = match surface {
+        CliSurfaceKind::Cli => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let root = find_project_root(&cwd).unwrap_or(cwd);
+            RealmSelection::WorkspaceDerived { root }
         }
+        CliSurfaceKind::Rpc => RealmSelection::Isolated,
     };
-    RuntimeScope {
-        realm_id,
+    let selection =
+        RealmConfig::selection_from_inputs(cli.realm.clone(), cli.isolated, default_selection)?;
+    let realm_cfg = RealmConfig {
+        selection,
+        instance_id: cli.instance.clone(),
+        backend_hint: cli
+            .realm_backend
+            .map(Into::into)
+            .map(|b: RealmBackend| b.as_str().to_string()),
+        state_root: None,
+    };
+    let locator = realm_cfg.resolve_locator()?;
+    Ok(RuntimeScope {
+        locator,
         instance_id: cli.instance.clone(),
         backend_hint: cli.realm_backend.map(Into::into).or(match surface {
             CliSurfaceKind::Cli => {
@@ -909,13 +920,13 @@ fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> RuntimeScope {
             }
             CliSurfaceKind::Rpc => Some(RealmBackend::Redb),
         }),
-    }
+    })
 }
 
 async fn resolve_config_store(
     scope: &RuntimeScope,
 ) -> anyhow::Result<(Arc<dyn ConfigStore>, PathBuf)> {
-    let paths = meerkat_store::realm_paths(&scope.realm_id);
+    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     if let Some(parent) = paths.config_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -1037,10 +1048,15 @@ async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
 
 async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
     let (initial_config, _config_base_dir) = load_config(scope).await?;
-    let (manifest, session_store) =
-        meerkat_store::open_realm_session_store(&scope.realm_id, scope.backend_hint()).await?;
+    let (manifest, session_store) = meerkat_store::open_realm_session_store_in(
+        &scope.locator.state_root,
+        &scope.locator.realm_id,
+        scope.backend_hint(),
+    )
+    .await?;
     let store_path = realm_store_path(&manifest, scope);
-    let realm_paths = meerkat_store::realm_paths(&scope.realm_id);
+    let realm_paths =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let project_root = find_project_root(&cwd);
 
@@ -1058,7 +1074,7 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
     let tagged = meerkat_core::TaggedConfigStore::new(
         base_store,
         meerkat_core::ConfigStoreMetadata {
-            realm_id: Some(scope.realm_id.clone()),
+            realm_id: Some(scope.locator.realm_id.clone()),
             instance_id: scope.instance_id.clone(),
             backend: Some(manifest.backend.as_str().to_string()),
             resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
@@ -1083,7 +1099,7 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
         session_store,
     );
     runtime.set_realm_context(
-        Some(scope.realm_id.clone()),
+        Some(scope.locator.realm_id.clone()),
         scope.instance_id.clone(),
         Some(manifest.backend.as_str().to_string()),
     );
@@ -1101,13 +1117,17 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
 async fn create_session_store(
     scope: &RuntimeScope,
 ) -> anyhow::Result<(meerkat_store::RealmManifest, Arc<dyn SessionStore>)> {
-    meerkat_store::open_realm_session_store(&scope.realm_id, scope.backend_hint())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to open realm session store: {e}"))
+    meerkat_store::open_realm_session_store_in(
+        &scope.locator.state_root,
+        &scope.locator.realm_id,
+        scope.backend_hint(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to open realm session store: {e}"))
 }
 
 fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScope) -> PathBuf {
-    let paths = meerkat_store::realm_paths(&scope.realm_id);
+    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     match manifest.backend {
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir,
@@ -1287,7 +1307,9 @@ async fn run_agent(
     let (manifest, session_store) = create_session_store(scope).await?;
     let factory = AgentFactory::new(realm_store_path(&manifest, scope))
         .session_store(session_store)
-        .runtime_root(meerkat_store::realm_paths(&scope.realm_id).root)
+        .runtime_root(
+            meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
+        )
         .project_root(project_root)
         .builtins(enable_builtins)
         .shell(enable_shell)
@@ -1316,7 +1338,7 @@ async fn run_agent(
         override_subagents: None,
         override_memory: None,
         preload_skills: None,
-        realm_id: Some(scope.realm_id.clone()),
+        realm_id: Some(scope.locator.realm_id.clone()),
         instance_id: scope.instance_id.clone(),
         backend: Some(manifest.backend.as_str().to_string()),
         config_generation: None,
@@ -1557,7 +1579,9 @@ async fn resume_session(
 
     let factory = AgentFactory::new(realm_store_path(&manifest, scope))
         .session_store(store.clone())
-        .runtime_root(meerkat_store::realm_paths(&scope.realm_id).root)
+        .runtime_root(
+            meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
+        )
         .project_root(project_root)
         .builtins(tooling.builtins)
         .shell(tooling.shell)
@@ -1586,7 +1610,7 @@ async fn resume_session(
         realm_id: stored_metadata
             .as_ref()
             .and_then(|m| m.realm_id.clone())
-            .or_else(|| Some(scope.realm_id.clone())),
+            .or_else(|| Some(scope.locator.realm_id.clone())),
         instance_id: stored_metadata
             .as_ref()
             .and_then(|m| m.instance_id.clone())
@@ -1642,7 +1666,9 @@ async fn build_cli_persistent_service(
 
     let factory = AgentFactory::new(realm_store_path(&manifest, scope))
         .session_store(store.clone())
-        .runtime_root(meerkat_store::realm_paths(&scope.realm_id).root)
+        .runtime_root(
+            meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
+        )
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
         .shell(config.tools.shell_enabled)

@@ -1,8 +1,10 @@
 //! Stdio MCP server for Meerkat.
 
 use clap::{Parser, ValueEnum};
+use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
 use meerkat_store::RealmBackend;
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Parser, Debug)]
@@ -11,12 +13,24 @@ struct Args {
     /// Explicit realm ID. Reuse to share state across processes/surfaces.
     #[arg(long)]
     realm: Option<String>,
+    /// Start in isolated mode (new generated realm).
+    #[arg(long)]
+    isolated: bool,
     /// Optional instance ID for this server process.
     #[arg(long)]
     instance: Option<String>,
     /// Realm backend when creating a new realm.
     #[arg(long, value_enum)]
     realm_backend: Option<RealmBackendArg>,
+    /// Optional override for realm state root.
+    #[arg(long)]
+    state_root: Option<PathBuf>,
+    /// Optional context root for filesystem conventions.
+    #[arg(long)]
+    context_root: Option<PathBuf>,
+    /// Optional user-level config root for additive conventions.
+    #[arg(long)]
+    user_config_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -37,14 +51,30 @@ impl From<RealmBackendArg> for RealmBackend {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let state = meerkat_mcp_server::MeerkatMcpState::new_with_bootstrap(
-        meerkat_mcp_server::RealmBootstrap {
-            realm_id: args.realm,
+    let selection =
+        RealmConfig::selection_from_inputs(args.realm, args.isolated, RealmSelection::Isolated)?;
+    let backend_hint = args
+        .realm_backend
+        .map(Into::into)
+        .map(|b: RealmBackend| b.as_str().to_string());
+    let state = meerkat_mcp_server::MeerkatMcpState::new_with_bootstrap(RuntimeBootstrap {
+        realm: RealmConfig {
+            selection,
             instance_id: args.instance,
-            backend_hint: args.realm_backend.map(Into::into),
+            backend_hint,
+            state_root: args.state_root,
         },
-    )
+        context: meerkat_core::ContextConfig {
+            context_root: args.context_root,
+            user_config_root: args.user_config_root,
+        },
+    })
     .await?;
+    eprintln!(
+        "meerkat-mcp-server starting (realm={}, backend={})",
+        state.realm_id(),
+        state.backend()
+    );
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();

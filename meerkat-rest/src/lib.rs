@@ -40,7 +40,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
-    SessionTooling, format_verbose_event,
+    RuntimeBootstrap, SessionTooling, format_verbose_event,
 };
 use meerkat_store::RealmBackend;
 use serde::{Deserialize, Serialize};
@@ -88,30 +88,38 @@ pub struct SessionEvent {
 
 impl AppState {
     pub async fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::load_from(rest_instance_root()).await
+        Self::load_with_bootstrap(RuntimeBootstrap::default()).await
     }
 
+    #[cfg(test)]
     async fn load_from(instance_root: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::load_from_with_bootstrap(instance_root, RealmBootstrap::default()).await
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.state_root = Some(instance_root.join("realms"));
+        bootstrap.context.context_root = Some(instance_root.clone());
+        Self::load_from_with_bootstrap(instance_root, bootstrap).await
     }
 
     pub async fn load_with_bootstrap(
-        bootstrap: RealmBootstrap,
+        bootstrap: RuntimeBootstrap,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::load_from_with_bootstrap(rest_instance_root(), bootstrap).await
     }
 
     async fn load_from_with_bootstrap(
         instance_root: PathBuf,
-        bootstrap: RealmBootstrap,
+        bootstrap: RuntimeBootstrap,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (event_tx, _) = broadcast::channel(256);
-        let realm_id = bootstrap
-            .realm_id
-            .unwrap_or_else(meerkat_store::generate_realm_id);
-        let instance_id = bootstrap.instance_id;
-        let backend_hint = bootstrap.backend_hint.or(Some(RealmBackend::Redb));
-        let realms_root = instance_root.join("realms");
+        let locator = bootstrap.realm.resolve_locator()?;
+        let realm_id = locator.realm_id;
+        let instance_id = bootstrap.realm.instance_id;
+        let backend_hint = bootstrap
+            .realm
+            .backend_hint
+            .as_deref()
+            .and_then(parse_backend_hint)
+            .or(Some(RealmBackend::Redb));
+        let realms_root = locator.state_root;
         let (manifest, session_store) =
             meerkat_store::open_realm_session_store_in(&realms_root, &realm_id, backend_hint)
                 .await?;
@@ -165,7 +173,11 @@ impl AppState {
             .runtime_root(realm_paths.root.clone())
             .builtins(enable_builtins)
             .shell(enable_shell);
-        factory = factory.project_root(instance_root.clone());
+        let resolved_context_root = bootstrap
+            .context
+            .context_root
+            .unwrap_or_else(|| instance_root.clone());
+        factory = factory.project_root(resolved_context_root.clone());
 
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
@@ -179,7 +191,7 @@ impl AppState {
             rest_port,
             enable_builtins,
             enable_shell,
-            project_root: Some(instance_root),
+            project_root: Some(resolved_context_root),
             llm_client_override: None,
             config_store,
             event_tx,
@@ -194,18 +206,19 @@ impl AppState {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct RealmBootstrap {
-    pub realm_id: Option<String>,
-    pub instance_id: Option<String>,
-    pub backend_hint: Option<RealmBackend>,
-}
-
 fn rest_instance_root() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("meerkat")
         .join("rest")
+}
+
+fn parse_backend_hint(raw: &str) -> Option<RealmBackend> {
+    match raw {
+        "jsonl" => Some(RealmBackend::Jsonl),
+        "redb" => Some(RealmBackend::Redb),
+        _ => None,
+    }
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, ApiError> {

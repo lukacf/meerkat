@@ -12,6 +12,10 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[[bin]]
+name = "rkat-mcp"
+path = "src/main.rs"
+
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "jsonl-store", "session-store", "memory-store"] }
 meerkat-mcp = { workspace = true }

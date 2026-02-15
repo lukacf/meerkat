@@ -113,7 +113,7 @@ You can connect any MCP-capable client to a Meerkat MCP server. Run a server pro
     {
       "mcpServers": {
         "meerkat": {
-          "command": "meerkat-mcp-server",
+          "command": "rkat-mcp",
           "args": [],
           "env": {
             "ANTHROPIC_API_KEY": "your-key"
@@ -127,7 +127,7 @@ You can connect any MCP-capable client to a Meerkat MCP server. Run a server pro
     Codex CLI supports MCP servers via a command and also via config. Example:
 
     ```bash
-    codex mcp add meerkat --env ANTHROPIC_API_KEY=your-key -- meerkat-mcp-server
+    codex mcp add meerkat --env ANTHROPIC_API_KEY=your-key -- rkat-mcp
     ```
 
     You can also configure MCP servers in `~/.codex/config.toml` under
@@ -150,10 +150,10 @@ You can connect any MCP-capable client to a Meerkat MCP server. Run a server pro
 
 `meerkat-mcp-server` is a library crate that provides tool schemas and handlers. If you need a standalone MCP server process, add a thin binary wrapper around its `tools_list()` and `handle_tools_call*` entrypoints, or embed it in an existing MCP host.
 
-The bundled binary supports realm scope flags:
+The bundled `rkat-mcp` binary supports realm scope flags:
 
 ```bash
-meerkat-mcp-server --realm team-alpha --instance worker-1 --realm-backend redb
+rkat-mcp --realm team-alpha --instance worker-1 --realm-backend redb
 ```
 
 If `--realm` is omitted, the server creates a new isolated realm by default.

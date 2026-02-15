@@ -25,8 +25,8 @@ Use explicit realm to share:
 ```bash
 rkat --realm team-alpha run "Plan release"
 rkat-rpc --realm team-alpha
-meerkat-rest --realm team-alpha
-meerkat-mcp-server --realm team-alpha
+rkat-rest --realm team-alpha
+rkat-mcp --realm team-alpha
 ```
 
 ## Surfaces

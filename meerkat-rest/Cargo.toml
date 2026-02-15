@@ -13,7 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [[bin]]
-name = "meerkat-rest"
+name = "rkat-rest"
 path = "src/main.rs"
 
 [[test]]

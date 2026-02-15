@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Parser, Debug)]
-#[command(name = "meerkat-mcp-server")]
+#[command(name = "rkat-mcp")]
 struct Args {
     /// Explicit realm ID. Reuse to share state across processes/surfaces.
     #[arg(long)]
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     eprintln!(
-        "meerkat-mcp-server starting (realm={}, backend={})",
+        "rkat-mcp starting (realm={}, backend={})",
         state.realm_id(),
         state.backend()
     );
@@ -134,7 +134,7 @@ async fn handle_request(state: &meerkat_mcp_server::MeerkatMcpState, request: &V
                 "protocolVersion": "2024-11-05",
                 "capabilities": { "tools": {} },
                 "serverInfo": {
-                    "name": "meerkat-mcp-server",
+                    "name": "rkat-mcp",
                     "version": env!("CARGO_PKG_VERSION")
                 }
             }

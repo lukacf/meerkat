@@ -73,7 +73,7 @@ new MeerkatClient(rkatPath?: string)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `rkatPath` | `string` | `"rkat-rpc"` | Path to the RPC binary. Use `"rkat"` for legacy subcommand mode. |
+| `rkatPath` | `string` | `"rkat-rpc"` | Path to the RPC binary. |
 
 ### connect()
 

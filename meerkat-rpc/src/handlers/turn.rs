@@ -87,7 +87,7 @@ pub async fn handle_start(
     let mut response: TurnResult = result.into();
     response.session_ref = runtime
         .realm_id()
-        .map(|realm| meerkat_core::format_session_ref(realm, &response.session_id));
+        .map(|realm| meerkat_contracts::format_session_ref(realm, &response.session_id));
     RpcResponse::success(id, response)
 }
 

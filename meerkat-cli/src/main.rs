@@ -5,6 +5,7 @@ mod mcp;
 mod stdin_events;
 
 use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
+use meerkat_contracts::{SessionLocator, SessionLocatorError, format_session_ref};
 use meerkat_core::AgentToolDispatcher;
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
@@ -12,8 +13,7 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionQuery, SessionService,
 };
 use meerkat_core::{
-    AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, SessionLocator,
-    format_session_ref, format_verbose_event,
+    AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, format_verbose_event,
 };
 use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
 #[cfg(feature = "mcp")]
@@ -1504,7 +1504,7 @@ fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Erro
 
 fn resolve_scoped_session_id(input: &str, scope: &RuntimeScope) -> anyhow::Result<SessionId> {
     SessionLocator::resolve_for_realm(input, &scope.locator.realm_id).map_err(|err| match err {
-        meerkat_core::SessionLocatorError::RealmMismatch { provided, active } => anyhow::anyhow!(
+        SessionLocatorError::RealmMismatch { provided, active } => anyhow::anyhow!(
             "Session belongs to realm '{provided}', but active realm is '{active}'. Use --realm {provided} or `rkat sessions locate {input}`."
         ),
         other => anyhow::anyhow!("Invalid session locator '{input}': {other}"),

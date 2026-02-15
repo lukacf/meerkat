@@ -60,7 +60,7 @@ pub(crate) fn parse_session_id_for_runtime(
     raw: &str,
     runtime: &SessionRuntime,
 ) -> Result<SessionId, RpcResponse> {
-    let locator = match meerkat_core::SessionLocator::parse(raw) {
+    let locator = match meerkat_contracts::SessionLocator::parse(raw) {
         Ok(locator) => locator,
         Err(err) => {
             return Err(RpcResponse::error(

@@ -215,7 +215,7 @@ pub async fn handle_create(
     let mut response: CreateSessionResult = result.into();
     response.session_ref = runtime
         .realm_id()
-        .map(|realm| meerkat_core::format_session_ref(realm, &response.session_id));
+        .map(|realm| meerkat_contracts::format_session_ref(realm, &response.session_id));
     RpcResponse::success(id, response)
 }
 
@@ -229,7 +229,7 @@ pub async fn handle_list(id: Option<RpcId>, runtime: &SessionRuntime) -> RpcResp
                 session_id: info.session_id.to_string(),
                 session_ref: runtime
                     .realm_id()
-                    .map(|realm| meerkat_core::format_session_ref(realm, &info.session_id)),
+                    .map(|realm| meerkat_contracts::format_session_ref(realm, &info.session_id)),
                 state: info.state.as_str().to_string(),
             })
             .collect(),
@@ -259,7 +259,7 @@ pub async fn handle_read(
                 session_id: session_id.to_string(),
                 session_ref: runtime
                     .realm_id()
-                    .map(|realm| meerkat_core::format_session_ref(realm, &session_id)),
+                    .map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
                 state: state.as_str().to_string(),
             };
             RpcResponse::success(id, result)

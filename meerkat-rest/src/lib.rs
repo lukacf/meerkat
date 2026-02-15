@@ -33,14 +33,15 @@ use meerkat::{
     PersistentSessionService, Session, SessionId, SessionService,
     encode_llm_client_override_for_service,
 };
+use meerkat_contracts::{SessionLocator, format_session_ref};
 use meerkat_core::service::{
     CreateSessionRequest as SvcCreateSessionRequest, SessionBuildOptions, SessionError,
     StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
-    HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionLocator, SessionTooling,
-    format_session_ref, format_verbose_event,
+    HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling,
+    format_verbose_event,
 };
 use meerkat_store::{RealmBackend, RealmOrigin};
 use serde::{Deserialize, Serialize};

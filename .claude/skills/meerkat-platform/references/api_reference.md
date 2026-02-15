@@ -44,7 +44,7 @@ rkat-rpc
 Server boot:
 
 ```bash
-meerkat-rest --realm team-alpha --instance rest-1 --realm-backend redb
+rkat-rest --realm team-alpha --instance rest-1 --realm-backend redb
 ```
 
 Core endpoints:
@@ -117,12 +117,12 @@ Core methods:
 
 ---
 
-## MCP server (`meerkat-mcp-server`)
+## MCP server (`rkat-mcp`)
 
 Start scoped server:
 
 ```bash
-meerkat-mcp-server --realm team-alpha --instance mcp-1 --realm-backend redb
+rkat-mcp --realm team-alpha --instance mcp-1 --realm-backend redb
 ```
 
 Tools exposed:

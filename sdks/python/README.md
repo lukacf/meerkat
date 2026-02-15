@@ -1,6 +1,6 @@
 # Meerkat Python SDK
 
-Python SDK for the [Meerkat](https://github.com/lukacf/raik) agent runtime. Communicates with the `rkat` JSON-RPC server over stdio to manage sessions, run agent turns, stream events, and query capabilities.
+Python SDK for the [Meerkat](https://github.com/lukacf/raik) agent runtime. Communicates with the `rkat-rpc` JSON-RPC server over stdio to manage sessions, run agent turns, stream events, and query capabilities.
 
 - **Contract version:** `0.2.0`
 - **Python:** `>=3.10`
@@ -24,7 +24,7 @@ The package is named `meerkat-sdk` (defined in `pyproject.toml`). It has zero ru
 
 ## Prerequisites
 
-The `rkat-rpc` binary must be installed and available on your `PATH` (the SDK also supports legacy `rkat rpc` fallback). It communicates via JSON-RPC 2.0 over newline-delimited JSON on stdin/stdout.
+The `rkat-rpc` binary must be installed and available on your `PATH`. It communicates via JSON-RPC 2.0 over newline-delimited JSON on stdin/stdout.
 
 Build from source:
 
@@ -86,7 +86,7 @@ MeerkatClient(rkat_path: str = "rkat-rpc")
 
 | Parameter   | Type  | Default  | Description |
 |-------------|-------|----------|-------------|
-| `rkat_path` | `str` | `"rkat-rpc"` | Path to the RPC binary. Use `"rkat"` for legacy subcommand mode. |
+| `rkat_path` | `str` | `"rkat-rpc"` | Path to the RPC binary. |
 
 Raises `MeerkatError` (code `"BINARY_NOT_FOUND"`) if the binary is not found.
 

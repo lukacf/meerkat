@@ -15,7 +15,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
-#[command(name = "meerkat-rest")]
+#[command(name = "rkat-rest")]
 struct Args {
     /// Explicit realm ID. Reuse to share state across processes/surfaces.
     #[arg(long)]

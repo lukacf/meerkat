@@ -347,9 +347,6 @@ enum Commands {
         command: ConfigCommands,
     },
 
-    /// Start the JSON-RPC stdio server
-    Rpc,
-
     /// Show runtime capabilities
     Capabilities,
 }
@@ -575,8 +572,7 @@ async fn main() -> anyhow::Result<ExitCode> {
 
     let cli = Cli::parse();
 
-    let cli_scope = resolve_runtime_scope(&cli, CliSurfaceKind::Cli)?;
-    let rpc_scope = resolve_runtime_scope(&cli, CliSurfaceKind::Rpc)?;
+    let cli_scope = resolve_runtime_scope(&cli)?;
 
     let result = match cli.command {
         Commands::Init => init_project_config().await,
@@ -725,7 +721,6 @@ async fn main() -> anyhow::Result<ExitCode> {
                 handle_config_patch(file, json, &cli_scope).await
             }
         },
-        Commands::Rpc => handle_rpc(&rpc_scope).await,
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
     };
 
@@ -922,12 +917,6 @@ struct CommsOverrides {
     peer_meta: Option<meerkat_core::PeerMeta>,
 }
 
-#[derive(Clone, Copy)]
-enum CliSurfaceKind {
-    Cli,
-    Rpc,
-}
-
 #[derive(Clone)]
 struct RuntimeScope {
     locator: RealmLocator,
@@ -944,16 +933,13 @@ impl RuntimeScope {
     }
 }
 
-fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> anyhow::Result<RuntimeScope> {
-    let default_selection = match surface {
-        CliSurfaceKind::Cli => {
-            let root = cli.context_root.clone().unwrap_or_else(|| {
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                find_project_root(&cwd).unwrap_or(cwd)
-            });
-            RealmSelection::WorkspaceDerived { root }
-        }
-        CliSurfaceKind::Rpc => RealmSelection::Isolated,
+fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
+    let default_selection = {
+        let root = cli.context_root.clone().unwrap_or_else(|| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            find_project_root(&cwd).unwrap_or(cwd)
+        });
+        RealmSelection::WorkspaceDerived { root }
     };
     let selection =
         RealmConfig::selection_from_inputs(cli.realm.clone(), cli.isolated, default_selection)?;
@@ -972,35 +958,26 @@ fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> anyhow::Result<R
         state_root: cli.state_root.clone(),
     };
     let locator = realm_cfg.resolve_locator()?;
-    let context_root = match surface {
-        CliSurfaceKind::Cli => Some(match cli.context_root.clone() {
-            Some(root) => root,
-            None => {
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                find_project_root(&cwd).unwrap_or(cwd)
-            }
-        }),
-        CliSurfaceKind::Rpc => cli.context_root.clone(),
-    };
-    let user_config_root = match surface {
-        CliSurfaceKind::Cli => cli.user_config_root.clone().or_else(dirs::home_dir),
-        CliSurfaceKind::Rpc => cli.user_config_root.clone(),
-    };
+    let context_root = Some(match cli.context_root.clone() {
+        Some(root) => root,
+        None => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            find_project_root(&cwd).unwrap_or(cwd)
+        }
+    });
+    let user_config_root = cli.user_config_root.clone().or_else(dirs::home_dir);
     Ok(RuntimeScope {
         locator,
         instance_id: cli.instance.clone(),
-        backend_hint: cli.realm_backend.map(Into::into).or(match surface {
-            CliSurfaceKind::Cli => {
-                #[cfg(feature = "jsonl-store")]
-                {
-                    Some(RealmBackend::Jsonl)
-                }
-                #[cfg(not(feature = "jsonl-store"))]
-                {
-                    Some(RealmBackend::Redb)
-                }
+        backend_hint: cli.realm_backend.map(Into::into).or({
+            #[cfg(feature = "jsonl-store")]
+            {
+                Some(RealmBackend::Jsonl)
             }
-            CliSurfaceKind::Rpc => Some(RealmBackend::Redb),
+            #[cfg(not(feature = "jsonl-store"))]
+            {
+                Some(RealmBackend::Redb)
+            }
         }),
         origin_hint,
         context_root,
@@ -1362,93 +1339,6 @@ async fn prune_realms_inner(
         outcome.removed += 1;
     }
     Ok(outcome)
-}
-
-async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
-    let (initial_config, _config_base_dir) = load_config(scope).await?;
-    let (manifest, session_store) = meerkat_store::open_realm_session_store_in(
-        &scope.locator.state_root,
-        &scope.locator.realm_id,
-        scope.backend_hint(),
-        Some(scope.origin_hint),
-    )
-    .await?;
-    let store_path = realm_store_path(&manifest, scope);
-    let realm_paths =
-        meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
-    let default_project_root = scope
-        .context_root
-        .clone()
-        .unwrap_or_else(|| realm_paths.root.clone());
-
-    // Max-permissive factory flags: per-request session build overrides
-    // control what tools are actually enabled (same pattern as MCP server).
-    let mut factory = AgentFactory::new(store_path)
-        .runtime_root(realm_paths.root.clone())
-        .project_root(default_project_root)
-        .builtins(true)
-        .shell(true)
-        .subagents(true)
-        .memory(true);
-    if let Some(context_root) = scope.context_root.clone() {
-        factory = factory.context_root(context_root);
-    }
-    if let Some(user_root) = scope.user_config_root.clone() {
-        factory = factory.user_config_root(user_root);
-    }
-
-    let (base_store, _base_dir) = resolve_config_store(scope).await?;
-    let tagged = meerkat_core::TaggedConfigStore::new(
-        base_store,
-        meerkat_core::ConfigStoreMetadata {
-            realm_id: Some(scope.locator.realm_id.clone()),
-            instance_id: scope.instance_id.clone(),
-            backend: Some(manifest.backend.as_str().to_string()),
-            resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
-                root: realm_paths.root.display().to_string(),
-                manifest_path: realm_paths.manifest_path.display().to_string(),
-                config_path: realm_paths.config_path.display().to_string(),
-                sessions_redb_path: realm_paths.sessions_redb_path.display().to_string(),
-                sessions_jsonl_dir: realm_paths.sessions_jsonl_dir.display().to_string(),
-            }),
-        },
-    );
-    let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(tagged);
-    let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
-        Arc::clone(&config_store),
-        realm_paths.root.join("config_state.json"),
-    ));
-    let mut runtime = meerkat_rpc::session_runtime::SessionRuntime::new_with_config_store(
-        factory,
-        initial_config,
-        Arc::clone(&config_store),
-        64,
-        session_store,
-    );
-    runtime.set_realm_context(
-        Some(scope.locator.realm_id.clone()),
-        scope.instance_id.clone(),
-        Some(manifest.backend.as_str().to_string()),
-    );
-    runtime.set_config_runtime(config_runtime);
-    let runtime = Arc::new(runtime);
-
-    let lease = meerkat_store::start_realm_lease_in(
-        &scope.locator.state_root,
-        &scope.locator.realm_id,
-        scope.instance_id.as_deref(),
-        "rkat-rpc",
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to start realm lease: {e}"))?;
-
-    let serve_result = meerkat_rpc::serve_stdio(runtime, config_store)
-        .await
-        .map_err(|e| anyhow::anyhow!("RPC server error: {e}"));
-    lease.shutdown().await;
-    serve_result?;
-
-    Ok(())
 }
 
 /// Create the realm-scoped session store backend.

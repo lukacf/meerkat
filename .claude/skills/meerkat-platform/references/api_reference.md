@@ -34,7 +34,7 @@ rkat sessions list [--limit N]
 rkat sessions show <ID>
 rkat sessions delete <ID>
 rkat config get|set|patch ...
-rkat rpc
+rkat-rpc
 ```
 
 ---
@@ -88,12 +88,12 @@ CAS writes:
 
 ---
 
-## JSON-RPC (`rkat rpc`)
+## JSON-RPC (`rkat-rpc`)
 
 Start scoped server:
 
 ```bash
-rkat --realm team-alpha rpc
+rkat-rpc --realm team-alpha
 ```
 
 Core methods:

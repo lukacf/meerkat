@@ -18,10 +18,10 @@ Meerkat is realm-first. A `realm_id` is the only identity key for sharing or iso
 | Surface | If `realm_id` is not provided |
 |---------|-------------------------------|
 | CLI (`rkat run/resume/sessions`) | Workspace-derived stable realm (`ws-...`) |
-| RPC (`rkat rpc`) | New opaque realm (`realm-...`) |
+| RPC (`rkat-rpc`) | New opaque realm (`realm-...`) |
 | REST (`meerkat-rest`) | New opaque realm (`realm-...`) |
 | MCP server (`meerkat-mcp-server`) | New opaque realm (`realm-...`) |
-| Python/TypeScript SDK | Whatever the spawned `rkat rpc` process picks (new opaque realm unless `realm_id` is passed) |
+| Python/TypeScript SDK | Whatever the spawned `rkat-rpc` process picks (new opaque realm unless `realm_id` is passed) |
 
 This means CLI is workspace-friendly by default, while non-CLI surfaces are isolated by default.
 
@@ -32,7 +32,7 @@ Use the same realm everywhere:
 ```bash
 rkat --realm team-alpha run "Draft release plan"
 rkat --realm team-alpha sessions list
-rkat --realm team-alpha rpc
+rkat-rpc --realm team-alpha
 meerkat-rest --realm team-alpha
 meerkat-mcp-server --realm team-alpha
 ```

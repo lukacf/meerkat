@@ -3468,7 +3468,6 @@ dependencies = [
  "meerkat-comms",
  "meerkat-core",
  "meerkat-mcp",
- "meerkat-rpc",
  "meerkat-store",
  "meerkat-tools",
  "serde",

@@ -110,7 +110,7 @@ Config stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user).
 
 ```bash
 # Start the JSON-RPC stdio server (for IDE/desktop integration)
-rkat rpc
+rkat-rpc
 ```
 
 The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/stdout. Unlike REST/MCP, it keeps agents alive between turns via `SessionRuntime` -- enabling fast multi-turn conversations, mid-turn cancellation, and event streaming without agent reconstruction overhead.

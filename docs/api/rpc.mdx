@@ -11,7 +11,7 @@ Meerkat exposes a JSON-RPC 2.0 stdio interface for IDE integration, desktop apps
 <Steps>
   <Step title="Start the server">
     ```bash
-    rkat rpc
+    rkat-rpc
     ```
 
     The server reads newline-delimited JSON (JSONL) from stdin and writes JSONL to stdout. Each line is a complete JSON-RPC 2.0 message.
@@ -29,15 +29,15 @@ Meerkat exposes a JSON-RPC 2.0 stdio interface for IDE integration, desktop apps
 </Steps>
 
 <Note>
-`rkat rpc` defaults to a new isolated realm each time. Use `--realm <id>` to share config/sessions with other surfaces or processes.
+`rkat-rpc` defaults to a new isolated realm each time. Use `--realm <id>` to share config/sessions with other surfaces or processes.
 </Note>
 
 ## Runtime scope
 
-`rkat rpc` accepts global scope flags:
+`rkat-rpc` accepts global scope flags:
 
 ```bash
-rkat [--realm <id>] [--instance <id>] [--realm-backend <redb|jsonl>] rpc
+rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <redb|jsonl>] [--state-root <path>] [--context-root <path>] [--user-config-root <path>]
 ```
 
 - `--realm`: explicit sharing/isolation key

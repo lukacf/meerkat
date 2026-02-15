@@ -19,7 +19,6 @@ rkat [--realm <id>] [--instance <id>] [--realm-backend <redb|jsonl>] <command> .
 | `resume` | Continue an existing session |
 | `sessions list/show/delete` | Inspect or remove sessions in active realm |
 | `config get/set/patch` | Read or mutate realm config |
-| `rpc` | Start JSON-RPC stdio server |
 | `mcp ...` | Manage MCP server config |
 | `capabilities` | Show resolved runtime capabilities |
 
@@ -28,14 +27,14 @@ rkat [--realm <id>] [--instance <id>] [--realm-backend <redb|jsonl>] <command> .
 | Command surface | Default without `--realm` |
 |----------------|----------------------------|
 | `run`, `resume`, `sessions ...` | Workspace-derived stable realm (`ws-...`) |
-| `rpc` | New opaque realm (`realm-...`) |
+| `rkat-rpc` | New opaque realm (`realm-...`) |
 
 To share state between CLI and RPC, use the same explicit realm:
 
 ```bash
 rkat --realm team-alpha run "Plan release"
 rkat --realm team-alpha sessions list
-rkat --realm team-alpha rpc
+rkat-rpc --realm team-alpha
 ```
 
 ## run
@@ -97,10 +96,10 @@ rkat config patch --json '{"budget":{"max_tokens":50000}}'
 
 Config operations are realm-scoped.
 
-## rpc
+## rkat-rpc
 
 ```bash
-rkat rpc
+rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <redb|jsonl>] [--state-root <path>] [--context-root <path>] [--user-config-root <path>]
 ```
 
 Starts JSON-RPC 2.0 over stdio.
@@ -108,7 +107,7 @@ Starts JSON-RPC 2.0 over stdio.
 Pass `--realm` when you want deterministic shared state with other surfaces or processes:
 
 ```bash
-rkat --realm team-alpha rpc
+rkat-rpc --realm team-alpha
 ```
 
 ## mcp

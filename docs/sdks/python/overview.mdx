@@ -4,7 +4,7 @@ description: "Getting started with the Meerkat Python SDK: sessions, turns, even
 icon: "python"
 ---
 
-The Python SDK (`meerkat-sdk`) lets you manage sessions, run agent turns, stream events, and query capabilities from Python. It communicates with a local `rkat rpc` subprocess over JSON-RPC 2.0 and can scope that process to an explicit realm.
+The Python SDK (`meerkat-sdk`) lets you manage sessions, run agent turns, stream events, and query capabilities from Python. It communicates with a local `rkat-rpc` subprocess over JSON-RPC 2.0 and can scope that process to an explicit realm.
 
 - **Python:** `>=3.10`
 - **Dependencies:** zero runtime dependencies
@@ -23,12 +23,12 @@ The Python SDK (`meerkat-sdk`) lets you manage sessions, run agent turns, stream
     ```
     </CodeGroup>
   </Step>
-  <Step title="Install the rkat binary">
-    The SDK spawns `rkat rpc` as a subprocess. Build it from source:
+  <Step title="Install the RPC binary">
+    The SDK spawns `rkat-rpc` as a subprocess. Build it from source:
 
     ```bash
-    cargo build -p meerkat-cli --release
-    # Binary is at target/release/rkat
+    cargo build -p meerkat-rpc --release
+    # Binary is at target/release/rkat-rpc
     ```
   </Step>
   <Step title="Connect and run">
@@ -57,10 +57,10 @@ The Python SDK (`meerkat-sdk`) lets you manage sessions, run agent turns, stream
 </Steps>
 
 <Tip>
-If the `rkat` binary is not on `PATH`, pass its location explicitly:
+If `rkat-rpc` is not on `PATH`, pass its location explicitly:
 
 ```python
-client = MeerkatClient(rkat_path="/path/to/rkat")
+client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 ```
 </Tip>
 
@@ -70,7 +70,7 @@ client = MeerkatClient(rkat_path="/path/to/rkat")
 
 | Method | Description |
 |--------|-------------|
-| `connect(realm_id?, instance_id?, realm_backend?)` | Spawn `rkat rpc`, handshake, fetch capabilities |
+| `connect(realm_id?, instance_id?, realm_backend?)` | Spawn `rkat-rpc`, handshake, fetch capabilities |
 | `close()` | Terminate the subprocess |
 | `create_session(prompt, ...)` | Create a session and run the first turn |
 | `start_turn(session_id, prompt)` | Continue an existing session |
@@ -93,7 +93,7 @@ client = MeerkatClient(rkat_path="/path/to/rkat")
 ### Constructor
 
 ```python
-MeerkatClient(rkat_path: str = "rkat")
+MeerkatClient(rkat_path: str = "rkat-rpc")
 ```
 
 Raises `MeerkatError` (code `"BINARY_NOT_FOUND"`) if the binary is not found.
@@ -109,7 +109,7 @@ async def connect(
 ) -> MeerkatClient
 ```
 
-Starts the `rkat rpc` subprocess, performs the `initialize` handshake, checks contract version compatibility, and fetches capabilities. Returns `self` for chaining.
+Starts the `rkat-rpc` subprocess, performs the `initialize` handshake, checks contract version compatibility, and fetches capabilities. Returns `self` for chaining.
 
 If `realm_id` is omitted, each SDK process gets an isolated default RPC realm. Reuse `realm_id` to share config and sessions across SDK/CLI/REST/MCP surfaces.
 

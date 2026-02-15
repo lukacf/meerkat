@@ -1,13 +1,13 @@
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.3.1
+Contract version: 0.3.2
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
-CONTRACT_VERSION = "0.3.1"
+CONTRACT_VERSION = "0.3.2"
 
 
 @dataclass
@@ -68,3 +68,4 @@ class SkillsParams:
     """Skills parameters (available because skills capability is compiled)."""
     skills_enabled: bool = False
     skill_references: list = field(default_factory=list)
+

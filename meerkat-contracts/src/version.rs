@@ -22,7 +22,7 @@ impl ContractVersion {
     pub const CURRENT: Self = Self {
         major: 0,
         minor: 3,
-        patch: 1,
+        patch: 2,
     };
 
     /// Check compatibility: same major version (for 1.0+), or same major+minor (for 0.x).
@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        assert_eq!(ContractVersion::CURRENT.to_string(), "0.3.1");
+        assert_eq!(ContractVersion::CURRENT.to_string(), "0.3.2");
     }
 
     #[test]

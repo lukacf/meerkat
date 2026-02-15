@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncWriteExt;
+use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Persistent backend for a realm.
@@ -63,9 +65,9 @@ pub fn sanitize_realm_id(realm_id: &str) -> String {
         .collect()
 }
 
-pub fn realm_paths(realm_id: &str) -> RealmPaths {
+pub fn realm_paths_in(realms_root: &Path, realm_id: &str) -> RealmPaths {
     let safe = sanitize_realm_id(realm_id);
-    let root = default_realms_root().join(safe);
+    let root = realms_root.join(safe);
     RealmPaths {
         manifest_path: root.join("realm_manifest.json"),
         config_path: root.join("config.toml"),
@@ -75,26 +77,27 @@ pub fn realm_paths(realm_id: &str) -> RealmPaths {
     }
 }
 
+pub fn realm_paths(realm_id: &str) -> RealmPaths {
+    realm_paths_in(&default_realms_root(), realm_id)
+}
+
 pub async fn ensure_realm_manifest(
     realm_id: &str,
     backend_hint: Option<RealmBackend>,
 ) -> Result<RealmManifest, StoreError> {
-    let paths = realm_paths(realm_id);
-    if tokio::fs::try_exists(&paths.manifest_path)
-        .await
-        .map_err(StoreError::Io)?
-    {
-        let bytes = tokio::fs::read(&paths.manifest_path)
-            .await
-            .map_err(StoreError::Io)?;
-        let manifest: RealmManifest =
-            serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-        return Ok(manifest);
-    }
+    ensure_realm_manifest_in(&default_realms_root(), realm_id, backend_hint).await
+}
 
+pub async fn ensure_realm_manifest_in(
+    realms_root: &Path,
+    realm_id: &str,
+    backend_hint: Option<RealmBackend>,
+) -> Result<RealmManifest, StoreError> {
+    let paths = realm_paths_in(realms_root, realm_id);
     tokio::fs::create_dir_all(&paths.root)
         .await
         .map_err(StoreError::Io)?;
+
     let manifest = RealmManifest {
         realm_id: realm_id.to_string(),
         backend: backend_hint.unwrap_or({
@@ -113,19 +116,67 @@ pub async fn ensure_realm_manifest(
             .as_secs()
             .to_string(),
     };
+
     let payload = serde_json::to_vec_pretty(&manifest).map_err(StoreError::Serialization)?;
-    tokio::fs::write(&paths.manifest_path, payload)
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&paths.manifest_path)
         .await
-        .map_err(StoreError::Io)?;
-    Ok(manifest)
+    {
+        Ok(mut file) => {
+            if let Err(err) = file.write_all(&payload).await {
+                let _ = tokio::fs::remove_file(&paths.manifest_path).await;
+                return Err(StoreError::Io(err));
+            }
+            if let Err(err) = file.sync_all().await {
+                let _ = tokio::fs::remove_file(&paths.manifest_path).await;
+                return Err(StoreError::Io(err));
+            }
+            Ok(manifest)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_existing_manifest(&paths.manifest_path).await
+        }
+        Err(err) => Err(StoreError::Io(err)),
+    }
+}
+
+async fn read_existing_manifest(path: &Path) -> Result<RealmManifest, StoreError> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match tokio::fs::read(path).await {
+            Ok(bytes) => match serde_json::from_slice::<RealmManifest>(&bytes) {
+                Ok(manifest) => return Ok(manifest),
+                Err(_err) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+                Err(err) => return Err(StoreError::Serialization(err)),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+            Err(err) => return Err(StoreError::Io(err)),
+        }
+    }
 }
 
 pub async fn open_realm_session_store(
     realm_id: &str,
     backend_hint: Option<RealmBackend>,
 ) -> Result<(RealmManifest, Arc<dyn SessionStore>), StoreError> {
-    let manifest = ensure_realm_manifest(realm_id, backend_hint).await?;
-    let paths = realm_paths(realm_id);
+    open_realm_session_store_in(&default_realms_root(), realm_id, backend_hint).await
+}
+
+pub async fn open_realm_session_store_in(
+    realms_root: &Path,
+    realm_id: &str,
+    backend_hint: Option<RealmBackend>,
+) -> Result<(RealmManifest, Arc<dyn SessionStore>), StoreError> {
+    let manifest = ensure_realm_manifest_in(realms_root, realm_id, backend_hint).await?;
+    let paths = realm_paths_in(realms_root, realm_id);
     let store: Arc<dyn SessionStore> = match manifest.backend {
         #[cfg(feature = "jsonl")]
         RealmBackend::Jsonl => Arc::new(JsonlStore::new(paths.sessions_jsonl_dir)),
@@ -139,7 +190,7 @@ pub async fn open_realm_session_store(
     Ok((manifest, store))
 }
 
-pub fn fvn1a64_hex(input: &str) -> String {
+pub fn fnv1a64_hex(input: &str) -> String {
     const OFFSET: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x100000001b3;
     let mut hash = OFFSET;
@@ -153,9 +204,63 @@ pub fn fvn1a64_hex(input: &str) -> String {
 pub fn derive_workspace_realm_id(path: &Path) -> String {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let key = canonical.to_string_lossy();
-    format!("ws-{}", fvn1a64_hex(&key))
+    format!("ws-{}", fnv1a64_hex(&key))
 }
 
 pub fn generate_realm_id() -> String {
     format!("realm-{}", Uuid::now_v7())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ensure_realm_manifest_concurrent_create_is_consistent() {
+        let temp = tempfile::tempdir().unwrap();
+        let realms_root = temp.path().join("realms");
+        let realm_id = "race-test";
+
+        let mut handles = Vec::new();
+        for idx in 0..32 {
+            let root = realms_root.clone();
+            handles.push(tokio::spawn(async move {
+                let backend_hint = if idx % 2 == 0 {
+                    Some(RealmBackend::Redb)
+                } else {
+                    #[cfg(feature = "jsonl")]
+                    {
+                        Some(RealmBackend::Jsonl)
+                    }
+                    #[cfg(not(feature = "jsonl"))]
+                    {
+                        Some(RealmBackend::Redb)
+                    }
+                };
+                ensure_realm_manifest_in(&root, realm_id, backend_hint)
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let mut manifests = Vec::new();
+        for handle in handles {
+            manifests.push(handle.await.unwrap());
+        }
+
+        let first_backend = manifests[0].backend;
+        for manifest in manifests {
+            assert_eq!(manifest.realm_id, realm_id);
+            assert_eq!(manifest.backend, first_backend);
+        }
+
+        let on_disk =
+            tokio::fs::read_to_string(realm_paths_in(&realms_root, realm_id).manifest_path)
+                .await
+                .unwrap();
+        let parsed: RealmManifest = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(parsed.realm_id, realm_id);
+        assert_eq!(parsed.backend, first_backend);
+    }
 }

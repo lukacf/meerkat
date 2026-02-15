@@ -20,7 +20,8 @@ pub use error::StoreError;
 pub use index::SessionIndex;
 pub use realm::{
     RealmBackend, RealmManifest, RealmPaths, derive_workspace_realm_id, ensure_realm_manifest,
-    generate_realm_id, open_realm_session_store, realm_paths, sanitize_realm_id,
+    ensure_realm_manifest_in, fnv1a64_hex, generate_realm_id, open_realm_session_store,
+    open_realm_session_store_in, realm_paths, realm_paths_in, sanitize_realm_id,
 };
 pub use redb_store::RedbSessionStore;
 

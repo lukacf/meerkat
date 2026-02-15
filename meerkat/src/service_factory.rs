@@ -205,39 +205,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         req: &CreateSessionRequest,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<FactoryAgent, SessionError> {
-        let mut build_config = AgentBuildConfig::new(req.model.clone());
-        build_config.system_prompt = req.system_prompt.clone();
-        build_config.max_tokens = req.max_tokens;
-        build_config.host_mode = req.host_mode;
-        if let Some(build) = &req.build {
-            build_config.provider = build.provider;
-            build_config.output_schema = build.output_schema.clone();
-            build_config.structured_output_retries = build.structured_output_retries;
-            build_config.hooks_override = build.hooks_override.clone();
-            build_config.comms_name = build.comms_name.clone();
-            build_config.peer_meta = build.peer_meta.clone();
-            build_config.resume_session = build.resume_session.clone();
-            build_config.budget_limits = build.budget_limits.clone();
-            build_config.provider_params = build.provider_params.clone();
-            build_config.external_tools = build.external_tools.clone();
-            if let Some(any_client) = &build.llm_client_override {
-                if let Some(client) = any_client.as_ref().downcast_ref::<Arc<dyn LlmClient>>() {
-                    build_config.llm_client_override = Some(client.clone());
-                }
-            }
-            build_config.override_builtins = build.override_builtins;
-            build_config.override_shell = build.override_shell;
-            build_config.override_subagents = build.override_subagents;
-            build_config.override_memory = build.override_memory;
-            build_config.preload_skills = build.preload_skills.clone();
-            build_config.realm_id = build.realm_id.clone();
-            build_config.instance_id = build.instance_id.clone();
-            build_config.backend = build.backend.clone();
-            build_config.config_generation = build.config_generation;
-        }
-
-        // Wire the event channel.
-        build_config.event_tx = Some(event_tx);
+        let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx);
 
         // Inject default LLM client if none provided.
         if build_config.llm_client_override.is_none() {
@@ -292,10 +260,20 @@ mod tests {
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
     use meerkat_core::Config;
     use meerkat_core::comms::{InputSource, InputStreamMode};
+    use meerkat_core::service::SessionBuildOptions;
+    use meerkat_session::ephemeral::SessionAgent;
     use std::pin::Pin;
     use tempfile::TempDir;
 
-    struct MockLlmClient;
+    struct MockLlmClient {
+        delta: &'static str,
+    }
+
+    impl Default for MockLlmClient {
+        fn default() -> Self {
+            Self { delta: "ok" }
+        }
+    }
 
     #[async_trait]
     impl LlmClient for MockLlmClient {
@@ -307,7 +285,7 @@ mod tests {
         > {
             Box::pin(stream::iter(vec![
                 Ok(LlmEvent::TextDelta {
-                    delta: "ok".to_string(),
+                    delta: self.delta.to_string(),
                     meta: None,
                 }),
                 Ok(LlmEvent::Done {
@@ -332,7 +310,7 @@ mod tests {
         mut build_config: AgentBuildConfig,
     ) -> Result<FactoryAgent, String> {
         let factory = AgentFactory::new(temp.path().join("sessions"));
-        build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+        build_config.llm_client_override = Some(Arc::new(MockLlmClient::default()));
         let agent = factory
             .build_agent(build_config, &Config::default())
             .await
@@ -425,6 +403,44 @@ mod tests {
             "comms runtime should be configured but no trusted peers are registered"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_session_llm_override_is_applied_end_to_end() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient { delta: "default" }));
+
+        let build = SessionBuildOptions {
+            llm_client_override: Some(crate::encode_llm_client_override_for_service(Arc::new(
+                MockLlmClient { delta: "override" },
+            ))),
+            ..SessionBuildOptions::default()
+        };
+        let req = CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "ignored".to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            host_mode: false,
+            skill_references: None,
+            build: Some(build),
+        };
+
+        let (build_event_tx, _build_event_rx) = mpsc::channel(8);
+        let mut agent = builder
+            .build_agent(&req, build_event_tx)
+            .await
+            .map_err(|err| format!("{err}"))?;
+
+        let (run_event_tx, _run_event_rx) = mpsc::channel(8);
+        let result = SessionAgent::run_with_events(&mut agent, "hello".to_string(), run_event_tx)
+            .await
+            .map_err(|err| format!("{err}"))?;
+        assert_eq!(result.text, "override");
         Ok(())
     }
 }

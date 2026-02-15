@@ -29,6 +29,7 @@ tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 schemars = { workspace = true }
 dirs = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 
 [features]
 default = ["comms"]

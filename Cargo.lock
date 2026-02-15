@@ -2607,6 +2607,7 @@ name = "meerkat-mcp-server"
 version = "0.3.2"
 dependencies = [
  "async-trait",
+ "clap",
  "dirs",
  "meerkat",
  "meerkat-client",
@@ -2651,6 +2652,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "clap",
  "dirs",
  "futures",
  "http-body-util",

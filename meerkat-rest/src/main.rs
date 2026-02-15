@@ -6,14 +6,47 @@
 //!
 //! - `ANTHROPIC_API_KEY`: Required API key for Anthropic
 
+use clap::{Parser, ValueEnum};
 use meerkat_core::{Config, ProviderConfig};
-use meerkat_rest::{AppState, router};
+use meerkat_rest::{AppState, RealmBootstrap, router};
+use meerkat_store::RealmBackend;
 use std::net::SocketAddr;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+#[derive(Parser, Debug)]
+#[command(name = "meerkat-rest")]
+struct Args {
+    /// Explicit realm ID. Reuse to share state across processes/surfaces.
+    #[arg(long)]
+    realm: Option<String>,
+    /// Optional instance ID for this server process.
+    #[arg(long)]
+    instance: Option<String>,
+    /// Realm backend when creating a new realm.
+    #[arg(long, value_enum)]
+    realm_backend: Option<RealmBackendArg>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RealmBackendArg {
+    Jsonl,
+    Redb,
+}
+
+impl From<RealmBackendArg> for RealmBackend {
+    fn from(value: RealmBackendArg) -> Self {
+        match value {
+            RealmBackendArg::Jsonl => RealmBackend::Jsonl,
+            RealmBackendArg::Redb => RealmBackend::Redb,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
@@ -24,7 +57,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Build app state
-    let state = AppState::load().await?;
+    let state = AppState::load_with_bootstrap(RealmBootstrap {
+        realm_id: args.realm,
+        instance_id: args.instance,
+        backend_hint: args.realm_backend.map(Into::into),
+    })
+    .await?;
     tracing::info!(
         store_path = %state.store_path.display(),
         default_model = %state.default_model,

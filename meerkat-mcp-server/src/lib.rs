@@ -14,8 +14,8 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionError, SessionService, StartTurnRequest,
 };
 use meerkat_core::{
-    AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
-    Session, ToolCallView, format_verbose_event,
+    AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigStore, FileConfigStore,
+    HookRunOverrides, Provider, Session, ToolCallView, format_verbose_event,
 };
 use meerkat_tools::find_project_root;
 use schemars::JsonSchema;
@@ -24,6 +24,13 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+#[derive(Debug, Clone, Default)]
+pub struct RealmBootstrap {
+    pub realm_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub backend_hint: Option<meerkat_store::RealmBackend>,
+}
 
 /// Tool definition provided by the MCP client
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -154,8 +161,8 @@ fn resolve_project_root() -> PathBuf {
     find_project_root(&cwd).unwrap_or(cwd)
 }
 
-async fn load_config_async() -> Config {
-    let store = match realm_config_store().await {
+async fn load_config_async(bootstrap: &RealmBootstrap) -> Config {
+    let store = match realm_config_store(bootstrap).await {
         Ok(store) => store,
         Err(_) => {
             Arc::new(FileConfigStore::project(resolve_project_root())) as Arc<dyn ConfigStore>
@@ -170,24 +177,17 @@ fn resolve_host_mode(requested: bool) -> Result<bool, String> {
     meerkat::surface::resolve_host_mode(requested)
 }
 
-fn resolve_realm_id() -> String {
-    std::env::var("RKAT_REALM_ID").unwrap_or_else(|_| meerkat_store::generate_realm_id())
-}
-
-fn resolve_backend_hint() -> Option<meerkat_store::RealmBackend> {
-    match std::env::var("RKAT_REALM_BACKEND")
-        .unwrap_or_else(|_| String::new())
-        .as_str()
-    {
-        "redb" => Some(meerkat_store::RealmBackend::Redb),
-        "jsonl" => Some(meerkat_store::RealmBackend::Jsonl),
-        _ => Some(meerkat_store::RealmBackend::Redb),
-    }
+fn resolve_realm_id(bootstrap: &RealmBootstrap) -> String {
+    bootstrap
+        .realm_id
+        .clone()
+        .unwrap_or_else(meerkat_store::generate_realm_id)
 }
 
 fn tagged_realm_config_store(
     realm_id: &str,
     backend: meerkat_store::RealmBackend,
+    instance_id: Option<&str>,
 ) -> Arc<dyn ConfigStore> {
     let paths = meerkat_store::realm_paths(realm_id);
     let base: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(paths.config_path.clone()));
@@ -195,7 +195,7 @@ fn tagged_realm_config_store(
         base,
         meerkat_core::ConfigStoreMetadata {
             realm_id: Some(realm_id.to_string()),
-            instance_id: std::env::var("RKAT_INSTANCE_ID").ok(),
+            instance_id: instance_id.map(ToOwned::to_owned),
             backend: Some(backend.as_str().to_string()),
             resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
                 root: paths.root.display().to_string(),
@@ -209,12 +209,21 @@ fn tagged_realm_config_store(
     Arc::new(tagged)
 }
 
-async fn realm_config_store() -> Result<Arc<dyn ConfigStore>, String> {
-    let realm_id = resolve_realm_id();
-    let (manifest, _) = meerkat_store::open_realm_session_store(&realm_id, resolve_backend_hint())
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(tagged_realm_config_store(&realm_id, manifest.backend))
+async fn realm_config_store(bootstrap: &RealmBootstrap) -> Result<Arc<dyn ConfigStore>, String> {
+    let realm_id = resolve_realm_id(bootstrap);
+    let (manifest, _) = meerkat_store::open_realm_session_store(
+        &realm_id,
+        bootstrap
+            .backend_hint
+            .or(Some(meerkat_store::RealmBackend::Redb)),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(tagged_realm_config_store(
+        &realm_id,
+        manifest.backend,
+        bootstrap.instance_id.as_deref(),
+    ))
 }
 
 fn realm_store_path(realm_id: &str, backend: meerkat_store::RealmBackend) -> PathBuf {
@@ -241,14 +250,29 @@ pub struct MeerkatMcpState {
 impl MeerkatMcpState {
     /// Create a new MCP state with a session service backed by `AgentFactory`.
     pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let config = load_config_async().await;
-        let realm_id = resolve_realm_id();
-        let (manifest, session_store) =
-            meerkat_store::open_realm_session_store(&realm_id, resolve_backend_hint()).await?;
+        Self::new_with_bootstrap(RealmBootstrap::default()).await
+    }
+
+    pub async fn new_with_bootstrap(
+        bootstrap: RealmBootstrap,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let config = load_config_async(&bootstrap).await;
+        let realm_id = resolve_realm_id(&bootstrap);
+        let (manifest, session_store) = meerkat_store::open_realm_session_store(
+            &realm_id,
+            bootstrap
+                .backend_hint
+                .or(Some(meerkat_store::RealmBackend::Redb)),
+        )
+        .await?;
         let store_path = realm_store_path(&realm_id, manifest.backend);
         let realm_paths = meerkat_store::realm_paths(&realm_id);
         let project_root = resolve_project_root();
-        let config_store = tagged_realm_config_store(&realm_id, manifest.backend);
+        let config_store = tagged_realm_config_store(
+            &realm_id,
+            manifest.backend,
+            bootstrap.instance_id.as_deref(),
+        );
         let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
             Arc::clone(&config_store),
             realm_paths.root.join("config_state.json"),
@@ -269,7 +293,7 @@ impl MeerkatMcpState {
             service,
             realm_id,
             backend: manifest.backend.as_str().to_string(),
-            instance_id: std::env::var("RKAT_INSTANCE_ID").ok(),
+            instance_id: bootstrap.instance_id,
             config_runtime,
         })
     }
@@ -277,12 +301,17 @@ impl MeerkatMcpState {
     /// Test constructor that accepts an injected store (avoids opening redb at platform data dir).
     #[cfg(test)]
     pub(crate) async fn new_with_store(store: Arc<dyn SessionStore>) -> Self {
-        let config = load_config_async().await;
-        let realm_id = resolve_realm_id();
+        let bootstrap = RealmBootstrap::default();
+        let config = load_config_async(&bootstrap).await;
+        let realm_id = resolve_realm_id(&bootstrap);
         let store_path = realm_store_path(&realm_id, meerkat_store::RealmBackend::Redb);
         let realm_paths = meerkat_store::realm_paths(&realm_id);
         let project_root = resolve_project_root();
-        let config_store = tagged_realm_config_store(&realm_id, meerkat_store::RealmBackend::Redb);
+        let config_store = tagged_realm_config_store(
+            &realm_id,
+            meerkat_store::RealmBackend::Redb,
+            bootstrap.instance_id.as_deref(),
+        );
         let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
             Arc::clone(&config_store),
             realm_paths.root.join("config_state.json"),
@@ -300,7 +329,7 @@ impl MeerkatMcpState {
             service,
             realm_id,
             backend: "redb".to_string(),
-            instance_id: std::env::var("RKAT_INSTANCE_ID").ok(),
+            instance_id: bootstrap.instance_id,
             config_runtime,
         }
     }
@@ -507,13 +536,18 @@ pub async fn handle_tools_call_with_notifier(
                 .map_err(|e| format!("Invalid arguments: {}", e))?;
             handle_meerkat_config(state, input).await
         }
-        "meerkat_capabilities" => handle_meerkat_capabilities().await,
+        "meerkat_capabilities" => handle_meerkat_capabilities(state).await,
         _ => Err(format!("Unknown tool: {}", tool_name)),
     }
 }
 
-async fn handle_meerkat_capabilities() -> Result<Value, String> {
-    let config = load_config_async().await;
+async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, String> {
+    let config = state
+        .config_runtime
+        .get()
+        .await
+        .map(|snapshot| snapshot.config)
+        .unwrap_or_default();
     let response = meerkat::surface::build_capabilities_response(&config);
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
@@ -529,15 +563,7 @@ async fn handle_meerkat_config(
                 .get()
                 .await
                 .map_err(|e| e.to_string())?;
-            let metadata = snapshot.metadata;
-            Ok(json!({
-                "config": snapshot.config,
-                "generation": snapshot.generation,
-                "realm_id": metadata.as_ref().and_then(|m| m.realm_id.clone()),
-                "instance_id": metadata.as_ref().and_then(|m| m.instance_id.clone()),
-                "backend": metadata.as_ref().and_then(|m| m.backend.clone()),
-                "resolved_paths": metadata.as_ref().and_then(|m| m.resolved_paths.clone()),
-            }))
+            config_envelope_value(snapshot)
         }
         ConfigAction::Set => {
             let config = input
@@ -550,15 +576,7 @@ async fn handle_meerkat_config(
                 .set(config, input.expected_generation)
                 .await
                 .map_err(|e| e.to_string())?;
-            let metadata = snapshot.metadata;
-            Ok(json!({
-                "config": snapshot.config,
-                "generation": snapshot.generation,
-                "realm_id": metadata.as_ref().and_then(|m| m.realm_id.clone()),
-                "instance_id": metadata.as_ref().and_then(|m| m.instance_id.clone()),
-                "backend": metadata.as_ref().and_then(|m| m.backend.clone()),
-                "resolved_paths": metadata.as_ref().and_then(|m| m.resolved_paths.clone()),
-            }))
+            config_envelope_value(snapshot)
         }
         ConfigAction::Patch => {
             let patch = input
@@ -569,17 +587,13 @@ async fn handle_meerkat_config(
                 .patch(ConfigDelta(patch), input.expected_generation)
                 .await
                 .map_err(|e| e.to_string())?;
-            let metadata = snapshot.metadata;
-            Ok(json!({
-                "config": snapshot.config,
-                "generation": snapshot.generation,
-                "realm_id": metadata.as_ref().and_then(|m| m.realm_id.clone()),
-                "instance_id": metadata.as_ref().and_then(|m| m.instance_id.clone()),
-                "backend": metadata.as_ref().and_then(|m| m.backend.clone()),
-                "resolved_paths": metadata.as_ref().and_then(|m| m.resolved_paths.clone()),
-            }))
+            config_envelope_value(snapshot)
         }
     }
+}
+
+fn config_envelope_value(snapshot: meerkat_core::ConfigSnapshot) -> Result<Value, String> {
+    serde_json::to_value(ConfigEnvelope::from(snapshot)).map_err(|e| e.to_string())
 }
 
 async fn handle_meerkat_run(
@@ -596,7 +610,12 @@ async fn handle_meerkat_run(
     {
         return Err("host_mode requires comms_name".to_string());
     }
-    let config = load_config_async().await;
+    let config = state
+        .config_runtime
+        .get()
+        .await
+        .map(|snapshot| snapshot.config)
+        .unwrap_or_default();
     let model = input
         .model
         .unwrap_or_else(|| config.agent.model.to_string());
@@ -684,7 +703,12 @@ async fn handle_meerkat_resume(
     input: MeerkatResumeInput,
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
-    let config = load_config_async().await;
+    let config = state
+        .config_runtime
+        .get()
+        .await
+        .map(|snapshot| snapshot.config)
+        .unwrap_or_default();
 
     let session_id =
         meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;

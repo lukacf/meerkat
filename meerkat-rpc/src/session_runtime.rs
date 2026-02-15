@@ -17,9 +17,7 @@ use meerkat::{
 };
 use meerkat_client::LlmClient;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::service::{
-    CreateSessionRequest, SessionBuildOptions, SessionError, SessionService, StartTurnRequest,
-};
+use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_core::{Config, ConfigStore, Session};
 use tokio::sync::{RwLock, mpsc};
@@ -228,32 +226,11 @@ impl SessionRuntime {
                 None
             };
 
-            let build = SessionBuildOptions {
-                provider: build_config.provider,
-                output_schema: build_config.output_schema,
-                structured_output_retries: build_config.structured_output_retries,
-                hooks_override: build_config.hooks_override,
-                comms_name: build_config.comms_name,
-                peer_meta: build_config.peer_meta,
-                resume_session: build_config.resume_session,
-                budget_limits: build_config.budget_limits,
-                provider_params: build_config.provider_params,
-                external_tools: build_config.external_tools,
-                llm_client_override: build_config
-                    .llm_client_override
-                    .map(|client| Arc::new(client) as Arc<dyn std::any::Any + Send + Sync>),
-                override_builtins: build_config.override_builtins,
-                override_shell: build_config.override_shell,
-                override_subagents: build_config.override_subagents,
-                override_memory: build_config.override_memory,
-                preload_skills: build_config.preload_skills,
-                realm_id: build_config.realm_id.or_else(|| self.realm_id.clone()),
-                instance_id: build_config
-                    .instance_id
-                    .or_else(|| self.instance_id.clone()),
-                backend: build_config.backend.or_else(|| self.backend.clone()),
-                config_generation: build_config.config_generation.or(runtime_generation),
-            };
+            let mut build = build_config.to_session_build_options();
+            build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());
+            build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
+            build.backend = build.backend.or_else(|| self.backend.clone());
+            build.config_generation = build.config_generation.or(runtime_generation);
 
             let req = CreateSessionRequest {
                 model: build_config.model,

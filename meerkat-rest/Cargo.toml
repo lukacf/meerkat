@@ -50,6 +50,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 subtle = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 
 [features]
 default = ["comms"]

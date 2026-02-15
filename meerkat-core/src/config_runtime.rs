@@ -5,7 +5,7 @@
 //! can do optimistic concurrency control across surfaces.
 
 use crate::config::{Config, ConfigDelta, ConfigError};
-use crate::config_store::{ConfigStore, ConfigStoreMetadata};
+use crate::config_store::{ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +23,31 @@ pub struct ConfigSnapshot {
     pub config: Config,
     pub generation: u64,
     pub metadata: Option<ConfigStoreMetadata>,
+}
+
+/// Wire envelope returned by config APIs across surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigEnvelope {
+    pub config: Config,
+    pub generation: u64,
+    pub realm_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub backend: Option<String>,
+    pub resolved_paths: Option<ConfigResolvedPaths>,
+}
+
+impl From<ConfigSnapshot> for ConfigEnvelope {
+    fn from(snapshot: ConfigSnapshot) -> Self {
+        let metadata = snapshot.metadata;
+        Self {
+            config: snapshot.config,
+            generation: snapshot.generation,
+            realm_id: metadata.as_ref().and_then(|m| m.realm_id.clone()),
+            instance_id: metadata.as_ref().and_then(|m| m.instance_id.clone()),
+            backend: metadata.as_ref().and_then(|m| m.backend.clone()),
+            resolved_paths: metadata.and_then(|m| m.resolved_paths),
+        }
+    }
 }
 
 /// Errors returned by [`ConfigRuntime`].

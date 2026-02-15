@@ -1,11 +1,50 @@
 //! Stdio MCP server for Meerkat.
 
+use clap::{Parser, ValueEnum};
+use meerkat_store::RealmBackend;
 use serde_json::{Value, json};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[derive(Parser, Debug)]
+#[command(name = "meerkat-mcp-server")]
+struct Args {
+    /// Explicit realm ID. Reuse to share state across processes/surfaces.
+    #[arg(long)]
+    realm: Option<String>,
+    /// Optional instance ID for this server process.
+    #[arg(long)]
+    instance: Option<String>,
+    /// Realm backend when creating a new realm.
+    #[arg(long, value_enum)]
+    realm_backend: Option<RealmBackendArg>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RealmBackendArg {
+    Jsonl,
+    Redb,
+}
+
+impl From<RealmBackendArg> for RealmBackend {
+    fn from(value: RealmBackendArg) -> Self {
+        match value {
+            RealmBackendArg::Jsonl => RealmBackend::Jsonl,
+            RealmBackendArg::Redb => RealmBackend::Redb,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let state = meerkat_mcp_server::MeerkatMcpState::new().await?;
+    let args = Args::parse();
+    let state = meerkat_mcp_server::MeerkatMcpState::new_with_bootstrap(
+        meerkat_mcp_server::RealmBootstrap {
+            realm_id: args.realm,
+            instance_id: args.instance,
+            backend_hint: args.realm_backend.map(Into::into),
+        },
+    )
+    .await?;
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();

@@ -31,6 +31,7 @@ use futures::stream::Stream;
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
     PersistentSessionService, Session, SessionId, SessionService,
+    encode_llm_client_override_for_service,
 };
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
@@ -38,9 +39,10 @@ use meerkat_core::service::{
     StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
-    Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider, SessionTooling,
-    format_verbose_event,
+    Config, ConfigDelta, ConfigEnvelope, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
+    SessionTooling, format_verbose_event,
 };
+use meerkat_store::RealmBackend;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -72,6 +74,7 @@ pub struct AppState {
     /// Webhook authentication, resolved once at startup from RKAT_WEBHOOK_SECRET.
     pub webhook_auth: webhook::WebhookAuth,
     pub realm_id: String,
+    pub instance_id: Option<String>,
     pub backend: String,
     pub resolved_paths: meerkat_core::ConfigResolvedPaths,
     pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
@@ -89,20 +92,30 @@ impl AppState {
     }
 
     async fn load_from(instance_root: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_from_with_bootstrap(instance_root, RealmBootstrap::default()).await
+    }
+
+    pub async fn load_with_bootstrap(
+        bootstrap: RealmBootstrap,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_from_with_bootstrap(rest_instance_root(), bootstrap).await
+    }
+
+    async fn load_from_with_bootstrap(
+        instance_root: PathBuf,
+        bootstrap: RealmBootstrap,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let (event_tx, _) = broadcast::channel(256);
-        let realm_id =
-            std::env::var("RKAT_REALM_ID").unwrap_or_else(|_| meerkat_store::generate_realm_id());
-        let backend_hint = match std::env::var("RKAT_REALM_BACKEND")
-            .unwrap_or_else(|_| String::new())
-            .as_str()
-        {
-            "redb" => Some(meerkat_store::RealmBackend::Redb),
-            "jsonl" => Some(meerkat_store::RealmBackend::Jsonl),
-            _ => Some(meerkat_store::RealmBackend::Redb),
-        };
+        let realm_id = bootstrap
+            .realm_id
+            .unwrap_or_else(meerkat_store::generate_realm_id);
+        let instance_id = bootstrap.instance_id;
+        let backend_hint = bootstrap.backend_hint.or(Some(RealmBackend::Redb));
+        let realms_root = instance_root.join("realms");
         let (manifest, session_store) =
-            meerkat_store::open_realm_session_store(&realm_id, backend_hint).await?;
-        let realm_paths = meerkat_store::realm_paths(&realm_id);
+            meerkat_store::open_realm_session_store_in(&realms_root, &realm_id, backend_hint)
+                .await?;
+        let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
         let resolved_paths = meerkat_core::ConfigResolvedPaths {
             root: realm_paths.root.display().to_string(),
             manifest_path: realm_paths.manifest_path.display().to_string(),
@@ -116,7 +129,7 @@ impl AppState {
             base_config_store,
             meerkat_core::ConfigStoreMetadata {
                 realm_id: Some(realm_id.clone()),
-                instance_id: std::env::var("RKAT_INSTANCE_ID").ok(),
+                instance_id: instance_id.clone(),
                 backend: Some(manifest.backend.as_str().to_string()),
                 resolved_paths: Some(resolved_paths.clone()),
             },
@@ -172,11 +185,19 @@ impl AppState {
             session_service,
             webhook_auth: webhook::WebhookAuth::from_env(),
             realm_id,
+            instance_id,
             backend: manifest.backend.as_str().to_string(),
             resolved_paths,
             config_runtime,
         })
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RealmBootstrap {
+    pub realm_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub backend_hint: Option<RealmBackend>,
 }
 
 fn rest_instance_root() -> PathBuf {
@@ -575,15 +596,6 @@ async fn get_capabilities(
 }
 
 /// Get the current config
-#[derive(Debug, Serialize)]
-struct ConfigEnvelopeResponse {
-    config: Config,
-    generation: u64,
-    realm_id: String,
-    backend: String,
-    resolved_paths: meerkat_core::ConfigResolvedPaths,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum SetConfigRequest {
@@ -606,28 +618,20 @@ enum PatchConfigRequest {
     Direct(Value),
 }
 
-async fn get_config(
-    State(state): State<AppState>,
-) -> Result<Json<ConfigEnvelopeResponse>, ApiError> {
+async fn get_config(State(state): State<AppState>) -> Result<Json<ConfigEnvelope>, ApiError> {
     let snapshot = state
         .config_runtime
         .get()
         .await
         .map_err(config_runtime_err_to_api)?;
-    Ok(Json(ConfigEnvelopeResponse {
-        config: snapshot.config,
-        generation: snapshot.generation,
-        realm_id: state.realm_id.clone(),
-        backend: state.backend.clone(),
-        resolved_paths: state.resolved_paths.clone(),
-    }))
+    Ok(Json(snapshot.into()))
 }
 
 /// Replace the current config
 async fn set_config(
     State(state): State<AppState>,
     Json(req): Json<SetConfigRequest>,
-) -> Result<Json<ConfigEnvelopeResponse>, ApiError> {
+) -> Result<Json<ConfigEnvelope>, ApiError> {
     let (config, expected_generation) = match req {
         SetConfigRequest::Wrapped {
             config,
@@ -640,20 +644,14 @@ async fn set_config(
         .set(config, expected_generation)
         .await
         .map_err(config_runtime_err_to_api)?;
-    Ok(Json(ConfigEnvelopeResponse {
-        config: snapshot.config,
-        generation: snapshot.generation,
-        realm_id: state.realm_id.clone(),
-        backend: state.backend.clone(),
-        resolved_paths: state.resolved_paths.clone(),
-    }))
+    Ok(Json(snapshot.into()))
 }
 
 /// Patch the current config using a JSON merge patch
 async fn patch_config(
     State(state): State<AppState>,
     Json(req): Json<PatchConfigRequest>,
-) -> Result<Json<ConfigEnvelopeResponse>, ApiError> {
+) -> Result<Json<ConfigEnvelope>, ApiError> {
     let (delta, expected_generation) = match req {
         PatchConfigRequest::Wrapped {
             patch,
@@ -666,13 +664,7 @@ async fn patch_config(
         .patch(ConfigDelta(delta), expected_generation)
         .await
         .map_err(config_runtime_err_to_api)?;
-    Ok(Json(ConfigEnvelopeResponse {
-        config: snapshot.config,
-        generation: snapshot.generation,
-        realm_id: state.realm_id.clone(),
-        backend: state.backend.clone(),
-        resolved_paths: state.resolved_paths.clone(),
-    }))
+    Ok(Json(snapshot.into()))
 }
 
 fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError {
@@ -786,14 +778,14 @@ async fn create_session(
         llm_client_override: state
             .llm_client_override
             .clone()
-            .map(|client| Arc::new(client) as Arc<dyn std::any::Any + Send + Sync>),
+            .map(encode_llm_client_override_for_service),
         override_builtins: req.enable_builtins,
         override_shell: req.enable_shell,
         override_subagents: req.enable_subagents,
         override_memory: req.enable_memory,
         preload_skills: None,
         realm_id: Some(state.realm_id.clone()),
-        instance_id: std::env::var("RKAT_INSTANCE_ID").ok(),
+        instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
     };
@@ -957,7 +949,7 @@ async fn continue_session(
                 llm_client_override: state
                     .llm_client_override
                     .clone()
-                    .map(|client| Arc::new(client) as Arc<dyn std::any::Any + Send + Sync>),
+                    .map(encode_llm_client_override_for_service),
                 override_builtins: Some(tooling.builtins),
                 override_shell: Some(tooling.shell),
                 override_subagents: Some(tooling.subagents),
@@ -974,7 +966,7 @@ async fn continue_session(
                 instance_id: stored_metadata
                     .as_ref()
                     .and_then(|m| m.instance_id.clone())
-                    .or_else(|| std::env::var("RKAT_INSTANCE_ID").ok()),
+                    .or_else(|| state.instance_id.clone()),
                 backend: stored_metadata
                     .as_ref()
                     .and_then(|m| m.backend.clone())

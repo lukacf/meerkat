@@ -2,22 +2,27 @@
 
 use std::sync::Arc;
 
+use serde_json::Value;
 use serde_json::value::RawValue;
-use serde_json::{Value, json};
 
 use meerkat_core::config::{Config, ConfigDelta};
-use meerkat_core::{ConfigRuntime, ConfigRuntimeError, ConfigSnapshot, ConfigStore};
+use meerkat_core::{
+    ConfigEnvelope, ConfigRuntime, ConfigRuntimeError, ConfigSnapshot, ConfigStore,
+};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 
 #[derive(serde::Deserialize)]
-struct ConfigSetPayload {
-    #[serde(default)]
-    config: Option<Config>,
-    #[serde(default)]
-    expected_generation: Option<u64>,
+#[serde(untagged)]
+enum ConfigSetRequest {
+    Wrapped {
+        config: Config,
+        #[serde(default)]
+        expected_generation: Option<u64>,
+    },
+    Direct(Config),
 }
 
 #[derive(serde::Deserialize)]
@@ -29,14 +34,10 @@ struct ConfigPatchPayload {
 }
 
 fn config_response_body(snapshot: ConfigSnapshot) -> Value {
-    let metadata = snapshot.metadata;
-    json!({
-        "config": snapshot.config,
-        "generation": snapshot.generation,
-        "realm_id": metadata.as_ref().and_then(|m| m.realm_id.clone()),
-        "instance_id": metadata.as_ref().and_then(|m| m.instance_id.clone()),
-        "backend": metadata.as_ref().and_then(|m| m.backend.clone()),
-        "resolved_paths": metadata.as_ref().and_then(|m| m.resolved_paths.clone()),
+    serde_json::to_value(ConfigEnvelope::from(snapshot)).unwrap_or_else(|err| {
+        serde_json::json!({
+            "error": format!("Failed to serialize config response: {err}")
+        })
     })
 }
 
@@ -96,33 +97,20 @@ pub async fn handle_set(
         Err(resp) => return resp.with_id(id),
     };
 
-    let (config, expected_generation) =
-        if let Ok(payload) = serde_json::from_value::<ConfigSetPayload>(value.clone()) {
-            match payload.config {
-                Some(config) => (config, payload.expected_generation),
-                None => match serde_json::from_value::<Config>(value) {
-                    Ok(config) => (config, None),
-                    Err(e) => {
-                        return RpcResponse::error(
-                            id,
-                            error::INVALID_PARAMS,
-                            format!("Failed to parse config payload: {e}"),
-                        );
-                    }
-                },
-            }
-        } else {
-            match serde_json::from_value::<Config>(value) {
-                Ok(config) => (config, None),
-                Err(e) => {
-                    return RpcResponse::error(
-                        id,
-                        error::INVALID_PARAMS,
-                        format!("Failed to parse config payload: {e}"),
-                    );
-                }
-            }
-        };
+    let (config, expected_generation) = match serde_json::from_value::<ConfigSetRequest>(value) {
+        Ok(ConfigSetRequest::Wrapped {
+            config,
+            expected_generation,
+        }) => (config, expected_generation),
+        Ok(ConfigSetRequest::Direct(config)) => (config, None),
+        Err(e) => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("Failed to parse config payload: {e}"),
+            );
+        }
+    };
 
     if let Some(runtime) = config_runtime(config_store) {
         match runtime.set(config, expected_generation).await {

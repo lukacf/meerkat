@@ -154,13 +154,16 @@ pub use meerkat_tools::ToolError;
 
 // AgentFactory and build_agent types
 mod factory;
-pub use factory::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent, provider_key};
+pub use factory::{
+    AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent,
+    decode_llm_client_override_from_service, encode_llm_client_override_for_service, provider_key,
+};
 
 // Factory-backed SessionService wiring
 mod service_factory;
-pub use service_factory::{FactoryAgent, FactoryAgentBuilder, build_ephemeral_service};
 #[cfg(feature = "session-store")]
 pub use service_factory::build_persistent_service;
+pub use service_factory::{FactoryAgent, FactoryAgentBuilder, build_ephemeral_service};
 
 // Session service
 pub use meerkat_core::{

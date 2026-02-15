@@ -11,6 +11,7 @@ use meerkat_client::{
     DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClient, LlmClientAdapter,
     LlmClientFactory, LlmProvider, ProviderResolver,
 };
+use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
@@ -117,6 +118,32 @@ impl SessionStore for EphemeralSessionStore {
 
 /// Type-erased agent using trait objects.
 pub type DynAgent = Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>;
+
+#[derive(Clone)]
+struct ErasedLlmClientOverride(Arc<dyn LlmClient>);
+
+/// Encode an LLM client override for transport in `SessionBuildOptions`.
+///
+/// `SessionBuildOptions` lives in `meerkat-core` and cannot depend directly on
+/// `meerkat-client`, so the override is carried as `Arc<dyn Any + Send + Sync>`.
+pub fn encode_llm_client_override_for_service(
+    client: Arc<dyn LlmClient>,
+) -> Arc<dyn std::any::Any + Send + Sync> {
+    Arc::new(ErasedLlmClientOverride(client))
+}
+
+/// Decode an LLM client override from `SessionBuildOptions`.
+///
+/// Accepts the current typed wrapper and the legacy `Arc<dyn LlmClient>` payload
+/// to preserve compatibility with older callers.
+pub fn decode_llm_client_override_from_service(
+    value: &Arc<dyn std::any::Any + Send + Sync>,
+) -> Option<Arc<dyn LlmClient>> {
+    if let Some(typed) = value.as_ref().downcast_ref::<ErasedLlmClientOverride>() {
+        return Some(typed.0.clone());
+    }
+    value.as_ref().downcast_ref::<Arc<dyn LlmClient>>().cloned()
+}
 
 /// Full configuration for building an agent via [`AgentFactory::build_agent()`].
 pub struct AgentBuildConfig {
@@ -244,6 +271,78 @@ impl AgentBuildConfig {
             instance_id: None,
             backend: None,
             config_generation: None,
+        }
+    }
+
+    /// Build config from a service `CreateSessionRequest` + event channel.
+    pub fn from_create_session_request(
+        req: &CreateSessionRequest,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Self {
+        let mut build = Self::new(req.model.clone());
+        build.system_prompt = req.system_prompt.clone();
+        build.max_tokens = req.max_tokens;
+        build.host_mode = req.host_mode;
+        if let Some(options) = &req.build {
+            build.apply_session_build_options(options);
+        }
+        build.event_tx = Some(event_tx);
+        build
+    }
+
+    /// Merge `SessionBuildOptions` into this build config.
+    pub fn apply_session_build_options(&mut self, build: &SessionBuildOptions) {
+        self.provider = build.provider;
+        self.output_schema = build.output_schema.clone();
+        self.structured_output_retries = build.structured_output_retries;
+        self.hooks_override = build.hooks_override.clone();
+        self.comms_name = build.comms_name.clone();
+        self.peer_meta = build.peer_meta.clone();
+        self.resume_session = build.resume_session.clone();
+        self.budget_limits = build.budget_limits.clone();
+        self.provider_params = build.provider_params.clone();
+        self.external_tools = build.external_tools.clone();
+        self.llm_client_override = build
+            .llm_client_override
+            .as_ref()
+            .and_then(decode_llm_client_override_from_service);
+        self.override_builtins = build.override_builtins;
+        self.override_shell = build.override_shell;
+        self.override_subagents = build.override_subagents;
+        self.override_memory = build.override_memory;
+        self.preload_skills = build.preload_skills.clone();
+        self.realm_id = build.realm_id.clone();
+        self.instance_id = build.instance_id.clone();
+        self.backend = build.backend.clone();
+        self.config_generation = build.config_generation;
+    }
+
+    /// Convert build options to the service transport representation.
+    pub fn to_session_build_options(&self) -> SessionBuildOptions {
+        SessionBuildOptions {
+            provider: self.provider,
+            output_schema: self.output_schema.clone(),
+            structured_output_retries: self.structured_output_retries,
+            hooks_override: self.hooks_override.clone(),
+            comms_name: self.comms_name.clone(),
+            peer_meta: self.peer_meta.clone(),
+            resume_session: self.resume_session.clone(),
+            budget_limits: self.budget_limits.clone(),
+            provider_params: self.provider_params.clone(),
+            external_tools: self.external_tools.clone(),
+            llm_client_override: self
+                .llm_client_override
+                .clone()
+                .map(encode_llm_client_override_for_service),
+            override_builtins: self.override_builtins,
+            override_shell: self.override_shell,
+            override_subagents: self.override_subagents,
+            override_memory: self.override_memory,
+            preload_skills: self.preload_skills.clone(),
+            realm_id: self.realm_id.clone(),
+            instance_id: self.instance_id.clone(),
+            backend: self.backend.clone(),
+            config_generation: self.config_generation,
         }
     }
 }

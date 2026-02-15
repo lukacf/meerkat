@@ -12,7 +12,8 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionQuery, SessionService,
 };
 use meerkat_core::{
-    AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, format_verbose_event,
+    AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, SessionLocator,
+    format_session_ref, format_verbose_event,
 };
 use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
 #[cfg(feature = "mcp")]
@@ -28,8 +29,7 @@ use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::types::OutputSchema;
-use meerkat_store::RealmBackend;
-use meerkat_store::RealmOrigin;
+use meerkat_store::{RealmBackend, RealmOrigin, SessionFilter};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -422,6 +422,15 @@ enum SessionCommands {
         /// Session ID to delete
         session_id: String,
     },
+
+    /// Locate a session ID across realms under explicit state roots.
+    Locate {
+        /// Session locator (<session_id> or <realm_id>:<session_id>)
+        locator: String,
+        /// Additional state roots to scan (active --state-root is always scanned).
+        #[arg(long = "extra-state-root")]
+        extra_state_roots: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -709,6 +718,10 @@ async fn main() -> anyhow::Result<ExitCode> {
             SessionCommands::List { limit } => list_sessions(limit, &cli_scope).await,
             SessionCommands::Show { id } => show_session(&id, &cli_scope).await,
             SessionCommands::Delete { session_id } => delete_session(&session_id, &cli_scope).await,
+            SessionCommands::Locate {
+                locator,
+                extra_state_roots,
+            } => locate_sessions(&locator, extra_state_roots, &cli_scope).await,
         },
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
         Commands::Mcp { command } => handle_mcp_command(command).await,
@@ -1489,6 +1502,15 @@ fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Erro
     }
 }
 
+fn resolve_scoped_session_id(input: &str, scope: &RuntimeScope) -> anyhow::Result<SessionId> {
+    SessionLocator::resolve_for_realm(input, &scope.locator.realm_id).map_err(|err| match err {
+        meerkat_core::SessionLocatorError::RealmMismatch { provided, active } => anyhow::anyhow!(
+            "Session belongs to realm '{provided}', but active realm is '{active}'. Use --realm {provided} or `rkat sessions locate {input}`."
+        ),
+        other => anyhow::anyhow!("Invalid session locator '{input}': {other}"),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_agent(
     prompt: &str,
@@ -1708,6 +1730,7 @@ async fn run_agent(
             let json = serde_json::json!({
                 "text": result.text,
                 "session_id": result.session_id.to_string(),
+                "session_ref": format_session_ref(&scope.locator.realm_id, &result.session_id),
                 "turns": result.turns,
                 "tool_calls": result.tool_calls,
                 "usage": {
@@ -1725,8 +1748,9 @@ async fn run_agent(
                 println!("{}", result.text);
             }
             eprintln!(
-                "\n[Session: {} | Turns: {} | Tokens: {} in / {} out]",
+                "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
                 result.session_id,
+                format_session_ref(&scope.locator.realm_id, &result.session_id),
                 result.turns,
                 result.usage.input_tokens,
                 result.usage.output_tokens
@@ -1754,9 +1778,8 @@ async fn resume_session(
     hooks_override: HookRunOverrides,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
-    // Parse session ID
-    let session_id = SessionId::parse(session_id)
-        .map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", session_id, e))?;
+    // Parse session locator (<session_id> or <realm_id>:<session_id>).
+    let session_id = resolve_scoped_session_id(session_id, scope)?;
 
     let (config, _config_base_dir) = load_config(scope).await?;
     let loader_service = build_cli_persistent_service(scope, config.clone()).await?;
@@ -1899,8 +1922,12 @@ async fn resume_session(
     // Output the result
     println!("{}", result.text);
     eprintln!(
-        "\n[Session: {} | Turns: {} | Tokens: {} in / {} out]",
-        result.session_id, result.turns, result.usage.input_tokens, result.usage.output_tokens
+        "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
+        result.session_id,
+        format_session_ref(&scope.locator.realm_id, &result.session_id),
+        result.turns,
+        result.usage.input_tokens,
+        result.usage.output_tokens
     );
 
     Ok(())
@@ -1956,10 +1983,10 @@ async fn list_sessions(limit: usize, scope: &RuntimeScope) -> anyhow::Result<()>
     }
 
     println!(
-        "{:<40} {:<12} {:<20} {:<20}",
-        "ID", "MESSAGES", "CREATED", "UPDATED"
+        "{:<40} {:<72} {:<12} {:<20} {:<20}",
+        "ID", "SESSION_REF", "MESSAGES", "CREATED", "UPDATED"
     );
-    println!("{}", "-".repeat(92));
+    println!("{}", "-".repeat(170));
 
     for meta in sessions {
         let created = chrono::DateTime::<chrono::Utc>::from(meta.created_at)
@@ -1970,8 +1997,12 @@ async fn list_sessions(limit: usize, scope: &RuntimeScope) -> anyhow::Result<()>
             .to_string();
 
         println!(
-            "{:<40} {:<12} {:<20} {:<20}",
-            meta.session_id, meta.message_count, created, updated
+            "{:<40} {:<72} {:<12} {:<20} {:<20}",
+            meta.session_id,
+            format_session_ref(&scope.locator.realm_id, &meta.session_id),
+            meta.message_count,
+            created,
+            updated
         );
     }
 
@@ -1980,9 +2011,8 @@ async fn list_sessions(limit: usize, scope: &RuntimeScope) -> anyhow::Result<()>
 
 /// Show session details from the realm-scoped persistent backend.
 async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
-    // Parse session ID
-    let session_id =
-        SessionId::parse(id).map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", id, e))?;
+    // Parse session locator (<session_id> or <realm_id>:<session_id>).
+    let session_id = resolve_scoped_session_id(id, scope)?;
 
     let (config, _) = load_config(scope).await?;
     let service = build_cli_persistent_service(scope, config).await?;
@@ -1994,6 +2024,10 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
 
     // Print session header
     println!("Session: {}", session_id);
+    println!(
+        "Session Ref: {}",
+        format_session_ref(&scope.locator.realm_id, &session_id)
+    );
     println!("Messages: {}", session.messages().len());
     println!("Version: {}", session.version());
     println!("{}", "=".repeat(60));
@@ -2076,9 +2110,8 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
 
 /// Delete a session from the realm-scoped persistent backend.
 async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
-    // Parse session ID
-    let session_id =
-        SessionId::parse(id).map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", id, e))?;
+    // Parse session locator (<session_id> or <realm_id>:<session_id>).
+    let session_id = resolve_scoped_session_id(id, scope)?;
 
     let (config, _) = load_config(scope).await?;
     let service = build_cli_persistent_service(scope, config).await?;
@@ -2089,7 +2122,140 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to delete session: {}", e))?;
 
     println!("Deleted session: {}", session_id);
+    println!(
+        "Session Ref: {}",
+        format_session_ref(&scope.locator.realm_id, &session_id)
+    );
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct SessionLocateMatch {
+    state_root: PathBuf,
+    realm_id: String,
+    backend: RealmBackend,
+    session_id: SessionId,
+}
+
+impl SessionLocateMatch {
+    fn session_ref(&self) -> String {
+        format_session_ref(&self.realm_id, &self.session_id)
+    }
+}
+
+/// Locate a session across realms in explicit scan roots.
+///
+/// Default scan scope is the active runtime `state_root`. Additional roots must
+/// be passed explicitly via `--extra-state-root`.
+async fn locate_sessions(
+    locator_input: &str,
+    extra_state_roots: Vec<PathBuf>,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    let mut matches = find_session_matches(locator_input, &extra_state_roots, scope).await?;
+
+    if matches.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Session '{}' was not found in the scanned state roots.",
+            locator_input
+        ));
+    }
+
+    matches.sort_by(|a, b| {
+        a.state_root
+            .cmp(&b.state_root)
+            .then_with(|| a.realm_id.cmp(&b.realm_id))
+    });
+
+    println!(
+        "{:<72} {:<40} {:<8} STATE_ROOT",
+        "SESSION_REF", "SESSION_ID", "BACKEND"
+    );
+    println!("{}", "-".repeat(160));
+    for hit in matches {
+        println!(
+            "{:<72} {:<40} {:<8} {}",
+            hit.session_ref(),
+            hit.session_id,
+            hit.backend.as_str(),
+            hit.state_root.display()
+        );
+    }
+    Ok(())
+}
+
+async fn find_session_matches(
+    locator_input: &str,
+    extra_state_roots: &[PathBuf],
+    scope: &RuntimeScope,
+) -> anyhow::Result<Vec<SessionLocateMatch>> {
+    let locator = SessionLocator::parse(locator_input)
+        .map_err(|e| anyhow::anyhow!("Invalid session locator '{locator_input}': {e}"))?;
+
+    let mut scan_roots = vec![scope.locator.state_root.clone()];
+    for root in extra_state_roots {
+        if !scan_roots.iter().any(|existing| existing == root) {
+            scan_roots.push(root.clone());
+        }
+    }
+
+    let mut matches: Vec<SessionLocateMatch> = Vec::new();
+    for root in &scan_roots {
+        let manifests = meerkat_store::list_realm_manifests_in(root)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list realms in '{}': {e}", root.display()))?;
+        for entry in manifests {
+            if let Some(target_realm) = locator.realm_id.as_deref() {
+                if entry.manifest.realm_id != target_realm {
+                    continue;
+                }
+            }
+
+            let store = meerkat_store::open_realm_session_store_in(
+                root,
+                &entry.manifest.realm_id,
+                Some(entry.manifest.backend),
+                None,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to open realm '{}' in '{}': {e}",
+                    entry.manifest.realm_id,
+                    root.display()
+                )
+            })?
+            .1;
+
+            let found = store
+                .list(SessionFilter::default())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to list sessions in realm '{}' ({}): {e}",
+                        entry.manifest.realm_id,
+                        root.display()
+                    )
+                })?
+                .into_iter()
+                .any(|meta| meta.id == locator.session_id);
+            if found {
+                matches.push(SessionLocateMatch {
+                    state_root: root.clone(),
+                    realm_id: entry.manifest.realm_id,
+                    backend: entry.manifest.backend,
+                    session_id: locator.session_id.clone(),
+                });
+            }
+        }
+    }
+
+    matches.sort_by(|a, b| {
+        a.state_root
+            .cmp(&b.state_root)
+            .then_with(|| a.realm_id.cmp(&b.realm_id))
+    });
+    Ok(matches)
 }
 
 /// Handle MCP subcommands
@@ -2231,6 +2397,20 @@ mod tests {
 
     fn hooks_override_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/hooks/run_override.json")
+    }
+
+    fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {
+        RuntimeScope {
+            locator: RealmLocator {
+                state_root,
+                realm_id: realm_id.to_string(),
+            },
+            instance_id: None,
+            backend_hint: Some(RealmBackend::Redb),
+            origin_hint: RealmOrigin::Explicit,
+            context_root: None,
+            user_config_root: None,
+        }
     }
 
     #[cfg(not(feature = "comms"))]
@@ -2765,5 +2945,55 @@ mod tests {
 
         let restore = std::fs::Permissions::from_mode(0o755);
         let _ = std::fs::set_permissions(&state_root, restore);
+    }
+
+    #[test]
+    fn test_resolve_scoped_session_id_accepts_session_ref_in_active_realm() {
+        let sid = SessionId::new();
+        let scope = test_scope(PathBuf::from("/tmp/realms"), "team-alpha");
+        let resolved = resolve_scoped_session_id(&format!("team-alpha:{}", sid), &scope)
+            .expect("session_ref in active realm should resolve");
+        assert_eq!(resolved, sid);
+    }
+
+    #[test]
+    fn test_resolve_scoped_session_id_rejects_realm_mismatch() {
+        let sid = SessionId::new();
+        let scope = test_scope(PathBuf::from("/tmp/realms"), "team-alpha");
+        let err = resolve_scoped_session_id(&format!("other-realm:{}", sid), &scope)
+            .expect_err("mismatched realm should fail");
+        assert!(err.to_string().contains("active realm is 'team-alpha'"));
+    }
+
+    #[tokio::test]
+    async fn test_find_session_matches_returns_all_matching_realms_in_scope_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let sid = SessionId::new();
+
+        for realm_id in ["realm-a", "realm-b"] {
+            let (_manifest, store) = meerkat_store::open_realm_session_store_in(
+                &state_root,
+                realm_id,
+                Some(RealmBackend::Redb),
+                Some(RealmOrigin::Explicit),
+            )
+            .await
+            .expect("open store");
+            store
+                .save(&Session::with_id(sid.clone()))
+                .await
+                .expect("save session");
+        }
+
+        let scope = test_scope(state_root.clone(), "realm-a");
+        let matches = find_session_matches(&sid.to_string(), &[], &scope)
+            .await
+            .expect("find matches");
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].state_root, state_root);
+        assert_eq!(matches[1].state_root, state_root);
+        assert_eq!(matches[0].session_id, sid);
+        assert_eq!(matches[1].session_id, sid);
     }
 }

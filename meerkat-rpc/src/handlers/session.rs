@@ -8,7 +8,7 @@ use meerkat::AgentBuildConfig;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::{HookRunOverrides, OutputSchema, Provider};
 
-use super::{RpcResponseExt, parse_params};
+use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
@@ -109,6 +109,8 @@ pub struct ListSessionsResult {
 #[derive(Debug, Serialize)]
 pub struct SessionInfoResult {
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
     pub state: String,
 }
 
@@ -116,6 +118,8 @@ pub struct SessionInfoResult {
 #[derive(Debug, Serialize)]
 pub struct ReadSessionResult {
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
     pub state: String,
 }
 
@@ -208,7 +212,10 @@ pub async fn handle_create(
         }
     };
 
-    let response: CreateSessionResult = result.into();
+    let mut response: CreateSessionResult = result.into();
+    response.session_ref = runtime
+        .realm_id()
+        .map(|realm| meerkat_core::format_session_ref(realm, &response.session_id));
     RpcResponse::success(id, response)
 }
 
@@ -220,6 +227,9 @@ pub async fn handle_list(id: Option<RpcId>, runtime: &SessionRuntime) -> RpcResp
             .into_iter()
             .map(|info| SessionInfoResult {
                 session_id: info.session_id.to_string(),
+                session_ref: runtime
+                    .realm_id()
+                    .map(|realm| meerkat_core::format_session_ref(realm, &info.session_id)),
                 state: info.state.as_str().to_string(),
             })
             .collect(),
@@ -238,21 +248,18 @@ pub async fn handle_read(
         Err(resp) => return resp.with_id(id),
     };
 
-    let session_id = match meerkat_core::types::SessionId::parse(&params.session_id) {
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
         Ok(sid) => sid,
-        Err(_) => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("Invalid session_id: {}", params.session_id),
-            );
-        }
+        Err(resp) => return resp,
     };
 
     match runtime.session_state(&session_id).await {
         Some(state) => {
             let result = ReadSessionResult {
                 session_id: session_id.to_string(),
+                session_ref: runtime
+                    .realm_id()
+                    .map(|realm| meerkat_core::format_session_ref(realm, &session_id)),
                 state: state.as_str().to_string(),
             };
             RpcResponse::success(id, result)
@@ -276,15 +283,9 @@ pub async fn handle_archive(
         Err(resp) => return resp.with_id(id),
     };
 
-    let session_id = match meerkat_core::types::SessionId::parse(&params.session_id) {
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
         Ok(sid) => sid,
-        Err(_) => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("Invalid session_id: {}", params.session_id),
-            );
-        }
+        Err(resp) => return resp,
     };
 
     match runtime.archive_session(&session_id).await {

@@ -18,6 +18,8 @@ use serde_json::value::RawValue;
 
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
+use crate::session_runtime::SessionRuntime;
+use meerkat_core::SessionId;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -50,3 +52,36 @@ impl RpcResponseExt for RpcResponse {
 
 /// Re-export `WireUsage` from contracts as the canonical usage type.
 pub use meerkat_contracts::WireUsage as UsageResult;
+
+/// Parse `<session_id>` or `<realm_id>:<session_id>` and enforce realm match.
+#[allow(clippy::result_large_err)]
+pub(crate) fn parse_session_id_for_runtime(
+    id: Option<RpcId>,
+    raw: &str,
+    runtime: &SessionRuntime,
+) -> Result<SessionId, RpcResponse> {
+    let locator = match meerkat_core::SessionLocator::parse(raw) {
+        Ok(locator) => locator,
+        Err(err) => {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("Invalid session_id '{}': {}", raw, err),
+            ));
+        }
+    };
+    if let Some(realm) = locator.realm_id.as_deref() {
+        if runtime.realm_id() != Some(realm) {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!(
+                    "Session locator realm '{}' does not match active runtime realm '{}'",
+                    realm,
+                    runtime.realm_id().unwrap_or("<none>")
+                ),
+            ));
+        }
+    }
+    Ok(locator.session_id)
+}

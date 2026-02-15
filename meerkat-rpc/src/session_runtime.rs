@@ -142,6 +142,11 @@ impl SessionRuntime {
         self.backend = backend;
     }
 
+    /// Active realm id for this runtime, if configured.
+    pub fn realm_id(&self) -> Option<&str> {
+        self.realm_id.as_deref()
+    }
+
     /// Attach config runtime for generation stamping.
     pub fn set_config_runtime(&mut self, runtime: Arc<meerkat_core::ConfigRuntime>) {
         self.config_runtime = Some(runtime);

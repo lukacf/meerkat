@@ -236,15 +236,13 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
-        let session_id = match SessionId::parse(&params.session_id) {
-            Ok(id) => id,
-            Err(_) => {
-                return RpcResponse::error(
-                    id,
-                    error::INVALID_PARAMS,
-                    format!("Invalid session ID: {}", params.session_id),
-                );
-            }
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
         };
 
         let comms = match self.runtime.comms_runtime(&session_id).await {

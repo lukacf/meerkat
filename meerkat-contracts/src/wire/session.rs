@@ -8,6 +8,8 @@ use meerkat_core::{SessionId, SessionInfo, SessionSummary};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireSessionInfo {
     pub session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub message_count: usize,
@@ -20,6 +22,7 @@ impl From<SessionInfo> for WireSessionInfo {
     fn from(info: SessionInfo) -> Self {
         Self {
             session_id: info.session_id,
+            session_ref: None,
             created_at: info
                 .created_at
                 .duration_since(std::time::UNIX_EPOCH)
@@ -41,6 +44,8 @@ impl From<SessionInfo> for WireSessionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireSessionSummary {
     pub session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub message_count: usize,
@@ -52,6 +57,7 @@ impl From<SessionSummary> for WireSessionSummary {
     fn from(summary: SessionSummary) -> Self {
         Self {
             session_id: summary.session_id,
+            session_ref: None,
             created_at: summary
                 .created_at
                 .duration_since(std::time::UNIX_EPOCH)

@@ -33,14 +33,14 @@ use meerkat::{
     PersistentSessionService, Session, SessionId, SessionService,
     encode_llm_client_override_for_service,
 };
-use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
     CreateSessionRequest as SvcCreateSessionRequest, SessionBuildOptions, SessionError,
     StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
-    RealmSelection, RuntimeBootstrap, SessionTooling, format_verbose_event,
+    RealmSelection, RuntimeBootstrap, SessionLocator, SessionTooling, format_session_ref,
+    format_verbose_event,
 };
 use meerkat_store::{RealmBackend, RealmOrigin};
 use serde::{Deserialize, Serialize};
@@ -351,6 +351,7 @@ pub type UsageResponse = meerkat_contracts::WireUsage;
 #[derive(Debug, Serialize)]
 pub struct SessionDetailsResponse {
     pub session_id: String,
+    pub session_ref: String,
     pub created_at: String,
     pub updated_at: String,
     pub message_count: usize,
@@ -429,8 +430,7 @@ async fn comms_send(
 ) -> Result<Json<Value>, ApiError> {
     use meerkat_core::comms::SendReceipt;
 
-    let session_id = SessionId::parse(&req.session_id)
-        .map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = resolve_session_id_for_state(&req.session_id, &state)?;
 
     let comms = state
         .session_service
@@ -555,8 +555,7 @@ async fn comms_peers(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<CommsPeersRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let session_id = SessionId::parse(&params.session_id)
-        .map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = resolve_session_id_for_state(&params.session_id, &state)?;
 
     let comms = state
         .session_service
@@ -604,8 +603,7 @@ async fn push_event(
         .map_err(|msg| ApiError::Unauthorized(msg.to_string()))?;
 
     // Validate session ID
-    let session_id =
-        SessionId::parse(&id).map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = resolve_session_id_for_state(&id, &state)?;
 
     // Get event injector for this session
     let injector = state
@@ -744,8 +742,27 @@ fn spawn_event_forwarder(
 }
 
 /// Convert a `RunResult` into a `SessionResponse` (via contracts `From` impl).
-fn run_result_to_response(result: meerkat_core::types::RunResult) -> SessionResponse {
-    result.into()
+fn run_result_to_response(
+    result: meerkat_core::types::RunResult,
+    realm_id: &str,
+) -> SessionResponse {
+    let mut response: SessionResponse = result.into();
+    response.session_ref = Some(format_session_ref(realm_id, &response.session_id));
+    response
+}
+
+fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<SessionId, ApiError> {
+    let locator = SessionLocator::parse(input)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid session locator '{input}': {e}")))?;
+    if let Some(realm) = locator.realm_id.as_deref() {
+        if realm != state.realm_id {
+            return Err(ApiError::BadRequest(format!(
+                "Session locator realm '{}' does not match active realm '{}'",
+                realm, state.realm_id
+            )));
+        }
+    }
+    Ok(locator.session_id)
 }
 
 /// Map a `SessionError` to an `ApiError`, handling `CallbackPending` specially
@@ -753,6 +770,7 @@ fn run_result_to_response(result: meerkat_core::types::RunResult) -> SessionResp
 fn session_error_to_api_result(
     err: SessionError,
     fallback_session_id: &SessionId,
+    realm_id: &str,
 ) -> Result<Json<SessionResponse>, ApiError> {
     match err {
         SessionError::Agent(ref agent_err) => {
@@ -766,6 +784,7 @@ fn session_error_to_api_result(
                 // caller can resume via continue_session.
                 return Ok(Json(SessionResponse {
                     session_id: fallback_session_id.clone(),
+                    session_ref: Some(format_session_ref(realm_id, fallback_session_id)),
                     text: "Agent is waiting for tool results".to_string(),
                     turns: 0,
                     tool_calls: 0,
@@ -849,8 +868,8 @@ async fn create_session(
     let _ = forward_task.await;
 
     match result {
-        Ok(run_result) => Ok(Json(run_result_to_response(run_result))),
-        Err(err) => session_error_to_api_result(err, &session_id),
+        Ok(run_result) => Ok(Json(run_result_to_response(run_result, &state.realm_id))),
+        Err(err) => session_error_to_api_result(err, &session_id, &state.realm_id),
     }
 }
 
@@ -859,8 +878,7 @@ async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<SessionDetailsResponse>, ApiError> {
-    let session_id =
-        SessionId::parse(&id).map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = resolve_session_id_for_state(&id, &state)?;
 
     let view = state
         .session_service
@@ -878,6 +896,7 @@ async fn get_session(
 
     Ok(Json(SessionDetailsResponse {
         session_id: view.state.session_id.to_string(),
+        session_ref: format_session_ref(&state.realm_id, &view.state.session_id),
         created_at: created_at.to_rfc3339(),
         updated_at: updated_at.to_rfc3339(),
         message_count: view.state.message_count,
@@ -891,15 +910,15 @@ async fn continue_session(
     Path(id): Path<String>,
     Json(req): Json<ContinueSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    if req.session_id != id {
+    let path_session_id = resolve_session_id_for_state(&id, &state)?;
+    let body_session_id = resolve_session_id_for_state(&req.session_id, &state)?;
+    if body_session_id != path_session_id {
         return Err(ApiError::BadRequest(format!(
             "Session ID mismatch: path={} body={}",
             id, req.session_id
         )));
     }
-
-    let session_id = SessionId::parse(&req.session_id)
-        .map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = body_session_id;
 
     // Set up event forwarding: caller channel -> broadcast
     let (caller_event_tx, caller_event_rx) = mpsc::channel::<AgentEvent>(100);
@@ -1033,7 +1052,7 @@ async fn continue_session(
                 .await
                 .map_err(|e| ApiError::Agent(format!("{e}")))
         }
-        Err(err) => return session_error_to_api_result(err, &session_id),
+        Err(err) => return session_error_to_api_result(err, &session_id, &state.realm_id),
     };
 
     // Drop the sender so the forwarder sees channel closure and can drain.
@@ -1043,7 +1062,7 @@ async fn continue_session(
     let _ = forward_task.await;
 
     match final_result {
-        Ok(run_result) => Ok(Json(run_result_to_response(run_result))),
+        Ok(run_result) => Ok(Json(run_result_to_response(run_result, &state.realm_id))),
         Err(err) => Err(err),
     }
 }
@@ -1053,8 +1072,7 @@ async fn session_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let session_id =
-        SessionId::parse(&id).map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = resolve_session_id_for_state(&id, &state)?;
 
     // load_persisted() only checks the redb store. A session on its first
     // in-progress turn (not yet persisted) will return 404. Future improvement:

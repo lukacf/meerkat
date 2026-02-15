@@ -445,6 +445,7 @@ class MeerkatClient:
         )
         return WireRunResult(
             session_id=data.get("session_id", ""),
+            session_ref=data.get("session_ref"),
             text=data.get("text", ""),
             turns=data.get("turns", 0),
             tool_calls=data.get("tool_calls", 0),

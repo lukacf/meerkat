@@ -92,7 +92,8 @@ pub use provider::Provider;
 pub use retry::RetryPolicy;
 pub use runtime_bootstrap::{
     ContextConfig, RealmConfig, RealmLocator, RealmSelection, RuntimeBootstrap,
-    RuntimeBootstrapError, default_state_root, derive_workspace_realm_id, generate_realm_id,
+    RuntimeBootstrapError, SessionLocator, SessionLocatorError, default_state_root,
+    derive_workspace_realm_id, format_session_ref, generate_realm_id,
 };
 pub use schema::{
     CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,

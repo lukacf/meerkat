@@ -6,9 +6,8 @@ use tokio::sync::mpsc;
 
 use meerkat_core::event::AgentEvent;
 
-use super::{RpcResponseExt, parse_params};
+use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
-use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
@@ -56,15 +55,9 @@ pub async fn handle_start(
         Err(resp) => return resp.with_id(id),
     };
 
-    let session_id = match meerkat_core::types::SessionId::parse(&params.session_id) {
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
         Ok(sid) => sid,
-        Err(_) => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("Invalid session_id: {}", params.session_id),
-            );
-        }
+        Err(resp) => return resp,
     };
 
     // Set up event forwarding. The spawned task exits naturally when `event_tx`
@@ -91,7 +84,10 @@ pub async fn handle_start(
         }
     };
 
-    let response: TurnResult = result.into();
+    let mut response: TurnResult = result.into();
+    response.session_ref = runtime
+        .realm_id()
+        .map(|realm| meerkat_core::format_session_ref(realm, &response.session_id));
     RpcResponse::success(id, response)
 }
 
@@ -106,15 +102,9 @@ pub async fn handle_interrupt(
         Err(resp) => return resp.with_id(id),
     };
 
-    let session_id = match meerkat_core::types::SessionId::parse(&params.session_id) {
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
         Ok(sid) => sid,
-        Err(_) => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("Invalid session_id: {}", params.session_id),
-            );
-        }
+        Err(resp) => return resp,
     };
 
     match runtime.interrupt(&session_id).await {

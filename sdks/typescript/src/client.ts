@@ -356,6 +356,8 @@ export class MeerkatClient {
     const usage = data.usage as Record<string, unknown> | undefined;
     return {
       session_id: String(data.session_id ?? ""),
+      session_ref:
+        data.session_ref == null ? undefined : String(data.session_ref),
       text: String(data.text ?? ""),
       turns: Number(data.turns ?? 0),
       tool_calls: Number(data.tool_calls ?? 0),

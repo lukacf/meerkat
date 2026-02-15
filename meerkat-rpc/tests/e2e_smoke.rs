@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use meerkat::AgentFactory;
 use meerkat_client::LlmClient;
-use meerkat_core::{Config, MemoryConfigStore};
+use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore};
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -50,10 +50,14 @@ fn spawn_test_server(
     let config = Config::default();
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
     let mut runtime = SessionRuntime::new(factory, config, 10, store);
-    runtime.default_llm_client = Some(client);
-    let runtime = Arc::new(runtime);
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(Config::default()));
+    runtime.default_llm_client = Some(client);
+    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+        Arc::clone(&config_store),
+        temp.path().join("config_state.json"),
+    )));
+    let runtime = Arc::new(runtime);
 
     // Use a larger buffer for live API tests that may stream many events
     let (server_reader, client_writer) = tokio::io::duplex(64 * 1024);

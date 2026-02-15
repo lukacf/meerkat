@@ -1122,6 +1122,11 @@ async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
 }
 
 async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
+    fn validate_realm_id(realm_id: &str) -> anyhow::Result<()> {
+        meerkat_core::runtime_bootstrap::validate_explicit_realm_id(realm_id)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     match command {
         RealmCommands::Current => {
             println!("{}", scope.locator.realm_id);
@@ -1167,6 +1172,7 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
             Ok(())
         }
         RealmCommands::Show { realm_id } => {
+            validate_realm_id(&realm_id)?;
             let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &realm_id);
             if !tokio::fs::try_exists(&paths.manifest_path)
                 .await
@@ -1198,6 +1204,7 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
             Ok(())
         }
         RealmCommands::Create { realm_id, backend } => {
+            validate_realm_id(&realm_id)?;
             let manifest = meerkat_store::ensure_realm_manifest_in(
                 &scope.locator.state_root,
                 &realm_id,
@@ -1215,6 +1222,7 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
             Ok(())
         }
         RealmCommands::Delete { realm_id, force } => {
+            validate_realm_id(&realm_id)?;
             delete_realm(&scope.locator.state_root, &realm_id, force).await
         }
         RealmCommands::Prune {

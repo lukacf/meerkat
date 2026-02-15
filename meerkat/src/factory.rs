@@ -966,6 +966,7 @@ impl AgentFactory {
                 _realm_scope_root.as_path(),
                 comms_name,
                 build_config.peer_meta.clone(),
+                // Realm ID is the comms inproc namespace boundary.
                 build_config.realm_id.clone(),
             )
             .await

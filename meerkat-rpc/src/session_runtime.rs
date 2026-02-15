@@ -152,6 +152,11 @@ impl SessionRuntime {
         self.config_runtime = Some(runtime);
     }
 
+    /// Shared config runtime used by config handlers.
+    pub fn config_runtime(&self) -> Option<Arc<meerkat_core::ConfigRuntime>> {
+        self.config_runtime.as_ref().map(Arc::clone)
+    }
+
     /// Create a new session with the given build configuration.
     ///
     /// Returns the session ID on success. The session is staged as "pending"
@@ -626,15 +631,18 @@ mod tests {
                 .await
         });
 
-        // Give the session task a moment to transition to Running
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-
-        let state = runtime.session_state(&session_id).await;
-        assert_eq!(
-            state,
-            Some(SessionState::Running),
-            "Session should be Running during a turn"
-        );
+        // Wait until the session transitions to Running.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if runtime.session_state(&session_id).await == Some(SessionState::Running) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "session did not enter running state before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
 
         // Wait for the turn to complete
         let result = turn_handle.await.unwrap().unwrap();
@@ -670,8 +678,18 @@ mod tests {
                 .await
         });
 
-        // Wait for the first turn to start running
-        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+        // Wait until the first turn is definitely running.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if runtime.session_state(&session_id).await == Some(SessionState::Running) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "session did not enter running state before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
 
         // Try to start a second turn
         let (event_tx2, _rx2) = mpsc::channel(100);

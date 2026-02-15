@@ -46,10 +46,6 @@ fn config_response_body(snapshot: ConfigSnapshot) -> Value {
     })
 }
 
-fn config_runtime(config_store: &Arc<dyn ConfigStore>) -> Option<ConfigRuntime> {
-    ConfigRuntime::from_store_metadata(Arc::clone(config_store))
-}
-
 fn runtime_error_to_response(id: Option<RpcId>, err: ConfigRuntimeError) -> RpcResponse {
     match err {
         ConfigRuntimeError::GenerationConflict { expected, current } => RpcResponse::error(
@@ -57,7 +53,7 @@ fn runtime_error_to_response(id: Option<RpcId>, err: ConfigRuntimeError) -> RpcR
             error::INVALID_PARAMS,
             format!("Generation conflict: expected {expected}, current {current}"),
         ),
-        other => RpcResponse::error(id, error::INVALID_PARAMS, other.to_string()),
+        other => RpcResponse::error(id, error::INTERNAL_ERROR, other.to_string()),
     }
 }
 
@@ -66,28 +62,21 @@ fn runtime_error_to_response(id: Option<RpcId>, err: ConfigRuntimeError) -> RpcR
 // ---------------------------------------------------------------------------
 
 /// Handle `config/get`.
-pub async fn handle_get(id: Option<RpcId>, config_store: &Arc<dyn ConfigStore>) -> RpcResponse {
-    if let Some(runtime) = config_runtime(config_store) {
-        match runtime.get().await {
-            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
-            Err(e) => runtime_error_to_response(id, e),
-        }
-    } else {
-        match config_store.get().await {
-            Ok(config) => RpcResponse::success(
-                id,
-                config_response_body(ConfigSnapshot {
-                    config,
-                    generation: 0,
-                    metadata: config_store.metadata(),
-                }),
-            ),
-            Err(e) => RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("Failed to read config: {e}"),
-            ),
-        }
+pub async fn handle_get(
+    id: Option<RpcId>,
+    _config_store: &Arc<dyn ConfigStore>,
+    config_runtime: Option<Arc<ConfigRuntime>>,
+) -> RpcResponse {
+    let Some(runtime) = config_runtime else {
+        return RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "Config runtime unavailable".to_string(),
+        );
+    };
+    match runtime.get().await {
+        Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+        Err(e) => runtime_error_to_response(id, e),
     }
 }
 
@@ -95,7 +84,8 @@ pub async fn handle_get(id: Option<RpcId>, config_store: &Arc<dyn ConfigStore>) 
 pub async fn handle_set(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    config_store: &Arc<dyn ConfigStore>,
+    _config_store: &Arc<dyn ConfigStore>,
+    config_runtime: Option<Arc<ConfigRuntime>>,
 ) -> RpcResponse {
     let value: Value = match parse_params(params) {
         Ok(v) => v,
@@ -117,27 +107,16 @@ pub async fn handle_set(
         }
     };
 
-    if let Some(runtime) = config_runtime(config_store) {
-        match runtime.set(config, expected_generation).await {
-            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
-            Err(e) => runtime_error_to_response(id, e),
-        }
-    } else {
-        match config_store.set(config.clone()).await {
-            Ok(()) => RpcResponse::success(
-                id,
-                config_response_body(ConfigSnapshot {
-                    config,
-                    generation: 0,
-                    metadata: config_store.metadata(),
-                }),
-            ),
-            Err(e) => RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("Failed to set config: {e}"),
-            ),
-        }
+    let Some(runtime) = config_runtime else {
+        return RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "Config runtime unavailable".to_string(),
+        );
+    };
+    match runtime.set(config, expected_generation).await {
+        Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+        Err(e) => runtime_error_to_response(id, e),
     }
 }
 
@@ -145,7 +124,8 @@ pub async fn handle_set(
 pub async fn handle_patch(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    config_store: &Arc<dyn ConfigStore>,
+    _config_store: &Arc<dyn ConfigStore>,
+    config_runtime: Option<Arc<ConfigRuntime>>,
 ) -> RpcResponse {
     let value: Value = match parse_params(params) {
         Ok(v) => v,
@@ -161,26 +141,15 @@ pub async fn handle_patch(
             (value, None)
         };
 
-    if let Some(runtime) = config_runtime(config_store) {
-        match runtime.patch(ConfigDelta(patch), expected_generation).await {
-            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
-            Err(e) => runtime_error_to_response(id, e),
-        }
-    } else {
-        match config_store.patch(ConfigDelta(patch)).await {
-            Ok(updated) => RpcResponse::success(
-                id,
-                config_response_body(ConfigSnapshot {
-                    config: updated,
-                    generation: 0,
-                    metadata: config_store.metadata(),
-                }),
-            ),
-            Err(e) => RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("Failed to patch config: {e}"),
-            ),
-        }
+    let Some(runtime) = config_runtime else {
+        return RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "Config runtime unavailable".to_string(),
+        );
+    };
+    match runtime.patch(ConfigDelta(patch), expected_generation).await {
+        Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+        Err(e) => runtime_error_to_response(id, e),
     }
 }

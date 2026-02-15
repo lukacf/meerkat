@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 /// Resolved paths attached to a config store context.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -183,7 +185,21 @@ impl ConfigStore for FileConfigStore {
             tokio::fs::create_dir_all(parent).await?;
         }
         let content = toml::to_string_pretty(&config).map_err(ConfigError::TomlSerialize)?;
-        tokio::fs::write(&self.path, content).await?;
+        let parent = self
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let tmp_path = parent.join(format!(".config.tmp.{}", Uuid::now_v7()));
+        let mut tmp = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .await?;
+        tmp.write_all(content.as_bytes()).await?;
+        tmp.sync_all().await?;
+        drop(tmp);
+        tokio::fs::rename(&tmp_path, &self.path).await?;
         Ok(())
     }
 

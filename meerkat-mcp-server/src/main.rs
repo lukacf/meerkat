@@ -166,14 +166,20 @@ async fn handle_request(state: &meerkat_mcp_server::MeerkatMcpState, request: &V
                     "id": id,
                     "result": result
                 }),
-                Err(message) => json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": {
-                        "code": -32603,
-                        "message": message
+                Err(err) => {
+                    let mut error = json!({
+                        "code": err.code,
+                        "message": err.message
+                    });
+                    if let Some(data) = err.data {
+                        error["data"] = data;
                     }
-                }),
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": error
+                    })
+                }
             }
         }
         _ => json!({

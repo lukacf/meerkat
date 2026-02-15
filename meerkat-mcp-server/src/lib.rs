@@ -15,8 +15,8 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore,
-    FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, Session,
-    ToolCallView, format_verbose_event,
+    ConfigRuntimeError, FileConfigStore, HookRunOverrides, Provider, RealmSelection,
+    RuntimeBootstrap, Session, ToolCallView, format_verbose_event,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -147,6 +147,55 @@ pub struct MeerkatConfigInput {
     pub patch: Option<Value>,
     #[serde(default)]
     pub expected_generation: Option<u64>,
+}
+
+/// Structured MCP tool-call error payload.
+#[derive(Debug, Clone)]
+pub struct ToolCallError {
+    pub code: i32,
+    pub message: String,
+    pub data: Option<Value>,
+}
+
+impl ToolCallError {
+    fn new(code: i32, message: impl Into<String>, data: Option<Value>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data,
+        }
+    }
+
+    fn invalid_params(message: impl Into<String>) -> Self {
+        Self::new(-32602, message, None)
+    }
+
+    fn method_not_found(message: impl Into<String>) -> Self {
+        Self::new(-32601, message, None)
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::new(-32603, message, None)
+    }
+}
+
+fn map_config_runtime_error(err: ConfigRuntimeError) -> ToolCallError {
+    match err {
+        ConfigRuntimeError::GenerationConflict { expected, current } => ToolCallError::new(
+            -32602,
+            format!("generation conflict: expected {expected}, current {current}"),
+            Some(json!({
+                "type": "generation_conflict",
+                "expected_generation": expected,
+                "current_generation": current
+            })),
+        ),
+        other => ToolCallError::new(
+            -32603,
+            other.to_string(),
+            Some(json!({ "type": "config_runtime_error" })),
+        ),
+    }
 }
 
 async fn load_config_async(
@@ -609,7 +658,7 @@ pub async fn handle_tools_call(
     state: &MeerkatMcpState,
     tool_name: &str,
     arguments: &Value,
-) -> Result<Value, String> {
+) -> Result<Value, ToolCallError> {
     handle_tools_call_with_notifier(state, tool_name, arguments, None).await
 }
 
@@ -619,25 +668,33 @@ pub async fn handle_tools_call_with_notifier(
     tool_name: &str,
     arguments: &Value,
     notifier: Option<EventNotifier>,
-) -> Result<Value, String> {
+) -> Result<Value, ToolCallError> {
     match tool_name {
         "meerkat_run" => {
             let input: MeerkatRunInput = serde_json::from_value(arguments.clone())
-                .map_err(|e| format!("Invalid arguments: {}", e))?;
-            handle_meerkat_run(state, input, notifier).await
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
+            handle_meerkat_run(state, input, notifier)
+                .await
+                .map_err(ToolCallError::internal)
         }
         "meerkat_resume" => {
             let input: MeerkatResumeInput = serde_json::from_value(arguments.clone())
-                .map_err(|e| format!("Invalid arguments: {}", e))?;
-            handle_meerkat_resume(state, input, notifier).await
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
+            handle_meerkat_resume(state, input, notifier)
+                .await
+                .map_err(ToolCallError::internal)
         }
         "meerkat_config" => {
             let input: MeerkatConfigInput = serde_json::from_value(arguments.clone())
-                .map_err(|e| format!("Invalid arguments: {}", e))?;
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
             handle_meerkat_config(state, input).await
         }
-        "meerkat_capabilities" => handle_meerkat_capabilities(state).await,
-        _ => Err(format!("Unknown tool: {}", tool_name)),
+        "meerkat_capabilities" => handle_meerkat_capabilities(state)
+            .await
+            .map_err(ToolCallError::internal),
+        _ => Err(ToolCallError::method_not_found(format!(
+            "Unknown tool: {tool_name}"
+        ))),
     }
 }
 
@@ -655,38 +712,40 @@ async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, S
 async fn handle_meerkat_config(
     state: &MeerkatMcpState,
     input: MeerkatConfigInput,
-) -> Result<Value, String> {
+) -> Result<Value, ToolCallError> {
     match input.action {
         ConfigAction::Get => {
             let snapshot = state
                 .config_runtime
                 .get()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(map_config_runtime_error)?;
             config_envelope_value(snapshot, state.expose_paths())
         }
         ConfigAction::Set => {
             let config = input
                 .config
-                .ok_or_else(|| "config is required for action=set".to_string())?;
+                .ok_or_else(|| ToolCallError::invalid_params("config is required for action=set"))?;
             let config: Config =
-                serde_json::from_value(config).map_err(|e| format!("Invalid config: {e}"))?;
+                serde_json::from_value(config).map_err(|e| {
+                    ToolCallError::invalid_params(format!("Invalid config: {e}"))
+                })?;
             let snapshot = state
                 .config_runtime
                 .set(config, input.expected_generation)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(map_config_runtime_error)?;
             config_envelope_value(snapshot, state.expose_paths())
         }
         ConfigAction::Patch => {
             let patch = input
                 .patch
-                .ok_or_else(|| "patch is required for action=patch".to_string())?;
+                .ok_or_else(|| ToolCallError::invalid_params("patch is required for action=patch"))?;
             let snapshot = state
                 .config_runtime
                 .patch(ConfigDelta(patch), input.expected_generation)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(map_config_runtime_error)?;
             config_envelope_value(snapshot, state.expose_paths())
         }
     }
@@ -695,13 +754,14 @@ async fn handle_meerkat_config(
 fn config_envelope_value(
     snapshot: meerkat_core::ConfigSnapshot,
     expose_paths: bool,
-) -> Result<Value, String> {
+) -> Result<Value, ToolCallError> {
     let policy = if expose_paths {
         ConfigEnvelopePolicy::Diagnostic
     } else {
         ConfigEnvelopePolicy::Public
     };
-    serde_json::to_value(ConfigEnvelope::from_snapshot(snapshot, policy)).map_err(|e| e.to_string())
+    serde_json::to_value(ConfigEnvelope::from_snapshot(snapshot, policy))
+        .map_err(|e| ToolCallError::internal(e.to_string()))
 }
 
 async fn handle_meerkat_run(
@@ -1101,6 +1161,20 @@ mod tests {
 
         let value = config_envelope_value(snapshot, true).expect("envelope value");
         assert!(value.get("resolved_paths").is_some());
+    }
+
+    #[test]
+    fn test_config_runtime_error_generation_conflict_is_typed() {
+        let err = map_config_runtime_error(ConfigRuntimeError::GenerationConflict {
+            expected: 2,
+            current: 5,
+        });
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("generation conflict"));
+        let data = err.data.expect("generation conflict should include data");
+        assert_eq!(data["type"], "generation_conflict");
+        assert_eq!(data["expected_generation"], 2);
+        assert_eq!(data["current_generation"], 5);
     }
 
     #[test]

@@ -3,6 +3,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import { MeerkatError } from "./generated/errors.js";
 import type {
@@ -30,6 +32,38 @@ export class MeerkatClient {
 
   constructor(rkatPath = "rkat-rpc") {
     this.rkatPath = rkatPath;
+  }
+
+  private static commandExists(command: string): boolean {
+    if (path.isAbsolute(command) || command.includes(path.sep)) {
+      return existsSync(command);
+    }
+
+    const pathEnv = process.env.PATH ?? "";
+    if (!pathEnv) return false;
+
+    const exts =
+      process.platform === "win32"
+        ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM")
+            .split(";")
+            .filter((ext: string) => ext.length > 0)
+        : [""];
+
+    for (const dir of pathEnv.split(path.delimiter)) {
+      if (!dir) continue;
+      for (const ext of exts) {
+        const candidate =
+          process.platform === "win32" &&
+          ext &&
+          !command.toLowerCase().endsWith(ext.toLowerCase())
+            ? `${command}${ext}`
+            : command;
+        if (existsSync(path.join(dir, candidate))) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   async connect(options?: {
@@ -69,10 +103,29 @@ export class MeerkatClient {
     if (options?.userConfigRoot) {
       args.push("--user-config-root", options.userConfigRoot);
     }
-    if (this.rkatPath === "rkat") {
+    let command = this.rkatPath;
+    if (this.rkatPath === "rkat-rpc") {
+      if (!MeerkatClient.commandExists("rkat-rpc")) {
+        if (MeerkatClient.commandExists("rkat")) {
+          command = "rkat";
+          args.push("rpc");
+        } else {
+          throw new MeerkatError(
+            "BINARY_NOT_FOUND",
+            "rkat-rpc binary not found on PATH. Install rkat-rpc or set rkatPath explicitly.",
+          );
+        }
+      }
+    } else if (this.rkatPath === "rkat") {
       args.push("rpc");
+    } else if (!MeerkatClient.commandExists(this.rkatPath)) {
+      throw new MeerkatError(
+        "BINARY_NOT_FOUND",
+        `rkat-rpc binary not found at '${this.rkatPath}'. Ensure it is installed and on your PATH.`,
+      );
     }
-    this.process = spawn(this.rkatPath, args, {
+
+    this.process = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
 

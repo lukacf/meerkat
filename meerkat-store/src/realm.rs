@@ -78,6 +78,9 @@ pub struct RealmPaths {
 
 pub const REALM_LEASE_HEARTBEAT_SECS: u64 = 5;
 pub const REALM_LEASE_STALE_TTL_SECS: u64 = 30;
+const MANIFEST_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
+const MANIFEST_LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
+const MANIFEST_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One active lease heartbeat record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +104,73 @@ pub struct RealmLeaseGuard {
     lease_path: PathBuf,
     stop_tx: Option<oneshot::Sender<()>>,
     join: Option<JoinHandle<()>>,
+}
+
+struct ManifestLockGuard {
+    path: PathBuf,
+}
+
+impl ManifestLockGuard {
+    async fn acquire(path: &Path, realm_id: &str) -> Result<Self, StoreError> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(StoreError::Io)?;
+        }
+
+        let deadline = Instant::now() + MANIFEST_LOCK_TIMEOUT;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(StoreError::RealmManifestLockTimeout {
+                    realm_id: realm_id.to_string(),
+                });
+            }
+
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .await
+            {
+                Ok(mut file) => {
+                    file.write_all(b"realm-manifest-lock")
+                        .await
+                        .map_err(StoreError::Io)?;
+                    file.sync_all().await.map_err(StoreError::Io)?;
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Self::is_stale(path).await? {
+                        let _ = tokio::fs::remove_file(path).await;
+                    }
+                    tokio::time::sleep(MANIFEST_LOCK_RETRY_DELAY).await;
+                }
+                Err(err) => return Err(StoreError::Io(err)),
+            }
+        }
+    }
+
+    async fn is_stale(path: &Path) -> Result<bool, StoreError> {
+        match tokio::fs::metadata(path).await {
+            Ok(metadata) => {
+                let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                let age = SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or_default();
+                Ok(age > MANIFEST_LOCK_STALE_AFTER)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(StoreError::Io(err)),
+        }
+    }
+}
+
+impl Drop for ManifestLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 impl RealmLeaseGuard {
@@ -192,15 +262,23 @@ fn now_unix_secs() -> u64 {
 
 async fn write_lease_record(path: &Path, record: &RealmLeaseRecord) -> Result<(), StoreError> {
     let payload = serde_json::to_vec_pretty(record).map_err(StoreError::Serialization)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(StoreError::Io)?;
+    let tmp_path = parent.join(format!(".lease.tmp.{}", Uuid::now_v7()));
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)
+        .create_new(true)
+        .open(&tmp_path)
         .await
         .map_err(StoreError::Io)?;
     file.write_all(&payload).await.map_err(StoreError::Io)?;
     file.sync_all().await.map_err(StoreError::Io)?;
+    drop(file);
+    tokio::fs::rename(&tmp_path, path)
+        .await
+        .map_err(StoreError::Io)?;
     Ok(())
 }
 
@@ -395,40 +473,8 @@ pub async fn ensure_realm_manifest_in(
     }
 
     let lock_path = paths.root.join(".realm_manifest.lock");
-    let acquire_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .await
-        {
-            Ok(lock_file) => {
-                let result =
-                    create_or_read_manifest_under_lock(&paths, realm_id, backend_hint, origin_hint)
-                        .await;
-                drop(lock_file);
-                let _ = tokio::fs::remove_file(&lock_path).await;
-                return result;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if tokio::fs::try_exists(&paths.manifest_path)
-                    .await
-                    .map_err(StoreError::Io)?
-                {
-                    let existing = read_existing_manifest(&paths.manifest_path).await?;
-                    validate_backend_hint(&existing, backend_hint)?;
-                    return Ok(existing);
-                }
-                if Instant::now() >= acquire_deadline {
-                    // Best-effort stale lock cleanup.
-                    let _ = tokio::fs::remove_file(&lock_path).await;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Err(err) => return Err(StoreError::Io(err)),
-        }
-    }
+    let _lock = ManifestLockGuard::acquire(&lock_path, realm_id).await?;
+    create_or_read_manifest_under_lock(&paths, realm_id, backend_hint, origin_hint).await
 }
 
 fn default_backend() -> RealmBackend {
@@ -567,9 +613,15 @@ pub async fn open_realm_session_store_in(
         RealmBackend::Jsonl => Arc::new(JsonlStore::new(paths.sessions_jsonl_dir)),
         RealmBackend::Redb => {
             if let Some(parent) = paths.sessions_redb_path.parent() {
-                std::fs::create_dir_all(parent).map_err(StoreError::Io)?;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(StoreError::Io)?;
             }
-            Arc::new(RedbSessionStore::open(&paths.sessions_redb_path)?)
+            let redb_path = paths.sessions_redb_path.clone();
+            let redb_store = tokio::task::spawn_blocking(move || RedbSessionStore::open(redb_path))
+                .await
+                .map_err(StoreError::Join)??;
+            Arc::new(redb_store)
         }
     };
     Ok((manifest, store))

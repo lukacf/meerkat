@@ -195,9 +195,28 @@ impl MethodRouter {
                 let config = self.config_store.get().await.unwrap_or_default();
                 handlers::capabilities::handle_get(id, &config)
             }
-            "config/get" => handlers::config::handle_get(id, &self.config_store).await,
-            "config/set" => handlers::config::handle_set(id, params, &self.config_store).await,
-            "config/patch" => handlers::config::handle_patch(id, params, &self.config_store).await,
+            "config/get" => {
+                handlers::config::handle_get(id, &self.config_store, self.runtime.config_runtime())
+                    .await
+            }
+            "config/set" => {
+                handlers::config::handle_set(
+                    id,
+                    params,
+                    &self.config_store,
+                    self.runtime.config_runtime(),
+                )
+                .await
+            }
+            "config/patch" => {
+                handlers::config::handle_patch(
+                    id,
+                    params,
+                    &self.config_store,
+                    self.runtime.config_runtime(),
+                )
+                .await
+            }
             _ => RpcResponse::error(
                 id,
                 error::METHOD_NOT_FOUND,
@@ -439,7 +458,7 @@ mod tests {
     use futures::stream;
     use meerkat::AgentFactory;
     use meerkat_client::{LlmClient, LlmError};
-    use meerkat_core::{Config, MemoryConfigStore, StopReason};
+    use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, StopReason};
     use serde::Serialize;
 
     use crate::protocol::RpcId;
@@ -490,10 +509,14 @@ mod tests {
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let mut runtime = SessionRuntime::new(factory, config, 10, store);
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
-        let runtime = Arc::new(runtime);
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);

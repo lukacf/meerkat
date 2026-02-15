@@ -19,10 +19,10 @@ This plan explicitly hardens cutover rules, removes all legacy public names, and
 1. No legacy public surface remains at cutover:
 
 - `event/push`
-- `send_message`
+- `send`
 - `send_request`
 - `send_response`
-- `list_peers`
+- `peers`
 
 2. No fallback aliases in any public layer:
 
@@ -293,7 +293,7 @@ Remove:
 
 Replace tools:
 
-- remove `send_message`, `send_request`, `send_response`, `list_peers`
+- remove `send`, `send_request`, `send_response`, `peers`
 - add `send`, `peers`
 
 ### REST

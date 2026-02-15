@@ -1119,8 +1119,8 @@ mod scenario_08_comms {
             .model(smoke_model())
             .max_tokens_per_turn(1024)
             .system_prompt(
-                "You are Agent A. Use send_message to talk to agent-b. \
-                 Use list_peers to see available peers.",
+                "You are Agent A. Use the comms tools `send` and `peers`. \
+                 To message agent-b, call `send` with kind `peer_message`.",
             )
             .build(llm_adapter_a, tools_a, store_adapter_a)
             .await;
@@ -1152,12 +1152,15 @@ mod scenario_08_comms {
         let (mut agent_a, mut agent_b, handle_a, handle_b, _temp_a, _temp_b) =
             create_agent_pair(&api_key).await;
 
-        // Agent A sends a message to Agent B
+        // Agent A sends a message to Agent B via comms tools.
         let result_a = agent_a
-            .run("Send a message to agent-b saying 'Smoke test ping from Agent A'".to_string())
+            .run(
+                "Use the send tool to send a peer_message to agent-b with body \
+                 exactly: Smoke test ping from Agent A"
+                    .to_string(),
+            )
             .await
             .expect("Agent A run should succeed");
-
         eprintln!(
             "[scenario 8] Agent A: tool_calls={}, text={}",
             result_a.tool_calls,
@@ -1165,7 +1168,7 @@ mod scenario_08_comms {
         );
         assert!(
             result_a.tool_calls > 0,
-            "Agent A should have made tool calls to send message"
+            "Agent A should make at least one comms tool call"
         );
 
         // Give time for message delivery
@@ -1173,7 +1176,7 @@ mod scenario_08_comms {
 
         // Agent B processes the incoming message
         let result_b = agent_b
-            .run(String::new())
+            .run("Process your inbox and acknowledge what Agent A sent.".to_string())
             .await
             .expect("Agent B inbox processing should succeed");
 

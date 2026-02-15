@@ -129,7 +129,7 @@ async fn integration_real_router_send() {
         write_envelope_async(&mut stream, &ack).await.unwrap();
     });
 
-    let result = router.send_message("test-peer", "hello".to_string()).await;
+    let result = router.send("test-peer", MessageKind::Message { body: "hello".to_string() }).await;
     assert!(result.is_ok());
     server_handle.await.unwrap();
 }
@@ -154,7 +154,7 @@ async fn integration_real_router_resolves_peer_name() {
     );
 
     let result = router
-        .send_message("unknown-peer", "hello".to_string())
+        .send("unknown-peer", MessageKind::Message { body: "hello".to_string() })
         .await;
 
     match result {
@@ -188,7 +188,7 @@ async fn integration_real_router_connects_to_peer() {
     );
 
     // No server listening - should fail with IO error
-    let result = router.send_message("test-peer", "hello".to_string()).await;
+    let result = router.send("test-peer", MessageKind::Message { body: "hello".to_string() }).await;
     assert!(matches!(result, Err(SendError::Io(_))));
 }
 
@@ -240,7 +240,7 @@ async fn integration_real_router_signs_envelope() {
         write_envelope_async(&mut stream, &ack).await.unwrap();
     });
 
-    let result = router.send_message("test-peer", "hello".to_string()).await;
+    let result = router.send("test-peer", MessageKind::Message { body: "hello".to_string() }).await;
     assert!(result.is_ok());
     server_handle.await.unwrap();
 }
@@ -289,7 +289,7 @@ async fn integration_real_router_waits_for_ack() {
         write_envelope_async(&mut stream, &ack).await.unwrap();
     });
 
-    let result = router.send_message("test-peer", "hello".to_string()).await;
+    let result = router.send("test-peer", MessageKind::Message { body: "hello".to_string() }).await;
     assert!(result.is_ok(), "Should receive ack successfully");
     server_handle.await.unwrap();
 }
@@ -327,7 +327,7 @@ async fn integration_real_router_timeout_returns_offline() {
         tokio::time::sleep(Duration::from_secs(5)).await;
     });
 
-    let result = router.send_message("test-peer", "hello".to_string()).await;
+    let result = router.send("test-peer", MessageKind::Message { body: "hello".to_string() }).await;
     assert!(matches!(result, Err(SendError::PeerOffline)));
 
     server_handle.abort();
@@ -335,7 +335,7 @@ async fn integration_real_router_timeout_returns_offline() {
 
 #[tokio::test]
 #[ignore = "integration-real: socket integration + timing behavior"]
-async fn integration_real_send_message() {
+async fn integration_real_send() {
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -387,7 +387,7 @@ async fn integration_real_send_message() {
     });
 
     let result = router
-        .send_message("test-peer", "test body".to_string())
+        .send("test-peer", MessageKind::Message { body: "test body".to_string() })
         .await;
     assert!(result.is_ok());
     server_handle.await.unwrap();
@@ -609,7 +609,7 @@ async fn integration_real_router_inproc_send() {
 
     // Send via router
     let result = router
-        .send_message("receiver-agent", "hello via inproc".to_string())
+        .send("receiver-agent", MessageKind::Message { body: "hello via inproc".to_string() })
         .await;
     assert!(result.is_ok(), "inproc send should succeed: {:?}", result);
 
@@ -662,7 +662,7 @@ async fn integration_real_router_inproc_peer_not_found() {
 
     // Send should fail - peer not in registry
     let result = router
-        .send_message("missing-agent", "hello".to_string())
+        .send("missing-agent", MessageKind::Message { body: "hello".to_string() })
         .await;
     assert!(result.is_err(), "should fail for missing inproc peer");
     assert!(

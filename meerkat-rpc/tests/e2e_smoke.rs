@@ -578,7 +578,10 @@ async fn e2e_scenario_16_kitchen_sink() {
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "config/get failed: {resp}");
-    let original_max = resp["result"]["max_tokens"].as_u64().unwrap();
+    let original_max = resp["result"]["config"]["max_tokens"]
+        .as_u64()
+        .or_else(|| resp["result"]["max_tokens"].as_u64())
+        .expect("config/get should include max_tokens");
 
     let id = next_id();
     send_request(
@@ -588,7 +591,11 @@ async fn e2e_scenario_16_kitchen_sink() {
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "config/patch failed: {resp}");
-    assert_eq!(resp["result"]["max_tokens"], original_max + 100);
+    let patched_max = resp["result"]["config"]["max_tokens"]
+        .as_u64()
+        .or_else(|| resp["result"]["max_tokens"].as_u64())
+        .expect("config/patch should include max_tokens");
+    assert_eq!(patched_max, original_max + 100);
 
     eprintln!(
         "[scenario 16] kitchen-sink test complete: tool calling + structured output + session CRUD + capabilities + config"

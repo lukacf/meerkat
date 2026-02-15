@@ -24,7 +24,6 @@ class WireUsage:
 class WireRunResult:
     """Run result from agent execution."""
     session_id: str = ''
-    session_ref: Optional[str] = None
     text: str = ''
     turns: int = 0
     tool_calls: int = 0
@@ -69,3 +68,4 @@ class SkillsParams:
     """Skills parameters (available because skills capability is compiled)."""
     skills_enabled: bool = False
     skill_references: list = field(default_factory=list)
+

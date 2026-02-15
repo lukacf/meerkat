@@ -68,12 +68,13 @@ impl AgentToolDispatcher for NoOpDispatcher {
     }
 }
 
-const COMMS_TOOL_NAMES: &[&str] = &[
-    "send_message",
-    "send_request",
-    "send_response",
-    "list_peers",
-];
+fn normalize_comms_call(name: &str, args: Value) -> Option<(&'static str, Value)> {
+    match name {
+        "send" => Some(("send", args)),
+        "peers" => Some(("peers", args)),
+        _ => None,
+    }
+}
 
 /// Canonical JSON-to-ToolDef conversion for comms tools.
 pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
@@ -98,8 +99,8 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
-        if COMMS_TOOL_NAMES.contains(&call.name) {
-            let result = handle_tools_call(&self.tool_context, call.name, &args)
+        if let Some((normalized_name, normalized_args)) = normalize_comms_call(call.name, args) {
+            let result = handle_tools_call(&self.tool_context, normalized_name, &normalized_args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
             Ok(ToolResult {
@@ -153,8 +154,8 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
-        if COMMS_TOOL_NAMES.contains(&call.name) {
-            let result = handle_tools_call(&self.tool_context, call.name, &args)
+        if let Some((normalized_name, normalized_args)) = normalize_comms_call(call.name, args) {
+            let result = handle_tools_call(&self.tool_context, normalized_name, &normalized_args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
             Ok(ToolResult {

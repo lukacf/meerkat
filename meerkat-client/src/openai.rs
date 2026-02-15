@@ -702,7 +702,27 @@ fn fallback_raw_value() -> Box<RawValue> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use axum::{Router, extract::State, response::IntoResponse, routing::post};
     use meerkat_core::UserMessage;
+    use tokio::net::TcpListener;
+
+    async fn responses_sse(State(payload): State<String>) -> impl IntoResponse {
+        ([("content-type", "text/event-stream")], payload)
+    }
+
+    async fn spawn_openai_stub_server(payload: String) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/v1/responses", post(responses_sse))
+            .with_state(payload);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{}", addr), handle)
+    }
 
     // =========================================================================
     // Responses API Request Format Tests
@@ -1322,6 +1342,39 @@ mod tests {
         assert_eq!(item["encrypted_content"], "enc_xyz");
         let summary = item["summary"].as_array().expect("summary array");
         assert_eq!(summary[0]["text"], "I need to think");
+    }
+
+    #[tokio::test]
+    async fn test_stream_does_not_duplicate_text_when_completed_replays_output() {
+        let payload = [
+            r#"data: {"type":"response.output_text.delta","delta":"Hello"}"#,
+            r#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            r#"data: {"type":"response.done","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage {
+                content: "hello".to_string(),
+            })],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut deltas = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::TextDelta { delta, .. } => deltas.push(delta),
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(deltas, vec!["Hello"]);
     }
 
     // =========================================================================

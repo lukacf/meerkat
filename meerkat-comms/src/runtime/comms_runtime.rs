@@ -1716,7 +1716,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_core_send_peer_message_unknown_peer_fails() {
+    async fn test_core_send_unknown_peer_fails() {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("sender-{suffix}")).unwrap();
 
@@ -1734,7 +1734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_core_send_peer_message_success_and_drain() {
+    async fn test_core_send_success_and_drain() {
         let suffix = Uuid::new_v4().simple().to_string();
         let sender_name = format!("sender-{suffix}");
         let receiver_name = format!("receiver-{suffix}");
@@ -1784,7 +1784,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_core_send_peer_message_fails_without_trusted_entry() {
+    async fn test_core_send_fails_without_trusted_entry() {
         let suffix = Uuid::new_v4().simple().to_string();
         let sender_name = format!("sender-ipc-{suffix}");
         let receiver_name = format!("receiver-ipc-{suffix}");
@@ -1807,7 +1807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_core_send_peer_message_succeeds_without_trusted_entry_when_auth_disabled() {
+    async fn test_core_send_succeeds_without_trusted_entry_when_auth_disabled() {
         let suffix = Uuid::new_v4().simple().to_string();
         let sender_name = format!("sender-ipc-no-auth-{suffix}");
         let receiver_name = format!("receiver-ipc-no-auth-{suffix}");

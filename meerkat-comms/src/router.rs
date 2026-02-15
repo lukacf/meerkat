@@ -245,11 +245,6 @@ impl Router {
             Ok(sent_id)
         }
     }
-
-    pub async fn send_message(&self, peer_name: &str, body: String) -> Result<Uuid, SendError> {
-        self.send(peer_name, MessageKind::Message { body }).await
-    }
-
     pub async fn send_request(
         &self,
         peer_name: &str,

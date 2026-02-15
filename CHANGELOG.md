@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 #### Comms Command Plane Redesign
-- Canonical `send` and `peers` tools replacing 4 legacy tools (`send_message`, `send_request`, `send_response`, `list_peers`)
+- Canonical `send` and `peers` tools replacing 4 legacy tools (`send`, `send_request`, `send_response`, `peers`)
   - `send`: unified command dispatch with flat `kind` discriminator for all comms operations
   - `peers`: list all visible peers
 - `comms/send` and `comms/peers` RPC methods with flat-schema validation
@@ -69,7 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Clippy fix: `.or_insert_with(Vec::new)` → `.or_default()` in `SessionProjector`
 
 ### Removed
-- 4 legacy comms tools (`send_message`, `send_request`, `send_response`, `list_peers`) -- now return "Unknown tool"
+- 4 legacy comms tools (`send`, `send_request`, `send_response`, `peers`) -- now return "Unknown tool"
 - `event/push` RPC method
 - `push_event()`/`pushEvent()` SDK methods
 - `vendor/hnsw_rs/` directory and `[patch.crates-io]` section
@@ -137,7 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `Keypair`/`PubKey`/`Signature` identity system with Ed25519
 - `TrustedPeers` trust model with peer verification
 - `Envelope` wire format with `MessageKind` variants: `Message`, `Request`, `Response`, `Ack`
-- Comms tools: `comms_send`, `comms_request`, `comms_response`, `comms_list_peers`
+- Comms tools: `comms_send`, `comms_request`, `comms_response`, `comms_peers`
 - Host mode for long-running agents that process comms messages
 
 #### Memory and Compaction

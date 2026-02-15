@@ -6,7 +6,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use meerkat_comms::{
-    CommsConfig, Inbox, Keypair, PubKey, Router, TrustedPeer, TrustedPeers, handle_connection,
+    CommsConfig, Inbox, Keypair, MessageKind, PubKey, Router, TrustedPeer, TrustedPeers,
+    handle_connection,
 };
 use serde_json::json;
 use std::path::Path;
@@ -217,7 +218,7 @@ async fn integration_real_uds_message_exchange() {
         true,
     );
     router_a
-        .send_message("peer-b", "Hello from A!".to_string())
+        .send("peer-b", MessageKind::Message { body: "Hello from A!".to_string() })
         .await
         .unwrap();
 
@@ -277,7 +278,7 @@ async fn integration_real_tcp_message_exchange() {
         true,
     );
     router_a
-        .send_message("peer-b", "Hello via TCP!".to_string())
+        .send("peer-b", MessageKind::Message { body: "Hello via TCP!".to_string() })
         .await
         .unwrap();
 
@@ -413,7 +414,7 @@ async fn integration_real_untrusted_rejected() {
         inbox_sender_a,
         true,
     );
-    let send_result = router_a.send_message("peer-b", "Hello!".to_string()).await;
+    let send_result = router_a.send("peer-b", MessageKind::Message { body: "Hello!".to_string() }).await;
 
     // The send should fail (no ack from B due to untrusted rejection)
     // Either timeout or immediate rejection
@@ -528,8 +529,8 @@ async fn integration_real_concurrent_multi_peer() {
         true,
     );
 
-    let send_b = router_a.send_message("peer-b", "Hello B!".to_string());
-    let send_c = router_a.send_message("peer-c", "Hello C!".to_string());
+    let send_b = router_a.send("peer-b", MessageKind::Message { body: "Hello B!".to_string() });
+    let send_c = router_a.send("peer-c", MessageKind::Message { body: "Hello C!".to_string() });
 
     // Both sends should succeed
     let (result_b, result_c) = tokio::join!(send_b, send_c);

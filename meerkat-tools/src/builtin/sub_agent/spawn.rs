@@ -185,7 +185,7 @@ fn child_comms_context(parent_name: &str) -> String {
         r#"
 ## Parent Communication
 Your parent agent is '{parent_name}'. To report findings or request help:
-  send_message("{parent_name}", "your message here")
+  send({{"kind":"peer_message","to":"{parent_name}","body":"your message here"}})
 
 Always report important findings to your parent. Follow instructions from your parent.
 "#,
@@ -197,7 +197,7 @@ Always report important findings to your parent. Follow instructions from your p
 #[cfg(feature = "comms")]
 fn parent_comms_instructions(child_name: &str) -> String {
     format!(
-        "To message this child: send_message(\"{child_name}\", \"your message\")",
+        "To message this child: send({{\"kind\":\"peer_message\",\"to\":\"{child_name}\",\"body\":\"your message\"}})",
         child_name = child_name
     )
 }

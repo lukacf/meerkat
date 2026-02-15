@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -74,6 +76,60 @@ pub struct RealmPaths {
     pub sessions_jsonl_dir: PathBuf,
 }
 
+pub const REALM_LEASE_HEARTBEAT_SECS: u64 = 5;
+pub const REALM_LEASE_STALE_TTL_SECS: u64 = 30;
+
+/// One active lease heartbeat record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealmLeaseRecord {
+    pub realm_id: String,
+    pub instance_id: String,
+    pub surface: String,
+    pub pid: u32,
+    pub started_at: u64,
+    pub heartbeat_at: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RealmLeaseStatus {
+    pub active: Vec<RealmLeaseRecord>,
+    pub stale: Vec<RealmLeaseRecord>,
+}
+
+pub struct RealmLeaseGuard {
+    instance_id: String,
+    lease_path: PathBuf,
+    stop_tx: Option<oneshot::Sender<()>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl RealmLeaseGuard {
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    pub fn lease_path(&self) -> &Path {
+        &self.lease_path
+    }
+
+    pub async fn shutdown(mut self) {
+        if let Some(stop) = self.stop_tx.take() {
+            let _ = stop.send(());
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.await;
+        }
+    }
+}
+
+impl Drop for RealmLeaseGuard {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop_tx.take() {
+            let _ = stop.send(());
+        }
+    }
+}
+
 fn default_realms_root() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -108,6 +164,206 @@ pub fn realm_paths_in(realms_root: &Path, realm_id: &str) -> RealmPaths {
 
 pub fn realm_paths(realm_id: &str) -> RealmPaths {
     realm_paths_in(&default_realms_root(), realm_id)
+}
+
+pub fn realm_lease_dir(paths: &RealmPaths) -> PathBuf {
+    paths.root.join("leases")
+}
+
+fn sanitize_instance_id(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+async fn write_lease_record(path: &Path, record: &RealmLeaseRecord) -> Result<(), StoreError> {
+    let payload = serde_json::to_vec_pretty(record).map_err(StoreError::Serialization)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await
+        .map_err(StoreError::Io)?;
+    file.write_all(&payload).await.map_err(StoreError::Io)?;
+    file.sync_all().await.map_err(StoreError::Io)?;
+    Ok(())
+}
+
+pub async fn start_realm_lease(
+    realm_id: &str,
+    instance_id: Option<&str>,
+    surface: &str,
+) -> Result<RealmLeaseGuard, StoreError> {
+    start_realm_lease_in(&default_realms_root(), realm_id, instance_id, surface).await
+}
+
+pub async fn start_realm_lease_in(
+    realms_root: &Path,
+    realm_id: &str,
+    instance_id: Option<&str>,
+    surface: &str,
+) -> Result<RealmLeaseGuard, StoreError> {
+    let paths = realm_paths_in(realms_root, realm_id);
+    let lease_dir = realm_lease_dir(&paths);
+    tokio::fs::create_dir_all(&lease_dir)
+        .await
+        .map_err(StoreError::Io)?;
+
+    let pid = std::process::id();
+    let resolved_instance = instance_id
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("instance-{}", Uuid::now_v7()));
+    let lease_name = format!("{}.json", sanitize_instance_id(&resolved_instance));
+    let lease_path = lease_dir.join(lease_name);
+
+    let now = now_unix_secs();
+    let mut record = RealmLeaseRecord {
+        realm_id: realm_id.to_string(),
+        instance_id: resolved_instance.clone(),
+        surface: surface.to_string(),
+        pid,
+        started_at: now,
+        heartbeat_at: now,
+    };
+    write_lease_record(&lease_path, &record).await?;
+
+    let (stop_tx, mut stop_rx) = oneshot::channel();
+    let heartbeat_path = lease_path.clone();
+    let join = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(REALM_LEASE_HEARTBEAT_SECS));
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => {
+                    break;
+                }
+                _ = interval.tick() => {
+                    record.heartbeat_at = now_unix_secs();
+                    let _ = write_lease_record(&heartbeat_path, &record).await;
+                }
+            }
+        }
+        let _ = tokio::fs::remove_file(&heartbeat_path).await;
+    });
+
+    Ok(RealmLeaseGuard {
+        instance_id: resolved_instance,
+        lease_path,
+        stop_tx: Some(stop_tx),
+        join: Some(join),
+    })
+}
+
+pub async fn inspect_realm_leases(
+    realm_id: &str,
+    cleanup_stale: bool,
+) -> Result<RealmLeaseStatus, StoreError> {
+    inspect_realm_leases_in(&default_realms_root(), realm_id, cleanup_stale).await
+}
+
+pub async fn inspect_realm_leases_in(
+    realms_root: &Path,
+    realm_id: &str,
+    cleanup_stale: bool,
+) -> Result<RealmLeaseStatus, StoreError> {
+    let paths = realm_paths_in(realms_root, realm_id);
+    let lease_dir = realm_lease_dir(&paths);
+    if !tokio::fs::try_exists(&lease_dir)
+        .await
+        .map_err(StoreError::Io)?
+    {
+        return Ok(RealmLeaseStatus::default());
+    }
+
+    let mut status = RealmLeaseStatus::default();
+    let mut entries = tokio::fs::read_dir(&lease_dir)
+        .await
+        .map_err(StoreError::Io)?;
+    let now = now_unix_secs();
+    while let Some(entry) = entries.next_entry().await.map_err(StoreError::Io)? {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => match serde_json::from_slice::<RealmLeaseRecord>(&bytes) {
+                Ok(record) => {
+                    if now.saturating_sub(record.heartbeat_at) <= REALM_LEASE_STALE_TTL_SECS {
+                        status.active.push(record);
+                    } else {
+                        status.stale.push(record);
+                        if cleanup_stale {
+                            let _ = tokio::fs::remove_file(&path).await;
+                        }
+                    }
+                }
+                Err(_) => {
+                    if cleanup_stale {
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(StoreError::Io(err)),
+        }
+    }
+    Ok(status)
+}
+
+#[derive(Debug, Clone)]
+pub struct RealmManifestEntry {
+    pub manifest: RealmManifest,
+    pub root: PathBuf,
+}
+
+pub async fn list_realm_manifests_in(
+    realms_root: &Path,
+) -> Result<Vec<RealmManifestEntry>, StoreError> {
+    if !tokio::fs::try_exists(realms_root)
+        .await
+        .map_err(StoreError::Io)?
+    {
+        return Ok(Vec::new());
+    }
+
+    let mut manifests = Vec::new();
+    let mut entries = tokio::fs::read_dir(realms_root)
+        .await
+        .map_err(StoreError::Io)?;
+    while let Some(entry) = entries.next_entry().await.map_err(StoreError::Io)? {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest_path = path.join("realm_manifest.json");
+        if !tokio::fs::try_exists(&manifest_path)
+            .await
+            .map_err(StoreError::Io)?
+        {
+            continue;
+        }
+        let manifest = read_existing_manifest(&manifest_path).await?;
+        manifests.push(RealmManifestEntry {
+            manifest,
+            root: path,
+        });
+    }
+    manifests.sort_by(|a, b| a.manifest.realm_id.cmp(&b.manifest.realm_id));
+    Ok(manifests)
 }
 
 pub async fn ensure_realm_manifest(
@@ -232,7 +488,10 @@ async fn create_or_read_manifest_under_lock(
     Ok(manifest)
 }
 
-async fn write_manifest_atomically(paths: &RealmPaths, manifest: &RealmManifest) -> Result<(), StoreError> {
+async fn write_manifest_atomically(
+    paths: &RealmPaths,
+    manifest: &RealmManifest,
+) -> Result<(), StoreError> {
     let payload = serde_json::to_vec_pretty(manifest).map_err(StoreError::Serialization)?;
     let tmp_name = format!(".realm_manifest.tmp.{}", Uuid::now_v7());
     let tmp_path = paths.root.join(tmp_name);
@@ -300,7 +559,8 @@ pub async fn open_realm_session_store_in(
     backend_hint: Option<RealmBackend>,
     origin_hint: Option<RealmOrigin>,
 ) -> Result<(RealmManifest, Arc<dyn SessionStore>), StoreError> {
-    let manifest = ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint).await?;
+    let manifest =
+        ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint).await?;
     let paths = realm_paths_in(realms_root, realm_id);
     let store: Arc<dyn SessionStore> = match manifest.backend {
         #[cfg(feature = "jsonl")]
@@ -354,9 +614,14 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let _ = idx;
                 let backend_hint = Some(RealmBackend::Redb);
-                ensure_realm_manifest_in(&root, realm_id, backend_hint, Some(RealmOrigin::Generated))
-                    .await
-                    .unwrap()
+                ensure_realm_manifest_in(
+                    &root,
+                    realm_id,
+                    backend_hint,
+                    Some(RealmOrigin::Generated),
+                )
+                .await
+                .unwrap()
             }));
         }
 
@@ -432,8 +697,13 @@ mod tests {
                         Some(RealmBackend::Redb)
                     }
                 };
-                ensure_realm_manifest_in(&root, realm_id, backend_hint, Some(RealmOrigin::Generated))
-                    .await
+                ensure_realm_manifest_in(
+                    &root,
+                    realm_id,
+                    backend_hint,
+                    Some(RealmOrigin::Generated),
+                )
+                .await
             }));
         }
 
@@ -522,10 +792,65 @@ mod tests {
                     ),
                 }
             }
-            assert!(Instant::now() < deadline, "manifest was not created before deadline");
+            assert!(
+                Instant::now() < deadline,
+                "manifest was not created before deadline"
+            );
         });
 
         create.await.unwrap();
         observe.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lease_stale_records_are_cleaned_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let realms_root = temp.path().join("realms");
+        let realm_id = "lease-stale";
+        let paths = realm_paths_in(&realms_root, realm_id);
+        let lease_dir = realm_lease_dir(&paths);
+        tokio::fs::create_dir_all(&lease_dir).await.unwrap();
+
+        let stale = RealmLeaseRecord {
+            realm_id: realm_id.to_string(),
+            instance_id: "stale-instance".to_string(),
+            surface: "rpc".to_string(),
+            pid: 1,
+            started_at: 1,
+            heartbeat_at: now_unix_secs().saturating_sub(REALM_LEASE_STALE_TTL_SECS + 1),
+        };
+        let stale_path = lease_dir.join("stale-instance.json");
+        write_lease_record(&stale_path, &stale).await.unwrap();
+
+        let status = inspect_realm_leases_in(&realms_root, realm_id, true)
+            .await
+            .unwrap();
+        assert!(status.active.is_empty());
+        assert_eq!(status.stale.len(), 1);
+        assert!(!tokio::fs::try_exists(&stale_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn lease_guard_heartbeats_and_shutdown_clears() {
+        let temp = tempfile::tempdir().unwrap();
+        let realms_root = temp.path().join("realms");
+        let realm_id = "lease-live";
+
+        let guard = start_realm_lease_in(&realms_root, realm_id, Some("live"), "rpc")
+            .await
+            .unwrap();
+        let status = inspect_realm_leases_in(&realms_root, realm_id, true)
+            .await
+            .unwrap();
+        assert_eq!(status.active.len(), 1);
+        assert_eq!(status.active[0].instance_id, "live");
+
+        guard.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let after = inspect_realm_leases_in(&realms_root, realm_id, true)
+            .await
+            .unwrap();
+        assert!(after.active.is_empty());
     }
 }

@@ -19,10 +19,12 @@ pub use adapter::StoreAdapter;
 pub use error::StoreError;
 pub use index::SessionIndex;
 pub use realm::{
-    RealmBackend, RealmManifest, RealmOrigin, RealmPaths, derive_workspace_realm_id,
-    ensure_realm_manifest, ensure_realm_manifest_in, fnv1a64_hex, generate_realm_id,
-    open_realm_session_store,
-    open_realm_session_store_in, realm_paths, realm_paths_in, sanitize_realm_id,
+    REALM_LEASE_HEARTBEAT_SECS, REALM_LEASE_STALE_TTL_SECS, RealmBackend, RealmLeaseGuard,
+    RealmLeaseRecord, RealmLeaseStatus, RealmManifest, RealmManifestEntry, RealmOrigin, RealmPaths,
+    derive_workspace_realm_id, ensure_realm_manifest, ensure_realm_manifest_in, fnv1a64_hex,
+    generate_realm_id, inspect_realm_leases, inspect_realm_leases_in, list_realm_manifests_in,
+    open_realm_session_store, open_realm_session_store_in, realm_lease_dir, realm_paths,
+    realm_paths_in, sanitize_realm_id, start_realm_lease, start_realm_lease_in,
 };
 pub use redb_store::RedbSessionStore;
 

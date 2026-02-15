@@ -78,6 +78,7 @@ pub struct AppState {
     pub backend: String,
     pub resolved_paths: meerkat_core::ConfigResolvedPaths,
     pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
+    pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +152,13 @@ impl AppState {
             Arc::clone(&config_store),
             realm_paths.root.join("config_state.json"),
         ));
+        let lease = meerkat_store::start_realm_lease_in(
+            &realms_root,
+            &realm_id,
+            instance_id.as_deref(),
+            "rkat-rest",
+        )
+        .await?;
 
         let mut config = config_store
             .get()
@@ -213,6 +221,7 @@ impl AppState {
             backend: manifest.backend.as_str().to_string(),
             resolved_paths,
             config_runtime,
+            realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
         })
     }
 }

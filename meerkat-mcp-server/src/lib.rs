@@ -249,6 +249,7 @@ pub struct MeerkatMcpState {
     backend: String,
     instance_id: Option<String>,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
+    _realm_lease: Option<meerkat_store::RealmLeaseGuard>,
 }
 
 impl MeerkatMcpState {
@@ -301,6 +302,13 @@ impl MeerkatMcpState {
             Arc::clone(&config_store),
             realm_paths.root.join("config_state.json"),
         ));
+        let lease = meerkat_store::start_realm_lease_in(
+            &realms_root,
+            &realm_id,
+            bootstrap.realm.instance_id.as_deref(),
+            "rkat-mcp",
+        )
+        .await?;
 
         // Create factory with max-permissive flags; per-request overrides
         // in SessionBuildOptions control what tools are actually enabled.
@@ -326,6 +334,7 @@ impl MeerkatMcpState {
             backend: manifest.backend.as_str().to_string(),
             instance_id: bootstrap.realm.instance_id,
             config_runtime,
+            _realm_lease: Some(lease),
         })
     }
 
@@ -383,6 +392,7 @@ impl MeerkatMcpState {
             backend: "redb".to_string(),
             instance_id: bootstrap.realm.instance_id,
             config_runtime,
+            _realm_lease: None,
         }
     }
 

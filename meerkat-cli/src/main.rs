@@ -329,6 +329,12 @@ enum Commands {
         command: SessionCommands,
     },
 
+    /// Realm lifecycle management
+    Realms {
+        #[command(subcommand)]
+        command: RealmCommands,
+    },
+
     /// MCP server management
     Mcp {
         #[command(subcommand)]
@@ -418,6 +424,47 @@ enum SessionCommands {
     Delete {
         /// Session ID to delete
         session_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RealmCommands {
+    /// Print the current default realm ID (from CLI scope).
+    Current,
+    /// List realm manifests in the active state root.
+    List,
+    /// Show details for one realm.
+    Show {
+        /// Realm ID
+        realm_id: String,
+    },
+    /// Create a realm manifest with an optional backend pin.
+    Create {
+        /// Realm ID
+        realm_id: String,
+        /// Backend to pin when creating a new realm.
+        #[arg(long, value_enum)]
+        backend: Option<RealmBackendArg>,
+    },
+    /// Delete a realm and all its state.
+    Delete {
+        /// Realm ID
+        realm_id: String,
+        /// Delete even if active lease is present.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Prune old realms.
+    Prune {
+        /// Only prune generated realms.
+        #[arg(long)]
+        isolated_only: bool,
+        /// Minimum age threshold in hours (default: 24).
+        #[arg(long, default_value_t = 24)]
+        older_than_hours: u64,
+        /// Ignore active lease and legacy safety checks.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -667,6 +714,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             SessionCommands::Show { id } => show_session(&id, &cli_scope).await,
             SessionCommands::Delete { session_id } => delete_session(&session_id, &cli_scope).await,
         },
+        Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
         Commands::Mcp { command } => handle_mcp_command(command).await,
         Commands::Config { command } => match command {
             ConfigCommands::Get { format } => handle_config_get(format, &cli_scope).await,
@@ -1083,6 +1131,239 @@ async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
+    match command {
+        RealmCommands::Current => {
+            println!("{}", scope.locator.realm_id);
+            Ok(())
+        }
+        RealmCommands::List => {
+            let manifests = meerkat_store::list_realm_manifests_in(&scope.locator.state_root)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to list realms: {e}"))?;
+            if manifests.is_empty() {
+                println!("No realms found.");
+                return Ok(());
+            }
+            println!(
+                "{:<28} {:<8} {:<14} {:<8} {:<12}",
+                "REALM", "BACKEND", "ORIGIN", "ACTIVE", "CREATED_AT"
+            );
+            println!("{}", "-".repeat(76));
+            for entry in manifests {
+                let leases = meerkat_store::inspect_realm_leases_in(
+                    &scope.locator.state_root,
+                    &entry.manifest.realm_id,
+                    true,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to inspect leases: {e}"))?;
+                let origin = entry.manifest.origin.as_str();
+                println!(
+                    "{:<28} {:<8} {:<14} {:<8} {:<12}",
+                    entry.manifest.realm_id,
+                    entry.manifest.backend.as_str(),
+                    origin,
+                    leases.active.len(),
+                    entry.manifest.created_at
+                );
+                if entry.manifest.origin == meerkat_store::RealmOrigin::LegacyUnknown {
+                    println!(
+                        "  note: realm '{}' is legacy/unknown origin and is skipped by --isolated-only prune.",
+                        entry.manifest.realm_id
+                    );
+                }
+            }
+            Ok(())
+        }
+        RealmCommands::Show { realm_id } => {
+            let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &realm_id);
+            if !tokio::fs::try_exists(&paths.manifest_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to check manifest path: {e}"))?
+            {
+                return Err(anyhow::anyhow!("Realm not found: {}", realm_id));
+            }
+            let payload = tokio::fs::read_to_string(&paths.manifest_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to read manifest: {e}"))?;
+            let manifest: meerkat_store::RealmManifest = serde_json::from_str(&payload)
+                .map_err(|e| anyhow::anyhow!("Failed to parse manifest: {e}"))?;
+            let leases =
+                meerkat_store::inspect_realm_leases_in(&scope.locator.state_root, &realm_id, true)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to inspect leases: {e}"))?;
+            println!("realm_id: {}", manifest.realm_id);
+            println!("backend: {}", manifest.backend.as_str());
+            println!("origin: {}", manifest.origin.as_str());
+            println!("created_at: {}", manifest.created_at);
+            println!("state_root: {}", scope.locator.state_root.display());
+            println!("active_leases: {}", leases.active.len());
+            for lease in leases.active {
+                println!(
+                    "  - instance={} surface={} pid={} heartbeat={}",
+                    lease.instance_id, lease.surface, lease.pid, lease.heartbeat_at
+                );
+            }
+            Ok(())
+        }
+        RealmCommands::Create { realm_id, backend } => {
+            let manifest = meerkat_store::ensure_realm_manifest_in(
+                &scope.locator.state_root,
+                &realm_id,
+                backend.map(Into::into),
+                Some(meerkat_store::RealmOrigin::Explicit),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create realm: {e}"))?;
+            println!(
+                "Created realm '{}' backend={} origin={}",
+                manifest.realm_id,
+                manifest.backend.as_str(),
+                manifest.origin.as_str()
+            );
+            Ok(())
+        }
+        RealmCommands::Delete { realm_id, force } => {
+            delete_realm(&scope.locator.state_root, &realm_id, force).await
+        }
+        RealmCommands::Prune {
+            isolated_only,
+            older_than_hours,
+            force,
+        } => {
+            prune_realms(
+                &scope.locator.state_root,
+                isolated_only,
+                older_than_hours,
+                force,
+            )
+            .await
+        }
+    }
+}
+
+async fn delete_realm(
+    state_root: &std::path::Path,
+    realm_id: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    let lease_status = meerkat_store::inspect_realm_leases_in(state_root, realm_id, true)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to inspect realm leases: {e}"))?;
+    if !lease_status.active.is_empty() && !force {
+        return Err(anyhow::anyhow!(
+            "Realm '{}' appears active ({} live lease(s)). Use --force to override.",
+            realm_id,
+            lease_status.active.len()
+        ));
+    }
+
+    let paths = meerkat_store::realm_paths_in(state_root, realm_id);
+    tokio::fs::remove_dir_all(&paths.root)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to delete realm '{}': {}", realm_id, e))?;
+    println!("Deleted realm '{}'", realm_id);
+    Ok(())
+}
+
+async fn prune_realms(
+    state_root: &std::path::Path,
+    isolated_only: bool,
+    older_than_hours: u64,
+    force: bool,
+) -> anyhow::Result<()> {
+    let outcome = prune_realms_inner(state_root, isolated_only, older_than_hours, force).await?;
+    println!(
+        "Prune summary: removed={}, skipped_active={}, skipped_legacy={}, leftovers={}",
+        outcome.removed,
+        outcome.skipped_active,
+        outcome.skipped_legacy,
+        outcome.leftovers.len()
+    );
+    if outcome.skipped_legacy > 0 {
+        println!(
+            "note: {} legacy/unknown realm(s) were kept. Use --force to prune them.",
+            outcome.skipped_legacy
+        );
+    }
+    if !outcome.leftovers.is_empty() {
+        eprintln!("Leftover realms (partial cleanup):");
+        for item in &outcome.leftovers {
+            eprintln!("  - {}", item);
+        }
+        return Err(anyhow::anyhow!(
+            "Realm prune completed with partial failures (see leftovers above)."
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct PruneOutcome {
+    removed: usize,
+    skipped_active: usize,
+    skipped_legacy: usize,
+    leftovers: Vec<String>,
+}
+
+async fn prune_realms_inner(
+    state_root: &std::path::Path,
+    isolated_only: bool,
+    older_than_hours: u64,
+    force: bool,
+) -> anyhow::Result<PruneOutcome> {
+    let manifests = meerkat_store::list_realm_manifests_in(state_root)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list realms: {e}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let threshold_secs = older_than_hours.saturating_mul(3600);
+
+    let mut outcome = PruneOutcome::default();
+
+    for entry in manifests {
+        let manifest = entry.manifest;
+        let created = manifest.created_at.parse::<u64>().unwrap_or(0);
+        let age_secs = now.saturating_sub(created);
+
+        if isolated_only && manifest.origin != meerkat_store::RealmOrigin::Generated {
+            if manifest.origin == meerkat_store::RealmOrigin::LegacyUnknown {
+                outcome.skipped_legacy += 1;
+            }
+            continue;
+        }
+        if manifest.origin == meerkat_store::RealmOrigin::LegacyUnknown && !force {
+            outcome.skipped_legacy += 1;
+            continue;
+        }
+        if age_secs < threshold_secs {
+            continue;
+        }
+
+        let lease_status =
+            meerkat_store::inspect_realm_leases_in(state_root, &manifest.realm_id, true)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to inspect realm leases: {e}"))?;
+        if !lease_status.active.is_empty() && !force {
+            outcome.skipped_active += 1;
+            continue;
+        }
+
+        let paths = meerkat_store::realm_paths_in(state_root, &manifest.realm_id);
+        if let Err(err) = tokio::fs::remove_dir_all(&paths.root).await {
+            outcome
+                .leftovers
+                .push(format!("{} ({})", manifest.realm_id, err));
+            continue;
+        }
+        outcome.removed += 1;
+    }
+    Ok(outcome)
+}
+
 async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
     let (initial_config, _config_base_dir) = load_config(scope).await?;
     let (manifest, session_store) = meerkat_store::open_realm_session_store_in(
@@ -1152,9 +1433,20 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
     runtime.set_config_runtime(config_runtime);
     let runtime = Arc::new(runtime);
 
-    meerkat_rpc::serve_stdio(runtime, config_store)
+    let lease = meerkat_store::start_realm_lease_in(
+        &scope.locator.state_root,
+        &scope.locator.realm_id,
+        scope.instance_id.as_deref(),
+        "rkat-rpc",
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to start realm lease: {e}"))?;
+
+    let serve_result = meerkat_rpc::serve_stdio(runtime, config_store)
         .await
-        .map_err(|e| anyhow::anyhow!("RPC server error: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("RPC server error: {e}"));
+    lease.shutdown().await;
+    serve_result?;
 
     Ok(())
 }
@@ -2491,5 +2783,97 @@ mod tests {
             11,
             "Should have 11 tools (6 task/utility + 5 sub-agent)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_prune_inner_skips_legacy_unknown_without_force() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let realm_id = "legacy-skip";
+        let paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+        tokio::fs::create_dir_all(&paths.root)
+            .await
+            .expect("create root");
+        let manifest = serde_json::json!({
+            "realm_id": realm_id,
+            "backend": "redb",
+            "created_at": "1"
+        });
+        tokio::fs::write(
+            &paths.manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("serialize manifest"),
+        )
+        .await
+        .expect("write manifest");
+
+        let outcome = prune_realms_inner(&state_root, true, 0, false)
+            .await
+            .expect("prune outcome");
+        assert_eq!(outcome.removed, 0);
+        assert_eq!(outcome.skipped_legacy, 1);
+    }
+
+    #[tokio::test]
+    async fn test_delete_realm_blocks_when_active_without_force() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let realm_id = "active-realm";
+
+        let _manifest = meerkat_store::ensure_realm_manifest_in(
+            &state_root,
+            realm_id,
+            Some(meerkat_store::RealmBackend::Redb),
+            Some(meerkat_store::RealmOrigin::Generated),
+        )
+        .await
+        .expect("create manifest");
+
+        let lease =
+            meerkat_store::start_realm_lease_in(&state_root, realm_id, Some("instance"), "rpc")
+                .await
+                .expect("start lease");
+
+        let blocked = delete_realm(&state_root, realm_id, false).await;
+        assert!(
+            blocked.is_err(),
+            "delete should block while realm is active"
+        );
+
+        let forced = delete_realm(&state_root, realm_id, true).await;
+        assert!(forced.is_ok(), "delete --force should proceed");
+
+        // Lease shutdown should be no-op after forced deletion.
+        lease.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_prune_inner_reports_leftovers_on_partial_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let realm_id = "partial-failure";
+
+        let _manifest = meerkat_store::ensure_realm_manifest_in(
+            &state_root,
+            realm_id,
+            Some(meerkat_store::RealmBackend::Redb),
+            Some(meerkat_store::RealmOrigin::Generated),
+        )
+        .await
+        .expect("create manifest");
+
+        let perms = std::fs::Permissions::from_mode(0o555);
+        std::fs::set_permissions(&state_root, perms).expect("set read-only root");
+
+        let outcome = prune_realms_inner(&state_root, true, 0, true)
+            .await
+            .expect("prune outcome");
+        assert_eq!(outcome.removed, 0);
+        assert_eq!(outcome.leftovers.len(), 1);
+
+        let restore = std::fs::Permissions::from_mode(0o755);
+        let _ = std::fs::set_permissions(&state_root, restore);
     }
 }

@@ -260,6 +260,10 @@ impl OpenAiClient {
     /// Orphaned reasoning can appear when a stream is interrupted/cancelled after
     /// reasoning completes but before output is produced, or when a response hits
     /// `max_output_tokens` during reasoning.
+    ///
+    /// Note: stripping discards any `encrypted_content` on the reasoning item.
+    /// This is acceptable — the alternative is an API rejection that blocks the
+    /// entire conversation. The model will re-derive reasoning on the next call.
     fn strip_orphaned_reasoning(items: &mut Vec<Value>) {
         let mut i = 0;
         while i < items.len() {
@@ -289,7 +293,7 @@ impl OpenAiClient {
                 i += 1;
             } else {
                 tracing::warn!(
-                    reasoning_id = items[i].get("id").and_then(|id| id.as_str()).unwrap_or("?"),
+                    reasoning_id = items[i].get("id").and_then(|id| id.as_str()),
                     "stripping orphaned reasoning item (no valid following output)"
                 );
                 items.remove(i);
@@ -1597,6 +1601,53 @@ mod tests {
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[1]["type"], "message");
         assert_eq!(input[1]["role"], "assistant");
+    }
+
+    #[test]
+    fn test_consecutive_orphaned_reasoning_items_all_stripped() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Hello".to_string(),
+                }),
+                // Two consecutive reasoning-only messages (e.g., repeated interruptions)
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Reasoning {
+                        text: "First thought".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAi {
+                            id: "rs_first".to_string(),
+                            encrypted_content: Some("enc_1".to_string()),
+                        })),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                }),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Reasoning {
+                        text: "Second thought".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAi {
+                            id: "rs_second".to_string(),
+                            encrypted_content: None,
+                        })),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                }),
+                Message::User(UserMessage {
+                    content: "Still here".to_string(),
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input should be array");
+
+        // Both orphaned reasoning items stripped, only user messages remain
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["content"], "Hello");
+        assert_eq!(input[1]["content"], "Still here");
     }
 
     // =========================================================================

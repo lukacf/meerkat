@@ -166,6 +166,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         event_tx: None,
         host_mode: false,
         skill_references: None,
+        build: None,
     }
 }
 

@@ -34,8 +34,13 @@ async fn integration_real_live_continue_hangs() {
         .project_root(project_root.clone());
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
-    let builder_slot = builder.build_config_slot.clone();
     let session_service = Arc::new(PersistentSessionService::new(builder, 100, store));
+    let config_store: Arc<dyn meerkat_core::ConfigStore> =
+        Arc::new(MemoryConfigStore::new(config.clone()));
+    let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+        Arc::clone(&config_store),
+        store_path.join("config_state.json"),
+    ));
 
     let state = AppState {
         store_path: store_path.clone(),
@@ -47,11 +52,20 @@ async fn integration_real_live_continue_hangs() {
         enable_shell: true,
         project_root: Some(project_root.clone()),
         llm_client_override: Some(Arc::new(TestClient::default())),
-        config_store: std::sync::Arc::new(MemoryConfigStore::new(config.clone())),
+        config_store,
         event_tx,
         session_service,
-        builder_slot,
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
+        realm_id: "test-realm".to_string(),
+        backend: "redb".to_string(),
+        resolved_paths: meerkat_core::ConfigResolvedPaths {
+            root: store_path.display().to_string(),
+            manifest_path: String::new(),
+            config_path: String::new(),
+            sessions_redb_path: String::new(),
+            sessions_jsonl_dir: String::new(),
+        },
+        config_runtime,
     };
 
     let app = router(state);

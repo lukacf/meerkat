@@ -264,6 +264,10 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         host_mode: false,
         comms_name: None,
         peer_meta: None,
+        realm_id: None,
+        instance_id: None,
+        backend: None,
+        config_generation: None,
     };
     session.set_session_metadata(original_metadata).unwrap();
 

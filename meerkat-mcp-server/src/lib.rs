@@ -6,11 +6,13 @@
 #[cfg(test)]
 use meerkat::SessionStore;
 use meerkat::{
-    AgentBuildConfig, AgentFactory, FactoryAgentBuilder, OutputSchema, PersistentSessionService,
-    ToolError, ToolResult,
+    AgentFactory, FactoryAgentBuilder, OutputSchema, PersistentSessionService, ToolError,
+    ToolResult,
 };
 use meerkat_core::error::invalid_session_id_message;
-use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
+use meerkat_core::service::{
+    CreateSessionRequest, SessionBuildOptions, SessionError, SessionService, StartTurnRequest,
+};
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider,
     Session, ToolCallView, format_verbose_event,
@@ -143,6 +145,8 @@ pub struct MeerkatConfigInput {
     pub config: Option<Value>,
     #[serde(default)]
     pub patch: Option<Value>,
+    #[serde(default)]
+    pub expected_generation: Option<u64>,
 }
 
 fn resolve_project_root() -> PathBuf {
@@ -181,19 +185,18 @@ fn resolve_backend_hint() -> Option<meerkat_store::RealmBackend> {
     }
 }
 
-async fn realm_config_store() -> Result<Arc<dyn ConfigStore>, String> {
-    let realm_id = resolve_realm_id();
-    let paths = meerkat_store::realm_paths(&realm_id);
-    let (manifest, _) = meerkat_store::open_realm_session_store(&realm_id, resolve_backend_hint())
-        .await
-        .map_err(|e| e.to_string())?;
+fn tagged_realm_config_store(
+    realm_id: &str,
+    backend: meerkat_store::RealmBackend,
+) -> Arc<dyn ConfigStore> {
+    let paths = meerkat_store::realm_paths(realm_id);
     let base: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(paths.config_path.clone()));
     let tagged = meerkat_core::TaggedConfigStore::new(
         base,
         meerkat_core::ConfigStoreMetadata {
-            realm_id: Some(realm_id),
+            realm_id: Some(realm_id.to_string()),
             instance_id: std::env::var("RKAT_INSTANCE_ID").ok(),
-            backend: Some(manifest.backend.as_str().to_string()),
+            backend: Some(backend.as_str().to_string()),
             resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
                 root: paths.root.display().to_string(),
                 manifest_path: paths.manifest_path.display().to_string(),
@@ -203,7 +206,15 @@ async fn realm_config_store() -> Result<Arc<dyn ConfigStore>, String> {
             }),
         },
     );
-    Ok(Arc::new(tagged))
+    Arc::new(tagged)
+}
+
+async fn realm_config_store() -> Result<Arc<dyn ConfigStore>, String> {
+    let realm_id = resolve_realm_id();
+    let (manifest, _) = meerkat_store::open_realm_session_store(&realm_id, resolve_backend_hint())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(tagged_realm_config_store(&realm_id, manifest.backend))
 }
 
 fn realm_store_path(realm_id: &str, backend: meerkat_store::RealmBackend) -> PathBuf {
@@ -218,10 +229,13 @@ fn realm_store_path(realm_id: &str, backend: meerkat_store::RealmBackend) -> Pat
 ///
 /// The service is configured once with max-permissive factory flags
 /// (`builtins: true`, `shell: true`). Per-request tool configuration is
-/// controlled via `override_builtins` / `override_shell` in `AgentBuildConfig`.
+/// controlled via `override_builtins` / `override_shell` in `SessionBuildOptions`.
 pub struct MeerkatMcpState {
     service: PersistentSessionService<FactoryAgentBuilder>,
-    build_config_slot: Arc<tokio::sync::Mutex<Option<AgentBuildConfig>>>,
+    realm_id: String,
+    backend: String,
+    instance_id: Option<String>,
+    config_runtime: Arc<meerkat_core::ConfigRuntime>,
 }
 
 impl MeerkatMcpState {
@@ -232,23 +246,31 @@ impl MeerkatMcpState {
         let (manifest, session_store) =
             meerkat_store::open_realm_session_store(&realm_id, resolve_backend_hint()).await?;
         let store_path = realm_store_path(&realm_id, manifest.backend);
+        let realm_paths = meerkat_store::realm_paths(&realm_id);
         let project_root = resolve_project_root();
+        let config_store = tagged_realm_config_store(&realm_id, manifest.backend);
+        let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+            Arc::clone(&config_store),
+            realm_paths.root.join("config_state.json"),
+        ));
 
         // Create factory with max-permissive flags; per-request overrides
-        // in AgentBuildConfig control what tools are actually enabled.
+        // in SessionBuildOptions control what tools are actually enabled.
         let factory = AgentFactory::new(store_path)
             .session_store(session_store.clone())
             .project_root(project_root)
             .builtins(true)
             .shell(true);
 
-        let builder = FactoryAgentBuilder::new(factory, config);
-        let build_config_slot = builder.build_config_slot.clone();
+        let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
         let service = PersistentSessionService::new(builder, 100, session_store);
 
         Ok(Self {
             service,
-            build_config_slot,
+            realm_id,
+            backend: manifest.backend.as_str().to_string(),
+            instance_id: std::env::var("RKAT_INSTANCE_ID").ok(),
+            config_runtime,
         })
     }
 
@@ -258,20 +280,28 @@ impl MeerkatMcpState {
         let config = load_config_async().await;
         let realm_id = resolve_realm_id();
         let store_path = realm_store_path(&realm_id, meerkat_store::RealmBackend::Redb);
+        let realm_paths = meerkat_store::realm_paths(&realm_id);
         let project_root = resolve_project_root();
+        let config_store = tagged_realm_config_store(&realm_id, meerkat_store::RealmBackend::Redb);
+        let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+            Arc::clone(&config_store),
+            realm_paths.root.join("config_state.json"),
+        ));
 
         let factory = AgentFactory::new(store_path)
             .project_root(project_root)
             .builtins(true)
             .shell(true);
 
-        let builder = FactoryAgentBuilder::new(factory, config);
-        let build_config_slot = builder.build_config_slot.clone();
+        let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
         let service = PersistentSessionService::new(builder, 100, store);
 
         Self {
             service,
-            build_config_slot,
+            realm_id,
+            backend: "redb".to_string(),
+            instance_id: std::env::var("RKAT_INSTANCE_ID").ok(),
+            config_runtime,
         }
     }
 }
@@ -475,7 +505,7 @@ pub async fn handle_tools_call_with_notifier(
         "meerkat_config" => {
             let input: MeerkatConfigInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| format!("Invalid arguments: {}", e))?;
-            handle_meerkat_config(input).await
+            handle_meerkat_config(state, input).await
         }
         "meerkat_capabilities" => handle_meerkat_capabilities().await,
         _ => Err(format!("Unknown tool: {}", tool_name)),
@@ -488,14 +518,25 @@ async fn handle_meerkat_capabilities() -> Result<Value, String> {
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
-async fn handle_meerkat_config(input: MeerkatConfigInput) -> Result<Value, String> {
-    let store = realm_config_store().await?;
+async fn handle_meerkat_config(
+    state: &MeerkatMcpState,
+    input: MeerkatConfigInput,
+) -> Result<Value, String> {
     match input.action {
         ConfigAction::Get => {
-            let config = store.get().await.map_err(|e| e.to_string())?;
+            let snapshot = state
+                .config_runtime
+                .get()
+                .await
+                .map_err(|e| e.to_string())?;
+            let metadata = snapshot.metadata;
             Ok(json!({
-                "config": config,
-                "metadata": store.metadata(),
+                "config": snapshot.config,
+                "generation": snapshot.generation,
+                "realm_id": metadata.as_ref().and_then(|m| m.realm_id.clone()),
+                "instance_id": metadata.as_ref().and_then(|m| m.instance_id.clone()),
+                "backend": metadata.as_ref().and_then(|m| m.backend.clone()),
+                "resolved_paths": metadata.as_ref().and_then(|m| m.resolved_paths.clone()),
             }))
         }
         ConfigAction::Set => {
@@ -504,19 +545,39 @@ async fn handle_meerkat_config(input: MeerkatConfigInput) -> Result<Value, Strin
                 .ok_or_else(|| "config is required for action=set".to_string())?;
             let config: Config =
                 serde_json::from_value(config).map_err(|e| format!("Invalid config: {e}"))?;
-            let config_clone = config.clone();
-            store.set(config_clone).await.map_err(|e| e.to_string())?;
-            Ok(json!({ "config": config }))
+            let snapshot = state
+                .config_runtime
+                .set(config, input.expected_generation)
+                .await
+                .map_err(|e| e.to_string())?;
+            let metadata = snapshot.metadata;
+            Ok(json!({
+                "config": snapshot.config,
+                "generation": snapshot.generation,
+                "realm_id": metadata.as_ref().and_then(|m| m.realm_id.clone()),
+                "instance_id": metadata.as_ref().and_then(|m| m.instance_id.clone()),
+                "backend": metadata.as_ref().and_then(|m| m.backend.clone()),
+                "resolved_paths": metadata.as_ref().and_then(|m| m.resolved_paths.clone()),
+            }))
         }
         ConfigAction::Patch => {
             let patch = input
                 .patch
                 .ok_or_else(|| "patch is required for action=patch".to_string())?;
-            let updated = store
-                .patch(ConfigDelta(patch))
+            let snapshot = state
+                .config_runtime
+                .patch(ConfigDelta(patch), input.expected_generation)
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(json!({ "config": updated }))
+            let metadata = snapshot.metadata;
+            Ok(json!({
+                "config": snapshot.config,
+                "generation": snapshot.generation,
+                "realm_id": metadata.as_ref().and_then(|m| m.realm_id.clone()),
+                "instance_id": metadata.as_ref().and_then(|m| m.instance_id.clone()),
+                "backend": metadata.as_ref().and_then(|m| m.backend.clone()),
+                "resolved_paths": metadata.as_ref().and_then(|m| m.resolved_paths.clone()),
+            }))
         }
     }
 }
@@ -572,49 +633,42 @@ async fn handle_meerkat_run(
         spawn_event_forwarder(rx, session_id.to_string(), input.verbose, stream_notifier)
     });
 
-    // Build config with per-request tool overrides
-    let build_config = AgentBuildConfig {
-        model: model.clone(),
+    let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
+    let build = SessionBuildOptions {
         provider: input.provider.map(|p| p.to_provider()),
-        max_tokens: input.max_tokens,
-        system_prompt: input.system_prompt.clone(),
         output_schema,
         structured_output_retries: input.structured_output_retries,
         hooks_override: input.hooks_override.clone().unwrap_or_default(),
-        host_mode,
         comms_name: input.comms_name.clone(),
         peer_meta: input.peer_meta.clone(),
         resume_session: Some(session),
         budget_limits: None,
-        event_tx: None, // wired by the service
-        llm_client_override: None,
         provider_params: None,
         external_tools,
+        llm_client_override: None,
         override_builtins: Some(input.enable_builtins),
         override_shell: Some(input.enable_builtins && enable_shell),
         override_subagents: None,
         override_memory: None,
         preload_skills: None,
+        realm_id: Some(state.realm_id.clone()),
+        instance_id: state.instance_id.clone(),
+        backend: Some(state.backend.clone()),
+        config_generation: current_generation,
     };
 
-    // Hold slot lock across staging + create to prevent concurrent
-    // requests from overwriting each other's staged config.
-    let result = {
-        let mut slot = state.build_config_slot.lock().await;
-        *slot = Some(build_config);
-
-        let req = CreateSessionRequest {
-            model,
-            prompt: input.prompt,
-            system_prompt: None, // already in the staged build config
-            max_tokens: None,    // already in the staged build config
-            event_tx: event_tx.clone(),
-            host_mode,
-            skill_references: None,
-        };
-
-        state.service.create_session(req).await
+    let req = CreateSessionRequest {
+        model,
+        prompt: input.prompt,
+        system_prompt: input.system_prompt,
+        max_tokens: input.max_tokens,
+        event_tx: event_tx.clone(),
+        host_mode,
+        skill_references: None,
+        build: Some(build),
     };
+
+    let result = state.service.create_session(req).await;
     drop(event_tx);
     if let Some(task) = event_task {
         if let Err(e) = task.await {
@@ -714,23 +768,18 @@ async fn handle_meerkat_resume(
         spawn_event_forwarder(rx, session_id.to_string(), input.verbose, stream_notifier)
     });
 
-    // Build config with resume_session and per-request tool overrides
-    let build_config = AgentBuildConfig {
-        model: model.clone(),
+    let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
+    let build = SessionBuildOptions {
         provider,
-        max_tokens,
-        system_prompt: None,
         output_schema: None,
         structured_output_retries: 2,
         hooks_override: input.hooks_override.clone().unwrap_or_default(),
-        host_mode,
         comms_name,
         resume_session: Some(session),
         budget_limits: None,
-        event_tx: None, // wired by the service
-        llm_client_override: None,
         provider_params: None,
         external_tools,
+        llm_client_override: None,
         override_builtins: Some(enable_builtins),
         override_shell: Some(enable_builtins && enable_shell),
         override_subagents: None,
@@ -740,6 +789,19 @@ async fn handle_meerkat_resume(
             .peer_meta
             .clone()
             .or_else(|| stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())),
+        realm_id: stored_metadata
+            .as_ref()
+            .and_then(|m| m.realm_id.clone())
+            .or_else(|| Some(state.realm_id.clone())),
+        instance_id: stored_metadata
+            .as_ref()
+            .and_then(|m| m.instance_id.clone())
+            .or_else(|| state.instance_id.clone()),
+        backend: stored_metadata
+            .as_ref()
+            .and_then(|m| m.backend.clone())
+            .or_else(|| Some(state.backend.clone())),
+        config_generation: current_generation,
     };
 
     // Try start_turn on the live session first (it may still be alive
@@ -754,23 +816,18 @@ async fn handle_meerkat_resume(
     let result = match state.service.start_turn(&session_id, turn_req).await {
         Ok(run_result) => Ok(run_result),
         Err(SessionError::NotFound { .. }) => {
-            // Session isn't live — hold slot lock, stage config, create.
-            let mut slot = state.build_config_slot.lock().await;
-            *slot = Some(build_config);
-
             let req = CreateSessionRequest {
                 model,
                 prompt,
                 system_prompt: None,
-                max_tokens: None,
+                max_tokens,
                 event_tx: event_tx.clone(),
                 host_mode,
                 skill_references: None,
+                build: Some(build),
             };
 
-            let r = state.service.create_session(req).await;
-            drop(slot);
-            r
+            state.service.create_session(req).await
         }
         Err(other) => Err(other),
     };

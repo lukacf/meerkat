@@ -341,6 +341,18 @@ pub struct SessionMetadata {
     /// Friendly metadata for peer discovery (populated when comms is enabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_meta: Option<PeerMeta>,
+    /// Realm identity for cross-surface storage sharing/isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    /// Optional process/agent instance identifier within a realm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    /// Backend pinned by the realm manifest (e.g. "redb", "jsonl").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Config generation used when this session was created/resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_generation: Option<u64>,
 }
 
 /// Key used to store SessionMetadata in Session metadata map.

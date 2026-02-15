@@ -11,11 +11,11 @@ use meerkat_core::comms::{
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError};
 use meerkat_core::types::{RunResult, SessionId};
-use meerkat_core::{Config, Session};
+use meerkat_core::{Config, ConfigStore, Session};
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 use crate::{AgentBuildConfig, AgentFactory, DynAgent};
 use meerkat_client::LlmClient;
@@ -138,20 +138,12 @@ impl SessionAgent for FactoryAgent {
 }
 
 /// Implements [`SessionAgentBuilder`] by delegating to [`AgentFactory::build_agent()`].
-///
-/// Surfaces pass a full `AgentBuildConfig` via the `build_config_slot` before
-/// calling `SessionService::create_session()`. The builder picks it up and
-/// uses it to construct the agent.
-///
-/// If no config is staged, a minimal config is built from the
-/// `CreateSessionRequest` fields.
 pub struct FactoryAgentBuilder {
     factory: AgentFactory,
-    config: Config,
+    config_snapshot: Config,
+    config_store: Option<Arc<dyn ConfigStore>>,
     /// Optional default LLM client injected into all builds (for testing).
     pub default_llm_client: Option<Arc<dyn LlmClient>>,
-    /// Slot for passing a full `AgentBuildConfig` from the surface to the builder.
-    pub build_config_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
 }
 
 impl FactoryAgentBuilder {
@@ -159,16 +151,38 @@ impl FactoryAgentBuilder {
     pub fn new(factory: AgentFactory, config: Config) -> Self {
         Self {
             factory,
-            config,
+            config_snapshot: config,
+            config_store: None,
             default_llm_client: None,
-            build_config_slot: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Stage a build config for the next `build_agent` call.
-    pub async fn stage_config(&self, config: AgentBuildConfig) {
-        let mut slot = self.build_config_slot.lock().await;
-        *slot = Some(config);
+    /// Create a new builder that resolves config from a store on each build.
+    ///
+    /// If the store read fails, the builder falls back to `initial_config`.
+    pub fn new_with_config_store(
+        factory: AgentFactory,
+        initial_config: Config,
+        config_store: Arc<dyn ConfigStore>,
+    ) -> Self {
+        Self {
+            factory,
+            config_snapshot: initial_config,
+            config_store: Some(config_store),
+            default_llm_client: None,
+        }
+    }
+
+    async fn resolve_config(&self) -> Config {
+        if let Some(store) = &self.config_store {
+            match store.get().await {
+                Ok(config) => return config,
+                Err(err) => {
+                    tracing::warn!("Failed to read latest config from store: {err}");
+                }
+            }
+        }
+        self.config_snapshot.clone()
     }
 
     /// Get a reference to the factory.
@@ -178,7 +192,7 @@ impl FactoryAgentBuilder {
 
     /// Get a reference to the config.
     pub fn config(&self) -> &Config {
-        &self.config
+        &self.config_snapshot
     }
 }
 
@@ -191,17 +205,36 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         req: &CreateSessionRequest,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<FactoryAgent, SessionError> {
-        // If a full build config was staged, use it.
-        // Otherwise construct a minimal one from the request.
-        let mut build_config = {
-            let mut slot = self.build_config_slot.lock().await;
-            slot.take().unwrap_or_else(|| {
-                let mut bc = AgentBuildConfig::new(req.model.clone());
-                bc.system_prompt = req.system_prompt.clone();
-                bc.max_tokens = req.max_tokens;
-                bc
-            })
-        };
+        let mut build_config = AgentBuildConfig::new(req.model.clone());
+        build_config.system_prompt = req.system_prompt.clone();
+        build_config.max_tokens = req.max_tokens;
+        build_config.host_mode = req.host_mode;
+        if let Some(build) = &req.build {
+            build_config.provider = build.provider;
+            build_config.output_schema = build.output_schema.clone();
+            build_config.structured_output_retries = build.structured_output_retries;
+            build_config.hooks_override = build.hooks_override.clone();
+            build_config.comms_name = build.comms_name.clone();
+            build_config.peer_meta = build.peer_meta.clone();
+            build_config.resume_session = build.resume_session.clone();
+            build_config.budget_limits = build.budget_limits.clone();
+            build_config.provider_params = build.provider_params.clone();
+            build_config.external_tools = build.external_tools.clone();
+            if let Some(any_client) = &build.llm_client_override {
+                if let Some(client) = any_client.as_ref().downcast_ref::<Arc<dyn LlmClient>>() {
+                    build_config.llm_client_override = Some(client.clone());
+                }
+            }
+            build_config.override_builtins = build.override_builtins;
+            build_config.override_shell = build.override_shell;
+            build_config.override_subagents = build.override_subagents;
+            build_config.override_memory = build.override_memory;
+            build_config.preload_skills = build.preload_skills.clone();
+            build_config.realm_id = build.realm_id.clone();
+            build_config.instance_id = build.instance_id.clone();
+            build_config.backend = build.backend.clone();
+            build_config.config_generation = build.config_generation;
+        }
 
         // Wire the event channel.
         build_config.event_tx = Some(event_tx);
@@ -213,9 +246,11 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             }
         }
 
+        let config = self.resolve_config().await;
+
         let agent = self
             .factory
-            .build_agent(build_config, &self.config)
+            .build_agent(build_config, &config)
             .await
             .map_err(|e| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(

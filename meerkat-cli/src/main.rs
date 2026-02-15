@@ -4,11 +4,13 @@ mod mcp;
 #[cfg(feature = "comms")]
 mod stdin_events;
 
-use meerkat::{AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
+use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_core::AgentToolDispatcher;
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
-use meerkat_core::service::{CreateSessionRequest, SessionService};
+use meerkat_core::service::{
+    CreateSessionRequest, SessionBuildOptions, SessionQuery, SessionService,
+};
 use meerkat_core::{AgentEvent, SchemaCompat, format_verbose_event};
 use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
 #[cfg(feature = "mcp")]
@@ -24,7 +26,7 @@ use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::types::OutputSchema;
-use meerkat_store::{RealmBackend, SessionFilter};
+use meerkat_store::RealmBackend;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -1030,14 +1032,14 @@ async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
 }
 
 async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
-    let (config, _config_base_dir) = load_config(scope).await?;
+    let (initial_config, _config_base_dir) = load_config(scope).await?;
     let (manifest, session_store) =
         meerkat_store::open_realm_session_store(&scope.realm_id, scope.backend_hint()).await?;
     let store_path = realm_store_path(&manifest, scope);
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let project_root = find_project_root(&cwd);
 
-    // Max-permissive factory flags: per-request AgentBuildConfig overrides
+    // Max-permissive factory flags: per-request session build overrides
     // control what tools are actually enabled (same pattern as MCP server).
     let factory = AgentFactory::new(store_path)
         .project_root(project_root.unwrap_or(cwd))
@@ -1045,13 +1047,6 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
         .shell(true)
         .subagents(true)
         .memory(true);
-
-    let runtime = Arc::new(meerkat_rpc::session_runtime::SessionRuntime::new(
-        factory,
-        config,
-        64,
-        session_store,
-    ));
 
     let (config_store, _base_dir) = resolve_config_store(scope).await?;
     let base_store: Arc<dyn meerkat_core::ConfigStore> = Arc::from(config_store);
@@ -1072,6 +1067,24 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
         },
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(tagged);
+    let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+        Arc::clone(&config_store),
+        realm_paths.root.join("config_state.json"),
+    ));
+    let mut runtime = meerkat_rpc::session_runtime::SessionRuntime::new_with_config_store(
+        factory,
+        initial_config,
+        Arc::clone(&config_store),
+        64,
+        session_store,
+    );
+    runtime.set_realm_context(
+        Some(scope.realm_id.clone()),
+        scope.instance_id.clone(),
+        Some(manifest.backend.as_str().to_string()),
+    );
+    runtime.set_config_runtime(config_runtime);
+    let runtime = Arc::new(runtime);
 
     meerkat_rpc::serve_stdio(runtime, config_store)
         .await
@@ -1165,7 +1178,7 @@ fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
     meerkat::surface::resolve_host_mode(requested).map_err(|e| anyhow::anyhow!(e))
 }
 
-/// Load MCP tools as an external tool dispatcher for AgentBuildConfig.
+/// Load MCP tools as an external tool dispatcher for session build options.
 async fn load_mcp_external_tools() -> (
     Option<Arc<dyn AgentToolDispatcher>>,
     Option<Arc<McpRouterAdapter>>,
@@ -1202,18 +1215,14 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
     }
 }
 
-/// Build a `FactoryAgentBuilder` + `EphemeralSessionService` from factory flags and config.
+/// Build an `EphemeralSessionService` backed by the factory.
 fn build_cli_service(
     factory: AgentFactory,
     config: Config,
-) -> (
-    EphemeralSessionService<FactoryAgentBuilder>,
-    Arc<tokio::sync::Mutex<Option<AgentBuildConfig>>>,
-) {
+) -> EphemeralSessionService<FactoryAgentBuilder> {
     let builder = FactoryAgentBuilder::new(factory, config);
-    let config_slot = builder.build_config_slot.clone();
     let service = EphemeralSessionService::new(builder, 1);
-    (service, config_slot)
+    service
 }
 
 fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Error {
@@ -1286,28 +1295,27 @@ async fn run_agent(
     // Pre-create session to claim the session_id
     let session = Session::new();
 
-    let build_config = AgentBuildConfig {
-        model: model.to_string(),
+    let build = SessionBuildOptions {
         provider: Some(provider.as_core()),
-        max_tokens: Some(max_tokens),
-        system_prompt: None,
         output_schema,
         structured_output_retries,
         hooks_override,
-        host_mode,
         comms_name: comms_name.clone(),
+        peer_meta: comms_overrides.peer_meta.clone(),
         resume_session: Some(session),
         budget_limits: Some(limits),
-        event_tx: None, // wired by the service via build_agent()
-        llm_client_override: None,
         provider_params,
         external_tools,
+        llm_client_override: None,
         override_builtins: None,
         override_shell: None,
         override_subagents: None,
         override_memory: None,
         preload_skills: None,
-        peer_meta: comms_overrides.peer_meta.clone(),
+        realm_id: Some(scope.realm_id.clone()),
+        instance_id: scope.instance_id.clone(),
+        backend: Some(manifest.backend.as_str().to_string()),
+        config_generation: None,
     };
 
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
@@ -1320,12 +1328,8 @@ async fn run_agent(
         config.comms.address = Some(addr.clone());
     }
 
-    // Build the session service and stage the build config
-    let (service, config_slot) = build_cli_service(factory, config);
-    {
-        let mut slot = config_slot.lock().await;
-        *slot = Some(build_config);
-    }
+    // Build the session service.
+    let service = build_cli_service(factory, config);
 
     if host_mode {
         eprintln!(
@@ -1346,6 +1350,7 @@ async fn run_agent(
         event_tx: event_tx.clone(),
         host_mode,
         skill_references: None,
+        build: Some(build),
     };
 
     // Warn if --stdin is used without --host (it has no effect)
@@ -1485,15 +1490,14 @@ async fn resume_session(
     let session_id = SessionId::parse(session_id)
         .map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", session_id, e))?;
 
-    // Load the session from store
-    let (manifest, store) = create_session_store(scope).await?;
-    let session = store
-        .load(&session_id)
+    let (config, _config_base_dir) = load_config(scope).await?;
+    let loader_service = build_cli_persistent_service(scope, config.clone()).await?;
+    let session = loader_service
+        .load_persisted(&session_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
-
-    let (config, _config_base_dir) = load_config(scope).await?;
+    let (manifest, store) = create_session_store(scope).await?;
     let stored_metadata = session.session_metadata();
     let tooling = stored_metadata
         .as_ref()
@@ -1557,36 +1561,40 @@ async fn resume_session(
     #[cfg(feature = "comms")]
     let factory = factory.comms(tooling.comms || host_mode);
 
-    let build_config = AgentBuildConfig {
-        model: model.clone(),
+    let build = SessionBuildOptions {
         provider: Some(provider_core),
-        max_tokens: Some(max_tokens),
-        system_prompt: None,
         output_schema: None,
         structured_output_retries: 2,
         hooks_override,
-        host_mode,
         comms_name: comms_name.clone(),
         resume_session: Some(session),
         budget_limits: None,
-        event_tx: None, // wired by the service via build_agent()
-        llm_client_override: None,
         provider_params: None,
         external_tools,
+        llm_client_override: None,
         override_builtins: None,
         override_shell: None,
         override_subagents: None,
         override_memory: None,
         preload_skills: None,
         peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
+        realm_id: stored_metadata
+            .as_ref()
+            .and_then(|m| m.realm_id.clone())
+            .or_else(|| Some(scope.realm_id.clone())),
+        instance_id: stored_metadata
+            .as_ref()
+            .and_then(|m| m.instance_id.clone())
+            .or_else(|| scope.instance_id.clone()),
+        backend: stored_metadata
+            .as_ref()
+            .and_then(|m| m.backend.clone())
+            .or_else(|| Some(manifest.backend.as_str().to_string())),
+        config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
     };
 
-    // Build the session service and stage the build config
-    let (service, config_slot) = build_cli_service(factory, config);
-    {
-        let mut slot = config_slot.lock().await;
-        *slot = Some(build_config);
-    }
+    // Build the session service.
+    let service = build_cli_service(factory, config);
 
     // Route through SessionService::create_session() with the resumed session
     // staged in the build config. The service builds the agent (which picks up
@@ -1600,6 +1608,7 @@ async fn resume_session(
             event_tx: None,
             host_mode,
             skill_references: None,
+            build: Some(build),
         })
         .await
         .map_err(session_err_to_anyhow)?;
@@ -1618,16 +1627,36 @@ async fn resume_session(
     Ok(())
 }
 
+async fn build_cli_persistent_service(
+    scope: &RuntimeScope,
+    config: Config,
+) -> anyhow::Result<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
+    let (manifest, store) = create_session_store(scope).await?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_root = find_project_root(&cwd).unwrap_or(cwd);
+
+    let factory = AgentFactory::new(realm_store_path(&manifest, scope))
+        .session_store(store.clone())
+        .project_root(project_root)
+        .builtins(config.tools.builtins_enabled)
+        .shell(config.tools.shell_enabled)
+        .subagents(config.tools.subagents_enabled);
+
+    let builder = FactoryAgentBuilder::new(factory, config);
+    Ok(meerkat::PersistentSessionService::new(builder, 64, store))
+}
+
 /// List sessions from the realm-scoped persistent backend.
 async fn list_sessions(limit: usize, scope: &RuntimeScope) -> anyhow::Result<()> {
-    let (_manifest, store) = create_session_store(scope).await?;
-    let filter = SessionFilter {
+    let (config, _) = load_config(scope).await?;
+    let service = build_cli_persistent_service(scope, config).await?;
+    let query = SessionQuery {
         limit: Some(limit),
-        ..Default::default()
+        offset: None,
     };
 
-    let sessions = store
-        .list(filter)
+    let sessions = service
+        .list(query)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to list sessions: {}", e))?;
 
@@ -1652,7 +1681,7 @@ async fn list_sessions(limit: usize, scope: &RuntimeScope) -> anyhow::Result<()>
 
         println!(
             "{:<40} {:<12} {:<20} {:<20}",
-            meta.id, meta.message_count, created, updated
+            meta.session_id, meta.message_count, created, updated
         );
     }
 
@@ -1665,9 +1694,10 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     let session_id =
         SessionId::parse(id).map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", id, e))?;
 
-    let (_manifest, store) = create_session_store(scope).await?;
-    let session = store
-        .load(&session_id)
+    let (config, _) = load_config(scope).await?;
+    let service = build_cli_persistent_service(scope, config).await?;
+    let session = service
+        .load_persisted(&session_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
@@ -1760,20 +1790,11 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     let session_id =
         SessionId::parse(id).map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", id, e))?;
 
-    let (_manifest, store) = create_session_store(scope).await?;
+    let (config, _) = load_config(scope).await?;
+    let service = build_cli_persistent_service(scope, config).await?;
 
-    // Check if session exists first
-    if !store
-        .exists(&session_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to check session: {}", e))?
-    {
-        return Err(anyhow::anyhow!("Session not found: {}", session_id));
-    }
-
-    // Delete the session
-    store
-        .delete(&session_id)
+    service
+        .archive(&session_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to delete session: {}", e))?;
 

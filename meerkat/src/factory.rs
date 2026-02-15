@@ -22,7 +22,10 @@ use meerkat_core::{ConcurrencyLimits, SubAgentManager};
 use meerkat_core::{SessionId, SessionMeta};
 #[cfg(feature = "jsonl-store")]
 use meerkat_store::JsonlStore;
-#[cfg(feature = "memory-store")]
+#[cfg(all(
+    feature = "memory-store",
+    any(not(feature = "jsonl-store"), feature = "sub-agents")
+))]
 use meerkat_store::MemoryStore;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_store::SessionFilter;
@@ -36,7 +39,9 @@ use meerkat_tools::builtin::{
     ToolPolicyLayer,
 };
 use meerkat_tools::{BuiltinDispatcherConfig, CompositeDispatcherError};
-use tokio::sync::{RwLock, mpsc};
+#[cfg(any(not(feature = "memory-store"), feature = "sub-agents"))]
+use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 
 #[cfg(feature = "comms")]
 use crate::{build_comms_runtime_from_config, compose_tools_with_comms};
@@ -164,6 +169,14 @@ pub struct AgentBuildConfig {
     /// `Some(ids)` = pre-load these skills into the system prompt.
     /// `Some(vec![])` is normalized to `None`.
     pub preload_skills: Option<Vec<meerkat_core::skills::SkillId>>,
+    /// Realm identity for cross-surface storage sharing/isolation.
+    pub realm_id: Option<String>,
+    /// Optional process/agent instance identifier within a realm.
+    pub instance_id: Option<String>,
+    /// Backend pinned by the realm manifest (e.g. "redb", "jsonl").
+    pub backend: Option<String>,
+    /// Config generation used when this session was created/resumed.
+    pub config_generation: Option<u64>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -194,6 +207,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("override_shell", &self.override_shell)
             .field("override_subagents", &self.override_subagents)
             .field("override_memory", &self.override_memory)
+            .field("realm_id", &self.realm_id)
+            .field("instance_id", &self.instance_id)
+            .field("backend", &self.backend)
+            .field("config_generation", &self.config_generation)
             .finish()
     }
 }
@@ -223,6 +240,10 @@ impl AgentBuildConfig {
             override_subagents: None,
             override_memory: None,
             preload_skills: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
         }
     }
 }
@@ -984,6 +1005,10 @@ impl AgentFactory {
             host_mode: build_config.host_mode,
             comms_name: build_config.comms_name,
             peer_meta: build_config.peer_meta,
+            realm_id: build_config.realm_id,
+            instance_id: build_config.instance_id,
+            backend: build_config.backend,
+            config_generation: build_config.config_generation,
         };
         if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
             tracing::warn!("Failed to store session metadata: {}", err);

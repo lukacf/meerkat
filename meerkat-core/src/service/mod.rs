@@ -7,6 +7,9 @@ pub mod transport;
 
 use crate::event::AgentEvent;
 use crate::types::{RunResult, SessionId, Usage};
+use crate::{
+    AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -78,6 +81,89 @@ pub struct CreateSessionRequest {
     pub host_mode: bool,
     /// Skill IDs to resolve and inject for the first turn.
     pub skill_references: Option<Vec<crate::skills::SkillId>>,
+    /// Optional extended build options for factory-backed builders.
+    pub build: Option<SessionBuildOptions>,
+}
+
+/// Optional build-time options used by factory-backed session builders.
+pub struct SessionBuildOptions {
+    pub provider: Option<Provider>,
+    pub output_schema: Option<OutputSchema>,
+    pub structured_output_retries: u32,
+    pub hooks_override: HookRunOverrides,
+    pub comms_name: Option<String>,
+    pub peer_meta: Option<PeerMeta>,
+    pub resume_session: Option<Session>,
+    pub budget_limits: Option<BudgetLimits>,
+    pub provider_params: Option<serde_json::Value>,
+    pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Opaque transport for an optional per-request LLM override.
+    ///
+    /// Factory builders may downcast this to their concrete client trait.
+    pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    pub override_builtins: Option<bool>,
+    pub override_shell: Option<bool>,
+    pub override_subagents: Option<bool>,
+    pub override_memory: Option<bool>,
+    pub preload_skills: Option<Vec<crate::skills::SkillId>>,
+    pub realm_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub backend: Option<String>,
+    pub config_generation: Option<u64>,
+}
+
+impl Default for SessionBuildOptions {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            output_schema: None,
+            structured_output_retries: 2,
+            hooks_override: HookRunOverrides::default(),
+            comms_name: None,
+            peer_meta: None,
+            resume_session: None,
+            budget_limits: None,
+            provider_params: None,
+            external_tools: None,
+            llm_client_override: None,
+            override_builtins: None,
+            override_shell: None,
+            override_subagents: None,
+            override_memory: None,
+            preload_skills: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for SessionBuildOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionBuildOptions")
+            .field("provider", &self.provider)
+            .field("output_schema", &self.output_schema.is_some())
+            .field("structured_output_retries", &self.structured_output_retries)
+            .field("hooks_override", &self.hooks_override)
+            .field("comms_name", &self.comms_name)
+            .field("peer_meta", &self.peer_meta)
+            .field("resume_session", &self.resume_session.is_some())
+            .field("budget_limits", &self.budget_limits)
+            .field("provider_params", &self.provider_params.is_some())
+            .field("external_tools", &self.external_tools.is_some())
+            .field("llm_client_override", &self.llm_client_override.is_some())
+            .field("override_builtins", &self.override_builtins)
+            .field("override_shell", &self.override_shell)
+            .field("override_subagents", &self.override_subagents)
+            .field("override_memory", &self.override_memory)
+            .field("preload_skills", &self.preload_skills)
+            .field("realm_id", &self.realm_id)
+            .field("instance_id", &self.instance_id)
+            .field("backend", &self.backend)
+            .field("config_generation", &self.config_generation)
+            .finish()
+    }
 }
 
 /// Request to start a new turn on an existing session.

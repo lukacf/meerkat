@@ -29,12 +29,12 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
-    AgentBuildConfig, AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
+    AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
     PersistentSessionService, Session, SessionId, SessionService,
 };
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
-    CreateSessionRequest as SvcCreateSessionRequest, SessionError,
+    CreateSessionRequest as SvcCreateSessionRequest, SessionBuildOptions, SessionError,
     StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
@@ -47,8 +47,7 @@ use std::borrow::Cow;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 
 /// Application state shared across handlers
 #[derive(Clone)]
@@ -70,14 +69,12 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<SessionEvent>,
     /// Session service for managing agent lifecycle.
     pub session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    /// Slot for staging `AgentBuildConfig` before `session_service` calls.
-    pub builder_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
     /// Webhook authentication, resolved once at startup from RKAT_WEBHOOK_SECRET.
     pub webhook_auth: webhook::WebhookAuth,
     pub realm_id: String,
     pub backend: String,
     pub resolved_paths: meerkat_core::ConfigResolvedPaths,
-    pub config_generation: Arc<AtomicU64>,
+    pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +121,10 @@ impl AppState {
                 resolved_paths: Some(resolved_paths.clone()),
             },
         ));
+        let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+            Arc::clone(&config_store),
+            realm_paths.root.join("config_state.json"),
+        ));
 
         let mut config = config_store
             .get()
@@ -152,8 +153,8 @@ impl AppState {
             .shell(enable_shell);
         factory = factory.project_root(instance_root.clone());
 
-        let builder = FactoryAgentBuilder::new(factory, config);
-        let builder_slot = builder.build_config_slot.clone();
+        let builder =
+            FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
         let session_service = Arc::new(PersistentSessionService::new(builder, 100, session_store));
 
         Ok(Self {
@@ -169,12 +170,11 @@ impl AppState {
             config_store,
             event_tx,
             session_service,
-            builder_slot,
             webhook_auth: webhook::WebhookAuth::from_env(),
             realm_id,
             backend: manifest.backend.as_str().to_string(),
             resolved_paths,
-            config_generation: Arc::new(AtomicU64::new(0)),
+            config_runtime,
         })
     }
 }
@@ -609,14 +609,14 @@ enum PatchConfigRequest {
 async fn get_config(
     State(state): State<AppState>,
 ) -> Result<Json<ConfigEnvelopeResponse>, ApiError> {
-    let config = state
-        .config_store
+    let snapshot = state
+        .config_runtime
         .get()
         .await
-        .map_err(|e| ApiError::Configuration(e.to_string()))?;
+        .map_err(config_runtime_err_to_api)?;
     Ok(Json(ConfigEnvelopeResponse {
-        config,
-        generation: state.config_generation.load(Ordering::SeqCst),
+        config: snapshot.config,
+        generation: snapshot.generation,
         realm_id: state.realm_id.clone(),
         backend: state.backend.clone(),
         resolved_paths: state.resolved_paths.clone(),
@@ -635,23 +635,14 @@ async fn set_config(
         } => (config, expected_generation),
         SetConfigRequest::Direct(config) => (config, None),
     };
-    if let Some(expected) = expected_generation {
-        let current = state.config_generation.load(Ordering::SeqCst);
-        if expected != current {
-            return Err(ApiError::Configuration(format!(
-                "Generation conflict: expected {expected}, current {current}"
-            )));
-        }
-    }
-    state
-        .config_store
-        .set(config.clone())
+    let snapshot = state
+        .config_runtime
+        .set(config, expected_generation)
         .await
-        .map_err(|e| ApiError::Configuration(e.to_string()))?;
-    state.config_generation.fetch_add(1, Ordering::SeqCst);
+        .map_err(config_runtime_err_to_api)?;
     Ok(Json(ConfigEnvelopeResponse {
-        config,
-        generation: state.config_generation.load(Ordering::SeqCst),
+        config: snapshot.config,
+        generation: snapshot.generation,
         realm_id: state.realm_id.clone(),
         backend: state.backend.clone(),
         resolved_paths: state.resolved_paths.clone(),
@@ -670,27 +661,29 @@ async fn patch_config(
         } => (patch, expected_generation),
         PatchConfigRequest::Direct(patch) => (patch, None),
     };
-    if let Some(expected) = expected_generation {
-        let current = state.config_generation.load(Ordering::SeqCst);
-        if expected != current {
-            return Err(ApiError::Configuration(format!(
-                "Generation conflict: expected {expected}, current {current}"
-            )));
-        }
-    }
-    let updated = state
-        .config_store
-        .patch(ConfigDelta(delta))
+    let snapshot = state
+        .config_runtime
+        .patch(ConfigDelta(delta), expected_generation)
         .await
-        .map_err(|e| ApiError::Configuration(e.to_string()))?;
-    state.config_generation.fetch_add(1, Ordering::SeqCst);
+        .map_err(config_runtime_err_to_api)?;
     Ok(Json(ConfigEnvelopeResponse {
-        config: updated,
-        generation: state.config_generation.load(Ordering::SeqCst),
+        config: snapshot.config,
+        generation: snapshot.generation,
         realm_id: state.realm_id.clone(),
         backend: state.backend.clone(),
         resolved_paths: state.resolved_paths.clone(),
     }))
+}
+
+fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError {
+    match err {
+        meerkat_core::ConfigRuntimeError::GenerationConflict { expected, current } => {
+            ApiError::BadRequest(format!(
+                "Generation conflict: expected {expected}, current {current}"
+            ))
+        }
+        other => ApiError::Configuration(other.to_string()),
+    }
 }
 
 /// Spawn a task that forwards events from an mpsc receiver to the broadcast channel,
@@ -778,49 +771,45 @@ async fn create_session(
         req.verbose,
     );
 
-    // Build the full AgentBuildConfig and stage it via the builder slot.
-    let build_config = AgentBuildConfig {
-        model: model.to_string(),
+    let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
+    let build = SessionBuildOptions {
         provider: req.provider,
-        max_tokens: Some(max_tokens),
-        system_prompt: req.system_prompt,
         output_schema: req.output_schema,
         structured_output_retries: req.structured_output_retries,
         hooks_override: req.hooks_override.unwrap_or_default(),
-        host_mode,
         comms_name: req.comms_name.clone(),
+        peer_meta: req.peer_meta.clone(),
         resume_session: Some(pre_session),
         budget_limits: None,
-        event_tx: None, // Wired by the session service's builder
-        llm_client_override: state.llm_client_override.clone(),
         provider_params: None,
         external_tools: None,
+        llm_client_override: state
+            .llm_client_override
+            .clone()
+            .map(|client| Arc::new(client) as Arc<dyn std::any::Any + Send + Sync>),
         override_builtins: req.enable_builtins,
         override_shell: req.enable_shell,
         override_subagents: req.enable_subagents,
         override_memory: req.enable_memory,
         preload_skills: None,
-        peer_meta: req.peer_meta.clone(),
+        realm_id: Some(state.realm_id.clone()),
+        instance_id: std::env::var("RKAT_INSTANCE_ID").ok(),
+        backend: Some(state.backend.clone()),
+        config_generation: current_generation,
     };
 
-    // Hold the slot lock across staging + create to prevent concurrent
-    // requests from overwriting each other's staged config.
-    let result = {
-        let mut slot = state.builder_slot.lock().await;
-        *slot = Some(build_config);
-
-        let svc_req = SvcCreateSessionRequest {
-            model: model.to_string(),
-            prompt: req.prompt,
-            system_prompt: None, // Already in build_config
-            max_tokens: Some(max_tokens),
-            event_tx: Some(caller_event_tx),
-            host_mode,
-            skill_references: None,
-        };
-
-        state.session_service.create_session(svc_req).await
+    let svc_req = SvcCreateSessionRequest {
+        model: model.to_string(),
+        prompt: req.prompt,
+        system_prompt: req.system_prompt,
+        max_tokens: Some(max_tokens),
+        event_tx: Some(caller_event_tx),
+        host_mode,
+        skill_references: None,
+        build: Some(build),
     };
+
+    let result = state.session_service.create_session(svc_req).await;
 
     // Wait for the event forwarder to drain
     let _ = forward_task.await;
@@ -954,22 +943,21 @@ async fn continue_session(
                     .and_then(|meta| meta.comms_name.clone())
             });
 
-            let build_config = AgentBuildConfig {
-                model: model.to_string(),
+            let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
+            let build = SessionBuildOptions {
                 provider,
-                max_tokens: Some(max_tokens),
-                system_prompt: req.system_prompt,
                 output_schema: req.output_schema,
                 structured_output_retries: req.structured_output_retries,
                 hooks_override: req.hooks_override.unwrap_or_default(),
-                host_mode: continue_host_mode,
                 comms_name,
                 resume_session: Some(session),
                 budget_limits: None,
-                event_tx: None, // Wired by the session service's builder
-                llm_client_override: state.llm_client_override.clone(),
                 provider_params: None,
                 external_tools: None,
+                llm_client_override: state
+                    .llm_client_override
+                    .clone()
+                    .map(|client| Arc::new(client) as Arc<dyn std::any::Any + Send + Sync>),
                 override_builtins: Some(tooling.builtins),
                 override_shell: Some(tooling.shell),
                 override_subagents: Some(tooling.subagents),
@@ -979,20 +967,30 @@ async fn continue_session(
                     .peer_meta
                     .clone()
                     .or_else(|| stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())),
+                realm_id: stored_metadata
+                    .as_ref()
+                    .and_then(|m| m.realm_id.clone())
+                    .or_else(|| Some(state.realm_id.clone())),
+                instance_id: stored_metadata
+                    .as_ref()
+                    .and_then(|m| m.instance_id.clone())
+                    .or_else(|| std::env::var("RKAT_INSTANCE_ID").ok()),
+                backend: stored_metadata
+                    .as_ref()
+                    .and_then(|m| m.backend.clone())
+                    .or_else(|| Some(state.backend.clone())),
+                config_generation: current_generation,
             };
-
-            // Hold slot lock across staging + create to prevent races.
-            let mut slot = state.builder_slot.lock().await;
-            *slot = Some(build_config);
 
             let svc_req = SvcCreateSessionRequest {
                 model: model.to_string(),
                 prompt: req.prompt,
-                system_prompt: None,
+                system_prompt: req.system_prompt,
                 max_tokens: Some(max_tokens),
                 event_tx: Some(caller_event_tx.clone()),
                 host_mode: continue_host_mode,
                 skill_references: None,
+                build: Some(build),
             };
 
             let r = state
@@ -1000,7 +998,6 @@ async fn continue_session(
                 .create_session(svc_req)
                 .await
                 .map_err(|e| ApiError::Agent(format!("{e}")));
-            drop(slot);
             r
         }
         Err(err) => return session_error_to_api_result(err, &session_id),

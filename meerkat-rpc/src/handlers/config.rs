@@ -1,23 +1,16 @@
 //! `config/*` method handlers.
 
 use std::sync::Arc;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
-use meerkat_core::ConfigStore;
 use meerkat_core::config::{Config, ConfigDelta};
+use meerkat_core::{ConfigRuntime, ConfigRuntimeError, ConfigSnapshot, ConfigStore};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
-
-fn generation_counter() -> &'static AtomicU64 {
-    static GEN: OnceLock<AtomicU64> = OnceLock::new();
-    GEN.get_or_init(|| AtomicU64::new(0))
-}
 
 #[derive(serde::Deserialize)]
 struct ConfigSetPayload {
@@ -35,12 +28,11 @@ struct ConfigPatchPayload {
     expected_generation: Option<u64>,
 }
 
-fn config_response_body(config: Config, config_store: &Arc<dyn ConfigStore>) -> Value {
-    let generation = generation_counter().load(Ordering::SeqCst);
-    let metadata = config_store.metadata();
+fn config_response_body(snapshot: ConfigSnapshot) -> Value {
+    let metadata = snapshot.metadata;
     json!({
-        "config": config,
-        "generation": generation,
+        "config": snapshot.config,
+        "generation": snapshot.generation,
         "realm_id": metadata.as_ref().and_then(|m| m.realm_id.clone()),
         "instance_id": metadata.as_ref().and_then(|m| m.instance_id.clone()),
         "backend": metadata.as_ref().and_then(|m| m.backend.clone()),
@@ -48,16 +40,19 @@ fn config_response_body(config: Config, config_store: &Arc<dyn ConfigStore>) -> 
     })
 }
 
-fn check_generation(expected_generation: Option<u64>) -> Result<(), String> {
-    if let Some(expected) = expected_generation {
-        let current = generation_counter().load(Ordering::SeqCst);
-        if expected != current {
-            return Err(format!(
-                "Generation conflict: expected {expected}, current {current}"
-            ));
-        }
+fn config_runtime(config_store: &Arc<dyn ConfigStore>) -> Option<ConfigRuntime> {
+    ConfigRuntime::from_store_metadata(Arc::clone(config_store))
+}
+
+fn runtime_error_to_response(id: Option<RpcId>, err: ConfigRuntimeError) -> RpcResponse {
+    match err {
+        ConfigRuntimeError::GenerationConflict { expected, current } => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("Generation conflict: expected {expected}, current {current}"),
+        ),
+        other => RpcResponse::error(id, error::INVALID_PARAMS, other.to_string()),
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -66,13 +61,27 @@ fn check_generation(expected_generation: Option<u64>) -> Result<(), String> {
 
 /// Handle `config/get`.
 pub async fn handle_get(id: Option<RpcId>, config_store: &Arc<dyn ConfigStore>) -> RpcResponse {
-    match config_store.get().await {
-        Ok(config) => RpcResponse::success(id, config_response_body(config, config_store)),
-        Err(e) => RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            format!("Failed to read config: {e}"),
-        ),
+    if let Some(runtime) = config_runtime(config_store) {
+        match runtime.get().await {
+            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+            Err(e) => runtime_error_to_response(id, e),
+        }
+    } else {
+        match config_store.get().await {
+            Ok(config) => RpcResponse::success(
+                id,
+                config_response_body(ConfigSnapshot {
+                    config,
+                    generation: 0,
+                    metadata: config_store.metadata(),
+                }),
+            ),
+            Err(e) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("Failed to read config: {e}"),
+            ),
+        }
     }
 }
 
@@ -115,20 +124,27 @@ pub async fn handle_set(
             }
         };
 
-    if let Err(msg) = check_generation(expected_generation) {
-        return RpcResponse::error(id, error::INVALID_PARAMS, msg);
-    }
-
-    match config_store.set(config.clone()).await {
-        Ok(()) => {
-            generation_counter().fetch_add(1, Ordering::SeqCst);
-            RpcResponse::success(id, config_response_body(config, config_store))
+    if let Some(runtime) = config_runtime(config_store) {
+        match runtime.set(config, expected_generation).await {
+            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+            Err(e) => runtime_error_to_response(id, e),
         }
-        Err(e) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("Failed to set config: {e}"),
-        ),
+    } else {
+        match config_store.set(config.clone()).await {
+            Ok(()) => RpcResponse::success(
+                id,
+                config_response_body(ConfigSnapshot {
+                    config,
+                    generation: 0,
+                    metadata: config_store.metadata(),
+                }),
+            ),
+            Err(e) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("Failed to set config: {e}"),
+            ),
+        }
     }
 }
 
@@ -152,19 +168,26 @@ pub async fn handle_patch(
             (value, None)
         };
 
-    if let Err(msg) = check_generation(expected_generation) {
-        return RpcResponse::error(id, error::INVALID_PARAMS, msg);
-    }
-
-    match config_store.patch(ConfigDelta(patch)).await {
-        Ok(updated) => {
-            generation_counter().fetch_add(1, Ordering::SeqCst);
-            RpcResponse::success(id, config_response_body(updated, config_store))
+    if let Some(runtime) = config_runtime(config_store) {
+        match runtime.patch(ConfigDelta(patch), expected_generation).await {
+            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+            Err(e) => runtime_error_to_response(id, e),
         }
-        Err(e) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("Failed to patch config: {e}"),
-        ),
+    } else {
+        match config_store.patch(ConfigDelta(patch)).await {
+            Ok(updated) => RpcResponse::success(
+                id,
+                config_response_body(ConfigSnapshot {
+                    config: updated,
+                    generation: 0,
+                    metadata: config_store.metadata(),
+                }),
+            ),
+            Err(e) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("Failed to patch config: {e}"),
+            ),
+        }
     }
 }

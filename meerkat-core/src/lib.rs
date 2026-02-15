@@ -8,6 +8,7 @@ pub mod budget;
 pub mod comms;
 pub mod compact;
 pub mod config;
+pub mod config_runtime;
 pub mod config_store;
 pub mod error;
 pub mod event;
@@ -55,6 +56,7 @@ pub use config::{
     ResolvedSubAgentConfig, RetryConfig, ShellDefaults, StorageConfig, StoreConfig,
     SubAgentsConfig, ToolsConfig,
 };
+pub use config_runtime::{ConfigRuntime, ConfigRuntimeError, ConfigSnapshot};
 pub use config_store::{
     ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, FileConfigStore, MemoryConfigStore,
     TaggedConfigStore,
@@ -91,8 +93,8 @@ pub use schema::{
     CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };
 pub use service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionUsage, SessionView, StartTurnRequest,
+    CreateSessionRequest, SessionBuildOptions, SessionError, SessionInfo, SessionQuery,
+    SessionService, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 pub use session::{SESSION_VERSION, Session, SessionMeta, SessionMetadata, SessionTooling};
 pub use state::LoopState;

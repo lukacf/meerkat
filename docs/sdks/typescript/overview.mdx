@@ -4,7 +4,7 @@ description: "Getting started with the Meerkat TypeScript SDK: sessions, turns, 
 icon: "js"
 ---
 
-The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, stream events, and query capabilities from TypeScript or JavaScript. It communicates with a local `rkat rpc` subprocess over JSON-RPC 2.0.
+The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, stream events, and query capabilities from TypeScript or JavaScript. It communicates with a local `rkat rpc` subprocess over JSON-RPC 2.0 and supports explicit realm scoping.
 
 ## Getting started
 
@@ -41,7 +41,7 @@ The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, s
     import { MeerkatClient } from "@meerkat/sdk";
 
     const client = new MeerkatClient();
-    await client.connect();
+    await client.connect({ realmId: "team-alpha" });
 
     const result = await client.createSession({
       prompt: "What is the capital of Sweden?",
@@ -65,7 +65,7 @@ The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, s
 
 | Method | Description |
 |--------|-------------|
-| `connect()` | Spawn `rkat rpc`, handshake, fetch capabilities |
+| `connect(options?)` | Spawn `rkat rpc`, handshake, fetch capabilities |
 | `close()` | Kill the subprocess |
 | `createSession(params)` | Create a session and run the first turn |
 | `startTurn(sessionId, prompt)` | Continue an existing session |
@@ -95,10 +95,16 @@ new MeerkatClient(rkatPath?: string)
 ### connect()
 
 ```typescript
-async connect(): Promise<this>
+async connect(options?: {
+  realmId?: string;
+  instanceId?: string;
+  realmBackend?: "jsonl" | "redb";
+}): Promise<this>
 ```
 
 Spawns `rkat rpc`, performs `initialize` handshake, checks contract version compatibility, and fetches capabilities. Returns `this` for chaining.
+
+If `realmId` is omitted, each SDK process gets an isolated default RPC realm. Reuse `realmId` to share sessions/config across surfaces.
 
 ### createSession(params)
 

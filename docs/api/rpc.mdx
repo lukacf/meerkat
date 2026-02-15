@@ -28,6 +28,22 @@ Meerkat exposes a JSON-RPC 2.0 stdio interface for IDE integration, desktop apps
   </Step>
 </Steps>
 
+<Note>
+`rkat rpc` defaults to a new isolated realm each time. Use `--realm <id>` to share config/sessions with other surfaces or processes.
+</Note>
+
+## Runtime scope
+
+`rkat rpc` accepts global scope flags:
+
+```bash
+rkat [--realm <id>] [--instance <id>] [--realm-backend <redb|jsonl>] rpc
+```
+
+- `--realm`: explicit sharing/isolation key
+- `--instance`: optional instance metadata
+- `--realm-backend`: creation hint only; actual backend is pinned per realm manifest
+
 ## Method overview
 
 | Method | Category | Description |
@@ -638,7 +654,7 @@ Possible `status` values:
 
 ### config/get
 
-Read current config.
+Read current realm config envelope.
 
 <CodeGroup>
 ```json Request
@@ -650,13 +666,22 @@ Read current config.
   "jsonrpc": "2.0",
   "id": 9,
   "result": {
-    "agent": {
-      "model": "claude-sonnet-4-5",
-      "max_tokens_per_turn": 8192
+    "config": {
+      "agent": {
+        "model": "claude-sonnet-4-5",
+        "max_tokens_per_turn": 8192
+      }
     },
-    "tools": {
-      "builtins_enabled": false,
-      "shell_enabled": false
+    "generation": 3,
+    "realm_id": "team-alpha",
+    "instance_id": "rpc-worker-1",
+    "backend": "redb",
+    "resolved_paths": {
+      "root": "/.../meerkat/realms/team-alpha",
+      "manifest_path": "/.../realm_manifest.json",
+      "config_path": "/.../config.toml",
+      "sessions_redb_path": "/.../sessions.redb",
+      "sessions_jsonl_dir": "/.../sessions_jsonl"
     }
   }
 }
@@ -665,15 +690,34 @@ Read current config.
 
 ### config/set
 
-Replace the config.
+Replace config, optionally using generation CAS.
 
 <CodeGroup>
 ```json Request
-{"jsonrpc":"2.0","id":10,"method":"config/set","params":{"agent":{"model":"gpt-5.2"}}}
+{
+  "jsonrpc":"2.0",
+  "id":10,
+  "method":"config/set",
+  "params":{
+    "config": {"agent":{"model":"gpt-5.2"}},
+    "expected_generation": 3
+  }
+}
 ```
 
 ```json Response
-{"jsonrpc":"2.0","id":10,"result":{}}
+{
+  "jsonrpc":"2.0",
+  "id":10,
+  "result": {
+    "config": {"agent":{"model":"gpt-5.2"}},
+    "generation": 4,
+    "realm_id": "team-alpha",
+    "instance_id": null,
+    "backend": "redb",
+    "resolved_paths": { "...": "..." }
+  }
+}
 ```
 </CodeGroup>
 
@@ -683,13 +727,36 @@ Merge-patch the config (RFC 7396).
 
 <CodeGroup>
 ```json Request
-{"jsonrpc":"2.0","id":11,"method":"config/patch","params":{"max_tokens":8192}}
+{
+  "jsonrpc":"2.0",
+  "id":11,
+  "method":"config/patch",
+  "params":{
+    "patch":{"agent":{"max_tokens_per_turn":8192}},
+    "expected_generation": 4
+  }
+}
 ```
 
 ```json Response
-{"jsonrpc":"2.0","id":11,"result":{}}
+{
+  "jsonrpc":"2.0",
+  "id":11,
+  "result": {
+    "config": {"agent":{"max_tokens_per_turn":8192}},
+    "generation": 5,
+    "realm_id": "team-alpha",
+    "instance_id": null,
+    "backend": "redb",
+    "resolved_paths": { "...": "..." }
+  }
+}
 ```
 </CodeGroup>
+
+<Note>
+`config/set` also accepts a direct config object as params for compatibility. In that mode, no CAS check is applied.
+</Note>
 
 ## Notifications
 

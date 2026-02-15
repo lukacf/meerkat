@@ -181,10 +181,9 @@ Session persistence:
 Session service orchestration:
 
 - **EphemeralSessionService**: in-memory session lifecycle (always available)
-- **PersistentSessionService**: durable sessions backed by `RedbEventStore` (feature: `session-store`)
+- **PersistentSessionService**: durable session lifecycle over `SessionStore` backends
 - **DefaultCompactor**: context compaction implementation (feature: `session-compaction`)
-- **EventStore trait / RedbEventStore**: append-only event log for sessions
-- **SessionProjector**: materializes `.rkat/sessions/` files from events (derived, not canonical)
+- **SessionRuntime**: per-session task ownership + turn concurrency coordination
 
 Feature gates: `session-store`, `session-compaction`.
 </Accordion>
@@ -277,28 +276,26 @@ events stream back as JSON-RPC notifications.
 The main entry point. Re-exports types and provides:
 
 - **AgentFactory**: centralized agent construction pipeline shared across all surfaces
-- **FactoryAgentBuilder**: bridges `AgentFactory` into `SessionAgentBuilder` for `EphemeralSessionService`
+- **FactoryAgentBuilder**: bridges `AgentFactory` into `SessionAgentBuilder`
 - **FactoryAgent**: wraps `DynAgent` implementing `SessionAgent`
 - **build_ephemeral_service()**: convenience constructor for `EphemeralSessionService<FactoryAgentBuilder>`
-- **AgentBuildConfig**: per-request configuration (model, system prompt, tools, `override_builtins`, `override_shell`)
+- **AgentBuildConfig**: per-request configuration (model, system prompt, tool overrides, realm metadata)
+- **SessionBuildOptions**: in-band request build options used by all surfaces
 
 The `FactoryAgentBuilder` pattern works as follows:
 
 <Steps>
-  <Step title="Stage config">
-    Surface crate stages an `AgentBuildConfig` into the `build_config_slot`.
-  </Step>
   <Step title="Create session">
-    Surface calls `service.create_session(req)`.
+    Surface calls `service.create_session(req)` with `req.build: SessionBuildOptions`.
   </Step>
   <Step title="Build agent">
-    `EphemeralSessionService` calls `builder.build_agent(req, event_tx)`.
+    Service invokes `builder.build_agent(req, event_tx)`.
   </Step>
   <Step title="Delegate to factory">
-    `FactoryAgentBuilder` checks the slot, picks up the staged config, delegates to `AgentFactory::build_agent()`.
+    `FactoryAgentBuilder` converts `SessionBuildOptions` into `AgentBuildConfig` and delegates to `AgentFactory::build_agent()`.
   </Step>
-  <Step title="Fallback">
-    If no config was staged, a minimal config is built from `CreateSessionRequest` fields.
+  <Step title="Persist metadata">
+    Realm metadata (`realm_id`, `instance_id`, `backend`, `config_generation`) is written into session metadata.
   </Step>
 </Steps>
 </Accordion>
@@ -524,8 +521,8 @@ Meerkat is extended by implementing three core traits. See the [Rust SDK](/rust/
 5. `meerkat-cli` is the top-level binary crate
 
 <Note>
-`.rkat/sessions/` files are derived projection output (materialized by `SessionProjector`),
-not canonical state. Deleting them and replaying from the event store produces identical content.
+Canonical runtime state is realm-scoped (`realm_manifest.json`, realm config, and pinned session backend).
+Sharing and isolation are controlled by `realm_id`, not by working directory alone.
 </Note>
 
 ## See also

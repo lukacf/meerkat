@@ -227,8 +227,11 @@ When the `memory-store-session` feature is compiled in and memory is enabled:
   <Tab title="SDK">
     ```rust
     use meerkat::{AgentFactory, AgentBuildConfig};
+    use meerkat_store;
 
-    let factory = AgentFactory::new(".rkat/sessions")
+    let realm = meerkat_store::realm_paths("team-alpha");
+    let factory = AgentFactory::new(realm.root.clone())
+        .runtime_root(realm.root)
         .project_root(".")
         .builtins(true)
         .memory(true);

@@ -73,10 +73,10 @@ graph TD
     Ensure the `comms` Cargo feature is compiled in (enabled by default in the CLI and facade crate).
   </Step>
   <Step title="Generate identity">
-    Identity is auto-generated on first run. Keys are stored in `.rkat/identity/` (mode `0600` for private key on Unix).
+    Identity is auto-generated on first run. Keys are stored under the realm runtime root (workspace `.rkat/identity/` for the default CLI workspace realm, realm data dir for non-workspace realms).
   </Step>
   <Step title="Configure trusted peers">
-    Add peers to `.rkat/trusted_peers.json` with their name, public key, and address.
+    Add peers to `trusted_peers.json` under the active runtime root with their name, public key, and address.
   </Step>
   <Step title="Run with comms enabled">
     Use `--comms-name <NAME>` on the CLI or set `enable_comms` on `AgentFactory`.
@@ -90,7 +90,7 @@ Each agent has an Ed25519 keypair managed by the `Keypair` type (`meerkat-comms/
 - **Key generation**: `Keypair::generate()` creates a new random keypair using `OsRng`.
 - **Key persistence**: `Keypair::save(dir)` writes `identity.key` (mode `0600` on Unix) and `identity.pub` to disk. `Keypair::load(dir)` reads them back. `Keypair::load_or_generate(dir)` is the canonical entry point.
 - **Public key format**: `PubKey` is a 32-byte Ed25519 public key. The canonical string format is `ed25519:<base64>` (standard Base64 with padding).
-- **Default identity directory**: `.rkat/identity/` (relative to base dir).
+- **Default identity directory**: `<runtime-root>/.rkat/identity/`.
 
 <Accordion title="Envelope signing">
 Every message is wrapped in a signed `Envelope`:
@@ -121,7 +121,7 @@ pub struct TrustedPeer {
 }
 ```
 
-Stored as JSON at `.rkat/trusted_peers.json`:
+Stored as JSON at `<runtime-root>/.rkat/trusted_peers.json`:
 
 ```json
 {
@@ -182,14 +182,14 @@ All transports use a length-prefixed CBOR framing protocol implemented by `Trans
 
 **TCP transport**: TCP listeners are spawned by `spawn_tcp_listener()`. Accepts connections and processes each in a dedicated tokio task.
 
-**Inproc transport**: The `InprocRegistry` (`meerkat-comms/src/inproc.rs`) is a process-global registry (singleton via `OnceLock`) that maps agent names and public keys to their inbox senders. Messages are delivered directly in-memory without serialization.
+**Inproc transport**: The `InprocRegistry` (`meerkat-comms/src/inproc.rs`) is a process-global registry segmented by namespace. Meerkat uses realm-scoped namespaces so inproc peers from different realms are isolated by default. Messages are delivered directly in-memory without serialization.
 
 - `InprocRegistry::global()` returns the singleton
-- `register(name, pubkey, sender)` adds an agent (evicts stale entries on collision)
-- `unregister(pubkey)` removes an agent
-- `send(from_keypair, to_name, kind)` creates a signed envelope and delivers it directly
+- `register_with_meta_in_namespace(namespace, name, pubkey, sender, meta)` adds an agent in a namespace
+- `unregister_in_namespace(namespace, pubkey)` removes an agent from a namespace
+- `send_with_signature_in_namespace(namespace, from_keypair, to_name, kind, sign)` delivers in-memory within that namespace
 
-When `CommsRuntime` is created, it automatically registers itself in the global `InprocRegistry`. When dropped, it unregisters.
+When `CommsRuntime` is created, it automatically registers itself in the active namespace. When dropped, it unregisters from that namespace.
 </Accordion>
 
 ## Message types
@@ -353,7 +353,7 @@ When converting to `CommsMessage` for the agent loop, ACKs and messages from unk
 
 ## Configuration
 
-<Accordion title="Config file (.rkat/config.toml)">
+<Accordion title="Config file (realm config.toml)">
 ```toml
 [comms]
 mode = "inproc"                    # "inproc", "tcp", or "uds"
@@ -379,10 +379,11 @@ The `CoreCommsConfig` is the internal config used by `CommsRuntime`:
 pub struct CoreCommsConfig {
     pub enabled: bool,
     pub name: String,                        // Default: "meerkat"
+    pub inproc_namespace: Option<String>,    // Realm-scoped namespace for inproc isolation
     pub listen_uds: Option<PathBuf>,
     pub listen_tcp: Option<SocketAddr>,
-    pub identity_dir: PathBuf,               // Default: ".rkat/identity"
-    pub trusted_peers_path: PathBuf,         // Default: ".rkat/trusted_peers.json"
+    pub identity_dir: PathBuf,               // Default: "<runtime-root>/.rkat/identity"
+    pub trusted_peers_path: PathBuf,         // Default: "<runtime-root>/.rkat/trusted_peers.json"
     pub ack_timeout_secs: u64,               // Default: 30
     pub max_message_bytes: usize,            // Default: 1,048,576
 }
@@ -486,7 +487,7 @@ let runtime = build_comms_runtime_from_config(&config, base_dir, "my-agent").awa
 ```
 
 This function reads `config.comms.mode` and creates the appropriate runtime:
-- `Inproc` -- calls `CommsRuntime::inproc_only()`
+- `Inproc` -- calls the scoped inproc constructor (`CommsRuntime::inproc_only_scoped`) with realm namespace when available
 - `Tcp` -- creates a full runtime with `CommsRuntime::new()` and starts TCP listeners
 - `Uds` -- creates a full runtime with `CommsRuntime::new()` and starts UDS listeners
 </Accordion>
@@ -665,7 +666,7 @@ The optional `source` field is prepended as `[source: ci-pipeline]` metadata. Re
 
 When `auth = "none"` in config, a separate plain-text listener starts on `event_address` for unauthenticated external events. The signed agent-to-agent listener is never replaced.
 
-```toml .rkat/config.toml
+```toml config.toml (active realm)
 [comms]
 mode = "tcp"
 address = "127.0.0.1:4200"         # Signed agent-to-agent listener

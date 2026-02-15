@@ -6,6 +6,10 @@ icon: "book"
 
 ## Wire types
 
+<Note>
+`get_config()` / `patch_config()` operate on the RPC config envelope (`config`, `generation`, `realm_id`, `instance_id`, `backend`, `resolved_paths`). `set_config()` currently forwards the payload you provide.
+</Note>
+
 <Accordion title="WireRunResult">
 ```python
 from meerkat import WireRunResult

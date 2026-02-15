@@ -150,6 +150,14 @@ You can connect any MCP-capable client to a Meerkat MCP server. Run a server pro
 
 `meerkat-mcp-server` is a library crate that provides tool schemas and handlers. If you need a standalone MCP server process, add a thin binary wrapper around its `tools_list()` and `handle_tools_call*` entrypoints, or embed it in an existing MCP host.
 
+The bundled binary supports realm scope flags:
+
+```bash
+meerkat-mcp-server --realm team-alpha --instance worker-1 --realm-backend redb
+```
+
+If `--realm` is omitted, the server creates a new isolated realm by default.
+
 ## Tool reference
 
 ### meerkat_run
@@ -451,7 +459,7 @@ Both `meerkat_run` and `meerkat_resume` return MCP-standard tool results. The in
 
 ### meerkat_config
 
-Get or update Meerkat config for this MCP server instance.
+Get or update realm config for this MCP server instance.
 
 <CodeGroup>
 ```json Get
@@ -459,11 +467,19 @@ Get or update Meerkat config for this MCP server instance.
 ```
 
 ```json Set
-{ "action": "set", "config": { "agent": { "model": "gpt-5.2" } } }
+{
+  "action": "set",
+  "config": { "agent": { "model": "gpt-5.2" } },
+  "expected_generation": 3
+}
 ```
 
 ```json Patch
-{ "action": "patch", "patch": { "agent": { "max_tokens_per_turn": 8192 } } }
+{
+  "action": "patch",
+  "patch": { "agent": { "max_tokens_per_turn": 8192 } },
+  "expected_generation": 4
+}
 ```
 </CodeGroup>
 
@@ -478,6 +494,19 @@ Get or update Meerkat config for this MCP server instance.
 <ParamField body="patch" type="object | null">
   RFC 7396 merge-patch delta (for `patch` action).
 </ParamField>
+
+<ParamField body="expected_generation" type="u64 | null">
+  Optional optimistic concurrency check for `set` and `patch`.
+</ParamField>
+
+Response includes config envelope fields:
+
+- `config`
+- `generation`
+- `realm_id`
+- `instance_id`
+- `backend`
+- `resolved_paths`
 
 ### meerkat_capabilities
 

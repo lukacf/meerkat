@@ -1,140 +1,76 @@
 ---
 title: "Configuration"
-description: "Layered TOML config, budget enforcement, retry policy, session persistence."
+description: "Realm-scoped config, generation CAS, and surface-consistent runtime settings."
 icon: "sliders"
 ---
 
-Configuration layers: defaults &rarr; global config &rarr; project config &rarr; env vars &rarr; CLI flags. Secrets (API keys) are always environment variables, never config files.
+Configuration is realm-scoped. The active `realm_id` determines which config file is read and written.
 
-## Config file
+## Realm-scoped config
 
-Meerkat loads config from TOML files in two locations:
+Every realm has its own config file and runtime state:
 
-| Location | Scope | Example path |
-|----------|-------|--------------|
-| `.rkat/config.toml` | Project (checked into repo or gitignored) | `./my-project/.rkat/config.toml` |
-| `~/.rkat/config.toml` | Global (user-wide defaults) | `~/.rkat/config.toml` |
+- `config.toml` (user settings)
+- `config_state.json` (generation counter for CAS)
+- `realm_manifest.json` (pinned backend + metadata)
 
-**Precedence:** defaults &rarr; global config &rarr; project config &rarr; env vars &rarr; CLI flags.
+The canonical location is under the platform data directory:
 
-### Minimal example
+- macOS: `~/Library/Application Support/meerkat/realms/<realm>/`
+- Linux: `~/.local/share/meerkat/realms/<realm>/`
+- Windows: `%APPDATA%\meerkat\realms\<realm>\`
 
-```toml .rkat/config.toml
-[agent]
-model = "claude-opus-4-6"
-max_tokens_per_turn = 16384
+Use [realms](/concepts/realms) to choose whether state is shared or isolated.
 
-[shell]
-program = "bash"
-timeout_secs = 30
-```
+## Effective precedence
 
-### Generating a config file
+For a given realm, effective settings are:
 
-```bash
-rkat init                 # Creates .rkat/config.toml with defaults
-```
+1. Built-in defaults
+2. Realm `config.toml`
+3. Environment overrides (secrets and supported runtime env overrides)
+4. Per-request runtime parameters (for example model/system prompt/tool toggles on create/resume calls)
 
-## Budget controls
+## Config APIs and CAS
 
-Budget limits cap resource usage per agent run. When a limit is reached the agent completes its current turn, then stops.
+RPC, REST, and MCP all expose the same config envelope:
 
-<ParamField path="max_tokens" type="integer">
-  Total input + output tokens across all turns.
-</ParamField>
+- `config`
+- `generation`
+- `realm_id`
+- `instance_id`
+- `backend`
+- `resolved_paths`
 
-<ParamField path="max_duration" type="string">
-  Maximum wall-clock runtime. Accepts `"30s"`, `"5m"`, `"2h"`.
-</ParamField>
+Writes support optimistic concurrency:
 
-<ParamField path="max_tool_calls" type="integer">
-  Maximum total tool invocations.
-</ParamField>
+- `config/set` and `config/patch` accept optional `expected_generation`
+- stale writes return generation conflict
 
-```toml .rkat/config.toml
-[budget]
-max_tokens = 50000
-max_duration = "5m"
-max_tool_calls = 50
-```
+This gives deterministic behavior when multiple clients or processes update config concurrently.
 
-## Retry policy
+## CLI behavior
 
-Failed LLM calls are retried automatically with exponential backoff and jitter.
-
-```toml .rkat/config.toml
-[retry]
-max_retries = 3
-initial_delay_ms = 500
-max_delay_ms = 10000
-multiplier = 2.0
-```
-
-| Error | Retried? |
-|-------|----------|
-| `RateLimited` | Yes (uses retry-after header when available) |
-| `ServerOverloaded` | Yes |
-| `NetworkTimeout` | Yes |
-| `ConnectionReset` | Yes |
-| `ServerError (5xx)` | Yes |
-| `InvalidRequest` | No |
-| `AuthenticationFailed` | No |
-| `ContentFiltered` | No |
-
-## Session persistence
-
-Sessions record conversation history so agents can resume where they left off.
-
-<Tabs>
-  <Tab title="JSONL (default)">
-    Sessions are stored as JSONL files, one per session.
-
-    ```toml .rkat/config.toml
-    [store]
-    sessions_path = "/custom/path/to/sessions"
-    ```
-
-    Requires the `jsonl-store` feature flag (enabled by default).
-  </Tab>
-  <Tab title="redb (embedded database)">
-    Durable embedded storage using [redb](https://github.com/cberner/redb). Requires the `session-store` feature flag.
-  </Tab>
-  <Tab title="In-memory (testing)">
-    Ephemeral storage that lives only in process memory. Requires the `memory-store` feature flag.
-  </Tab>
-</Tabs>
-
-### Managing sessions
+CLI config commands operate on the selected realm:
 
 ```bash
-rkat sessions list [--limit N]
-rkat sessions show <SESSION_ID>
+rkat --realm team-alpha config get --format json
+rkat --realm team-alpha config patch --json '{"agent":{"model":"gpt-5.2"}}'
 ```
 
-## Logging
+Without `--realm`, CLI uses the workspace-derived default realm (`ws-...`).
 
-Meerkat uses the `tracing` crate. Configure via `RUST_LOG`:
+## What about `~/.rkat/config.toml` and `.rkat/config.toml`?
 
-```bash
-export RUST_LOG=info                    # Session lifecycle, turns, completions
-export RUST_LOG=meerkat=debug,info      # Debug Meerkat, info for dependencies
-export RUST_LOG=trace                   # Wire-level protocol details
-```
+Those files still exist for compatibility and developer ergonomics (`rkat init`, legacy flows, and some layered hook loading behavior), but realm config is the canonical runtime configuration for CLI/RPC/REST/MCP surfaces.
 
-## Advanced configuration
+## Backend and storage settings
 
-These features have their own dedicated guides:
-
-| Feature | Config section | Guide |
-|---------|---------------|-------|
-| Hooks | `[hooks]` | [Hooks guide](/guides/hooks) |
-| Memory and compaction | `[compaction]` | [Memory guide](/guides/memory) |
-| Sub-agents | `[sub_agents]` | [Sub-agents guide](/guides/sub-agents) |
-| Inter-agent comms | `[comms]` | [Comms guide](/guides/comms) |
-| MCP servers | `.rkat/mcp.toml` | [MCP reference](/api/mcp) |
-| Shell security | `[shell]` | [Built-in tools](/reference/builtin-tools) |
+Session backend is pinned per realm in `realm_manifest.json` (`redb` or `jsonl`).
+`--realm-backend` only matters on first creation of a realm.
 
 ## See also
 
-- [Providers](/concepts/providers) - API key and model setup
-- [CLI configuration](/cli/configuration) - CLI-specific config details
+- [Realms](/concepts/realms)
+- [Sessions](/concepts/sessions)
+- [CLI configuration](/cli/configuration)

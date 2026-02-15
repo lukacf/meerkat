@@ -60,7 +60,7 @@ Background hooks on post-points publish patches via `HookPatchEnvelope` (contain
     Pick one of the three runtimes: in-process (Rust closure), command (subprocess), or HTTP (remote endpoint).
   </Step>
   <Step title="Add configuration">
-    Add a `[[hooks.entries]]` block to `.rkat/config.toml` or register programmatically via `HooksConfig`.
+    Add a `[[hooks.entries]]` block to the active realm `config.toml` (or register programmatically via `HooksConfig`).
   </Step>
   <Step title="Implement the handler">
     Write the handler that receives a `HookInvocation` and returns a `RuntimeHookResponse` with an optional decision and patches.
@@ -227,7 +227,7 @@ A priority-1 guardrail that denies will prevent a priority-100 observer from run
 
 ## Configuration
 
-<Accordion title="Config file example (.rkat/config.toml)">
+<Accordion title="Config file example (realm config.toml)">
 Hook configuration lives under the `[hooks]` table:
 
 ```toml
@@ -268,7 +268,7 @@ args = ["hooks/safety_check.py"]
 </Accordion>
 
 <Accordion title="Layered config loading">
-Hook entries from global config (`~/.rkat/config.toml`) and project config (`.rkat/config.toml`) are combined additively via `HooksConfig::append_entries_from()`. Global entries load first, then project entries are appended after them.
+Hook loading is runtime-root aware. In workspace-derived realms, global and project hook entries are layered (`~/.rkat/config.toml` then `.rkat/config.toml`) and merged with active realm config hooks. In non-workspace realms, realm config is primary and no project config may be discovered.
 </Accordion>
 
 ## Per-run overrides

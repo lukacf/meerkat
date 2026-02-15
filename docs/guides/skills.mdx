@@ -10,7 +10,7 @@ Skills inject domain-specific knowledge into the agent's context. A skill is a m
 
 Skills are discovered from multiple sources, in precedence order:
 
-1. **Project** (`.rkat/skills/`) — highest precedence
+1. **Project/runtime root** (`<runtime-root>/.rkat/skills/`) — highest precedence
 2. **User** (`~/.rkat/skills/`)
 3. **Git repositories** — cloned to local cache, refreshed on TTL
 4. **HTTP endpoints** — fetched from remote skill servers
@@ -22,7 +22,7 @@ A project skill with the same ID as a builtin skill overrides the builtin (first
 
 ### Git sources
 
-Configured in `.rkat/skills.toml`. Uses gitoxide (pure Rust, no git CLI dependency):
+Configured in skills settings (typically in realm `config.toml`). Uses gitoxide (pure Rust, no git CLI dependency):
 
 ```toml
 [[repositories]]
@@ -242,10 +242,10 @@ See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript S
 
 ## Configuration
 
-Skills are configured in `.rkat/skills.toml` with user/project layering:
+Skills are configured via `SkillsConfig` (realm-scoped at runtime, with optional user/project layering when those files are present):
 
 ```toml
-# ~/.config/rkat/skills.toml (user) or .rkat/skills.toml (project)
+# realm config (or ~/.rkat/skills.toml and .rkat/skills.toml in layered compatibility mode)
 enabled = true
 max_injection_bytes = 32768    # max size of injected skill content
 inventory_threshold = 12       # flat listing below, collection mode above
@@ -256,4 +256,4 @@ transport = "git"
 url = "https://github.com/company/skills.git"
 ```
 
-Project settings override user settings when the project file exists. Repositories are merged (project repos take precedence over user repos with the same name).
+When layered user/project files are used, project settings override user settings and repositories are merged by name.

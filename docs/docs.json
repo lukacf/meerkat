@@ -32,6 +32,7 @@
           {
             "group": "Core concepts",
             "pages": [
+              "concepts/realms",
               "concepts/sessions",
               "concepts/tools",
               "concepts/providers",

@@ -74,6 +74,10 @@ description: "Install Meerkat and run your first agent. Single binary, any provi
   </Tab>
 </Tabs>
 
+<Note>
+To share state across processes/surfaces, pass the same explicit realm (`--realm` for CLI, `realm_id`/`realmId` for SDK clients). See [realms](/concepts/realms).
+</Note>
+
 ## Switch providers
 
 Same code, different model. The provider is inferred from the model name:

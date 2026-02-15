@@ -281,7 +281,7 @@ When the `comms` feature is enabled and the parent has comms configured:
 2. The sub-agent's tools are wrapped with comms tools via `wrap_with_comms`.
 3. The sub-agent is added to the parent's trusted peers so bidirectional communication works.
 4. The parent receives `comms` instructions in the spawn response explaining how to message the child.
-5. Communication uses in-process (`CommsBootstrap::for_child_inproc`) rather than network listeners.
+5. Communication uses in-process (`CommsBootstrap::for_child_inproc`) with the parent's realm namespace, so child/parent comms stay isolated from other realms in the same process.
 
 <Info>
 See the [comms guide](/guides/comms) for details on the inter-agent communication system.

@@ -91,9 +91,8 @@ Events emitted: `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`.
 ## Durability
 
 - **Ephemeral**: Process death loses all state.
-- **Persistent**: Snapshot saved AFTER turn completes. Crash mid-turn loses the in-flight turn.
-- `.rkat/sessions/` files are derived (projected) output, not canonical source. Deleting them
-  and replaying from the event store produces identical content.
+- **Persistent**: Snapshot saved after turn completion according to the pinned realm backend.
+- Backends are pinned per realm (`realm_manifest.json`) and shared across surfaces only when `realm_id` matches.
 
 ## See also
 

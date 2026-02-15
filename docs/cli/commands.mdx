@@ -1,363 +1,138 @@
 ---
 title: "CLI commands"
-description: "Complete command reference for the Meerkat CLI (rkat)."
+description: "Command reference for rkat with realm-first runtime scoping."
 icon: "terminal"
 ---
 
-`rkat` is the command-line interface for Meerkat. It lets you run AI agents from your terminal with support for multiple providers, MCP tools, session management, and streaming output.
+`rkat` is realm-first. All commands accept global scope flags:
+
+```bash
+rkat [--realm <id>] [--instance <id>] [--realm-backend <redb|jsonl>] <command> ...
+```
 
 ## Common commands
 
-| Command | Example | Purpose |
-|---------|---------|---------|
-| `init` | `rkat init` | Initialize project config |
-| `run` | `rkat run "prompt"` | Execute an agent with a prompt |
-| `resume` | `rkat resume <ID> "prompt"` | Continue a previous session |
-| `sessions list` | `rkat sessions list` | List stored sessions |
-| `sessions show` | `rkat sessions show <ID>` | View session details |
-| `mcp add` | `rkat mcp add name -- cmd` | Add an MCP tool server |
-| `mcp list` | `rkat mcp list` | List configured MCP servers |
-| `config` | `rkat config get` | Get, set, or patch configuration |
-| `rpc` | `rkat rpc` | Start the JSON-RPC stdio server |
-| `capabilities` | `rkat capabilities` | Show runtime capabilities |
+| Command | Purpose |
+|---------|---------|
+| `init` | Initialize local project compatibility config (`.rkat/config.toml`) |
+| `run` | Create and run a session |
+| `resume` | Continue an existing session |
+| `sessions list/show/delete` | Inspect or remove sessions in active realm |
+| `config get/set/patch` | Read or mutate realm config |
+| `rpc` | Start JSON-RPC stdio server |
+| `mcp ...` | Manage MCP server config |
+| `capabilities` | Show resolved runtime capabilities |
 
----
+## Realm behavior by command
 
-## init
+| Command surface | Default without `--realm` |
+|----------------|----------------------------|
+| `run`, `resume`, `sessions ...` | Workspace-derived stable realm (`ws-...`) |
+| `rpc` | New opaque realm (`realm-...`) |
 
-Initialize a project config directory.
+To share state between CLI and RPC, use the same explicit realm:
 
 ```bash
-rkat init
+rkat --realm team-alpha run "Plan release"
+rkat --realm team-alpha sessions list
+rkat --realm team-alpha rpc
 ```
 
-Creates `.rkat/config.toml` with sensible defaults for the current project.
-
----
-
 ## run
-
-Execute an agent with a prompt.
 
 ```bash
 rkat run [OPTIONS] <PROMPT>
 ```
 
-<ParamField path="PROMPT" type="string" required>
-  The prompt to execute.
-</ParamField>
+Frequently used options:
 
-### Model selection
+- `--model <MODEL>`
+- `--provider <anthropic|openai|gemini>`
+- `--stream`
+- `--output <text|json>`
+- `--max-tokens <N>`
+- `--max-total-tokens <N>`
+- `--max-duration <DURATION>`
+- `--max-tool-calls <N>`
+- `--enable-builtins`
+- `--enable-shell` (requires `--enable-builtins`)
+- `--no-subagents`
+- `--hooks-override-json <JSON>`
+- `--hooks-override-file <FILE>`
 
-<ParamField path="--model" type="string" default="claude-opus-4-6">
-  Model to use.
-</ParamField>
+Comms options:
 
-<ParamField path="-p, --provider" type="string">
-  LLM provider: `anthropic`, `openai`, or `gemini`. Auto-detected from the model name if omitted.
-</ParamField>
-
-### Output
-
-<ParamField path="--output" type="string" default="text">
-  Output format: `text` or `json`.
-</ParamField>
-
-<ParamField path="--stream" type="boolean" default="false">
-  Stream response tokens as they arrive.
-</ParamField>
-
-<Accordion title="Budget and token limits">
-<ParamField path="--max-tokens" type="integer" default="4096">
-  Maximum tokens per turn.
-</ParamField>
-
-<ParamField path="--max-total-tokens" type="integer">
-  Maximum total tokens for the run. Unlimited by default.
-</ParamField>
-
-<ParamField path="--max-duration" type="string">
-  Maximum duration (e.g., `5m`, `1h30m`, `30s`). Unlimited by default.
-</ParamField>
-
-<ParamField path="--max-tool-calls" type="integer">
-  Maximum number of tool calls. Unlimited by default.
-</ParamField>
-</Accordion>
-
-<Accordion title="Provider parameters (--param)">
-<ParamField path="--param" type="string">
-  Provider-specific parameter as `KEY=VALUE`. Can be repeated. See [provider parameters](/concepts/providers#provider-parameters) for details.
-</ParamField>
-</Accordion>
-
-<Accordion title="Inter-agent communication and events">
-<ParamField path="--comms-name" type="string">
-  Agent name for inter-agent communication. Enables comms if set.
-</ParamField>
-
-<ParamField path="--comms-listen-tcp" type="string">
-  TCP address to listen on for signed comms (e.g., `0.0.0.0:4200`).
-</ParamField>
-
-<ParamField path="--no-comms" type="boolean">
-  Disable inter-agent communication entirely.
-</ParamField>
-
-<ParamField path="--host" type="boolean" default="false">
-  Run in host mode: process the initial prompt, then stay alive listening for comms messages and external events.
-</ParamField>
-
-<ParamField path="--stdin" type="boolean" default="false">
-  Read external events from stdin (newline-delimited JSON or plain text). Only meaningful with `--host`. Each line is injected into the agent's inbox.
-</ParamField>
-</Accordion>
-
-### Examples
-
-<CodeGroup>
-```bash Basic usage
-rkat run "What is the capital of France?"
-rkat run --model claude-opus-4-6 "Explain quantum computing"
-rkat run --model gpt-5.2 "Write a haiku about Rust"
-rkat run --model gemini-3-flash-preview "What are the benefits of async/await?"
-```
-
-```bash Output options
-rkat run --stream "Tell me a story"
-rkat run --output json "What is 2+2?" | jq '.text'
-```
-
-```bash Budget constraints
-rkat run --max-duration 30s "Solve this complex problem"
-rkat run --max-total-tokens 10000 "Analyze this codebase"
-rkat run --max-tool-calls 5 "Search for and summarize recent news"
-```
-</CodeGroup>
-
----
+- `--comms-name <NAME>`
+- `--comms-listen-tcp <ADDR>`
+- `--no-comms`
+- `--host`
+- `--stdin`
 
 ## resume
-
-Resume a previous session with a new prompt.
 
 ```bash
 rkat resume <SESSION_ID> <PROMPT>
 ```
 
-<ParamField path="SESSION_ID" type="string" required>
-  Session ID to resume.
-</ParamField>
-
-<ParamField path="PROMPT" type="string" required>
-  The prompt to continue with.
-</ParamField>
-
-```bash
-rkat run "Let's discuss Rust error handling"
-# Note the session ID from output
-rkat resume 01936f8a-... "What about the ? operator?"
-```
-
----
+Resumes a session from the active realm.
 
 ## sessions
 
-Manage stored sessions.
-
-### list
-
 ```bash
 rkat sessions list [--limit N]
-```
-
-```bash
-$ rkat sessions list
-ID                                       MESSAGES     CREATED              UPDATED
---------------------------------------------------------------------------------------------
-01936f8a-7b2c-7000-8000-000000000001     8            2025-01-22 14:30     2025-01-22 15:45
-01936f8a-7b2c-7000-8000-000000000002     3            2025-01-21 09:15     2025-01-21 09:20
-```
-
-### show
-
-```bash
 rkat sessions show <ID>
+rkat sessions delete <ID>
 ```
 
-Displays all messages in the session with their types (USER, ASSISTANT, SYSTEM, TOOL RESULTS).
+These commands read/write through the same session service path used by `run` and `resume`.
 
-### delete
+## config
 
 ```bash
-rkat sessions delete <SESSION_ID>
+rkat config get [--format toml|json]
+rkat config set --file config.toml
+rkat config set --json '{"agent":{"model":"gpt-5.2"}}'
+rkat config patch --json '{"budget":{"max_tokens":50000}}'
 ```
 
----
-
-## mcp
-
-Manage MCP (Model Context Protocol) server configuration.
-
-### add
-
-```bash
-rkat mcp add [OPTIONS] <NAME> [-- <COMMAND>...]
-```
-
-<Tabs>
-  <Tab title="Stdio transport">
-    ```bash
-    rkat mcp add my-tools -- npx -y @example/mcp-server
-    rkat mcp add api-tools -e API_KEY=secret123 -- python mcp_server.py
-    rkat mcp add global-tools --user -- /usr/local/bin/mcp-server
-    ```
-  </Tab>
-  <Tab title="HTTP transport">
-    ```bash
-    rkat mcp add remote-tools --url https://mcp.example.com/api
-    rkat mcp add auth-tools --url https://mcp.example.com/api -H "Authorization:Bearer token123"
-    rkat mcp add sse-tools -t sse --url https://old.example.com/sse
-    ```
-  </Tab>
-</Tabs>
-
-### list
-
-```bash
-rkat mcp list [--scope user|project] [--json]
-```
-
-### get
-
-```bash
-rkat mcp get [--scope user|project] [--json] <NAME>
-```
-
-### remove
-
-```bash
-rkat mcp remove [--scope user|project] <NAME>
-```
-
-<Warning>
-If the server exists in multiple scopes and `--scope` is not specified, the command will error.
-</Warning>
-
----
+Config operations are realm-scoped.
 
 ## rpc
-
-Start the JSON-RPC stdio server for IDE and desktop app integration.
 
 ```bash
 rkat rpc
 ```
 
-The server reads/writes newline-delimited JSON-RPC 2.0 on stdin/stdout. Unlike `run`/`resume`, it keeps agents alive between turns.
+Starts JSON-RPC 2.0 over stdio.
 
-See the [RPC reference](/api/rpc) for the full protocol specification.
+Pass `--realm` when you want deterministic shared state with other surfaces or processes:
 
----
+```bash
+rkat --realm team-alpha rpc
+```
+
+## mcp
+
+```bash
+rkat mcp add <NAME> -- <COMMAND> [ARGS...]
+rkat mcp add <NAME> --url <URL>
+rkat mcp list [--scope user|project] [--json]
+rkat mcp get <NAME> [--scope user|project] [--json]
+rkat mcp remove <NAME> [--scope user|project]
+```
+
+MCP config is stored in `.rkat/mcp.toml` (project) and `~/.rkat/mcp.toml` (user).
 
 ## capabilities
-
-Show runtime capabilities -- what features are compiled in and enabled by config.
 
 ```bash
 rkat capabilities
 ```
 
-Lists every known capability (sessions, structured output, hooks, builtins, shell, comms, sub-agents, memory, skills, MCP) with its current status: `Available`, `DisabledByPolicy`, or `NotCompiled`.
-
----
-
-## config
-
-Manage configuration.
-
-### get
-
-```bash
-rkat config get [--format toml|json]
-```
-
-### set
-
-```bash
-rkat config set --file config.toml
-rkat config set --json '{"agent":{"model":"gpt-5.2"}}'
-rkat config set --toml '[agent]\nmodel = "gpt-5.2"'
-```
-
-### patch
-
-```bash
-rkat config patch --json '{"budget":{"max_tokens":50000}}'
-rkat config patch --file patch.json
-```
-
----
-
-## Examples
-
-<Accordion title="MCP tools workflow">
-<Steps>
-  <Step title="Set up a filesystem tool">
-    ```bash
-    rkat mcp add fs -- npx -y @modelcontextprotocol/server-filesystem /home/user/projects
-    ```
-  </Step>
-  <Step title="Run with tools available">
-    ```bash
-    rkat run "List all Rust files in the projects directory"
-    ```
-  </Step>
-</Steps>
-</Accordion>
-
-<Accordion title="Session workflow">
-<Steps>
-  <Step title="Start a conversation">
-    ```bash
-    rkat run "I want to learn about Rust iterators"
-    ```
-  </Step>
-  <Step title="Continue the conversation">
-    ```bash
-    rkat resume 01936f8a-... "What about the collect() method?"
-    ```
-  </Step>
-  <Step title="Review and clean up">
-    ```bash
-    rkat sessions show 01936f8a-...
-    rkat sessions delete 01936f8a-...
-    ```
-  </Step>
-</Steps>
-</Accordion>
-
-<Accordion title="Scripting with JSON output">
-```bash
-#!/bin/bash
-prompts=("What is Rust?" "What is Go?" "What is Python?")
-
-for prompt in "${prompts[@]}"; do
-    result=$(rkat run --output json "$prompt")
-    text=$(echo "$result" | jq -r '.text')
-    tokens=$(echo "$result" | jq -r '.usage.input_tokens + .usage.output_tokens')
-    echo "Q: $prompt"
-    echo "A: $text"
-    echo "Tokens: $tokens"
-    echo "---"
-done
-```
-</Accordion>
-
----
+Shows status per capability (`Available`, `DisabledByPolicy`, `NotCompiled`, `NotSupportedByProtocol`).
 
 ## See also
 
-- [CLI configuration](/cli/configuration) - environment variables, config files, exit codes
-- [RPC reference](/api/rpc) - JSON-RPC stdio server protocol
-- [Providers](/concepts/providers) - model and provider setup
+- [Realms](/concepts/realms)
+- [CLI configuration](/cli/configuration)
+- [JSON-RPC](/api/rpc)

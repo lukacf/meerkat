@@ -401,6 +401,11 @@ pub struct AgentFactory {
     /// skill caches). When unset, falls back to project_root or store_path.
     pub runtime_root: Option<PathBuf>,
     pub project_root: Option<PathBuf>,
+    /// Explicit root for project/workspace conventions (skills, hooks, AGENTS, MCP config).
+    /// When unset, convention loading remains disabled unless caller opts in.
+    pub context_root: Option<PathBuf>,
+    /// Optional user-global convention root (typically HOME).
+    pub user_config_root: Option<PathBuf>,
     pub enable_builtins: bool,
     pub enable_shell: bool,
     pub enable_subagents: bool,
@@ -422,6 +427,8 @@ impl std::fmt::Debug for AgentFactory {
         d.field("store_path", &self.store_path)
             .field("runtime_root", &self.runtime_root)
             .field("project_root", &self.project_root)
+            .field("context_root", &self.context_root)
+            .field("user_config_root", &self.user_config_root)
             .field("enable_builtins", &self.enable_builtins)
             .field("enable_shell", &self.enable_shell)
             .field("enable_subagents", &self.enable_subagents)
@@ -442,6 +449,8 @@ impl AgentFactory {
             store_path: store_path.into(),
             runtime_root: None,
             project_root: None,
+            context_root: None,
+            user_config_root: None,
             enable_builtins: false,
             enable_shell: false,
             enable_subagents: false,
@@ -467,6 +476,19 @@ impl AgentFactory {
     /// Set the project root used for tool persistence.
     pub fn project_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.project_root = Some(path.into());
+        self
+    }
+
+    /// Set convention context root used for project-level conventions
+    /// (skills/hooks/AGENTS/MCP definitions).
+    pub fn context_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.context_root = Some(path.into());
+        self
+    }
+
+    /// Set optional user-global convention root.
+    pub fn user_config_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.user_config_root = Some(path.into());
         self
     }
 
@@ -876,6 +898,8 @@ impl AgentFactory {
         // 5. Resolve max_tokens
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
         let realm_scope_root = self.realm_scope_root(&build_config);
+        let conventions_context_root = self.context_root.as_deref();
+        let conventions_user_root = self.user_config_root.as_deref();
 
         // 6a. Build skill engine early so it can be passed to the tool dispatcher.
         #[cfg(feature = "skills")]
@@ -886,8 +910,10 @@ impl AgentFactory {
                 } else if !config.skills.enabled {
                     None
                 } else {
-                    match meerkat_skills::resolve_repositories(
+                    match meerkat_skills::resolve_repositories_with_roots(
                         &config.skills,
+                        conventions_context_root,
+                        conventions_user_root,
                         Some(realm_scope_root.as_path()),
                     )
                     .await
@@ -1022,7 +1048,9 @@ impl AgentFactory {
         }
 
         // 10. Resolve hooks
-        let layered_hooks = resolve_layered_hooks_config(realm_scope_root.as_path(), config).await;
+        let layered_hooks =
+            resolve_layered_hooks_config(conventions_context_root, conventions_user_root, config)
+                .await;
         let hook_engine = create_default_hook_engine(layered_hooks);
 
         // 11. Generate skill inventory section using the engine created in step 6a
@@ -1098,6 +1126,7 @@ impl AgentFactory {
         let system_prompt = crate::assemble_system_prompt(
             config,
             per_request_prompt.as_deref(),
+            conventions_context_root,
             &extra_sections,
             &tool_usage_instructions,
         )

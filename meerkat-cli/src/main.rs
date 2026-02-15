@@ -151,6 +151,15 @@ struct Cli {
     /// Realm backend when creating a new realm.
     #[arg(long, global = true, value_enum)]
     realm_backend: Option<RealmBackendArg>,
+    /// Override state root (directory that contains realms).
+    #[arg(long, global = true)]
+    state_root: Option<PathBuf>,
+    /// Convention context root for skills/hooks/AGENTS/MCP config.
+    #[arg(long, global = true)]
+    context_root: Option<PathBuf>,
+    /// Optional user-global convention root.
+    #[arg(long, global = true)]
+    user_config_root: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -877,6 +886,8 @@ struct RuntimeScope {
     instance_id: Option<String>,
     backend_hint: Option<RealmBackend>,
     origin_hint: RealmOrigin,
+    context_root: Option<PathBuf>,
+    user_config_root: Option<PathBuf>,
 }
 
 impl RuntimeScope {
@@ -888,8 +899,10 @@ impl RuntimeScope {
 fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> anyhow::Result<RuntimeScope> {
     let default_selection = match surface {
         CliSurfaceKind::Cli => {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let root = find_project_root(&cwd).unwrap_or(cwd);
+            let root = cli.context_root.clone().unwrap_or_else(|| {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                find_project_root(&cwd).unwrap_or(cwd)
+            });
             RealmSelection::WorkspaceDerived { root }
         }
         CliSurfaceKind::Rpc => RealmSelection::Isolated,
@@ -908,9 +921,23 @@ fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> anyhow::Result<R
             .realm_backend
             .map(Into::into)
             .map(|b: RealmBackend| b.as_str().to_string()),
-        state_root: None,
+        state_root: cli.state_root.clone(),
     };
     let locator = realm_cfg.resolve_locator()?;
+    let context_root = match surface {
+        CliSurfaceKind::Cli => Some(match cli.context_root.clone() {
+            Some(root) => root,
+            None => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                find_project_root(&cwd).unwrap_or(cwd)
+            }
+        }),
+        CliSurfaceKind::Rpc => cli.context_root.clone(),
+    };
+    let user_config_root = match surface {
+        CliSurfaceKind::Cli => cli.user_config_root.clone().or_else(dirs::home_dir),
+        CliSurfaceKind::Rpc => cli.user_config_root.clone(),
+    };
     Ok(RuntimeScope {
         locator,
         instance_id: cli.instance.clone(),
@@ -928,6 +955,8 @@ fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> anyhow::Result<R
             CliSurfaceKind::Rpc => Some(RealmBackend::Redb),
         }),
         origin_hint,
+        context_root,
+        user_config_root,
     })
 }
 
@@ -1066,18 +1095,26 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
     let store_path = realm_store_path(&manifest, scope);
     let realm_paths =
         meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let project_root = find_project_root(&cwd);
+    let default_project_root = scope
+        .context_root
+        .clone()
+        .unwrap_or_else(|| realm_paths.root.clone());
 
     // Max-permissive factory flags: per-request session build overrides
     // control what tools are actually enabled (same pattern as MCP server).
-    let factory = AgentFactory::new(store_path)
+    let mut factory = AgentFactory::new(store_path)
         .runtime_root(realm_paths.root.clone())
-        .project_root(project_root.unwrap_or(cwd))
+        .project_root(default_project_root)
         .builtins(true)
         .shell(true)
         .subagents(true)
         .memory(true);
+    if let Some(context_root) = scope.context_root.clone() {
+        factory = factory.context_root(context_root);
+    }
+    if let Some(user_root) = scope.user_config_root.clone() {
+        factory = factory.user_config_root(user_root);
+    }
 
     let (base_store, _base_dir) = resolve_config_store(scope).await?;
     let tagged = meerkat_core::TaggedConfigStore::new(
@@ -1147,14 +1184,17 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
 
 /// Create MCP tool dispatcher from config files
 #[cfg(feature = "mcp")]
-async fn create_mcp_tools() -> anyhow::Result<Option<McpRouterAdapter>> {
+async fn create_mcp_tools(scope: &RuntimeScope) -> anyhow::Result<Option<McpRouterAdapter>> {
     use meerkat_core::mcp_config::{McpConfig, McpScope};
     use meerkat_mcp::McpRouter;
 
     // Load MCP config with scope info for security warnings
-    let servers_with_scope = McpConfig::load_with_scopes()
-        .await
-        .map_err(|e| anyhow::anyhow!("MCP config error: {}", e))?;
+    let servers_with_scope = McpConfig::load_with_scopes_from_roots(
+        scope.context_root.as_deref(),
+        scope.user_config_root.as_deref(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("MCP config error: {}", e))?;
 
     if servers_with_scope.is_empty() {
         return Ok(None);
@@ -1213,13 +1253,15 @@ fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
 }
 
 /// Load MCP tools as an external tool dispatcher for session build options.
-async fn load_mcp_external_tools() -> (
+async fn load_mcp_external_tools(
+    scope: &RuntimeScope,
+) -> (
     Option<Arc<dyn AgentToolDispatcher>>,
     Option<Arc<McpRouterAdapter>>,
 ) {
     #[cfg(feature = "mcp")]
     {
-        match create_mcp_tools().await {
+        match create_mcp_tools(scope).await {
             Ok(Some(adapter)) => {
                 let adapter = Arc::new(adapter);
                 let external: Arc<dyn AgentToolDispatcher> = adapter.clone();
@@ -1301,7 +1343,7 @@ async fn run_agent(
     };
 
     // Load MCP tools as external tools for the factory
-    let (external_tools, mcp_adapter) = load_mcp_external_tools().await;
+    let (external_tools, mcp_adapter) = load_mcp_external_tools(scope).await;
 
     // Resolve comms_name for the factory
     let comms_name = if cfg!(feature = "comms") && !comms_overrides.disabled {
@@ -1311,11 +1353,13 @@ async fn run_agent(
     };
 
     // Build factory with appropriate flags
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let project_root = find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let project_root = scope.context_root.clone().unwrap_or_else(|| {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        find_project_root(&cwd).unwrap_or(cwd)
+    });
 
     let (manifest, session_store) = create_session_store(scope).await?;
-    let factory = AgentFactory::new(realm_store_path(&manifest, scope))
+    let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
         .session_store(session_store)
         .runtime_root(
             meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
@@ -1324,6 +1368,12 @@ async fn run_agent(
         .builtins(enable_builtins)
         .shell(enable_shell)
         .subagents(enable_subagents);
+    if let Some(context_root) = scope.context_root.clone() {
+        factory = factory.context_root(context_root);
+    }
+    if let Some(user_root) = scope.user_config_root.clone() {
+        factory = factory.user_config_root(user_root);
+    }
 
     #[cfg(feature = "comms")]
     let factory = factory.comms(!comms_overrides.disabled);
@@ -1581,13 +1631,15 @@ async fn resume_session(
     );
 
     // Load MCP tools as external tools for the factory
-    let (external_tools, mcp_adapter) = load_mcp_external_tools().await;
+    let (external_tools, mcp_adapter) = load_mcp_external_tools(scope).await;
 
     // Build factory with flags restored from stored session metadata
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let project_root = find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let project_root = scope.context_root.clone().unwrap_or_else(|| {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        find_project_root(&cwd).unwrap_or(cwd)
+    });
 
-    let factory = AgentFactory::new(realm_store_path(&manifest, scope))
+    let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
         .session_store(store.clone())
         .runtime_root(
             meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
@@ -1596,6 +1648,12 @@ async fn resume_session(
         .builtins(tooling.builtins)
         .shell(tooling.shell)
         .subagents(tooling.subagents);
+    if let Some(context_root) = scope.context_root.clone() {
+        factory = factory.context_root(context_root);
+    }
+    if let Some(user_root) = scope.user_config_root.clone() {
+        factory = factory.user_config_root(user_root);
+    }
 
     #[cfg(feature = "comms")]
     let factory = factory.comms(tooling.comms || host_mode);
@@ -1671,10 +1729,12 @@ async fn build_cli_persistent_service(
     config: Config,
 ) -> anyhow::Result<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
     let (manifest, store) = create_session_store(scope).await?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let project_root = find_project_root(&cwd).unwrap_or(cwd);
+    let project_root = scope.context_root.clone().unwrap_or_else(|| {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        find_project_root(&cwd).unwrap_or(cwd)
+    });
 
-    let factory = AgentFactory::new(realm_store_path(&manifest, scope))
+    let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
         .session_store(store.clone())
         .runtime_root(
             meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
@@ -1683,6 +1743,12 @@ async fn build_cli_persistent_service(
         .builtins(config.tools.builtins_enabled)
         .shell(config.tools.shell_enabled)
         .subagents(config.tools.subagents_enabled);
+    if let Some(context_root) = scope.context_root.clone() {
+        factory = factory.context_root(context_root);
+    }
+    if let Some(user_root) = scope.user_config_root.clone() {
+        factory = factory.user_config_root(user_root);
+    }
 
     let builder = FactoryAgentBuilder::new(factory, config);
     Ok(meerkat::PersistentSessionService::new(builder, 64, store))

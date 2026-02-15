@@ -178,11 +178,17 @@ impl AppState {
             .runtime_root(realm_paths.root.clone())
             .builtins(enable_builtins)
             .shell(enable_shell);
-        let resolved_context_root = bootstrap
-            .context
-            .context_root
+        let conventions_context_root = bootstrap.context.context_root.clone();
+        let task_project_root = conventions_context_root
+            .clone()
             .unwrap_or_else(|| instance_root.clone());
-        factory = factory.project_root(resolved_context_root.clone());
+        factory = factory.project_root(task_project_root.clone());
+        if let Some(context_root) = conventions_context_root {
+            factory = factory.context_root(context_root);
+        }
+        if let Some(user_root) = bootstrap.context.user_config_root.clone() {
+            factory = factory.user_config_root(user_root);
+        }
 
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
@@ -196,7 +202,7 @@ impl AppState {
             rest_port,
             enable_builtins,
             enable_shell,
-            project_root: Some(resolved_context_root),
+            project_root: Some(task_project_root),
             llm_client_override: None,
             config_store,
             event_tx,

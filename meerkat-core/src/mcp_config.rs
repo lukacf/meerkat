@@ -194,6 +194,19 @@ impl McpConfig {
         Ok(merge_project_over_user(user_cfg, project_cfg))
     }
 
+    /// Load with explicit convention roots.
+    ///
+    /// `context_root` maps to project scope (`<context_root>/.rkat/mcp.toml`),
+    /// `user_config_root` maps to user scope (`<user_config_root>/.rkat/mcp.toml`).
+    pub async fn load_from_roots(
+        context_root: Option<&Path>,
+        user_config_root: Option<&Path>,
+    ) -> Result<Self, McpConfigError> {
+        let project_path = context_root.map(project_mcp_path_in);
+        let user_path = user_config_root.map(user_mcp_path_in);
+        Self::load_from_paths(user_path.as_deref(), project_path.as_deref()).await
+    }
+
     /// Load from explicit paths (useful for testing)
     pub async fn load_from_paths(
         user_path: Option<&Path>,
@@ -235,6 +248,39 @@ impl McpConfig {
             }
         }
 
+        Ok(result)
+    }
+
+    /// Load scoped server list from explicit convention roots.
+    pub async fn load_with_scopes_from_roots(
+        context_root: Option<&Path>,
+        user_config_root: Option<&Path>,
+    ) -> Result<Vec<McpServerWithScope>, McpConfigError> {
+        let user_path = user_config_root.map(user_mcp_path_in);
+        let project_path = context_root.map(project_mcp_path_in);
+        let user_cfg = read_mcp_file(user_path.as_deref()).await?;
+        let project_cfg = read_mcp_file(project_path.as_deref()).await?;
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut result: Vec<McpServerWithScope> = Vec::new();
+
+        for server in project_cfg.servers {
+            if seen.insert(server.name.clone()) {
+                result.push(McpServerWithScope {
+                    server,
+                    scope: McpScope::Project,
+                });
+            }
+        }
+
+        for server in user_cfg.servers {
+            if seen.insert(server.name.clone()) {
+                result.push(McpServerWithScope {
+                    server,
+                    scope: McpScope::User,
+                });
+            }
+        }
         Ok(result)
     }
 
@@ -414,6 +460,10 @@ pub fn user_mcp_path() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".rkat/mcp.toml"))
 }
 
+pub fn user_mcp_path_in(root: &Path) -> PathBuf {
+    root.join(".rkat/mcp.toml")
+}
+
 /// Get the user-level MCP config directory: ~/.rkat/
 pub fn user_mcp_dir() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".rkat"))
@@ -442,6 +492,10 @@ pub fn project_mcp_path() -> Option<PathBuf> {
     std::env::current_dir()
         .ok()
         .map(|cwd| cwd.join(".rkat/mcp.toml"))
+}
+
+pub fn project_mcp_path_in(root: &Path) -> PathBuf {
+    root.join(".rkat/mcp.toml")
 }
 
 /// Get the project MCP config directory for the current directory
@@ -707,5 +761,63 @@ headers = { Authorization = "Bearer ${RKAT_TEST_API_KEY}" }
             }
             _ => unreachable!("Expected http transport"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_load_with_scopes_from_roots_precedence_and_dedup() {
+        let temp = TempDir::new().unwrap();
+        let context_root = temp.path().join("context");
+        let user_root = temp.path().join("user");
+        tokio::fs::create_dir_all(context_root.join(".rkat"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(user_root.join(".rkat"))
+            .await
+            .unwrap();
+
+        tokio::fs::write(
+            context_root.join(".rkat/mcp.toml"),
+            r#"
+[[servers]]
+name = "shared"
+command = "context-cmd"
+
+[[servers]]
+name = "context-only"
+command = "context-only-cmd"
+"#,
+        )
+        .await
+        .unwrap();
+
+        tokio::fs::write(
+            user_root.join(".rkat/mcp.toml"),
+            r#"
+[[servers]]
+name = "shared"
+command = "user-cmd"
+
+[[servers]]
+name = "user-only"
+command = "user-only-cmd"
+"#,
+        )
+        .await
+        .unwrap();
+
+        let merged = McpConfig::load_with_scopes_from_roots(Some(&context_root), Some(&user_root))
+            .await
+            .unwrap();
+        let names: Vec<String> = merged.iter().map(|s| s.server.name.clone()).collect();
+        assert_eq!(names, vec!["shared", "context-only", "user-only"]);
+        assert_eq!(merged[0].scope, McpScope::Project);
+    }
+
+    #[tokio::test]
+    async fn test_load_with_scopes_from_roots_none_is_empty() {
+        let merged = McpConfig::load_with_scopes_from_roots(None, None)
+            .await
+            .unwrap();
+        assert!(merged.is_empty());
     }
 }

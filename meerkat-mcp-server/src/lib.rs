@@ -18,7 +18,6 @@ use meerkat_core::{
     HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, Session, ToolCallView,
     format_verbose_event,
 };
-use meerkat_tools::find_project_root;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -150,11 +149,6 @@ pub struct MeerkatConfigInput {
     pub expected_generation: Option<u64>,
 }
 
-fn resolve_project_root() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    find_project_root(&cwd).unwrap_or(cwd)
-}
-
 async fn load_config_async(
     realm_id: &str,
     realms_root: &std::path::Path,
@@ -162,14 +156,17 @@ async fn load_config_async(
     origin_hint: Option<meerkat_store::RealmOrigin>,
     instance_id: Option<&str>,
 ) -> Config {
-    let store =
-        match realm_config_store(realm_id, realms_root, backend_hint, origin_hint, instance_id)
-            .await
-        {
+    let store = match realm_config_store(
+        realm_id,
+        realms_root,
+        backend_hint,
+        origin_hint,
+        instance_id,
+    )
+    .await
+    {
         Ok(store) => store,
-        Err(_) => {
-            Arc::new(FileConfigStore::project(resolve_project_root())) as Arc<dyn ConfigStore>
-        }
+        Err(_) => return Config::default(),
     };
     let mut config = store.get().await.unwrap_or_else(|_| Config::default());
     let _ = config.apply_env_overrides();
@@ -290,10 +287,10 @@ impl MeerkatMcpState {
         .await?;
         let store_path = realm_store_path(&realms_root, &realm_id, manifest.backend);
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
-        let project_root = bootstrap
-            .context
-            .context_root
-            .unwrap_or_else(resolve_project_root);
+        let conventions_context_root = bootstrap.context.context_root.clone();
+        let project_root = conventions_context_root
+            .clone()
+            .unwrap_or_else(|| realm_paths.root.clone());
         let config_store = tagged_realm_config_store(
             &realms_root,
             &realm_id,
@@ -307,12 +304,18 @@ impl MeerkatMcpState {
 
         // Create factory with max-permissive flags; per-request overrides
         // in SessionBuildOptions control what tools are actually enabled.
-        let factory = AgentFactory::new(store_path)
+        let mut factory = AgentFactory::new(store_path)
             .session_store(session_store.clone())
             .runtime_root(realm_paths.root)
             .project_root(project_root)
             .builtins(true)
             .shell(true);
+        if let Some(context_root) = conventions_context_root {
+            factory = factory.context_root(context_root);
+        }
+        if let Some(user_root) = bootstrap.context.user_config_root.clone() {
+            factory = factory.user_config_root(user_root);
+        }
 
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
         let service = PersistentSessionService::new(builder, 100, session_store);
@@ -350,7 +353,7 @@ impl MeerkatMcpState {
         let store_path =
             realm_store_path(&realms_root, &realm_id, meerkat_store::RealmBackend::Redb);
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
-        let project_root = resolve_project_root();
+        let project_root = realm_paths.root.clone();
         let config_store = tagged_realm_config_store(
             &realms_root,
             &realm_id,
@@ -362,11 +365,14 @@ impl MeerkatMcpState {
             realm_paths.root.join("config_state.json"),
         ));
 
-        let factory = AgentFactory::new(store_path)
+        let mut factory = AgentFactory::new(store_path)
             .runtime_root(realm_paths.root)
             .project_root(project_root)
             .builtins(true)
             .shell(true);
+        if let Some(user_root) = bootstrap.context.user_config_root.clone() {
+            factory = factory.user_config_root(user_root);
+        }
 
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
         let service = PersistentSessionService::new(builder, 100, store);

@@ -1,7 +1,6 @@
 //! SDK helper functions for tool dispatcher setup.
 
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::{cmp, collections::HashSet};
 
@@ -23,28 +22,74 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 /// Resolve layered hooks config (global -> project) without duplicating project entries.
-pub async fn resolve_layered_hooks_config(start_dir: &Path, active_config: &Config) -> HooksConfig {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let mut layered =
-        (Config::load_layered_hooks_from(start_dir, home.as_deref()).await).unwrap_or_default();
+pub async fn resolve_layered_hooks_config(
+    context_root: Option<&Path>,
+    user_config_root: Option<&Path>,
+    active_config: &Config,
+) -> HooksConfig {
+    let mut user_entries = Vec::new();
+    let mut context_entries = Vec::new();
+
+    if let Some(user_root) = user_config_root {
+        let user_cfg_path = user_root.join(".rkat").join("config.toml");
+        if let Ok(Some(cfg)) = read_hooks_config_from(&user_cfg_path).await {
+            user_entries = cfg.entries;
+        }
+    }
+
+    if let Some(context) = context_root {
+        let project_cfg_path = context.join(".rkat").join("config.toml");
+        if let Ok(Some(cfg)) = read_hooks_config_from(&project_cfg_path).await {
+            context_entries = cfg.entries;
+        }
+    }
 
     let active_hooks = &active_config.hooks;
-    layered.default_timeout_ms = active_hooks.default_timeout_ms;
-    layered.payload_max_bytes = active_hooks.payload_max_bytes;
-    layered.background_max_concurrency = cmp::max(1, active_hooks.background_max_concurrency);
+    let mut layered = HooksConfig {
+        default_timeout_ms: active_hooks.default_timeout_ms,
+        payload_max_bytes: active_hooks.payload_max_bytes,
+        background_max_concurrency: cmp::max(1, active_hooks.background_max_concurrency),
+        ..HooksConfig::default()
+    };
 
-    let mut seen_ids: HashSet<_> = layered
-        .entries
-        .iter()
-        .map(|entry| entry.id.clone())
-        .collect();
+    // Deterministic precedence: active config > context root > user root.
+    let mut seen_ids: HashSet<_> = HashSet::new();
     for entry in &active_hooks.entries {
+        if seen_ids.insert(entry.id.clone()) {
+            layered.entries.push(entry.clone());
+        }
+    }
+    for entry in &context_entries {
+        if seen_ids.insert(entry.id.clone()) {
+            layered.entries.push(entry.clone());
+        }
+    }
+    for entry in &user_entries {
         if seen_ids.insert(entry.id.clone()) {
             layered.entries.push(entry.clone());
         }
     }
 
     layered
+}
+
+async fn read_hooks_config_from(path: &Path) -> Result<Option<HooksConfig>, std::io::Error> {
+    if !tokio::fs::try_exists(path).await? {
+        return Ok(None);
+    }
+    let mut parsed = Config::default();
+    let path_buf = path.to_path_buf();
+    match parsed.merge_file(&path_buf).await {
+        Ok(()) => Ok(Some(parsed.hooks)),
+        Err(err) => {
+            tracing::warn!(
+                "Failed to parse hooks config at {}: {}",
+                path.display(),
+                err
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Build a default hook engine when at least one hook is configured.
@@ -329,6 +374,7 @@ mod tests {
     use meerkat_core::{
         HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig,
     };
+    use std::path::Path;
 
     async fn dispatch_json(
         dispatcher: &dyn AgentToolDispatcher,
@@ -491,5 +537,80 @@ mod tests {
             ..Default::default()
         };
         assert!(create_default_hook_engine(hooks).is_some());
+    }
+
+    fn mk_hook(id: &str, command: &str) -> HookEntryConfig {
+        HookEntryConfig {
+            id: HookId::new(id),
+            point: HookPoint::TurnBoundary,
+            mode: HookExecutionMode::Foreground,
+            capability: HookCapability::Observe,
+            runtime: HookRuntimeConfig::new(
+                "command",
+                Some(serde_json::json!({ "command": command })),
+            )
+            .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    async fn write_config_with_hooks(root: &Path, hooks: Vec<HookEntryConfig>) {
+        let mut cfg = Config::default();
+        cfg.hooks.entries = hooks;
+        let payload = toml::to_string(&cfg).expect("serialize config");
+        let dir = root.join(".rkat");
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create .rkat dir");
+        tokio::fs::write(dir.join("config.toml"), payload)
+            .await
+            .expect("write config");
+    }
+
+    #[tokio::test]
+    async fn resolve_layered_hooks_respects_precedence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let user_root = temp.path().join("user");
+        let context_root = temp.path().join("context");
+        tokio::fs::create_dir_all(&user_root)
+            .await
+            .expect("user root");
+        tokio::fs::create_dir_all(&context_root)
+            .await
+            .expect("context root");
+
+        write_config_with_hooks(
+            &user_root,
+            vec![mk_hook("dup", "echo user"), mk_hook("u", "echo u")],
+        )
+        .await;
+        write_config_with_hooks(
+            &context_root,
+            vec![mk_hook("dup", "echo context"), mk_hook("c", "echo c")],
+        )
+        .await;
+
+        let mut active = Config::default();
+        active.hooks.entries = vec![mk_hook("dup", "echo active"), mk_hook("a", "echo a")];
+
+        let resolved =
+            resolve_layered_hooks_config(Some(&context_root), Some(&user_root), &active).await;
+        let ids: Vec<String> = resolved.entries.iter().map(|h| h.id.0.clone()).collect();
+        assert_eq!(ids, vec!["dup", "a", "c", "u"]);
+
+        let first_runtime = resolved.entries[0]
+            .runtime
+            .config_value()
+            .expect("runtime config");
+        assert_eq!(first_runtime["command"], "echo active");
+    }
+
+    #[tokio::test]
+    async fn resolve_layered_hooks_without_roots_uses_active_only() {
+        let mut active = Config::default();
+        active.hooks.entries = vec![mk_hook("only-active", "echo active")];
+        let resolved = resolve_layered_hooks_config(None, None, &active).await;
+        assert_eq!(resolved.entries.len(), 1);
+        assert_eq!(resolved.entries[0].id.0, "only-active");
     }
 }

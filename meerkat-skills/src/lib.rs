@@ -13,7 +13,7 @@ pub mod source;
 
 pub use engine::DefaultSkillEngine;
 pub use registration::{SkillRegistration, collect_registered_skills};
-pub use resolve::resolve_repositories;
+pub use resolve::{resolve_repositories, resolve_repositories_with_roots};
 pub use source::{
     CompositeSkillSource, EmbeddedSkillSource, FilesystemSkillSource, InMemorySkillSource,
     NamedSource,

@@ -169,7 +169,7 @@ impl ManifestLockGuard {
 
 impl Drop for ManifestLockGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        remove_file_nonblocking_on_drop(self.path.clone());
     }
 }
 
@@ -197,6 +197,26 @@ impl Drop for RealmLeaseGuard {
         if let Some(stop) = self.stop_tx.take() {
             let _ = stop.send(());
         }
+        if let Some(join) = self.join.take() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                std::mem::drop(handle.spawn(async move {
+                    let _ = join.await;
+                }));
+            } else {
+                join.abort();
+                let _ = std::fs::remove_file(&self.lease_path);
+            }
+        }
+    }
+}
+
+fn remove_file_nonblocking_on_drop(path: PathBuf) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        std::mem::drop(handle.spawn(async move {
+            let _ = tokio::fs::remove_file(path).await;
+        }));
+    } else {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -904,5 +924,30 @@ mod tests {
             .await
             .unwrap();
         assert!(after.active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lease_guard_drop_cleans_up_without_explicit_shutdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let realms_root = temp.path().join("realms");
+        let realm_id = "lease-drop";
+
+        let guard = start_realm_lease_in(&realms_root, realm_id, Some("drop"), "rpc")
+            .await
+            .unwrap();
+        let lease_path = guard.lease_path().to_path_buf();
+        drop(guard);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if !tokio::fs::try_exists(&lease_path).await.unwrap() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "lease file remained after guard drop: {}",
+            lease_path.display()
+        );
     }
 }

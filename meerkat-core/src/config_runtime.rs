@@ -256,18 +256,33 @@ impl LockGuard {
     }
 
     async fn is_stale(path: &Path) -> Result<bool, ConfigRuntimeError> {
-        let metadata = tokio::fs::metadata(path).await?;
-        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let age = SystemTime::now()
-            .duration_since(modified)
-            .unwrap_or_default();
-        Ok(age > LOCK_STALE_AFTER)
+        match tokio::fs::metadata(path).await {
+            Ok(metadata) => {
+                let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                let age = SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or_default();
+                Ok(age > LOCK_STALE_AFTER)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(ConfigRuntimeError::Io(err)),
+        }
     }
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        remove_file_nonblocking_on_drop(self.path.clone());
+    }
+}
+
+fn remove_file_nonblocking_on_drop(path: PathBuf) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        std::mem::drop(handle.spawn(async move {
+            let _ = tokio::fs::remove_file(path).await;
+        }));
+    } else {
+        let _ = std::fs::remove_file(path);
     }
 }
 

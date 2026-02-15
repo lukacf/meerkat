@@ -22,6 +22,7 @@
 
 # Temporary files
 nohup.out
+.release-hook-done
 .rct/
 test-project/
 

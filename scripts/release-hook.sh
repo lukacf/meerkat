@@ -6,13 +6,23 @@
 #   2. Re-emit schemas + run SDK codegen
 #   3. Stage the changed files for the release commit
 #
-# cargo-release calls this AFTER bumping Cargo.toml versions but BEFORE
-# creating the release commit, so we can add SDK files to the same commit.
+# cargo-release calls this from each crate directory (with shared-version,
+# it runs once per crate). We cd to the workspace root and use a sentinel
+# file to ensure the work only happens once.
 
 set -euo pipefail
 
 VERSION="${1:?Usage: release-hook.sh <version>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# cargo-release runs this hook per-crate. Only execute once.
+SENTINEL="$ROOT/.release-hook-done"
+if [[ -f "$SENTINEL" ]] && [[ "$(cat "$SENTINEL")" == "$VERSION" ]]; then
+    exit 0
+fi
+
+# All commands must run from workspace root (emit-schemas writes to ./artifacts/)
+cd "$ROOT"
 
 echo "==> Release hook: syncing SDK versions to $VERSION"
 
@@ -37,5 +47,8 @@ git add \
     "$ROOT/sdks/python/meerkat/generated/" \
     "$ROOT/sdks/typescript/src/generated/" \
     "$ROOT/artifacts/schemas/"
+
+# 5. Mark as done for this version
+echo "$VERSION" > "$SENTINEL"
 
 echo "==> Release hook complete"

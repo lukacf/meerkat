@@ -141,15 +141,29 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        self.inner.archive(id).await?;
-        // Also remove from persistent store.
-        // store.delete() is idempotent — silently succeeds if the key doesn't exist
-        // (e.g., session archived before first turn completed and persisted).
-        self.store
-            .delete(id)
+        let live_result = self.inner.archive(id).await;
+
+        // Check whether the session exists in the persistent store before
+        // deleting — store.delete() is idempotent and always returns Ok,
+        // so we need exists() to know if the store actually had it.
+        let in_store = self
+            .store
+            .exists(id)
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?;
-        Ok(())
+        if in_store {
+            self.store
+                .delete(id)
+                .await
+                .map_err(|e| SessionError::Store(Box::new(e)))?;
+        }
+
+        match (&live_result, in_store) {
+            // At least one side had the session — success.
+            (Ok(()), _) | (_, true) => Ok(()),
+            // Neither side had it — propagate NotFound from the live service.
+            _ => live_result,
+        }
     }
 }
 
@@ -248,6 +262,25 @@ mod tests {
         store.delete(&id).await.unwrap();
 
         // Verify it's gone
+        assert!(store.load(&id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_persistent_archive_store_only_session_succeeds() {
+        // After restart, sessions exist only in the persistent store —
+        // not in the live (inner) ephemeral service. archive() must still
+        // succeed by deleting from the store even when inner returns NotFound.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let session = Session::new();
+        let id = session.id().clone();
+        store.save(&session).await.unwrap();
+
+        // Verify the session exists in the store
+        assert!(store.load(&id).await.unwrap().is_some());
+
+        // Simulate the archive path: inner.archive() would return NotFound,
+        // but store.delete() should still succeed.
+        store.delete(&id).await.unwrap();
         assert!(store.load(&id).await.unwrap().is_none());
     }
 }

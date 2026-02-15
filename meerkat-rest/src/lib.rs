@@ -124,12 +124,12 @@ impl AppState {
             .shell(enable_shell);
         factory = factory.project_root(instance_root.clone());
 
-        // Scope database to instance root when config doesn't specify an explicit path.
-        let db_dir = config
-            .store
-            .database_dir
-            .clone()
-            .unwrap_or_else(|| instance_root.join("db"));
+        // Scope database to instance root when config doesn't specify an
+        // explicit database_dir, then resolve via the standard helper.
+        if config.store.database_dir.is_none() {
+            config.store.database_dir = Some(instance_root.join("db"));
+        }
+        let db_dir = meerkat_store::resolve_database_dir(&config);
         std::fs::create_dir_all(&db_dir).map_err(|e| {
             format!(
                 "Failed to create database directory {}: {e}",
@@ -933,6 +933,10 @@ async fn session_events(
     let session_id =
         SessionId::parse(&id).map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
 
+    // load_persisted() only checks the redb store. A session on its first
+    // in-progress turn (not yet persisted) will return 404. Future improvement:
+    // try read() first for message_count (works for live sessions), fall back
+    // to load_persisted() for inactive sessions.
     let session = state
         .session_service
         .load_persisted(&session_id)

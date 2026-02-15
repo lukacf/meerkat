@@ -146,7 +146,12 @@ impl OpenAiClient {
         Ok(body)
     }
 
-    /// Convert messages to Responses API input format
+    /// Convert messages to Responses API input format.
+    ///
+    /// OpenAI requires every `reasoning` item to be immediately followed by an
+    /// output item (`message` with `role: assistant` or `function_call`). Orphaned
+    /// reasoning items (e.g., from stream interruption or cancellation) are stripped
+    /// in a post-processing pass to prevent `invalid_request_error`.
     fn convert_to_responses_input(messages: &[Message]) -> Vec<Value> {
         let mut items = Vec::new();
 
@@ -243,7 +248,54 @@ impl OpenAiClient {
                 }
             }
         }
+
+        Self::strip_orphaned_reasoning(&mut items);
         items
+    }
+
+    /// Remove reasoning items not immediately followed by an output item.
+    ///
+    /// OpenAI's Responses API requires every `reasoning` item to be immediately
+    /// followed by either a `message` with `role: assistant` or a `function_call`.
+    /// Orphaned reasoning can appear when a stream is interrupted/cancelled after
+    /// reasoning completes but before output is produced, or when a response hits
+    /// `max_output_tokens` during reasoning.
+    fn strip_orphaned_reasoning(items: &mut Vec<Value>) {
+        let mut i = 0;
+        while i < items.len() {
+            let is_reasoning = items[i]
+                .get("type")
+                .and_then(|t| t.as_str())
+                == Some("reasoning");
+
+            if !is_reasoning {
+                i += 1;
+                continue;
+            }
+
+            // Check if the next item is a valid output for this reasoning
+            let has_valid_follower = items.get(i + 1).is_some_and(|next| {
+                let next_type = next.get("type").and_then(|t| t.as_str());
+                match next_type {
+                    Some("function_call") => true,
+                    Some("message") => {
+                        next.get("role").and_then(|r| r.as_str()) == Some("assistant")
+                    }
+                    _ => false,
+                }
+            });
+
+            if has_valid_follower {
+                i += 1;
+            } else {
+                tracing::warn!(
+                    reasoning_id = items[i].get("id").and_then(|id| id.as_str()).unwrap_or("?"),
+                    "stripping orphaned reasoning item (no valid following output)"
+                );
+                items.remove(i);
+                // Don't increment i — the next element shifted into this position
+            }
+        }
     }
 
     /// Parse an SSE event from the Responses API stream
@@ -877,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn test_request_input_format_block_assistant_reasoning() {
+    fn test_request_input_format_block_assistant_reasoning_with_output() {
         use meerkat_core::BlockAssistantMessage;
 
         let client = OpenAiClient::new("test-key".to_string());
@@ -888,13 +940,19 @@ mod tests {
                     content: "Hello".to_string(),
                 }),
                 Message::BlockAssistant(BlockAssistantMessage {
-                    blocks: vec![AssistantBlock::Reasoning {
-                        text: "Let me think about this".to_string(),
-                        meta: Some(Box::new(ProviderMeta::OpenAi {
-                            id: "rs_abc123".to_string(),
-                            encrypted_content: Some("encrypted_data".to_string()),
-                        })),
-                    }],
+                    blocks: vec![
+                        AssistantBlock::Reasoning {
+                            text: "Let me think about this".to_string(),
+                            meta: Some(Box::new(ProviderMeta::OpenAi {
+                                id: "rs_abc123".to_string(),
+                                encrypted_content: Some("encrypted_data".to_string()),
+                            })),
+                        },
+                        AssistantBlock::Text {
+                            text: "Here is my answer".to_string(),
+                            meta: None,
+                        },
+                    ],
                     stop_reason: StopReason::EndTurn,
                 }),
             ],
@@ -903,6 +961,8 @@ mod tests {
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
+        // Reasoning followed by assistant message — both preserved
+        assert_eq!(input.len(), 3);
         assert_eq!(input[1]["type"], "reasoning");
         assert_eq!(input[1]["id"], "rs_abc123");
         assert_eq!(input[1]["encrypted_content"], "encrypted_data");
@@ -910,6 +970,8 @@ mod tests {
             .as_array()
             .expect("summary should be array");
         assert_eq!(summary[0]["text"], "Let me think about this");
+        assert_eq!(input[2]["type"], "message");
+        assert_eq!(input[2]["role"], "assistant");
     }
 
     #[test]
@@ -1335,6 +1397,211 @@ mod tests {
         let args: Value = serde_json::from_str(args_str).expect("valid json");
         assert_eq!(args["location"], "Tokyo");
     }
+
+    // =========================================================================
+    // Orphaned Reasoning Stripping Tests
+    // =========================================================================
+
+    #[test]
+    fn test_orphaned_reasoning_at_end_is_stripped() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Hello".to_string(),
+                }),
+                // Reasoning-only response (e.g., stream interrupted after reasoning)
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Reasoning {
+                        text: "Let me think".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAi {
+                            id: "rs_orphan".to_string(),
+                            encrypted_content: None,
+                        })),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input should be array");
+
+        // Orphaned reasoning should be stripped, leaving only the user message
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn test_orphaned_reasoning_before_user_message_is_stripped() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "First question".to_string(),
+                }),
+                // Reasoning without output, followed by next user turn
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Reasoning {
+                        text: "Thinking...".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAi {
+                            id: "rs_mid".to_string(),
+                            encrypted_content: None,
+                        })),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                }),
+                Message::User(UserMessage {
+                    content: "Second question".to_string(),
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input should be array");
+
+        // Reasoning followed by user message (not assistant output) should be stripped
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"], "First question");
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(input[1]["content"], "Second question");
+    }
+
+    #[test]
+    fn test_orphaned_reasoning_before_tool_result_is_stripped() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Hello".to_string(),
+                }),
+                // Reasoning-only at end of one assistant message
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Reasoning {
+                        text: "Thinking...".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAi {
+                            id: "rs_before_tool".to_string(),
+                            encrypted_content: None,
+                        })),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                }),
+                // Next message is tool results — not a valid follower for reasoning
+                Message::ToolResults {
+                    results: vec![meerkat_core::ToolResult::new(
+                        "call_123".to_string(),
+                        "result".to_string(),
+                        false,
+                    )],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input should be array");
+
+        // Reasoning should be stripped; user message + tool result remain
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[1]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn test_reasoning_followed_by_function_call_is_preserved() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let args = RawValue::from_string(r#"{"q":"test"}"#.to_string()).unwrap();
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Hello".to_string(),
+                }),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::Reasoning {
+                            text: "I should search".to_string(),
+                            meta: Some(Box::new(ProviderMeta::OpenAi {
+                                id: "rs_valid".to_string(),
+                                encrypted_content: None,
+                            })),
+                        },
+                        AssistantBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "search".to_string(),
+                            args,
+                            meta: None,
+                        },
+                    ],
+                    stop_reason: StopReason::ToolUse,
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input should be array");
+
+        // Reasoning + function_call is a valid pair — both preserved
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[2]["type"], "function_call");
+    }
+
+    #[test]
+    fn test_non_openai_reasoning_blocks_are_skipped() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Hello".to_string(),
+                }),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::Reasoning {
+                            text: "Anthropic thinking".to_string(),
+                            meta: Some(Box::new(ProviderMeta::Anthropic {
+                                signature: "sig_abc".to_string(),
+                            })),
+                        },
+                        AssistantBlock::Text {
+                            text: "Answer".to_string(),
+                            meta: None,
+                        },
+                    ],
+                    stop_reason: StopReason::EndTurn,
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input should be array");
+
+        // Non-OpenAI reasoning is not serialized at all, only text remains
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["role"], "assistant");
+    }
+
+    // =========================================================================
+    // Response Status Tests
+    // =========================================================================
 
     #[test]
     fn test_stop_reason_from_response_status() {

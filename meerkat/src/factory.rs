@@ -696,7 +696,7 @@ impl AgentFactory {
                     engine,
                 ));
             }
-            return Ok(Arc::new(composite));
+            Ok(Arc::new(composite))
         }
 
         #[cfg(feature = "sub-agents")]
@@ -897,7 +897,7 @@ impl AgentFactory {
 
         // 5. Resolve max_tokens
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
-        let realm_scope_root = self.realm_scope_root(&build_config);
+        let _realm_scope_root = self.realm_scope_root(&build_config);
         let conventions_context_root = self.context_root.as_deref();
         let conventions_user_root = self.user_config_root.as_deref();
 
@@ -914,7 +914,7 @@ impl AgentFactory {
                         &config.skills,
                         conventions_context_root,
                         conventions_user_root,
-                        Some(realm_scope_root.as_path()),
+                        Some(_realm_scope_root.as_path()),
                     )
                     .await
                     {
@@ -963,7 +963,7 @@ impl AgentFactory {
                 .ok_or(BuildAgentError::HostModeRequiresCommsName)?;
             let runtime = crate::build_comms_runtime_from_config_scoped(
                 config,
-                realm_scope_root.as_path(),
+                _realm_scope_root.as_path(),
                 comms_name,
                 build_config.peer_meta.clone(),
                 build_config.realm_id.clone(),
@@ -975,7 +975,7 @@ impl AgentFactory {
             None
         };
         #[cfg(not(feature = "comms"))]
-        let comms_runtime: Option<()> = None;
+        let _comms_runtime: Option<()> = None;
 
         #[cfg(all(feature = "sub-agents", feature = "comms"))]
         let sub_agent_comms = if config.comms.auto_enable_for_subagents && effective_subagents {
@@ -984,7 +984,7 @@ impl AgentFactory {
                     parent_name: runtime.participant_name().to_string(),
                     parent_pubkey: *runtime.public_key().as_bytes(),
                     parent_addr: runtime.advertised_address(),
-                    comms_base_dir: realm_scope_root
+                    comms_base_dir: _realm_scope_root
                         .join(".rkat")
                         .join("subagents")
                         .join("comms"),

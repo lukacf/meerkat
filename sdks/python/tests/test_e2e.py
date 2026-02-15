@@ -1,10 +1,10 @@
-"""E2E tests for the Python SDK against a live rkat rpc server.
+"""E2E tests for the Python SDK against a live rkat-rpc server.
 
 These tests require:
-  - rkat binary on PATH (cargo build -p meerkat-cli)
+  - rkat-rpc binary on PATH (cargo build -p meerkat-rpc)
   - ANTHROPIC_API_KEY set in environment
 
-Run with: pytest tests/test_e2e.py -v (skipped by default if rkat not found)
+Run with: pytest tests/test_e2e.py -v (skipped by default if rkat-rpc not found)
 """
 
 import shutil
@@ -12,19 +12,21 @@ import subprocess
 
 import pytest
 
-# Skip all tests in this file if rkat is not available
+# Skip all tests in this file if rkat-rpc is not available
 pytestmark = pytest.mark.skipif(
-    shutil.which("rkat") is None,
-    reason="rkat binary not found on PATH",
+    shutil.which("rkat-rpc") is None and shutil.which("rkat") is None,
+    reason="rkat-rpc binary not found on PATH",
 )
 
 
 def test_rkat_rpc_starts_and_responds():
-    """Verify rkat rpc subprocess starts and responds to initialize."""
+    """Verify rkat-rpc subprocess starts and responds to initialize."""
     import json
 
+    binary = "rkat-rpc" if shutil.which("rkat-rpc") else "rkat"
+    args = [binary] + (["rpc"] if binary == "rkat" else [])
     proc = subprocess.Popen(
-        ["rkat", "rpc"],
+        args,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -42,7 +44,7 @@ def test_rkat_rpc_starts_and_responds():
         proc.stdin.flush()
 
         response_line = proc.stdout.readline()
-        assert response_line, "rkat rpc should respond to initialize"
+        assert response_line, "rkat-rpc should respond to initialize"
 
         response = json.loads(response_line)
         assert "result" in response or "error" not in response

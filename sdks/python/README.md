@@ -24,19 +24,19 @@ The package is named `meerkat-sdk` (defined in `pyproject.toml`). It has zero ru
 
 ## Prerequisites
 
-The `rkat` binary must be installed and available on your `PATH`. The SDK spawns `rkat rpc` as a subprocess and communicates via JSON-RPC 2.0 over newline-delimited JSON on stdin/stdout.
+The `rkat-rpc` binary must be installed and available on your `PATH` (the SDK also supports legacy `rkat rpc` fallback). It communicates via JSON-RPC 2.0 over newline-delimited JSON on stdin/stdout.
 
 Build from source:
 
 ```bash
-cargo build -p meerkat-cli --release
-# Binary is at target/release/rkat
+cargo build -p meerkat-rpc --release
+# Binary is at target/release/rkat-rpc
 ```
 
 If the binary is not on `PATH`, you can pass its location explicitly:
 
 ```python
-client = MeerkatClient(rkat_path="/path/to/rkat")
+client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 ```
 
 If the binary is not found, `MeerkatError` is raised immediately with code `"BINARY_NOT_FOUND"`.
@@ -48,7 +48,7 @@ import asyncio
 from meerkat import MeerkatClient
 
 async def main():
-    # Connect to rkat rpc
+    # Connect to rkat-rpc
     client = MeerkatClient()
     await client.connect()
 
@@ -76,17 +76,17 @@ asyncio.run(main())
 from meerkat import MeerkatClient
 ```
 
-The primary class. Spawns `rkat rpc` as a child process and speaks JSON-RPC over its stdin/stdout.
+The primary class. Spawns `rkat-rpc` as a child process and speaks JSON-RPC over its stdin/stdout.
 
 #### Constructor
 
 ```python
-MeerkatClient(rkat_path: str = "rkat")
+MeerkatClient(rkat_path: str = "rkat-rpc")
 ```
 
 | Parameter   | Type  | Default  | Description |
 |-------------|-------|----------|-------------|
-| `rkat_path` | `str` | `"rkat"` | Path to the `rkat` binary. Resolved via `shutil.which()`. |
+| `rkat_path` | `str` | `"rkat-rpc"` | Path to the RPC binary. Use `"rkat"` for legacy subcommand mode. |
 
 Raises `MeerkatError` (code `"BINARY_NOT_FOUND"`) if the binary is not found.
 
@@ -96,7 +96,7 @@ Raises `MeerkatError` (code `"BINARY_NOT_FOUND"`) if the binary is not found.
 async def connect(self) -> MeerkatClient
 ```
 
-Starts the `rkat rpc` subprocess and performs the initialization handshake:
+Starts the `rkat-rpc` subprocess and performs the initialization handshake:
 
 1. Sends `initialize` and checks the server's `contract_version` against the SDK's `CONTRACT_VERSION` (`"0.2.0"`). Raises `MeerkatError` (code `"VERSION_MISMATCH"`) on incompatibility.
 2. Fetches capabilities via `capabilities/get` and caches them internally.
@@ -109,7 +109,7 @@ Returns `self` for chaining.
 async def close(self) -> None
 ```
 
-Terminates the `rkat rpc` subprocess. Sends `SIGTERM` and waits up to 5 seconds; falls back to `SIGKILL` on timeout.
+Terminates the `rkat-rpc` subprocess. Sends `SIGTERM` and waits up to 5 seconds; falls back to `SIGKILL` on timeout.
 
 #### `create_session()`
 
@@ -423,7 +423,7 @@ SkillHelper(client)
 from meerkat import EventStream
 ```
 
-Async iterator that yields `WireEvent` objects from the `rkat rpc` notification stream. Reads from an `asyncio.StreamReader` (the stdout of the rkat process), skips JSON-RPC response messages (which have an `id` field), and only yields notification payloads.
+Async iterator that yields `WireEvent` objects from the `rkat-rpc` notification stream. Reads from an `asyncio.StreamReader` (the stdout of the rkat process), skips JSON-RPC response messages (which have an `id` field), and only yields notification payloads.
 
 ```python
 # Low-level usage with the process stdout
@@ -440,7 +440,7 @@ EventStream(stream: asyncio.StreamReader)
 
 | Parameter | Type                    | Description |
 |-----------|-------------------------|-------------|
-| `stream`  | `asyncio.StreamReader`  | The stdout stream from the `rkat rpc` process. |
+| `stream`  | `asyncio.StreamReader`  | The stdout stream from the `rkat-rpc` process. |
 
 ### Async Iterator Protocol
 
@@ -498,9 +498,9 @@ SDK-specific codes raised by the client itself:
 
 | Code                    | Origin    | Description |
 |-------------------------|-----------|-------------|
-| `"BINARY_NOT_FOUND"`    | Client    | `rkat` binary not found on PATH. |
+| `"BINARY_NOT_FOUND"`    | Client    | `rkat-rpc` binary not found on PATH. |
 | `"NOT_CONNECTED"`       | Client    | Operation attempted before `connect()`. |
-| `"CONNECTION_CLOSED"`   | Client    | The `rkat rpc` process closed unexpectedly. |
+| `"CONNECTION_CLOSED"`   | Client    | The `rkat-rpc` process closed unexpectedly. |
 | `"VERSION_MISMATCH"`    | Client    | Server contract version incompatible with SDK. |
 | `"CAPABILITY_UNAVAILABLE"` | Client | Capability check failed via `require_capability()` or `SkillHelper.require_skills()`. |
 
@@ -732,12 +732,12 @@ The top-level `meerkat.errors` module defines identical error classes that are u
 # Install dev dependencies
 pip install -e "sdks/python[dev]"
 
-# Run type conformance tests (no rkat binary needed)
+# Run type conformance tests (no rkat-rpc binary needed)
 pytest sdks/python/tests/test_types.py -v
 
-# Run E2E tests (requires rkat on PATH)
+# Run E2E tests (requires rkat-rpc on PATH)
 pytest sdks/python/tests/test_e2e.py -v
 
-# Run E2E smoke tests (requires rkat on PATH + ANTHROPIC_API_KEY)
+# Run E2E smoke tests (requires rkat-rpc on PATH + ANTHROPIC_API_KEY)
 pytest sdks/python/tests/test_e2e_smoke.py -v
 ```

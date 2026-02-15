@@ -1,5 +1,5 @@
 /**
- * Meerkat client — spawns rkat rpc subprocess and communicates via JSON-RPC.
+ * Meerkat client — spawns rkat-rpc subprocess and communicates via JSON-RPC.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -28,7 +28,7 @@ export class MeerkatClient {
     { resolve: (value: unknown) => void; reject: (reason: unknown) => void }
   >();
 
-  constructor(rkatPath = "rkat") {
+  constructor(rkatPath = "rkat-rpc") {
     this.rkatPath = rkatPath;
   }
 
@@ -36,8 +36,21 @@ export class MeerkatClient {
     realmId?: string;
     instanceId?: string;
     realmBackend?: "jsonl" | "redb";
+    isolated?: boolean;
+    stateRoot?: string;
+    contextRoot?: string;
+    userConfigRoot?: string;
   }): Promise<this> {
+    if (options?.realmId && options?.isolated) {
+      throw new MeerkatError(
+        "INVALID_ARGS",
+        "realmId and isolated cannot both be set",
+      );
+    }
     const args: string[] = [];
+    if (options?.isolated) {
+      args.push("--isolated");
+    }
     if (options?.realmId) {
       args.push("--realm", options.realmId);
     }
@@ -47,7 +60,18 @@ export class MeerkatClient {
     if (options?.realmBackend) {
       args.push("--realm-backend", options.realmBackend);
     }
-    args.push("rpc");
+    if (options?.stateRoot) {
+      args.push("--state-root", options.stateRoot);
+    }
+    if (options?.contextRoot) {
+      args.push("--context-root", options.contextRoot);
+    }
+    if (options?.userConfigRoot) {
+      args.push("--user-config-root", options.userConfigRoot);
+    }
+    if (this.rkatPath === "rkat") {
+      args.push("rpc");
+    }
     this.process = spawn(this.rkatPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });

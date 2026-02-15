@@ -1,5 +1,5 @@
 /**
- * Async event stream over JSON-RPC notifications from rkat rpc.
+ * Async event stream over JSON-RPC notifications from rkat-rpc.
  */
 
 import type { Interface as ReadlineInterface } from "node:readline";

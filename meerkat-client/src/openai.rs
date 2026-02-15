@@ -267,10 +267,7 @@ impl OpenAiClient {
     fn strip_orphaned_reasoning(items: &mut Vec<Value>) {
         let mut i = 0;
         while i < items.len() {
-            let is_reasoning = items[i]
-                .get("type")
-                .and_then(|t| t.as_str())
-                == Some("reasoning");
+            let is_reasoning = items[i].get("type").and_then(|t| t.as_str()) == Some("reasoning");
 
             if !is_reasoning {
                 i += 1;

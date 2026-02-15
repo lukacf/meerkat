@@ -717,7 +717,11 @@ mod tests {
 
         // Default namespace cannot see realm-a registrations.
         assert!(registry.get_by_name("receiver").is_none());
-        assert!(registry.get_by_name_in_namespace("realm-a", "receiver").is_some());
+        assert!(
+            registry
+                .get_by_name_in_namespace("realm-a", "receiver")
+                .is_some()
+        );
 
         let sender_keypair = make_keypair();
 

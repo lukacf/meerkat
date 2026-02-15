@@ -1,6 +1,6 @@
 """Streaming API for the Meerkat Python SDK.
 
-Provides _StdoutDispatcher (internal) for multiplexing the rkat rpc stdout
+Provides _StdoutDispatcher (internal) for multiplexing the rkat-rpc stdout
 stream, and StreamingTurn (public) for consuming agent events in real-time.
 """
 
@@ -85,14 +85,14 @@ class _StdoutDispatcher:
         while not self._closed:
             line = await self._stdout.readline()
             if not line:
-                self._fail_all("CONNECTION_CLOSED", "rkat rpc process closed")
+                self._fail_all("CONNECTION_CLOSED", "rkat-rpc process closed")
                 return
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
                 import logging
                 logging.getLogger("meerkat.streaming").warning(
-                    "Malformed JSON from rkat rpc: %s", line[:200]
+                    "Malformed JSON from rkat-rpc: %s", line[:200]
                 )
                 continue
             if "id" in data:

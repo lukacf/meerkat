@@ -1,8 +1,8 @@
 /**
- * E2E smoke tests for the TypeScript SDK against a live rkat rpc server.
+ * E2E smoke tests for the TypeScript SDK against a live rkat-rpc server.
  *
  * Requirements:
- *   - rkat binary on PATH (cargo build -p meerkat-cli)
+ *   - rkat-rpc binary on PATH (cargo build -p meerkat-rpc)
  *   - ANTHROPIC_API_KEY set for live API tests
  *
  * Run with: node --test tests/e2e_smoke.test.ts
@@ -19,7 +19,7 @@ import { createInterface, type Interface } from "node:readline";
 
 function rkatAvailable(): boolean {
   try {
-    execSync("which rkat", { stdio: "ignore" });
+    execSync("which rkat-rpc || which rkat", { stdio: "ignore" });
     return true;
   } catch {
     return false;
@@ -41,7 +41,16 @@ interface RpcClient {
 }
 
 function createRpcClient(): RpcClient {
-  const proc = spawn("rkat", ["rpc"], {
+  const binary = (() => {
+    try {
+      execSync("which rkat-rpc", { stdio: "ignore" });
+      return "rkat-rpc";
+    } catch {
+      return "rkat";
+    }
+  })();
+  const args = binary === "rkat" ? ["rpc"] : [];
+  const proc = spawn(binary, args, {
     stdio: ["pipe", "pipe", "pipe"],
   });
 

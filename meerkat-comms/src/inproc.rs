@@ -702,6 +702,86 @@ mod tests {
         assert!(matches!(result, Err(InprocSendError::InboxClosed)));
     }
 
+    #[tokio::test]
+    async fn test_registry_namespace_isolation_for_lookup_and_send() {
+        let registry = InprocRegistry::new();
+        let receiver_keypair = make_keypair();
+        let (mut inbox, sender) = Inbox::new();
+        registry.register_with_meta_in_namespace(
+            "realm-a",
+            "receiver",
+            receiver_keypair.public_key(),
+            sender,
+            PeerMeta::default(),
+        );
+
+        // Default namespace cannot see realm-a registrations.
+        assert!(registry.get_by_name("receiver").is_none());
+        assert!(registry.get_by_name_in_namespace("realm-a", "receiver").is_some());
+
+        let sender_keypair = make_keypair();
+
+        // Matching namespace succeeds.
+        let ok = registry.send_with_signature_in_namespace(
+            "realm-a",
+            &sender_keypair,
+            "receiver",
+            MessageKind::Message {
+                body: "hello scoped".to_string(),
+            },
+            true,
+        );
+        assert!(ok.is_ok());
+
+        // Different namespace cannot route to receiver.
+        let wrong_ns = registry.send_with_signature_in_namespace(
+            "realm-b",
+            &sender_keypair,
+            "receiver",
+            MessageKind::Message {
+                body: "should not deliver".to_string(),
+            },
+            true,
+        );
+        assert!(matches!(wrong_ns, Err(InprocSendError::PeerNotFound(_))));
+
+        let items = inbox.try_drain();
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn test_registry_same_name_can_exist_in_different_namespaces() {
+        let registry = InprocRegistry::new();
+        let kp_a = make_keypair();
+        let kp_b = make_keypair();
+        let (_, sender_a) = Inbox::new();
+        let (_, sender_b) = Inbox::new();
+
+        registry.register_with_meta_in_namespace(
+            "realm-a",
+            "shared-name",
+            kp_a.public_key(),
+            sender_a,
+            PeerMeta::default(),
+        );
+        registry.register_with_meta_in_namespace(
+            "realm-b",
+            "shared-name",
+            kp_b.public_key(),
+            sender_b,
+            PeerMeta::default(),
+        );
+
+        let (found_a, _) = registry
+            .get_by_name_in_namespace("realm-a", "shared-name")
+            .expect("realm-a peer should exist");
+        let (found_b, _) = registry
+            .get_by_name_in_namespace("realm-b", "shared-name")
+            .expect("realm-b peer should exist");
+        assert_ne!(found_a, found_b);
+        assert!(registry.get_by_name("shared-name").is_none());
+    }
+
     #[test]
     fn test_global_registry() {
         // Access global registry

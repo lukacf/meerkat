@@ -955,8 +955,18 @@ async fn handle_rpc() -> anyhow::Result<()> {
         .subagents(true)
         .memory(true);
 
+    let db_dir = meerkat_store::resolve_database_dir(&config);
+    std::fs::create_dir_all(&db_dir)?;
+    let session_store: Arc<dyn meerkat_store::SessionStore> = Arc::new(
+        meerkat_store::RedbSessionStore::open(db_dir.join("sessions.redb"))
+            .map_err(|e| anyhow::anyhow!("Failed to open session database: {e}"))?,
+    );
+
     let runtime = Arc::new(meerkat_rpc::session_runtime::SessionRuntime::new(
-        factory, config, 64,
+        factory,
+        config,
+        64,
+        session_store,
     ));
 
     let (config_store, _base_dir) = resolve_config_store().await?;

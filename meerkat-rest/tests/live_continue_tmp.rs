@@ -3,7 +3,9 @@
 use axum::body::Body;
 use axum::http::Request;
 use http_body_util::BodyExt;
-use meerkat::{AgentFactory, Config, EphemeralSessionService, FactoryAgentBuilder};
+use meerkat::{
+    AgentFactory, Config, FactoryAgentBuilder, MemoryStore, PersistentSessionService, SessionStore,
+};
 use meerkat_client::TestClient;
 use meerkat_core::MemoryConfigStore;
 use meerkat_rest::{AppState, router};
@@ -24,6 +26,8 @@ async fn integration_real_live_continue_hangs() {
     let store_path = temp_dir.path().join("sessions");
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
 
+    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+
     let factory = AgentFactory::new(store_path.clone())
         .builtins(true)
         .shell(true)
@@ -31,7 +35,7 @@ async fn integration_real_live_continue_hangs() {
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
     let builder_slot = builder.build_config_slot.clone();
-    let session_service = Arc::new(EphemeralSessionService::new(builder, 100));
+    let session_service = Arc::new(PersistentSessionService::new(builder, 100, store));
 
     let state = AppState {
         store_path: store_path.clone(),

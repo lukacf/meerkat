@@ -79,3 +79,78 @@ pub fn resolve_store_path(config: &meerkat_core::Config) -> std::path::PathBuf {
                 .join("sessions")
         })
 }
+
+/// Resolve the database directory from config, with sensible fallbacks.
+///
+/// Precedence: `store.database_dir` > `storage.directory/db` > platform data dir.
+pub fn resolve_database_dir(config: &meerkat_core::Config) -> std::path::PathBuf {
+    config
+        .store
+        .database_dir
+        .clone()
+        .or_else(|| config.storage.directory.as_ref().map(|d| d.join("db")))
+        .unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("meerkat")
+                .join("db")
+        })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use meerkat_core::Config;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_resolve_database_dir_explicit() {
+        let mut config = Config::default();
+        config.store.database_dir = Some(PathBuf::from("/explicit/db"));
+        assert_eq!(resolve_database_dir(&config), PathBuf::from("/explicit/db"));
+    }
+
+    #[test]
+    fn test_resolve_database_dir_from_storage_directory() {
+        let mut config = Config::default();
+        config.storage.directory = Some(PathBuf::from("/data/meerkat"));
+        assert_eq!(
+            resolve_database_dir(&config),
+            PathBuf::from("/data/meerkat/db")
+        );
+    }
+
+    #[test]
+    fn test_resolve_database_dir_explicit_overrides_storage_directory() {
+        let mut config = Config::default();
+        config.store.database_dir = Some(PathBuf::from("/explicit/db"));
+        config.storage.directory = Some(PathBuf::from("/data/meerkat"));
+        assert_eq!(resolve_database_dir(&config), PathBuf::from("/explicit/db"));
+    }
+
+    #[test]
+    fn test_resolve_database_dir_platform_default() {
+        let config = Config::default();
+        let result = resolve_database_dir(&config);
+        // Falls through to platform data dir or "." fallback.
+        assert!(result.ends_with("db"), "expected path ending in 'db', got: {result:?}");
+    }
+
+    #[test]
+    fn test_store_config_database_dir_serde_roundtrip() {
+        let mut config = Config::default();
+        config.store.database_dir = Some(PathBuf::from("/test/db"));
+        let serialized = toml::to_string(&config).unwrap();
+        let deserialized: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.store.database_dir, Some(PathBuf::from("/test/db")));
+    }
+
+    #[test]
+    fn test_store_config_backward_compat_without_database_dir() {
+        // Config TOML without database_dir should deserialize with None.
+        let toml_str = "[store]\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.store.database_dir, None);
+    }
+}

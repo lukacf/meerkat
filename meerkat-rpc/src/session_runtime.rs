@@ -1,6 +1,6 @@
 //! SessionRuntime - keeps agents alive between turns.
 //!
-//! Delegates to [`EphemeralSessionService`] for session lifecycle management.
+//! Delegates to [`PersistentSessionService`] for session lifecycle management.
 //! `FactoryAgentBuilder` bridges `AgentFactory::build_agent()` into the
 //! `SessionAgentBuilder` / `SessionAgent` traits used by the service.
 //!
@@ -12,7 +12,9 @@
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use meerkat::{AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
+use meerkat::{
+    AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistentSessionService, SessionStore,
+};
 use meerkat_client::LlmClient;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
@@ -65,10 +67,10 @@ pub struct SessionInfo {
 
 /// Core runtime that manages agent sessions.
 ///
-/// Wraps [`EphemeralSessionService`] for session lifecycle management while
+/// Wraps [`PersistentSessionService`] for session lifecycle management while
 /// preserving the two-step create-then-run API required by JSON-RPC handlers.
 pub struct SessionRuntime {
-    service: EphemeralSessionService<FactoryAgentBuilder>,
+    service: PersistentSessionService<FactoryAgentBuilder>,
     /// Sessions that have been "created" (ID returned to caller) but not yet
     /// materialized in the service. The first `start_turn` call promotes them.
     pending: RwLock<IndexMap<SessionId, AgentBuildConfig>>,
@@ -84,10 +86,15 @@ pub struct SessionRuntime {
 
 impl SessionRuntime {
     /// Create a new session runtime.
-    pub fn new(factory: AgentFactory, config: Config, max_sessions: usize) -> Self {
+    pub fn new(
+        factory: AgentFactory,
+        config: Config,
+        max_sessions: usize,
+        store: Arc<dyn SessionStore>,
+    ) -> Self {
         let builder = FactoryAgentBuilder::new(factory, config);
         let build_config_slot = builder.build_config_slot.clone();
-        let service = EphemeralSessionService::new(builder, max_sessions);
+        let service = PersistentSessionService::new(builder, max_sessions, store);
 
         Self {
             service,
@@ -497,7 +504,8 @@ mod tests {
     }
 
     fn make_runtime(factory: AgentFactory, max_sessions: usize) -> SessionRuntime {
-        SessionRuntime::new(factory, Config::default(), max_sessions)
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        SessionRuntime::new(factory, Config::default(), max_sessions, store)
     }
 
     // -----------------------------------------------------------------------

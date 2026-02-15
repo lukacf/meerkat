@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use meerkat::{
-    AgentFactory, Config, EphemeralSessionService, FactoryAgentBuilder, JsonlStore, SessionId,
+    AgentFactory, Config, FactoryAgentBuilder, MemoryStore, PersistentSessionService, SessionId,
     SessionStore,
 };
 use meerkat_client::TestClient;
@@ -41,6 +41,8 @@ async fn inner_test_rest_resume_metadata() {
     let store_path = temp_dir.path().join("sessions");
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
 
+    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+
     let factory = AgentFactory::new(store_path.clone())
         .builtins(true)
         .shell(true)
@@ -48,7 +50,7 @@ async fn inner_test_rest_resume_metadata() {
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
     let builder_slot = builder.build_config_slot.clone();
-    let session_service = Arc::new(EphemeralSessionService::new(builder, 100));
+    let session_service = Arc::new(PersistentSessionService::new(builder, 100, store.clone()));
 
     let state_run = AppState {
         store_path: store_path.clone(),
@@ -99,8 +101,6 @@ async fn inner_test_rest_resume_metadata() {
         .expect("session_id")
         .to_string();
 
-    let store = JsonlStore::new(store_path.clone());
-    store.init().await.expect("init store");
     let session = store
         .load(&SessionId::parse(&session_id).expect("session id"))
         .await
@@ -120,7 +120,8 @@ async fn inner_test_rest_resume_metadata() {
     let mut builder2 = FactoryAgentBuilder::new(factory2, config.clone());
     builder2.default_llm_client = Some(Arc::new(TestClient::default()));
     let builder_slot2 = builder2.build_config_slot.clone();
-    let session_service2 = Arc::new(EphemeralSessionService::new(builder2, 100));
+    let session_service2 =
+        Arc::new(PersistentSessionService::new(builder2, 100, store.clone()));
 
     let state_resume = AppState {
         store_path: store_path.clone(),

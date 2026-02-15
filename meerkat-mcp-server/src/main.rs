@@ -5,7 +5,7 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let state = meerkat_mcp_server::MeerkatMcpState::new().await;
+    let state = meerkat_mcp_server::MeerkatMcpState::new().await?;
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();

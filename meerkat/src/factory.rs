@@ -517,41 +517,11 @@ impl AgentFactory {
         self
     }
 
-    fn default_runtime_root_from_store_path(&self) -> PathBuf {
-        let looks_like_jsonl_dir = self
-            .store_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == "sessions_jsonl");
-        if looks_like_jsonl_dir {
-            return self
-                .store_path
-                .parent()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| self.store_path.clone());
-        }
-        self.store_path.clone()
-    }
-
-    fn should_prefer_project_root_for_realm(&self, build_config: &AgentBuildConfig) -> bool {
-        match (&self.project_root, build_config.realm_id.as_deref()) {
-            (Some(project_root), Some(realm_id)) => {
-                meerkat_store::derive_workspace_realm_id(project_root) == realm_id
-            }
-            _ => false,
-        }
-    }
-
-    fn realm_scope_root(&self, build_config: &AgentBuildConfig) -> PathBuf {
-        if self.should_prefer_project_root_for_realm(build_config) {
-            if let Some(project_root) = self.project_root.clone() {
-                return project_root;
-            }
-        }
+    fn realm_scope_root(&self, _build_config: &AgentBuildConfig) -> PathBuf {
         self.runtime_root
             .clone()
             .or_else(|| self.project_root.clone())
-            .unwrap_or_else(|| self.default_runtime_root_from_store_path())
+            .unwrap_or_else(|| self.store_path.clone())
     }
 
     /// Build an LLM adapter for the provided client/model.

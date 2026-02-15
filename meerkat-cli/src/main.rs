@@ -914,7 +914,7 @@ fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> RuntimeScope {
 
 async fn resolve_config_store(
     scope: &RuntimeScope,
-) -> anyhow::Result<(Box<dyn ConfigStore>, PathBuf)> {
+) -> anyhow::Result<(Arc<dyn ConfigStore>, PathBuf)> {
     let paths = meerkat_store::realm_paths(&scope.realm_id);
     if let Some(parent) = paths.config_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -922,7 +922,7 @@ async fn resolve_config_store(
             .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
     }
     Ok((
-        Box::new(FileConfigStore::new(paths.config_path)),
+        Arc::new(FileConfigStore::new(paths.config_path)),
         paths.root,
     ))
 }
@@ -987,9 +987,11 @@ async fn handle_config_set(
         ));
     };
 
-    let (store, _) = resolve_config_store(scope).await?;
-    store
-        .set(config)
+    let (store, base_dir) = resolve_config_store(scope).await?;
+    let runtime =
+        meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
+    runtime
+        .set(config, None)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
     Ok(())
@@ -1013,9 +1015,11 @@ async fn handle_config_patch(
         return Err(anyhow::anyhow!("Provide --file or --json to patch config"));
     };
 
-    let (store, _) = resolve_config_store(scope).await?;
-    store
-        .patch(ConfigDelta(patch_value))
+    let (store, base_dir) = resolve_config_store(scope).await?;
+    let runtime =
+        meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
+    runtime
+        .patch(ConfigDelta(patch_value), None)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to patch config: {e}"))?;
     Ok(())
@@ -1050,8 +1054,7 @@ async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
         .subagents(true)
         .memory(true);
 
-    let (config_store, _base_dir) = resolve_config_store(scope).await?;
-    let base_store: Arc<dyn meerkat_core::ConfigStore> = Arc::from(config_store);
+    let (base_store, _base_dir) = resolve_config_store(scope).await?;
     let tagged = meerkat_core::TaggedConfigStore::new(
         base_store,
         meerkat_core::ConfigStoreMetadata {

@@ -148,7 +148,7 @@ tag-name = "v{{version}}"
 pre-release-commit-message = "chore: release v{{version}}"
 tag-message = "Release v{{version}}"
 # Bump SDK versions + regenerate schemas before committing
-pre-release-hook = ["scripts/release-hook.sh", "{{version}}"]
-# Require manual publish until hnsw_rs patch is resolved
-publish = false
+# cargo-release runs hooks from each crate dir, so resolve workspace root via git
+pre-release-hook = ["bash", "-c", "$(git rev-parse --show-toplevel)/scripts/release-hook.sh {{version}}"]
+publish = true
 push = true

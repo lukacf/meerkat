@@ -57,6 +57,7 @@ async fn integration_real_live_continue_hangs() {
         session_service,
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
+        instance_id: None,
         backend: "redb".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {
             root: store_path.display().to_string(),
@@ -65,7 +66,9 @@ async fn integration_real_live_continue_hangs() {
             sessions_redb_path: String::new(),
             sessions_jsonl_dir: String::new(),
         },
+        expose_paths: false,
         config_runtime,
+        realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     let app = router(state);

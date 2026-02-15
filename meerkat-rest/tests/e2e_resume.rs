@@ -71,6 +71,7 @@ async fn inner_test_rest_resume_metadata() {
         session_service,
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
+        instance_id: None,
         backend: "redb".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {
             root: store_path.display().to_string(),
@@ -79,7 +80,9 @@ async fn inner_test_rest_resume_metadata() {
             sessions_redb_path: String::new(),
             sessions_jsonl_dir: String::new(),
         },
+        expose_paths: false,
         config_runtime,
+        realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     let app = router(state_run);
@@ -155,6 +158,7 @@ async fn inner_test_rest_resume_metadata() {
         session_service: session_service2,
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
+        instance_id: None,
         backend: "redb".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {
             root: store_path.display().to_string(),
@@ -163,7 +167,9 @@ async fn inner_test_rest_resume_metadata() {
             sessions_redb_path: String::new(),
             sessions_jsonl_dir: String::new(),
         },
+        expose_paths: false,
         config_runtime: config_runtime_resume,
+        realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     let app = router(state_resume);

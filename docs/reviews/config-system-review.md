@@ -1,6 +1,7 @@
 # Configuration System Review
 
 **Date:** 2026-02-15
+**Base revision:** `5577c14` (after persistent session storage PR #26)
 **Scope:** Cross-surface consistency, storage overlap, SDK suitability
 
 ---
@@ -9,11 +10,14 @@
 
 The configuration system has solid foundations -- a single `Config` struct, a `ConfigStore` abstraction, and a consistent config/get/set/patch API across REST, RPC, and CLI surfaces. However, it has accumulated structural debt that creates real problems for non-Rust consumers and introduces subtle inconsistencies between surfaces.
 
-The core issues fall into three categories:
+PR #26 (persistent session storage) resolved several previous concerns -- server surfaces now use `PersistentSessionService` + `RedbSessionStore` and there's a new `database_dir` config field. But it also introduced new inconsistencies: the CLI `run` command still uses `EphemeralSessionService` while `rkat rpc` uses persistent storage, and session management commands (`list`, `show`, `delete`) still bypass `SessionService` to access `JsonlStore` directly.
+
+The remaining issues fall into four categories:
 
 1. **Structural duplication** -- overlapping config fields that serve the same purpose
 2. **Config-as-snapshot semantics** -- config changes don't propagate to running agents
-3. **Rust-native assumptions** -- the `Config` type is too coupled to Rust internal details for clean SDK exposure
+3. **Rust-native assumptions** -- the `Config` type is too coupled to Rust details for SDK use
+4. **Storage divergence** -- three storage backends (JSONL, redb, ephemeral) coexist with inconsistent config and feature wiring
 
 ---
 
@@ -43,31 +47,31 @@ Meanwhile, `apply_env_overrides()` (`config.rs:306-338`) writes API keys into `P
 
 ---
 
-## Issue 2: Dual Storage Path Configuration
+## Issue 2: Three-Way Storage Path Configuration
 
-**Files:** `meerkat-core/src/config.rs:29,37`, `meerkat-store/src/lib.rs:69-81`
+**Files:** `meerkat-core/src/config.rs:29,37,836`, `meerkat-store/src/lib.rs:66-98`
 
-Two config fields control session storage location:
+After PR #26, there are now **three** config sections related to storage paths:
 
 ```rust
 pub struct Config {
-    pub storage: StorageConfig,  // { directory: Option<PathBuf> }  -- line 29
-    // ...
-    pub store: StoreConfig,      // { sessions_path: Option<PathBuf>, tasks_path: ... }  -- line 37
+    pub storage: StorageConfig,  // { directory: Option<PathBuf> }         -- generic fallback
+    pub store: StoreConfig,      // { sessions_path, tasks_path, database_dir }  -- specific paths
 }
 ```
 
-The resolution function (`meerkat-store/src/lib.rs:69-81`) implements a three-level fallback:
+With **two** resolution functions in `meerkat-store`:
 
-```
-config.store.sessions_path  >  config.storage.directory  >  platform data dir
-```
+1. `resolve_store_path()` -- sessions JSONL: `store.sessions_path > storage.directory > platform`
+2. `resolve_database_dir()` -- redb database: `store.database_dir > storage.directory/db > platform`
 
-Both `AppState::default()` and `AppState::load_from()` in `meerkat-rest/src/lib.rs:87-97,154-164` duplicate this exact fallback chain inline, rather than calling `resolve_store_path()`.
+Both fall back to `storage.directory` as a middle tier, but branch to different subdirectories.
 
-**Impact:** Users see `[storage]` and `[store]` sections in config and have to guess which one matters. The `StorageConfig` default even computes a path (`data_dir().join("sessions")`) that gets silently overridden if `store.sessions_path` is set.
+Additionally, REST inlines the `resolve_store_path()` logic (`meerkat-rest/src/lib.rs:102-112`) instead of calling the function, and then patches `store.database_dir` from `instance_root` before calling `resolve_database_dir()` (`meerkat-rest/src/lib.rs:129-132`).
 
-**Recommendation:** Merge `StorageConfig` into `StoreConfig`. Keep `storage.directory` as a deprecated alias during migration. The REST surface should call `resolve_store_path()` instead of inlining the fallback logic.
+**Impact:** Users now face three config fields (`storage.directory`, `store.sessions_path`, `store.database_dir`) that interact in non-obvious ways. The REST surface mutates config before resolving, adding a fourth implicit path source.
+
+**Recommendation:** Merge `StorageConfig` into `StoreConfig`. Establish a single `store.root` field as the base directory, with `sessions_path` and `database_dir` as optional overrides relative to that root. Remove the inline path resolution in REST.
 
 ---
 
@@ -81,7 +85,7 @@ Token limits are configured via:
 2. `config.agent.max_tokens_per_turn: u32` (line 617) -- agent sub-config
 3. `config.budget.max_tokens: Option<u64>` (line 1021) -- budget sub-config (note: `u64`, not `u32`)
 
-The factory resolves `max_tokens` from `build_config.max_tokens.unwrap_or(config.max_tokens)` (`factory.rs:672`), ignoring `agent.max_tokens_per_turn`. But `AppState` in REST reads `config.agent.max_tokens_per_turn` (`meerkat-rest/src/lib.rs:114`).
+The factory resolves `max_tokens` from `build_config.max_tokens.unwrap_or(config.max_tokens)` (`factory.rs:672`), ignoring `agent.max_tokens_per_turn`. But `AppState` in REST reads `config.agent.max_tokens_per_turn` (`meerkat-rest/src/lib.rs:118`).
 
 The type mismatch (`u32` vs `u64`) between `max_tokens` and `budget.max_tokens` adds to the confusion.
 
@@ -93,7 +97,7 @@ The type mismatch (`u32` vs `u64`) between `max_tokens` and `budget.max_tokens` 
 
 ## Issue 4: Config Changes Don't Propagate to Running Agents
 
-**Files:** `meerkat-rest/src/lib.rs:607-631`, `meerkat-rpc/src/handlers/config.rs`, `meerkat/src/service_factory.rs:148-155`
+**Files:** `meerkat-rest/src/lib.rs:597-631`, `meerkat-rpc/src/handlers/config.rs`, `meerkat/src/service_factory.rs:148-155`
 
 The config/set and config/patch endpoints update the `ConfigStore` (file or memory), but the `FactoryAgentBuilder` holds a frozen `Config` snapshot captured at construction:
 
@@ -120,11 +124,11 @@ Option (a) is the cleanest. It would require `FactoryAgentBuilder` to hold an `A
 
 ## Issue 5: `build_config_slot` Mutex Is a Concurrency Hazard
 
-**Files:** `meerkat/src/service_factory.rs:154`, `meerkat-rpc/src/session_runtime.rs:76-80`
+**Files:** `meerkat/src/service_factory.rs:154`, `meerkat-rpc/src/session_runtime.rs:80-82`
 
 The `build_config_slot: Arc<Mutex<Option<AgentBuildConfig>>>` pattern requires surfaces to stage config into a shared slot before calling `create_session()`. This works for single-threaded CLI use, but for REST and RPC with concurrent requests, there's a window between staging and consumption where another request could overwrite the slot.
 
-The RPC surface mitigates this with a `promote_lock: Mutex<()>` (`session_runtime.rs:78`) that serializes the stage-then-create sequence. The REST surface uses `builder_slot: Arc<Mutex<Option<AgentBuildConfig>>>` (`meerkat-rest/src/lib.rs:74`) but the staging+create is not wrapped in a single lock scope in all handler paths.
+The RPC surface mitigates this with a `promote_lock: Mutex<()>` (`session_runtime.rs:80`) that serializes the stage-then-create sequence. The REST surface uses `builder_slot: Arc<Mutex<Option<AgentBuildConfig>>>` (`meerkat-rest/src/lib.rs:73`) but the staging+create is not wrapped in a single lock scope in all handler paths.
 
 **Impact:** Under concurrent REST requests, one request could stage a config that gets consumed by a different request's `create_session()` call.
 
@@ -146,7 +150,7 @@ The `Config` struct contains Rust-specific details that don't translate to SDK c
 
 4. **`Box<RawValue>`** in `HookRuntimeConfig` -- opaque pass-through JSON that can't be represented in generated SDK types.
 
-5. **`PathBuf`** fields (`sessions_path`, `storage.directory`) serialize as platform-specific path strings. A REST API consumer on a different OS would produce paths the server can't use.
+5. **`PathBuf`** fields (`sessions_path`, `storage.directory`, `database_dir`) serialize as platform-specific path strings. A REST API consumer on a different OS would produce paths the server can't use.
 
 **Impact:** The config/get and config/set APIs expose the raw Rust `Config` struct over the wire. SDK consumers receiving or constructing this type must deal with Rust serialization artifacts.
 
@@ -187,7 +191,7 @@ If there's no `.rkat/config.toml` in the project, `FileConfigStore::get()` retur
 
 ## Issue 8: REST Config Store Location Is Inconsistent
 
-**File:** `meerkat-rest/src/lib.rs:82-84,143-144`
+**File:** `meerkat-rest/src/lib.rs:89-92`
 
 The REST server creates its own config store at `{instance_root}/config.toml`:
 
@@ -261,9 +265,9 @@ Tool enablement is controlled at three levels:
 
 The factory flags are set from the config flags during surface initialization. The build config overrides can then override the factory flags per-request.
 
-The MCP server sets factory flags to max-permissive (`builtins: true, shell: true`) and relies on per-request overrides. The CLI and REST read config flags literally.
+The MCP server and `rkat rpc` set factory flags to max-permissive (`builtins: true, shell: true`) and rely on per-request overrides. The CLI `run` and REST read config flags literally.
 
-**Impact:** The three-level override system works but is hard to reason about. The MCP server's "always-permissive factory" pattern is a design divergence from CLI/REST.
+**Impact:** The three-level override system works but is hard to reason about. The "always-permissive factory" pattern in MCP/RPC vs. the "config-literal" pattern in CLI/REST is a design divergence.
 
 **Recommendation:** Consider collapsing factory flags into `AgentBuildConfig` overrides only, populated from config at the surface level. This reduces the override levels from three to two (config -> per-request) and makes the data flow clearer.
 
@@ -289,12 +293,65 @@ Validation is called by `ConfigStore::set()` and `ConfigStore::patch()`, so inva
 
 ---
 
+## Issue 13 (NEW): CLI Storage Backend Divergence
+
+**File:** `meerkat-cli/src/main.rs:943-969,992-995,1101-1113`
+
+After PR #26, the CLI has a split personality:
+
+- **`rkat rpc`** uses `PersistentSessionService` + `RedbSessionStore` (lines 958-969) -- sessions survive restarts.
+- **`rkat run`** uses `EphemeralSessionService` (line 1101-1112) -- sessions are memory-only for the process lifetime. JSONL store is configured in the factory but only used for internal `AgentBuilder` plumbing.
+- **`rkat session list/show/delete`** bypasses `SessionService` entirely and reads from `JsonlStore` directly (lines 992-994, 1517-1518, 1566, 1664).
+
+This means:
+- Sessions created via `rkat run` are saved to JSONL but **not** to the redb database.
+- Sessions created via `rkat rpc` are saved to redb but the session management commands read from JSONL.
+- `rkat session list` after using `rkat rpc` will **not** show those sessions.
+
+The code itself acknowledges this with TODO comments:
+```
+/// TODO: Migrate to `PersistentSessionService::list()` when the `session-store`
+/// feature is wired into the CLI.
+```
+
+**Impact:** The CLI has three parallel storage paths that don't see each other's data. A user switching between `rkat run` and `rkat rpc` (or using an IDE that connects via RPC) will get inconsistent session lists.
+
+**Recommendation:** Wire the CLI `run` command through `PersistentSessionService` and migrate the session management commands to use `SessionService` instead of direct `JsonlStore` access. This aligns CLI with the server surfaces.
+
+---
+
+## Issue 14 (NEW): REST Mutates Config Before Path Resolution
+
+**File:** `meerkat-rest/src/lib.rs:129-132`
+
+The REST surface patches `database_dir` into the config before resolving:
+
+```rust
+if config.store.database_dir.is_none() {
+    config.store.database_dir = Some(instance_root.join("db"));
+}
+let db_dir = meerkat_store::resolve_database_dir(&config);
+```
+
+This mutation happens after config loading but before the config is passed to `FactoryAgentBuilder`. The mutated config is then frozen in the builder. However, the `ConfigStore` still returns the **original** unmutated config via `config/get`, so a client reading config would not see the actual `database_dir` being used.
+
+The MCP server does **not** do this patching -- it calls `resolve_database_dir()` directly and lets the standard fallback logic apply. So the two server surfaces have different `database_dir` resolution behavior for the same config.
+
+**Impact:** The REST surface's effective database location is invisible through the config API. A client calling `config/get` would see `database_dir: null` even though the actual path is `~/.local/share/meerkat/rest/db`. This makes debugging storage issues harder.
+
+**Recommendation:** Either:
+- (a) Persist the resolved `database_dir` back to the config store so `config/get` reflects reality, or
+- (b) Add a separate `runtime/info` endpoint that reports resolved paths, or
+- (c) Treat `instance_root` as a first-class concept -- like MCP Server's `resolve_project_root()` -- and document how each surface determines its data directory.
+
+---
+
 ## Summary of Recommendations
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
 | 1 | Dual provider config | Medium | Deprecate `ProviderConfig` enum |
-| 2 | Dual storage path config | Medium | Merge `StorageConfig` into `StoreConfig` |
+| 2 | Three-way storage path config | Medium | Merge `StorageConfig` into `StoreConfig` with single root |
 | 3 | `max_tokens` in three places | Medium | Unify to single field with clear semantics |
 | 4 | Config changes don't propagate | High | Read from ConfigStore on each build |
 | 5 | `build_config_slot` mutex | High | Pass config through request, not side-channel |
@@ -305,3 +362,5 @@ Validation is called by `ConfigStore::set()` and `ConfigStore::patch()`, so inva
 | 10 | Inconsistent merge semantics | Medium | Option-based merging |
 | 11 | Three-level tool flag override | Low | Collapse to two levels |
 | 12 | Narrow validation | Medium | Extend to all config sections |
+| 13 | CLI storage backend divergence | High | Wire CLI through PersistentSessionService |
+| 14 | REST mutates config silently | Medium | Surface resolved paths via API or config |

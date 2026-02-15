@@ -23,7 +23,7 @@ Use `comms_response` to reply to incoming requests.
 
 ## Peer Discovery
 
-- Use `comms_list_peers` to see connected peers
+- Use `comms_peers` to see connected peers
 - Peers must be in the trust configuration to communicate
 
 ## Transport Selection

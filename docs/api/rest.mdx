@@ -12,12 +12,12 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
   <Step title="Build the server">
     <CodeGroup>
     ```bash Development
-    cargo run --package meerkat-rest
+    cargo run --package meerkat-rest -- --realm team-alpha
     ```
 
     ```bash Production
     cargo build --release --package meerkat-rest
-    ./target/release/meerkat-rest
+    ./target/release/rkat-rest --realm team-alpha
     ```
     </CodeGroup>
   </Step>
@@ -37,6 +37,16 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
     ```
   </Step>
 </Steps>
+
+## Runtime scope
+
+`rkat-rest` accepts:
+
+- `--realm <id>`
+- `--instance <id>`
+- `--realm-backend <redb|jsonl>`
+
+If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-...`).
 
 ## Endpoint overview
 
@@ -58,11 +68,13 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
 ## Configuration
 
 <Accordion title="Server configuration details">
-  The REST server reads config from its instance data directory:
+  REST configuration is realm-scoped:
 
-  - macOS: `~/Library/Application Support/meerkat/rest/config.toml`
-  - Linux: `~/.local/share/meerkat/rest/config.toml`
-  - Windows: `%APPDATA%\meerkat\rest\config.toml`
+  - macOS: `~/Library/Application Support/meerkat/rest/realms/<realm>/config.toml`
+  - Linux: `~/.local/share/meerkat/rest/realms/<realm>/config.toml`
+  - Windows: `%APPDATA%\\meerkat\\rest\\realms\\<realm>\\config.toml`
+
+  Each realm also has `realm_manifest.json` (backend pinning) and `config_state.json` (generation CAS state).
 
   Key sections:
 
@@ -492,15 +504,36 @@ The full response includes all capabilities: `sessions`, `streaming`, `structure
 
 ### GET /config
 
-Returns the current `Config` object.
+Returns a realm config envelope:
+
+- `config`
+- `generation`
+- `realm_id`
+- `instance_id`
+- `backend`
+- `resolved_paths`
 
 ### PUT /config
 
-Sets the entire config. Body: full `Config` JSON.
+Replaces config.
+
+Accepted request forms:
+
+- Direct config object (compat)
+- Wrapped form with CAS:
+  - `{ "config": <Config>, "expected_generation": <u64|null> }`
 
 ### PATCH /config
 
-RFC 7396 merge patch on the config. Body: partial JSON.
+Applies RFC 7396 merge patch.
+
+Accepted request forms:
+
+- Direct patch object (compat)
+- Wrapped form with CAS:
+  - `{ "patch": <JSON>, "expected_generation": <u64|null> }`
+
+If `expected_generation` is stale, the server returns `400` with a generation-conflict message.
 
 ### POST /comms/send
 

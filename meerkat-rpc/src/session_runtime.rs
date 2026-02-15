@@ -19,8 +19,8 @@ use meerkat_client::LlmClient;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
 use meerkat_core::types::{RunResult, SessionId};
-use meerkat_core::{Config, Session};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use meerkat_core::{Config, ConfigStore, Session};
+use tokio::sync::{RwLock, mpsc};
 
 use crate::error;
 use crate::protocol::RpcError;
@@ -75,13 +75,12 @@ pub struct SessionRuntime {
     /// materialized in the service. The first `start_turn` call promotes them.
     pending: RwLock<IndexMap<SessionId, AgentBuildConfig>>,
     max_sessions: usize,
-    /// Serializes create-then-promote operations to prevent two concurrent
-    /// `start_turn` calls from racing through the build config slot.
-    promote_lock: Mutex<()>,
-    /// Shared slot between the runtime and the builder.
-    build_config_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
     /// Override LLM client for all sessions (primarily for testing).
     pub default_llm_client: Option<Arc<dyn LlmClient>>,
+    realm_id: Option<String>,
+    instance_id: Option<String>,
+    backend: Option<String>,
+    config_runtime: Option<Arc<meerkat_core::ConfigRuntime>>,
 }
 
 impl SessionRuntime {
@@ -93,17 +92,69 @@ impl SessionRuntime {
         store: Arc<dyn SessionStore>,
     ) -> Self {
         let builder = FactoryAgentBuilder::new(factory, config);
-        let build_config_slot = builder.build_config_slot.clone();
         let service = PersistentSessionService::new(builder, max_sessions, store);
 
         Self {
             service,
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
-            promote_lock: Mutex::new(()),
-            build_config_slot,
             default_llm_client: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_runtime: None,
         }
+    }
+
+    /// Create a runtime that resolves config from a shared config store.
+    pub fn new_with_config_store(
+        factory: AgentFactory,
+        initial_config: Config,
+        config_store: Arc<dyn ConfigStore>,
+        max_sessions: usize,
+        store: Arc<dyn SessionStore>,
+    ) -> Self {
+        let builder =
+            FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
+        let service = PersistentSessionService::new(builder, max_sessions, store);
+
+        Self {
+            service,
+            pending: RwLock::new(IndexMap::new()),
+            max_sessions,
+            default_llm_client: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_runtime: None,
+        }
+    }
+
+    /// Attach realm context defaults used for session metadata.
+    pub fn set_realm_context(
+        &mut self,
+        realm_id: Option<String>,
+        instance_id: Option<String>,
+        backend: Option<String>,
+    ) {
+        self.realm_id = realm_id;
+        self.instance_id = instance_id;
+        self.backend = backend;
+    }
+
+    /// Active realm id for this runtime, if configured.
+    pub fn realm_id(&self) -> Option<&str> {
+        self.realm_id.as_deref()
+    }
+
+    /// Attach config runtime for generation stamping.
+    pub fn set_config_runtime(&mut self, runtime: Arc<meerkat_core::ConfigRuntime>) {
+        self.config_runtime = Some(runtime);
+    }
+
+    /// Shared config runtime used by config handlers.
+    pub fn config_runtime(&self) -> Option<Arc<meerkat_core::ConfigRuntime>> {
+        self.config_runtime.as_ref().map(Arc::clone)
     }
 
     /// Create a new session with the given build configuration.
@@ -175,25 +226,31 @@ impl SessionRuntime {
                     build_config.llm_client_override = Some(client.clone());
                 }
             }
+            let runtime_generation = if build_config.config_generation.is_none() {
+                if let Some(runtime) = &self.config_runtime {
+                    runtime.get().await.ok().map(|snapshot| snapshot.generation)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
-            // Promote via the service. Serialize to prevent concurrent promotes
-            // from racing through the shared build config slot.
-            let _guard = self.promote_lock.lock().await;
-
-            // Stage the full build config for the builder.
-            {
-                let mut slot = self.build_config_slot.lock().await;
-                *slot = Some(build_config);
-            }
+            let mut build = build_config.to_session_build_options();
+            build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());
+            build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
+            build.backend = build.backend.or_else(|| self.backend.clone());
+            build.config_generation = build.config_generation.or(runtime_generation);
 
             let req = CreateSessionRequest {
-                model: String::new(), // builder will use the staged config
+                model: build_config.model,
                 prompt,
-                system_prompt: None,
-                max_tokens: None,
+                system_prompt: build_config.system_prompt,
+                max_tokens: build_config.max_tokens,
                 event_tx: Some(event_tx),
-                host_mode: false, // host_mode is encoded in the staged AgentBuildConfig
-                skill_references: None,
+                host_mode: build_config.host_mode,
+                skill_references: skill_references.clone(),
+                build: Some(build),
             };
 
             let result = self
@@ -574,15 +631,18 @@ mod tests {
                 .await
         });
 
-        // Give the session task a moment to transition to Running
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-
-        let state = runtime.session_state(&session_id).await;
-        assert_eq!(
-            state,
-            Some(SessionState::Running),
-            "Session should be Running during a turn"
-        );
+        // Wait until the session transitions to Running.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if runtime.session_state(&session_id).await == Some(SessionState::Running) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "session did not enter running state before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
 
         // Wait for the turn to complete
         let result = turn_handle.await.unwrap().unwrap();
@@ -618,8 +678,18 @@ mod tests {
                 .await
         });
 
-        // Wait for the first turn to start running
-        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+        // Wait until the first turn is definitely running.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if runtime.session_state(&session_id).await == Some(SessionState::Running) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "session did not enter running state before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
 
         // Try to start a second turn
         let (event_tx2, _rx2) = mpsc::channel(100);

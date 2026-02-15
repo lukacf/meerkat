@@ -1,10 +1,10 @@
-"""E2E smoke tests for the Python SDK against a live rkat rpc server.
+"""E2E smoke tests for the Python SDK against a live rkat-rpc server.
 
 These tests exercise the full Python SDK lifecycle including session
-management, capabilities, and error handling through a real rkat rpc subprocess.
+management, capabilities, and error handling through a real rkat-rpc subprocess.
 
 Requirements:
-  - rkat binary on PATH (cargo build -p meerkat-cli)
+  - rkat-rpc binary on PATH (cargo build -p meerkat-rpc)
   - ANTHROPIC_API_KEY set for live API tests
 
 Run with: pytest tests/test_e2e_smoke.py -v
@@ -17,10 +17,10 @@ import subprocess
 
 import pytest
 
-# Skip all tests if rkat binary is not available
+# Skip all tests if rkat-rpc binary is not available
 pytestmark = pytest.mark.skipif(
-    shutil.which("rkat") is None,
-    reason="rkat binary not found on PATH",
+    shutil.which("rkat-rpc") is None and shutil.which("rkat") is None,
+    reason="rkat-rpc binary not found on PATH",
 )
 
 
@@ -53,7 +53,7 @@ def rpc_request(proc, method, params=None, request_id=None):
     while True:
         line = proc.stdout.readline()
         if not line:
-            raise RuntimeError("rkat rpc process closed unexpectedly")
+            raise RuntimeError("rkat-rpc process closed unexpectedly")
         response = json.loads(line)
         if "id" in response and response["id"] == request_id:
             if "error" in response and response["error"]:
@@ -65,9 +65,11 @@ def rpc_request(proc, method, params=None, request_id=None):
 
 
 def spawn_rpc():
-    """Spawn an rkat rpc subprocess."""
+    """Spawn an rkat-rpc subprocess."""
+    binary = "rkat-rpc" if shutil.which("rkat-rpc") else "rkat"
+    args = [binary] + (["rpc"] if binary == "rkat" else [])
     return subprocess.Popen(
-        ["rkat", "rpc"],
+        args,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

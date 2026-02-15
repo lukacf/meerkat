@@ -6,6 +6,10 @@ icon: "book"
 
 ## Wire types
 
+<Note>
+`getConfig()` / `patchConfig()` return the RPC config envelope (`config`, `generation`, `realm_id`, `instance_id`, `backend`, `resolved_paths`). `setConfig()` forwards the payload you provide.
+</Note>
+
 <Accordion title="WireRunResult">
 ```typescript
 interface WireRunResult {

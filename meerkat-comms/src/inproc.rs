@@ -29,6 +29,8 @@ use crate::inbox::{InboxError, InboxSender};
 use crate::peer_meta::PeerMeta;
 use crate::types::{Envelope, InboxItem, MessageKind};
 
+const DEFAULT_NAMESPACE: &str = "";
+
 /// Snapshot of an inproc peer returned by [`InprocRegistry::peers()`].
 #[derive(Debug, Clone)]
 pub struct InprocPeerInfo {
@@ -49,20 +51,35 @@ struct InprocPeer {
     meta: PeerMeta,
 }
 
-/// Internal state protected by a single lock to prevent deadlocks.
-struct RegistryState {
+/// Internal namespace state protected by a single lock to prevent deadlocks.
+#[derive(Default)]
+struct NamespaceState {
     /// Map from pubkey to peer entry.
     peers: HashMap<PubKey, InprocPeer>,
     /// Map from name to pubkey for name-based lookup.
     names: HashMap<String, PubKey>,
 }
 
+/// Internal registry state keyed by namespace.
+struct RegistryState {
+    namespaces: HashMap<String, NamespaceState>,
+}
+
 impl RegistryState {
-    fn new() -> Self {
-        Self {
-            peers: HashMap::new(),
-            names: HashMap::new(),
-        }
+    fn namespace_mut(&mut self, namespace: &str) -> &mut NamespaceState {
+        self.namespaces.entry(namespace.to_string()).or_default()
+    }
+
+    fn namespace(&self, namespace: &str) -> Option<&NamespaceState> {
+        self.namespaces.get(namespace)
+    }
+
+    fn namespace_len(&self, namespace: &str) -> usize {
+        self.namespace(namespace).map_or(0, |ns| ns.peers.len())
+    }
+
+    fn namespace_is_empty(&self, namespace: &str) -> bool {
+        self.namespace_len(namespace) == 0
     }
 }
 
@@ -83,7 +100,9 @@ impl InprocRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
-            state: RwLock::new(RegistryState::new()),
+            state: RwLock::new(RegistryState {
+                namespaces: HashMap::new(),
+            }),
         }
     }
 
@@ -100,12 +119,30 @@ impl InprocRegistry {
     /// If an agent with the same name but different pubkey exists, the old
     /// agent will be evicted (both from peers and names maps).
     pub fn register(&self, name: impl Into<String>, pubkey: PubKey, sender: InboxSender) {
-        self.register_with_meta(name, pubkey, sender, PeerMeta::default())
+        self.register_with_meta_in_namespace(
+            DEFAULT_NAMESPACE,
+            name,
+            pubkey,
+            sender,
+            PeerMeta::default(),
+        )
     }
 
     /// Register an agent's inbox with associated [`PeerMeta`].
     pub fn register_with_meta(
         &self,
+        name: impl Into<String>,
+        pubkey: PubKey,
+        sender: InboxSender,
+        meta: PeerMeta,
+    ) {
+        self.register_with_meta_in_namespace(DEFAULT_NAMESPACE, name, pubkey, sender, meta);
+    }
+
+    /// Register an agent's inbox within an explicit namespace.
+    pub fn register_with_meta_in_namespace(
+        &self,
+        namespace: &str,
         name: impl Into<String>,
         pubkey: PubKey,
         sender: InboxSender,
@@ -120,57 +157,84 @@ impl InprocRegistry {
         };
 
         let mut state = self.state.write();
+        let namespace_state = state.namespace_mut(namespace);
 
         // If this pubkey was registered under a different name, remove old name mapping
-        let old_name_to_remove = state
+        let old_name_to_remove = namespace_state
             .peers
             .get(&pubkey)
             .filter(|old_peer| old_peer.name != name)
             .map(|old_peer| old_peer.name.clone());
         if let Some(old_name) = old_name_to_remove {
-            state.names.remove(&old_name);
+            namespace_state.names.remove(&old_name);
         }
 
         // If this name was registered to a different pubkey, remove the old pubkey entry
         // This prevents stale pubkeys from remaining reachable
-        let old_pubkey_to_remove = state
+        let old_pubkey_to_remove = namespace_state
             .names
             .get(&name)
             .filter(|&&old_pk| old_pk != pubkey)
             .copied();
         if let Some(old_pubkey) = old_pubkey_to_remove {
-            state.peers.remove(&old_pubkey);
+            namespace_state.peers.remove(&old_pubkey);
         }
 
-        state.peers.insert(pubkey, peer);
-        state.names.insert(name, pubkey);
+        namespace_state.peers.insert(pubkey, peer);
+        namespace_state.names.insert(name, pubkey);
     }
 
     /// Unregister an agent by pubkey.
     ///
     /// Returns true if the agent was found and removed.
     pub fn unregister(&self, pubkey: &PubKey) -> bool {
+        self.unregister_in_namespace(DEFAULT_NAMESPACE, pubkey)
+    }
+
+    /// Unregister an agent by pubkey from an explicit namespace.
+    pub fn unregister_in_namespace(&self, namespace: &str, pubkey: &PubKey) -> bool {
         let mut state = self.state.write();
-        if let Some(peer) = state.peers.remove(pubkey) {
-            state.names.remove(&peer.name);
-            true
-        } else {
-            false
+        if let Some(namespace_state) = state.namespaces.get_mut(namespace) {
+            if let Some(peer) = namespace_state.peers.remove(pubkey) {
+                namespace_state.names.remove(&peer.name);
+                return true;
+            }
         }
+        false
     }
 
     /// Look up an inproc peer by name.
     pub fn get_by_name(&self, name: &str) -> Option<(PubKey, InboxSender)> {
+        self.get_by_name_in_namespace(DEFAULT_NAMESPACE, name)
+    }
+
+    /// Look up an inproc peer by name in an explicit namespace.
+    pub fn get_by_name_in_namespace(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Option<(PubKey, InboxSender)> {
         let state = self.state.read();
-        let pubkey = state.names.get(name).copied()?;
-        let peer = state.peers.get(&pubkey)?;
+        let namespace_state = state.namespace(namespace)?;
+        let pubkey = namespace_state.names.get(name).copied()?;
+        let peer = namespace_state.peers.get(&pubkey)?;
         Some((peer.pubkey, peer.sender.clone()))
     }
 
     /// Look up an inproc peer by pubkey.
     pub fn get_by_pubkey(&self, pubkey: &PubKey) -> Option<InboxSender> {
+        self.get_by_pubkey_in_namespace(DEFAULT_NAMESPACE, pubkey)
+    }
+
+    /// Look up an inproc peer by pubkey in an explicit namespace.
+    pub fn get_by_pubkey_in_namespace(
+        &self,
+        namespace: &str,
+        pubkey: &PubKey,
+    ) -> Option<InboxSender> {
         self.state
             .read()
+            .namespace(namespace)?
             .peers
             .get(pubkey)
             .map(|p| p.sender.clone())
@@ -178,8 +242,18 @@ impl InprocRegistry {
 
     /// Look up an inproc peer name by public key.
     pub fn get_name_by_pubkey(&self, pubkey: &PubKey) -> Option<String> {
+        self.get_name_by_pubkey_in_namespace(DEFAULT_NAMESPACE, pubkey)
+    }
+
+    /// Look up an inproc peer name by public key in an explicit namespace.
+    pub fn get_name_by_pubkey_in_namespace(
+        &self,
+        namespace: &str,
+        pubkey: &PubKey,
+    ) -> Option<String> {
         self.state
             .read()
+            .namespace(namespace)?
             .peers
             .get(pubkey)
             .map(|peer| peer.name.clone())
@@ -187,29 +261,33 @@ impl InprocRegistry {
 
     /// Check if a peer is registered.
     pub fn contains(&self, pubkey: &PubKey) -> bool {
-        self.state.read().peers.contains_key(pubkey)
+        self.state
+            .read()
+            .namespace(DEFAULT_NAMESPACE)
+            .is_some_and(|ns| ns.peers.contains_key(pubkey))
     }
 
     /// Check if a peer name is registered.
     pub fn contains_name(&self, name: &str) -> bool {
-        self.state.read().names.contains_key(name)
+        self.state
+            .read()
+            .namespace(DEFAULT_NAMESPACE)
+            .is_some_and(|ns| ns.names.contains_key(name))
     }
 
     /// Get the number of registered peers.
     pub fn len(&self) -> usize {
-        self.state.read().peers.len()
+        self.state.read().namespace_len(DEFAULT_NAMESPACE)
     }
 
     /// Check if the registry is empty.
     pub fn is_empty(&self) -> bool {
-        self.state.read().peers.is_empty()
+        self.state.read().namespace_is_empty(DEFAULT_NAMESPACE)
     }
 
     /// Clear all registrations (primarily for testing).
     pub fn clear(&self) {
-        let mut state = self.state.write();
-        state.peers.clear();
-        state.names.clear();
+        self.state.write().namespaces.clear();
     }
 
     /// Send a message directly to an inproc peer.
@@ -227,7 +305,7 @@ impl InprocRegistry {
         to_name: &str,
         kind: MessageKind,
     ) -> Result<uuid::Uuid, InprocSendError> {
-        self.send_with_signature(from_keypair, to_name, kind, true)
+        self.send_with_signature_in_namespace(DEFAULT_NAMESPACE, from_keypair, to_name, kind, true)
     }
 
     /// Send a message directly to an inproc peer.
@@ -240,9 +318,27 @@ impl InprocRegistry {
         kind: MessageKind,
         sign_envelope: bool,
     ) -> Result<uuid::Uuid, InprocSendError> {
+        self.send_with_signature_in_namespace(
+            DEFAULT_NAMESPACE,
+            from_keypair,
+            to_name,
+            kind,
+            sign_envelope,
+        )
+    }
+
+    /// Send a message directly to an inproc peer within a namespace.
+    pub fn send_with_signature_in_namespace(
+        &self,
+        namespace: &str,
+        from_keypair: &Keypair,
+        to_name: &str,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
         // Look up the peer
         let (to_pubkey, sender) = self
-            .get_by_name(to_name)
+            .get_by_name_in_namespace(namespace, to_name)
             .ok_or_else(|| InprocSendError::PeerNotFound(to_name.to_string()))?;
 
         // Create and sign the envelope
@@ -271,21 +367,37 @@ impl InprocRegistry {
 
     /// List all registered peer names.
     pub fn peer_names(&self) -> Vec<String> {
-        self.state.read().names.keys().cloned().collect()
+        self.peer_names_in_namespace(DEFAULT_NAMESPACE)
+    }
+
+    /// List all registered peer names in an explicit namespace.
+    pub fn peer_names_in_namespace(&self, namespace: &str) -> Vec<String> {
+        self.state
+            .read()
+            .namespace(namespace)
+            .map_or_else(Vec::new, |ns| ns.names.keys().cloned().collect())
     }
 
     /// List all registered peers.
     pub fn peers(&self) -> Vec<InprocPeerInfo> {
+        self.peers_in_namespace(DEFAULT_NAMESPACE)
+    }
+
+    /// List all registered peers in an explicit namespace.
+    pub fn peers_in_namespace(&self, namespace: &str) -> Vec<InprocPeerInfo> {
         self.state
             .read()
-            .peers
-            .values()
-            .map(|peer| InprocPeerInfo {
-                name: peer.name.clone(),
-                pubkey: peer.pubkey,
-                meta: peer.meta.clone(),
+            .namespace(namespace)
+            .map_or_else(Vec::new, |ns| {
+                ns.peers
+                    .values()
+                    .map(|peer| InprocPeerInfo {
+                        name: peer.name.clone(),
+                        pubkey: peer.pubkey,
+                        meta: peer.meta.clone(),
+                    })
+                    .collect()
             })
-            .collect()
     }
 }
 
@@ -588,6 +700,90 @@ mod tests {
         );
 
         assert!(matches!(result, Err(InprocSendError::InboxClosed)));
+    }
+
+    #[tokio::test]
+    async fn test_registry_namespace_isolation_for_lookup_and_send() {
+        let registry = InprocRegistry::new();
+        let receiver_keypair = make_keypair();
+        let (mut inbox, sender) = Inbox::new();
+        registry.register_with_meta_in_namespace(
+            "realm-a",
+            "receiver",
+            receiver_keypair.public_key(),
+            sender,
+            PeerMeta::default(),
+        );
+
+        // Default namespace cannot see realm-a registrations.
+        assert!(registry.get_by_name("receiver").is_none());
+        assert!(
+            registry
+                .get_by_name_in_namespace("realm-a", "receiver")
+                .is_some()
+        );
+
+        let sender_keypair = make_keypair();
+
+        // Matching namespace succeeds.
+        let ok = registry.send_with_signature_in_namespace(
+            "realm-a",
+            &sender_keypair,
+            "receiver",
+            MessageKind::Message {
+                body: "hello scoped".to_string(),
+            },
+            true,
+        );
+        assert!(ok.is_ok());
+
+        // Different namespace cannot route to receiver.
+        let wrong_ns = registry.send_with_signature_in_namespace(
+            "realm-b",
+            &sender_keypair,
+            "receiver",
+            MessageKind::Message {
+                body: "should not deliver".to_string(),
+            },
+            true,
+        );
+        assert!(matches!(wrong_ns, Err(InprocSendError::PeerNotFound(_))));
+
+        let items = inbox.try_drain();
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn test_registry_same_name_can_exist_in_different_namespaces() {
+        let registry = InprocRegistry::new();
+        let kp_a = make_keypair();
+        let kp_b = make_keypair();
+        let (_, sender_a) = Inbox::new();
+        let (_, sender_b) = Inbox::new();
+
+        registry.register_with_meta_in_namespace(
+            "realm-a",
+            "shared-name",
+            kp_a.public_key(),
+            sender_a,
+            PeerMeta::default(),
+        );
+        registry.register_with_meta_in_namespace(
+            "realm-b",
+            "shared-name",
+            kp_b.public_key(),
+            sender_b,
+            PeerMeta::default(),
+        );
+
+        let (found_a, _) = registry
+            .get_by_name_in_namespace("realm-a", "shared-name")
+            .expect("realm-a peer should exist");
+        let (found_b, _) = registry
+            .get_by_name_in_namespace("realm-b", "shared-name")
+            .expect("realm-b peer should exist");
+        assert_ne!(found_a, found_b);
+        assert!(registry.get_by_name("shared-name").is_none());
     }
 
     #[test]

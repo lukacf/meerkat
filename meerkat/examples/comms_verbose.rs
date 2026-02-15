@@ -397,8 +397,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .model(&model)
         .max_tokens_per_turn(1024)
         .system_prompt(
-            "You are Agent A. You can communicate with other agents using the send_message tool. \\
-             Use list_peers to see available peers.",
+            "You are Agent A. You can communicate with other agents using the send tool. \\
+             Use peers to see available peers.",
         )
         .build(llm_a, tools_a, store.clone())
         .await;
@@ -422,12 +422,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  PHASE 1: AGENT A SENDS MESSAGE TO AGENT B                   ║");
     println!("║  (This will: call Anthropic API → LLM returns tool call →    ║");
-    println!("║   execute send_message → TCP connection to Agent B)          ║");
+    println!("║   execute send → TCP connection to Agent B)          ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
 
     let result_a = agent_a
         .run(
-            "Send the message 'Hello from Agent A!' to agent-b using the send_message tool."
+            "Send the message 'Hello from Agent A!' to agent-b using the send tool."
                 .to_string(),
         )
         .await?;

@@ -1,0 +1,81 @@
+---
+title: "Realms"
+description: "Realm-first identity and storage model across CLI, RPC, REST, MCP, and SDK surfaces."
+icon: "earth-americas"
+---
+
+Meerkat is realm-first. A `realm_id` is the only identity key for sharing or isolating state across surfaces.
+
+## Core rules
+
+1. Same `realm_id` means shared sessions, config, and runtime metadata.
+2. Different `realm_id` means strict isolation, even from the same folder.
+3. Backend (`redb` or `jsonl`) is pinned once per realm via `realm_manifest.json`.
+4. Realms are opaque strings. Reuse the same value to collaborate across surfaces.
+
+## Surface defaults
+
+| Surface | If `realm_id` is not provided |
+|---------|-------------------------------|
+| CLI (`rkat run/resume/sessions`) | Workspace-derived stable realm (`ws-...`) |
+| RPC (`rkat-rpc`) | New opaque realm (`realm-...`) |
+| REST (`rkat-rest`) | New opaque realm (`realm-...`) |
+| MCP server (`rkat-mcp`) | New opaque realm (`realm-...`) |
+| Python/TypeScript SDK | Whatever the spawned `rkat-rpc` process picks (new opaque realm unless `realm_id` is passed) |
+
+This means CLI is workspace-friendly by default, while non-CLI surfaces are isolated by default.
+
+## Explicit sharing
+
+Use the same realm everywhere:
+
+```bash
+rkat --realm team-alpha run "Draft release plan"
+rkat --realm team-alpha sessions list
+rkat-rpc --realm team-alpha
+rkat-rest --realm team-alpha
+rkat-mcp --realm team-alpha
+```
+
+SDKs pass the same value when connecting:
+
+```python
+await client.connect(realm_id="team-alpha")
+```
+
+```ts
+await client.connect({ realmId: "team-alpha" })
+```
+
+## Backend pinning
+
+On first use, a realm writes a manifest with backend choice. Later opens must honor it.
+
+| First open | Manifest pins |
+|------------|----------------|
+| `--realm-backend redb` | `redb` |
+| `--realm-backend jsonl` | `jsonl` |
+| No hint | Surface default backend for first creation |
+
+After pinning, all surfaces use the manifest backend for that realm.
+
+## Config and CAS
+
+Config is realm-scoped and generation-based.
+
+- `config/get` returns: `config`, `generation`, `realm_id`, `instance_id`, `backend`, `resolved_paths`.
+- `config/set` and `config/patch` accept optional `expected_generation`.
+- Stale writes fail deterministically with generation conflict.
+
+## Why this solves multi-surface concurrency
+
+1. 100 RPC servers from the same folder without `realm_id` do not collide.
+2. 100 agents across RPC/REST/MCP/CLI with the same `realm_id` see the same state.
+3. CLI workspace ergonomics remain simple without forcing filesystem identity onto non-CLI surfaces.
+
+## See also
+
+- [Sessions](/concepts/sessions)
+- [Configuration](/concepts/configuration)
+- [CLI commands](/cli/commands)
+- [JSON-RPC](/api/rpc)

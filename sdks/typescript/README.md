@@ -1,6 +1,6 @@
 # Meerkat TypeScript SDK
 
-TypeScript client for the [Meerkat](https://github.com/lukacf/raik) agent runtime. Communicates with a local `rkat rpc` subprocess over JSON-RPC 2.0 (newline-delimited JSON on stdin/stdout).
+TypeScript client for the [Meerkat](https://github.com/lukacf/raik) agent runtime. Communicates with a local `rkat-rpc` subprocess over JSON-RPC 2.0 (newline-delimited JSON on stdin/stdout).
 
 ## Installation
 
@@ -10,7 +10,7 @@ npm install @meerkat/sdk
 
 ## Prerequisites
 
-- **`rkat` binary on PATH** -- build it from the Meerkat repo with `cargo build -p meerkat-cli`, then ensure the resulting `rkat` binary is in your `$PATH`.
+- **`rkat-rpc` binary on PATH** -- build it from the Meerkat repo with `cargo build -p meerkat-rpc`, then ensure the resulting `rkat-rpc` binary is in your `$PATH`.
 - **Node.js >= 18** (uses `node:child_process`, `node:readline`, `node:test`).
 - **API key** for at least one LLM provider set in your environment (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY`).
 
@@ -38,7 +38,7 @@ import { MeerkatClient } from "@meerkat/sdk";
 
 const client = new MeerkatClient();
 
-// Connect spawns `rkat rpc`, performs the initialize handshake,
+// Connect spawns `rkat-rpc`, performs the initialize handshake,
 // and fetches runtime capabilities.
 await client.connect();
 
@@ -73,7 +73,7 @@ new MeerkatClient(rkatPath?: string)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `rkatPath` | `string` | `"rkat"` | Path to the `rkat` binary. Override if it is not on your `$PATH`. |
+| `rkatPath` | `string` | `"rkat-rpc"` | Path to the RPC binary. |
 
 ### connect()
 
@@ -81,7 +81,7 @@ new MeerkatClient(rkatPath?: string)
 async connect(): Promise<this>
 ```
 
-Spawns `rkat rpc` as a child process, performs the `initialize` handshake, checks contract version compatibility, and fetches runtime capabilities via `capabilities/get`. Returns `this` for chaining.
+Spawns `rkat-rpc` as a child process, performs the `initialize` handshake, checks contract version compatibility, and fetches runtime capabilities via `capabilities/get`. Returns `this` for chaining.
 
 Throws `MeerkatError` with code `"VERSION_MISMATCH"` if the server's contract version is incompatible with the SDK's `CONTRACT_VERSION`.
 
@@ -91,7 +91,7 @@ Throws `MeerkatError` with code `"VERSION_MISMATCH"` if the server's contract ve
 async close(): Promise<void>
 ```
 
-Kills the `rkat rpc` subprocess and cleans up resources.
+Kills the `rkat-rpc` subprocess and cleans up resources.
 
 ### createSession(params)
 
@@ -388,14 +388,14 @@ const result = await helper.invokeNewSession(
 
 ## EventStream
 
-Async iterator that yields `WireEvent` objects from JSON-RPC notifications emitted by `rkat rpc` during a turn. Filters out response messages (which have an `id` field) and only yields notification payloads.
+Async iterator that yields `WireEvent` objects from JSON-RPC notifications emitted by `rkat-rpc` during a turn. Filters out response messages (which have an `id` field) and only yields notification payloads.
 
 ```ts
 import { createInterface } from "node:readline";
 import { EventStream } from "@meerkat/sdk";
 import type { Interface } from "node:readline";
 
-// The EventStream wraps a readline interface attached to rkat's stdout.
+// The EventStream wraps a readline interface attached to the RPC process stdout.
 // In practice you would get the readline from the child process:
 const rl: Interface = createInterface({ input: process.stdin });
 const stream = new EventStream(rl);
@@ -407,7 +407,7 @@ for await (const event of stream) {
 
 The `EventStream` class implements `AsyncIterable<WireEvent>`. It buffers events internally and resolves waiting consumers as events arrive. When the underlying readline interface closes, the iterator completes.
 
-> **Note:** `MeerkatClient` handles the JSON-RPC response/notification multiplexing internally. `EventStream` is a lower-level primitive for advanced use cases where you manage the `rkat rpc` subprocess yourself.
+> **Note:** `MeerkatClient` handles the JSON-RPC response/notification multiplexing internally. `EventStream` is a lower-level primitive for advanced use cases where you manage the `rkat-rpc` subprocess yourself.
 
 ## Error Handling
 

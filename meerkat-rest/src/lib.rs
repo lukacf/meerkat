@@ -29,25 +29,28 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
-    AgentBuildConfig, AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
-    PersistentSessionService, RedbSessionStore, Session, SessionId, SessionService, SessionStore,
+    AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
+    PersistentSessionService, Session, SessionId, SessionService,
+    encode_llm_client_override_for_service,
 };
-use meerkat_core::error::invalid_session_id_message;
+use meerkat_contracts::{SessionLocator, format_session_ref};
 use meerkat_core::service::{
-    CreateSessionRequest as SvcCreateSessionRequest, SessionError,
+    CreateSessionRequest as SvcCreateSessionRequest, SessionBuildOptions, SessionError,
     StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
-    Config, ConfigDelta, ConfigStore, FileConfigStore, HookRunOverrides, Provider, SessionTooling,
+    Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
+    HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling,
     format_verbose_event,
 };
+use meerkat_store::{RealmBackend, RealmOrigin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 
 /// Application state shared across handlers
 #[derive(Clone)]
@@ -69,10 +72,15 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<SessionEvent>,
     /// Session service for managing agent lifecycle.
     pub session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    /// Slot for staging `AgentBuildConfig` before `session_service` calls.
-    pub builder_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
     /// Webhook authentication, resolved once at startup from RKAT_WEBHOOK_SECRET.
     pub webhook_auth: webhook::WebhookAuth,
+    pub realm_id: String,
+    pub instance_id: Option<String>,
+    pub backend: String,
+    pub resolved_paths: meerkat_core::ConfigResolvedPaths,
+    pub expose_paths: bool,
+    pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
+    pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,13 +91,84 @@ pub struct SessionEvent {
 
 impl AppState {
     pub async fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::load_from(rest_instance_root()).await
+        Self::load_with_bootstrap_and_options(RuntimeBootstrap::default(), false).await
     }
 
+    #[cfg(test)]
     async fn load_from(instance_root: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.state_root = Some(instance_root.join("realms"));
+        bootstrap.context.context_root = Some(instance_root.clone());
+        Self::load_from_with_bootstrap(instance_root, bootstrap, false).await
+    }
+
+    pub async fn load_with_bootstrap(
+        bootstrap: RuntimeBootstrap,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_with_bootstrap_and_options(bootstrap, false).await
+    }
+
+    pub async fn load_with_bootstrap_and_options(
+        bootstrap: RuntimeBootstrap,
+        expose_paths: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_from_with_bootstrap(rest_instance_root(), bootstrap, expose_paths).await
+    }
+
+    async fn load_from_with_bootstrap(
+        instance_root: PathBuf,
+        bootstrap: RuntimeBootstrap,
+        expose_paths: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let (event_tx, _) = broadcast::channel(256);
-        let config_store: Arc<dyn ConfigStore> =
-            Arc::new(FileConfigStore::new(instance_root.join("config.toml")));
+        let locator = bootstrap.realm.resolve_locator()?;
+        let realm_id = locator.realm_id;
+        let instance_id = bootstrap.realm.instance_id;
+        let backend_hint = bootstrap
+            .realm
+            .backend_hint
+            .as_deref()
+            .and_then(parse_backend_hint)
+            .or(Some(RealmBackend::Redb));
+        let origin_hint = Some(realm_origin_from_selection(&bootstrap.realm.selection));
+        let realms_root = locator.state_root;
+        let (manifest, session_store) = meerkat_store::open_realm_session_store_in(
+            &realms_root,
+            &realm_id,
+            backend_hint,
+            origin_hint,
+        )
+        .await?;
+        let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
+        let resolved_paths = meerkat_core::ConfigResolvedPaths {
+            root: realm_paths.root.display().to_string(),
+            manifest_path: realm_paths.manifest_path.display().to_string(),
+            config_path: realm_paths.config_path.display().to_string(),
+            sessions_redb_path: realm_paths.sessions_redb_path.display().to_string(),
+            sessions_jsonl_dir: realm_paths.sessions_jsonl_dir.display().to_string(),
+        };
+        let base_config_store: Arc<dyn ConfigStore> =
+            Arc::new(FileConfigStore::new(realm_paths.config_path.clone()));
+        let config_store: Arc<dyn ConfigStore> = Arc::new(meerkat_core::TaggedConfigStore::new(
+            base_config_store,
+            meerkat_core::ConfigStoreMetadata {
+                realm_id: Some(realm_id.clone()),
+                instance_id: instance_id.clone(),
+                backend: Some(manifest.backend.as_str().to_string()),
+                resolved_paths: Some(resolved_paths.clone()),
+            },
+        ));
+        let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+            Arc::clone(&config_store),
+            realm_paths.root.join("config_state.json"),
+        ));
+        let lease = meerkat_store::start_realm_lease_in(
+            &realms_root,
+            &realm_id,
+            instance_id.as_deref(),
+            "rkat-rest",
+        )
+        .await?;
 
         let mut config = config_store
             .get()
@@ -99,17 +178,10 @@ impl AppState {
             tracing::warn!("Failed to apply env overrides: {}", err);
         }
 
-        let store_path = config
-            .store
-            .sessions_path
-            .clone()
-            .or_else(|| config.storage.directory.clone())
-            .unwrap_or_else(|| {
-                dirs::data_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("meerkat")
-                    .join("sessions")
-            });
+        let store_path = match manifest.backend {
+            meerkat_store::RealmBackend::Jsonl => realm_paths.sessions_jsonl_dir.clone(),
+            meerkat_store::RealmBackend::Redb => realm_paths.root.clone(),
+        };
 
         let enable_builtins = config.tools.builtins_enabled;
         let enable_shell = config.tools.shell_enabled;
@@ -120,35 +192,25 @@ impl AppState {
         let rest_port = config.rest.port;
 
         let mut factory = AgentFactory::new(store_path.clone())
+            .session_store(session_store.clone())
+            .runtime_root(realm_paths.root.clone())
             .builtins(enable_builtins)
             .shell(enable_shell);
-        factory = factory.project_root(instance_root.clone());
-
-        // Scope database to instance root when config doesn't specify an
-        // explicit database_dir, then resolve via the standard helper.
-        if config.store.database_dir.is_none() {
-            config.store.database_dir = Some(instance_root.join("db"));
+        let conventions_context_root = bootstrap.context.context_root.clone();
+        let task_project_root = conventions_context_root
+            .clone()
+            .unwrap_or_else(|| instance_root.clone());
+        factory = factory.project_root(task_project_root.clone());
+        if let Some(context_root) = conventions_context_root {
+            factory = factory.context_root(context_root);
         }
-        let db_dir = meerkat_store::resolve_database_dir(&config);
-        std::fs::create_dir_all(&db_dir).map_err(|e| {
-            format!(
-                "Failed to create database directory {}: {e}",
-                db_dir.display()
-            )
-        })?;
-        let session_store: Arc<dyn SessionStore> = Arc::new(
-            RedbSessionStore::open(db_dir.join("sessions.redb")).map_err(|e| {
-                format!(
-                    "Failed to open session database at {}: {e}",
-                    db_dir.display()
-                )
-            })?,
-        );
+        if let Some(user_root) = bootstrap.context.user_config_root.clone() {
+            factory = factory.user_config_root(user_root);
+        }
 
-        let builder = FactoryAgentBuilder::new(factory, config);
-        let builder_slot = builder.build_config_slot.clone();
-        let session_service =
-            Arc::new(PersistentSessionService::new(builder, 100, session_store));
+        let builder =
+            FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
+        let session_service = Arc::new(PersistentSessionService::new(builder, 100, session_store));
 
         Ok(Self {
             store_path,
@@ -158,13 +220,19 @@ impl AppState {
             rest_port,
             enable_builtins,
             enable_shell,
-            project_root: Some(instance_root),
+            project_root: Some(task_project_root),
             llm_client_override: None,
             config_store,
             event_tx,
             session_service,
-            builder_slot,
             webhook_auth: webhook::WebhookAuth::from_env(),
+            realm_id,
+            instance_id,
+            backend: manifest.backend.as_str().to_string(),
+            resolved_paths,
+            expose_paths,
+            config_runtime,
+            realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
         })
     }
 }
@@ -174,6 +242,22 @@ fn rest_instance_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("meerkat")
         .join("rest")
+}
+
+fn parse_backend_hint(raw: &str) -> Option<RealmBackend> {
+    match raw {
+        "jsonl" => Some(RealmBackend::Jsonl),
+        "redb" => Some(RealmBackend::Redb),
+        _ => None,
+    }
+}
+
+fn realm_origin_from_selection(selection: &RealmSelection) -> RealmOrigin {
+    match selection {
+        RealmSelection::Explicit { .. } => RealmOrigin::Explicit,
+        RealmSelection::Isolated => RealmOrigin::Generated,
+        RealmSelection::WorkspaceDerived { .. } => RealmOrigin::Workspace,
+    }
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, ApiError> {
@@ -278,6 +362,7 @@ pub type UsageResponse = meerkat_contracts::WireUsage;
 #[derive(Debug, Serialize)]
 pub struct SessionDetailsResponse {
     pub session_id: String,
+    pub session_ref: String,
     pub created_at: String,
     pub updated_at: String,
     pub message_count: usize,
@@ -356,8 +441,7 @@ async fn comms_send(
 ) -> Result<Json<Value>, ApiError> {
     use meerkat_core::comms::SendReceipt;
 
-    let session_id = SessionId::parse(&req.session_id)
-        .map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = resolve_session_id_for_state(&req.session_id, &state)?;
 
     let comms = state
         .session_service
@@ -482,8 +566,7 @@ async fn comms_peers(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<CommsPeersRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let session_id = SessionId::parse(&params.session_id)
-        .map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = resolve_session_id_for_state(&params.session_id, &state)?;
 
     let comms = state
         .session_service
@@ -531,8 +614,7 @@ async fn push_event(
         .map_err(|msg| ApiError::Unauthorized(msg.to_string()))?;
 
     // Validate session ID
-    let session_id =
-        SessionId::parse(&id).map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = resolve_session_id_for_state(&id, &state)?;
 
     // Get event injector for this session
     let injector = state
@@ -565,39 +647,107 @@ async fn get_capabilities(
 }
 
 /// Get the current config
-async fn get_config(State(state): State<AppState>) -> Result<Json<Config>, ApiError> {
-    let config = state
-        .config_store
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SetConfigRequest {
+    Wrapped {
+        config: Config,
+        #[serde(default)]
+        expected_generation: Option<u64>,
+    },
+    Direct(Config),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PatchConfigRequest {
+    Wrapped {
+        patch: Value,
+        #[serde(default)]
+        expected_generation: Option<u64>,
+    },
+    Direct(Value),
+}
+
+async fn get_config(State(state): State<AppState>) -> Result<Json<ConfigEnvelope>, ApiError> {
+    let snapshot = state
+        .config_runtime
         .get()
         .await
-        .map_err(|e| ApiError::Configuration(e.to_string()))?;
-    Ok(Json(config))
+        .map_err(config_runtime_err_to_api)?;
+    Ok(Json(ConfigEnvelope::from_snapshot(
+        snapshot,
+        if state.expose_paths {
+            ConfigEnvelopePolicy::Diagnostic
+        } else {
+            ConfigEnvelopePolicy::Public
+        },
+    )))
 }
 
 /// Replace the current config
 async fn set_config(
     State(state): State<AppState>,
-    Json(config): Json<Config>,
-) -> Result<Json<Config>, ApiError> {
-    state
-        .config_store
-        .set(config.clone())
+    Json(req): Json<SetConfigRequest>,
+) -> Result<Json<ConfigEnvelope>, ApiError> {
+    let (config, expected_generation) = match req {
+        SetConfigRequest::Wrapped {
+            config,
+            expected_generation,
+        } => (config, expected_generation),
+        SetConfigRequest::Direct(config) => (config, None),
+    };
+    let snapshot = state
+        .config_runtime
+        .set(config, expected_generation)
         .await
-        .map_err(|e| ApiError::Configuration(e.to_string()))?;
-    Ok(Json(config))
+        .map_err(config_runtime_err_to_api)?;
+    Ok(Json(ConfigEnvelope::from_snapshot(
+        snapshot,
+        if state.expose_paths {
+            ConfigEnvelopePolicy::Diagnostic
+        } else {
+            ConfigEnvelopePolicy::Public
+        },
+    )))
 }
 
 /// Patch the current config using a JSON merge patch
 async fn patch_config(
     State(state): State<AppState>,
-    Json(delta): Json<Value>,
-) -> Result<Json<Config>, ApiError> {
-    let updated = state
-        .config_store
-        .patch(ConfigDelta(delta))
+    Json(req): Json<PatchConfigRequest>,
+) -> Result<Json<ConfigEnvelope>, ApiError> {
+    let (delta, expected_generation) = match req {
+        PatchConfigRequest::Wrapped {
+            patch,
+            expected_generation,
+        } => (patch, expected_generation),
+        PatchConfigRequest::Direct(patch) => (patch, None),
+    };
+    let snapshot = state
+        .config_runtime
+        .patch(ConfigDelta(delta), expected_generation)
         .await
-        .map_err(|e| ApiError::Configuration(e.to_string()))?;
-    Ok(Json(updated))
+        .map_err(config_runtime_err_to_api)?;
+    Ok(Json(ConfigEnvelope::from_snapshot(
+        snapshot,
+        if state.expose_paths {
+            ConfigEnvelopePolicy::Diagnostic
+        } else {
+            ConfigEnvelopePolicy::Public
+        },
+    )))
+}
+
+fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError {
+    match err {
+        meerkat_core::ConfigRuntimeError::GenerationConflict { expected, current } => {
+            ApiError::BadRequest(format!(
+                "Generation conflict: expected {expected}, current {current}"
+            ))
+        }
+        other => ApiError::Configuration(other.to_string()),
+    }
 }
 
 /// Spawn a task that forwards events from an mpsc receiver to the broadcast channel,
@@ -624,8 +774,27 @@ fn spawn_event_forwarder(
 }
 
 /// Convert a `RunResult` into a `SessionResponse` (via contracts `From` impl).
-fn run_result_to_response(result: meerkat_core::types::RunResult) -> SessionResponse {
-    result.into()
+fn run_result_to_response(
+    result: meerkat_core::types::RunResult,
+    realm_id: &str,
+) -> SessionResponse {
+    let mut response: SessionResponse = result.into();
+    response.session_ref = Some(format_session_ref(realm_id, &response.session_id));
+    response
+}
+
+fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<SessionId, ApiError> {
+    let locator = SessionLocator::parse(input)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid session locator '{input}': {e}")))?;
+    if let Some(realm) = locator.realm_id.as_deref() {
+        if realm != state.realm_id {
+            return Err(ApiError::BadRequest(format!(
+                "Session locator realm '{}' does not match active realm '{}'",
+                realm, state.realm_id
+            )));
+        }
+    }
+    Ok(locator.session_id)
 }
 
 /// Map a `SessionError` to an `ApiError`, handling `CallbackPending` specially
@@ -633,6 +802,7 @@ fn run_result_to_response(result: meerkat_core::types::RunResult) -> SessionResp
 fn session_error_to_api_result(
     err: SessionError,
     fallback_session_id: &SessionId,
+    realm_id: &str,
 ) -> Result<Json<SessionResponse>, ApiError> {
     match err {
         SessionError::Agent(ref agent_err) => {
@@ -646,6 +816,7 @@ fn session_error_to_api_result(
                 // caller can resume via continue_session.
                 return Ok(Json(SessionResponse {
                     session_id: fallback_session_id.clone(),
+                    session_ref: Some(format_session_ref(realm_id, fallback_session_id)),
                     text: "Agent is waiting for tool results".to_string(),
                     turns: 0,
                     tool_calls: 0,
@@ -685,56 +856,52 @@ async fn create_session(
         req.verbose,
     );
 
-    // Build the full AgentBuildConfig and stage it via the builder slot.
-    let build_config = AgentBuildConfig {
-        model: model.to_string(),
+    let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
+    let build = SessionBuildOptions {
         provider: req.provider,
-        max_tokens: Some(max_tokens),
-        system_prompt: req.system_prompt,
         output_schema: req.output_schema,
         structured_output_retries: req.structured_output_retries,
         hooks_override: req.hooks_override.unwrap_or_default(),
-        host_mode,
         comms_name: req.comms_name.clone(),
+        peer_meta: req.peer_meta.clone(),
         resume_session: Some(pre_session),
         budget_limits: None,
-        event_tx: None, // Wired by the session service's builder
-        llm_client_override: state.llm_client_override.clone(),
         provider_params: None,
         external_tools: None,
+        llm_client_override: state
+            .llm_client_override
+            .clone()
+            .map(encode_llm_client_override_for_service),
         override_builtins: req.enable_builtins,
         override_shell: req.enable_shell,
         override_subagents: req.enable_subagents,
         override_memory: req.enable_memory,
         preload_skills: None,
-        peer_meta: req.peer_meta.clone(),
+        realm_id: Some(state.realm_id.clone()),
+        instance_id: state.instance_id.clone(),
+        backend: Some(state.backend.clone()),
+        config_generation: current_generation,
     };
 
-    // Hold the slot lock across staging + create to prevent concurrent
-    // requests from overwriting each other's staged config.
-    let result = {
-        let mut slot = state.builder_slot.lock().await;
-        *slot = Some(build_config);
-
-        let svc_req = SvcCreateSessionRequest {
-            model: model.to_string(),
-            prompt: req.prompt,
-            system_prompt: None, // Already in build_config
-            max_tokens: Some(max_tokens),
-            event_tx: Some(caller_event_tx),
-            host_mode,
-            skill_references: None,
-        };
-
-        state.session_service.create_session(svc_req).await
+    let svc_req = SvcCreateSessionRequest {
+        model: model.to_string(),
+        prompt: req.prompt,
+        system_prompt: req.system_prompt,
+        max_tokens: Some(max_tokens),
+        event_tx: Some(caller_event_tx),
+        host_mode,
+        skill_references: None,
+        build: Some(build),
     };
+
+    let result = state.session_service.create_session(svc_req).await;
 
     // Wait for the event forwarder to drain
     let _ = forward_task.await;
 
     match result {
-        Ok(run_result) => Ok(Json(run_result_to_response(run_result))),
-        Err(err) => session_error_to_api_result(err, &session_id),
+        Ok(run_result) => Ok(Json(run_result_to_response(run_result, &state.realm_id))),
+        Err(err) => session_error_to_api_result(err, &session_id, &state.realm_id),
     }
 }
 
@@ -743,8 +910,7 @@ async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<SessionDetailsResponse>, ApiError> {
-    let session_id =
-        SessionId::parse(&id).map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = resolve_session_id_for_state(&id, &state)?;
 
     let view = state
         .session_service
@@ -762,6 +928,7 @@ async fn get_session(
 
     Ok(Json(SessionDetailsResponse {
         session_id: view.state.session_id.to_string(),
+        session_ref: format_session_ref(&state.realm_id, &view.state.session_id),
         created_at: created_at.to_rfc3339(),
         updated_at: updated_at.to_rfc3339(),
         message_count: view.state.message_count,
@@ -775,15 +942,15 @@ async fn continue_session(
     Path(id): Path<String>,
     Json(req): Json<ContinueSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    if req.session_id != id {
+    let path_session_id = resolve_session_id_for_state(&id, &state)?;
+    let body_session_id = resolve_session_id_for_state(&req.session_id, &state)?;
+    if body_session_id != path_session_id {
         return Err(ApiError::BadRequest(format!(
             "Session ID mismatch: path={} body={}",
             id, req.session_id
         )));
     }
-
-    let session_id = SessionId::parse(&req.session_id)
-        .map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = body_session_id;
 
     // Set up event forwarding: caller channel -> broadcast
     let (caller_event_tx, caller_event_rx) = mpsc::channel::<AgentEvent>(100);
@@ -861,22 +1028,21 @@ async fn continue_session(
                     .and_then(|meta| meta.comms_name.clone())
             });
 
-            let build_config = AgentBuildConfig {
-                model: model.to_string(),
+            let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
+            let build = SessionBuildOptions {
                 provider,
-                max_tokens: Some(max_tokens),
-                system_prompt: req.system_prompt,
                 output_schema: req.output_schema,
                 structured_output_retries: req.structured_output_retries,
                 hooks_override: req.hooks_override.unwrap_or_default(),
-                host_mode: continue_host_mode,
                 comms_name,
                 resume_session: Some(session),
                 budget_limits: None,
-                event_tx: None, // Wired by the session service's builder
-                llm_client_override: state.llm_client_override.clone(),
                 provider_params: None,
                 external_tools: None,
+                llm_client_override: state
+                    .llm_client_override
+                    .clone()
+                    .map(encode_llm_client_override_for_service),
                 override_builtins: Some(tooling.builtins),
                 override_shell: Some(tooling.shell),
                 override_subagents: Some(tooling.subagents),
@@ -886,31 +1052,39 @@ async fn continue_session(
                     .peer_meta
                     .clone()
                     .or_else(|| stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())),
+                realm_id: stored_metadata
+                    .as_ref()
+                    .and_then(|m| m.realm_id.clone())
+                    .or_else(|| Some(state.realm_id.clone())),
+                instance_id: stored_metadata
+                    .as_ref()
+                    .and_then(|m| m.instance_id.clone())
+                    .or_else(|| state.instance_id.clone()),
+                backend: stored_metadata
+                    .as_ref()
+                    .and_then(|m| m.backend.clone())
+                    .or_else(|| Some(state.backend.clone())),
+                config_generation: current_generation,
             };
-
-            // Hold slot lock across staging + create to prevent races.
-            let mut slot = state.builder_slot.lock().await;
-            *slot = Some(build_config);
 
             let svc_req = SvcCreateSessionRequest {
                 model: model.to_string(),
                 prompt: req.prompt,
-                system_prompt: None,
+                system_prompt: req.system_prompt,
                 max_tokens: Some(max_tokens),
                 event_tx: Some(caller_event_tx.clone()),
                 host_mode: continue_host_mode,
                 skill_references: None,
+                build: Some(build),
             };
 
-            let r = state
+            state
                 .session_service
                 .create_session(svc_req)
                 .await
-                .map_err(|e| ApiError::Agent(format!("{e}")));
-            drop(slot);
-            r
+                .map_err(|e| ApiError::Agent(format!("{e}")))
         }
-        Err(err) => return session_error_to_api_result(err, &session_id),
+        Err(err) => return session_error_to_api_result(err, &session_id, &state.realm_id),
     };
 
     // Drop the sender so the forwarder sees channel closure and can drain.
@@ -920,7 +1094,7 @@ async fn continue_session(
     let _ = forward_task.await;
 
     match final_result {
-        Ok(run_result) => Ok(Json(run_result_to_response(run_result))),
+        Ok(run_result) => Ok(Json(run_result_to_response(run_result, &state.realm_id))),
         Err(err) => Err(err),
     }
 }
@@ -930,8 +1104,7 @@ async fn session_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let session_id =
-        SessionId::parse(&id).map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
+    let session_id = resolve_session_id_for_state(&id, &state)?;
 
     // load_persisted() only checks the redb store. A session on its first
     // in-progress turn (not yet persisted) will return 404. Future improvement:
@@ -1054,7 +1227,9 @@ mod tests {
     #[tokio::test]
     async fn test_app_state_default() {
         let temp = TempDir::new().unwrap();
-        let state = AppState::load_from(temp.path().to_path_buf()).await.unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
         assert!(!state.default_model.is_empty());
         assert!(state.max_tokens > 0);
     }
@@ -1073,9 +1248,32 @@ mod tests {
     #[tokio::test]
     async fn test_app_state_builtins_disabled_by_default() {
         let temp = TempDir::new().unwrap();
-        let state = AppState::load_from(temp.path().to_path_buf()).await.unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
         assert!(!state.enable_builtins);
         assert!(!state.enable_shell);
+    }
+
+    #[tokio::test]
+    async fn test_config_envelope_redacts_paths_by_default() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let Json(envelope) = get_config(State(state)).await.unwrap();
+        assert!(envelope.resolved_paths.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_config_envelope_includes_paths_when_enabled() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.expose_paths = true;
+        let Json(envelope) = get_config(State(state)).await.unwrap();
+        assert!(envelope.resolved_paths.is_some());
     }
 
     #[test]

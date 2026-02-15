@@ -19,8 +19,8 @@ from meerkat.generated.errors import (
 
 
 def test_contract_version():
-    """Contract version should be 0.2.0."""
-    assert CONTRACT_VERSION == "0.2.0"
+    """Contract version should match the generated SDK contract."""
+    assert CONTRACT_VERSION == "0.3.2"
 
 
 def test_wire_usage_defaults():
@@ -53,8 +53,8 @@ def test_wire_event_defaults():
 def test_capabilities_response():
     """CapabilitiesResponse should work with entries."""
     entry = CapabilityEntry(id="sessions", description="Session lifecycle", status="Available")
-    response = CapabilitiesResponse(contract_version="0.2.0", capabilities=[entry])
-    assert response.contract_version == "0.2.0"
+    response = CapabilitiesResponse(contract_version=CONTRACT_VERSION, capabilities=[entry])
+    assert response.contract_version == CONTRACT_VERSION
     assert len(response.capabilities) == 1
     assert response.capabilities[0].id == "sessions"
 

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use meerkat::AgentFactory;
 use meerkat_client::LlmClient;
-use meerkat_core::{Config, MemoryConfigStore};
+use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore};
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -50,10 +50,14 @@ fn spawn_test_server(
     let config = Config::default();
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
     let mut runtime = SessionRuntime::new(factory, config, 10, store);
-    runtime.default_llm_client = Some(client);
-    let runtime = Arc::new(runtime);
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(Config::default()));
+    runtime.default_llm_client = Some(client);
+    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+        Arc::clone(&config_store),
+        temp.path().join("config_state.json"),
+    )));
+    let runtime = Arc::new(runtime);
 
     // Use a larger buffer for live API tests that may stream many events
     let (server_reader, client_writer) = tokio::io::duplex(64 * 1024);
@@ -574,7 +578,10 @@ async fn e2e_scenario_16_kitchen_sink() {
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "config/get failed: {resp}");
-    let original_max = resp["result"]["max_tokens"].as_u64().unwrap();
+    let original_max = resp["result"]["config"]["max_tokens"]
+        .as_u64()
+        .or_else(|| resp["result"]["max_tokens"].as_u64())
+        .expect("config/get should include max_tokens");
 
     let id = next_id();
     send_request(
@@ -584,7 +591,11 @@ async fn e2e_scenario_16_kitchen_sink() {
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "config/patch failed: {resp}");
-    assert_eq!(resp["result"]["max_tokens"], original_max + 100);
+    let patched_max = resp["result"]["config"]["max_tokens"]
+        .as_u64()
+        .or_else(|| resp["result"]["max_tokens"].as_u64())
+        .expect("config/patch should include max_tokens");
+    assert_eq!(patched_max, original_max + 100);
 
     eprintln!(
         "[scenario 16] kitchen-sink test complete: tool calling + structured output + session CRUD + capabilities + config"

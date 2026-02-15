@@ -143,7 +143,7 @@ struct ForkResponse {
 #[cfg(feature = "comms")]
 fn parent_comms_instructions(child_name: &str) -> String {
     format!(
-        "To message this fork: send_message(\"{child_name}\", \"your message\")",
+        "To message this fork: send({{\"kind\":\"peer_message\",\"to\":\"{child_name}\",\"body\":\"your message\"}})",
         child_name = child_name
     )
 }

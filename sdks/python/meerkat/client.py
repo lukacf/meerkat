@@ -1,4 +1,4 @@
-"""Meerkat client — spawns rkat rpc subprocess and communicates via JSON-RPC."""
+"""Meerkat client — spawns rkat-rpc subprocess and communicates via JSON-RPC."""
 
 import asyncio
 import json
@@ -16,7 +16,7 @@ from .streaming import StreamingTurn, _StdoutDispatcher
 
 
 class MeerkatClient:
-    """Async client that communicates with a Meerkat runtime via rkat rpc.
+    """Async client that communicates with a Meerkat runtime via rkat-rpc.
 
     A background dispatcher multiplexes stdout so that JSON-RPC responses
     and streaming event notifications can be consumed concurrently.
@@ -38,26 +38,82 @@ class MeerkatClient:
             result = stream.result
     """
 
-    def __init__(self, rkat_path: str = "rkat"):
+    def __init__(self, rkat_path: str = "rkat-rpc"):
         import shutil
 
         self._rkat_path = rkat_path
+        self._legacy_rpc_subcommand = False
         self._process: Optional[asyncio.subprocess.Process] = None
         self._request_id = 0
         self._capabilities: Optional[CapabilitiesResponse] = None
         self._dispatcher: Optional[_StdoutDispatcher] = None
 
         if not shutil.which(self._rkat_path):
-            raise MeerkatError(
-                "BINARY_NOT_FOUND",
-                f"rkat binary not found at '{self._rkat_path}'. "
-                "Ensure it is installed and on your PATH.",
-            )
+            if self._rkat_path == "rkat-rpc" and shutil.which("rkat"):
+                # Transitional fallback for older installs.
+                self._rkat_path = "rkat"
+                self._legacy_rpc_subcommand = True
+            else:
+                raise MeerkatError(
+                    "BINARY_NOT_FOUND",
+                    f"rkat-rpc binary not found at '{self._rkat_path}'. "
+                    "Ensure it is installed and on your PATH.",
+                )
 
-    async def connect(self) -> "MeerkatClient":
-        """Start the rkat rpc subprocess and perform handshake."""
+    async def connect(
+        self,
+        realm_id: Optional[str] = None,
+        instance_id: Optional[str] = None,
+        realm_backend: Optional[str] = None,
+        isolated: bool = False,
+        state_root: Optional[str] = None,
+        context_root: Optional[str] = None,
+        user_config_root: Optional[str] = None,
+    ) -> "MeerkatClient":
+        """Start the rkat-rpc subprocess and perform handshake."""
+        if realm_id and isolated:
+            raise MeerkatError(
+                "INVALID_ARGS",
+                "realm_id and isolated cannot both be set",
+            )
+        legacy_requires_new_binary = any(
+            [
+                isolated,
+                realm_id is not None,
+                instance_id is not None,
+                realm_backend is not None,
+                state_root is not None,
+                context_root is not None,
+                user_config_root is not None,
+            ]
+        )
+        if self._legacy_rpc_subcommand and legacy_requires_new_binary:
+            raise MeerkatError(
+                "LEGACY_BINARY_UNSUPPORTED",
+                "Realm/context options require the standalone rkat-rpc binary. "
+                "Install rkat-rpc and retry.",
+            )
+        args = []
+        if self._legacy_rpc_subcommand:
+            # Legacy fallback path supports only `rkat rpc` with defaults.
+            args = ["rpc"]
+        else:
+            if isolated:
+                args.append("--isolated")
+            if realm_id:
+                args.extend(["--realm", realm_id])
+            if instance_id:
+                args.extend(["--instance", instance_id])
+            if realm_backend:
+                args.extend(["--realm-backend", realm_backend])
+            if state_root:
+                args.extend(["--state-root", state_root])
+            if context_root:
+                args.extend(["--context-root", context_root])
+            if user_config_root:
+                args.extend(["--user-config-root", user_config_root])
         self._process = await asyncio.create_subprocess_exec(
-            self._rkat_path, "rpc",
+            self._rkat_path, *args,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -82,7 +138,7 @@ class MeerkatClient:
         return self
 
     async def close(self) -> None:
-        """Terminate the rkat rpc subprocess."""
+        """Terminate the rkat-rpc subprocess."""
         if self._dispatcher:
             await self._dispatcher.stop()
             self._dispatcher = None
@@ -408,6 +464,7 @@ class MeerkatClient:
         )
         return WireRunResult(
             session_id=data.get("session_id", ""),
+            session_ref=data.get("session_ref"),
             text=data.get("text", ""),
             turns=data.get("turns", 0),
             tool_calls=data.get("tool_calls", 0),

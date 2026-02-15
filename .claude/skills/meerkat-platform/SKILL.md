@@ -5,33 +5,52 @@ description: "Comprehensive guide for building applications with the Meerkat age
 
 # Meerkat Platform Guide
 
-Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered applications. It provides the core execution loop, tool dispatch, session management, and multi-agent coordination without opinions about prompts or output formatting.
+Meerkat (`rkat`) is a library-first agent runtime exposed through multiple surfaces. The execution pipeline is shared, and state is realm-scoped.
+
+## Realm-first model
+
+`realm_id` is the sharing key across all surfaces.
+
+- Same `realm_id` => shared sessions/config/backend.
+- Different `realm_id` => strict isolation.
+- Backend (`redb` or `jsonl`) is pinned per realm in `realm_manifest.json`.
+
+Default realm behavior:
+
+- CLI (`run/resume/sessions`): workspace-derived stable realm.
+- RPC/REST/MCP/SDK: new opaque realm unless explicitly provided.
+
+Use explicit realm to share:
+
+```bash
+rkat --realm team-alpha run "Plan release"
+rkat-rpc --realm team-alpha
+rkat-rest --realm team-alpha
+rkat-mcp --realm team-alpha
+```
 
 ## Surfaces
-
-Meerkat exposes the same agent engine through multiple surfaces. All share the same underlying `AgentFactory::build_agent()` pipeline.
 
 | Surface | Protocol | Use Case |
 |---------|----------|----------|
 | CLI | Shell commands | Developer workflows, scripting |
-| REST | HTTP/JSON | Web services, microservices |
-| RPC | JSON-RPC 2.0 (stdio) | IDE integration, SDK backend |
-| MCP | Model Context Protocol | LLM tool integration |
+| REST | HTTP/JSON | Services and language-agnostic clients |
+| RPC | JSON-RPC 2.0 (stdio) | IDE integration and SDK backend |
+| MCP | Model Context Protocol | Expose Meerkat as tools |
 | Python SDK | Async Python over RPC | Python applications |
 | TypeScript SDK | TypeScript over RPC | Node.js applications |
-| Rust SDK | Direct library calls | Embedded Rust applications |
+| Rust SDK | Direct library API | Embedded Rust systems |
 
-For full API reference for each surface including method signatures, parameters, and complex multi-step examples, load:
-`references/api_reference.md`
+For full per-surface schemas and examples, load: `references/api_reference.md`.
 
-## Quick Start
+## Quick start
 
 ### CLI
 
 ```bash
 rkat run "What is Rust?"
-rkat run "Create a todo app" --enable-builtins --enable-shell --stream -v
-rkat resume sid_abc123 "Now add error handling"
+rkat --realm team-alpha run "Create a todo app" --enable-builtins --enable-shell --stream -v
+rkat --realm team-alpha resume sid_abc123 "Now add error handling"
 ```
 
 ### Python SDK
@@ -40,17 +59,9 @@ rkat resume sid_abc123 "Now add error handling"
 from meerkat import MeerkatClient
 
 client = MeerkatClient()
-await client.connect()
+await client.connect(realm_id="team-alpha")
 result = await client.create_session("What is Rust?")
 print(result.text)
-
-# Streaming
-async with client.create_session_streaming("Write a poem") as stream:
-    async for event in stream:
-        if event["type"] == "text_delta":
-            print(event["delta"], end="", flush=True)
-    result = stream.result
-
 await client.close()
 ```
 
@@ -58,8 +69,9 @@ await client.close()
 
 ```typescript
 import { MeerkatClient } from "@meerkat/sdk";
+
 const client = new MeerkatClient();
-await client.connect();
+await client.connect({ realmId: "team-alpha" });
 const result = await client.createSession({ prompt: "What is Rust?" });
 await client.close();
 ```
@@ -69,9 +81,14 @@ await client.close();
 ```rust
 use meerkat::{AgentFactory, AgentBuildConfig};
 use meerkat_core::Config;
+use meerkat_store;
 
 let config = Config::load().await?;
-let factory = AgentFactory::new(".rkat/sessions").builtins(true).shell(true);
+let realm = meerkat_store::realm_paths("team-alpha");
+let factory = AgentFactory::new(realm.root.clone())
+    .runtime_root(realm.root)
+    .builtins(true)
+    .shell(true);
 let build = AgentBuildConfig::new("claude-sonnet-4-5");
 let mut agent = factory.build_agent(build, &config).await?;
 let result = agent.run("What is Rust?".into()).await?;
@@ -79,85 +96,48 @@ let result = agent.run("What is Rust?".into()).await?;
 
 ## Configuration
 
-Configuration loads from `.rkat/config.toml` (project) or `~/.rkat/config.toml` (global). API keys come from environment variables only.
+Config APIs return a realm-scoped envelope:
 
-```toml
-[agent]
-model = "claude-sonnet-4-5"
-max_tokens_per_turn = 8192
+- `config`
+- `generation`
+- `realm_id`
+- `instance_id`
+- `backend`
+- `resolved_paths`
 
-[budget]
-max_tokens = 100000
-max_duration = "30m"
-max_tool_calls = 50
+`config/set` and `config/patch` support `expected_generation` for CAS.
 
-[shell]
-timeout_secs = 120
-
-[comms]
-mode = "inproc"           # "inproc", "tcp", or "uds"
-# address = "127.0.0.1:4200"      # Signed agent-to-agent listener
-# auth = "none"                    # "none" (open) or "ed25519"
-# event_address = "127.0.0.1:4201" # Plain-text external event listener
-# auto_enable_for_subagents = false
-
-[skills]
-enabled = true
-max_injection_bytes = 32768
-inventory_threshold = 12
-```
-
-Environment variables: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`.
-
-## Core Features
+## Core features
 
 ### Sessions
 
-Sessions persist conversation state across turns. Lifecycle: create -> turn -> turn -> ... -> archive.
+Sessions are realm-scoped and surface-neutral. Visibility depends on `realm_id` matching.
 
 ### Streaming
 
-Real-time event streaming: `text_delta`, `tool_call_requested`, `tool_result_received`, `turn_completed`, `run_completed`. Python SDK provides `create_session_streaming()` and `start_turn_streaming()` with async context manager pattern.
+Real-time events include `text_delta`, tool lifecycle events, hook events, and terminal run events.
 
 ### Skills
 
-Domain-specific knowledge injection. Activated via `/skill-ref` in messages, `skill_references` wire param, or `preload_skills` at session creation. Sources: filesystem, git, HTTP, embedded. Configure in `.rkat/skills.toml`.
+Skill loading is runtime-root aware. Workspace realms use project `.rkat/skills`; non-workspace realms use realm runtime roots.
 
 ### Hooks
 
-8 lifecycle hook points (`RunStarted`, `PreLlmRequest`, `PostLlmResponse`, `PreToolExecution`, `PostToolExecution`, `TurnBoundary`, `RunCompleted`, `RunFailed`) with 3 capabilities (`Observe`, `Guardrail`, `Rewrite`) and 3 runtimes (in-process, command, HTTP) for policy enforcement, logging, and content modification.
+Hook config is realm-aware, with compatibility layering from user/project hook files when available.
 
-### Sub-Agents
+### Sub-agents
 
-Hierarchical agent spawning with tools: `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list`. Budget-isolated with configurable model inheritance.
+Sub-agents inherit realm context. With comms enabled, parent/child inproc communication is namespace-scoped by realm.
 
-### Inter-Agent Communication & External Events
+### Inter-agent comms
 
-**Agent-to-agent comms:** Ed25519-signed peer-to-peer messaging via `send` (with `kind=peer_message`, `kind=peer_request`, or `kind=peer_response`) and `peers`. Host mode (`--host`) keeps agent alive listening for messages. Signed listeners use CBOR + Ed25519 with trusted peer verification. `peers` returns discoverable peers from both configured `TrustedPeers` and active in-process registrations (`InprocRegistry`), excluding self and de-duplicating by name. Each peer can carry `PeerMeta` (description + labels) so orchestrators can reason about peer capabilities.
-
-**Peer metadata (`PeerMeta`):** Agents can advertise supplementary discovery metadata — a description and arbitrary key/value labels. The peer's canonical routing name is always `comms_name` (set via `--comms-name`); `PeerMeta` carries *additional* context. Set via CLI (`--agent-description`, `--agent-label key=value`), `AgentBuildConfig.peer_meta`, or surface request params. Flows through `CommsRuntime` → `InprocRegistry` → `peers()` output. Persisted in `SessionMetadata.peer_meta` for deterministic resume.
-
-**External event ingestion:** External systems (webhooks, scripts, stdin) can push events into a running agent's inbox. All events flow through the `SubscribableInjector` trait (which extends `EventInjector`) into a bounded inbox, drained at turn boundaries (or continuously in host mode) and injected as user messages.
-
-| Surface | Ingestion Method | Source Tag | Auth |
-|---------|-----------------|------------|------|
-| CLI | `--stdin` (newline-delimited) | `stdin` | None |
-| REST | `POST /sessions/{id}/event` | `webhook` | `RKAT_WEBHOOK_SECRET` header |
-| RPC | `comms/send` method | `rpc` | None (implicit) |
-| Comms | TCP/UDS plain listeners | `tcp`/`uds` | `auth = "none"` required |
-
-**Interaction-scoped streaming (Rust SDK):** When injecting events programmatically, use `inject_with_subscription()` instead of `inject()` to get a dedicated `mpsc::Receiver<AgentEvent>` scoped to that interaction. Events (`TextDelta`, `ToolCallRequested`, etc.) are mirrored to the subscriber during the turn that processes the injected message. The stream ends with exactly one terminal event: `InteractionComplete { result }` or `InteractionFailed { error }`. Backpressure drops intermediate events (with a `StreamTruncated` marker) but never the terminal. Requires host mode with a configured primary `event_tx` (typically via `AgentBuildConfig.event_tx`, then `run_host_mode()`) and comms enabled. The service's `event_injector(&session_id)` returns `Arc<dyn SubscribableInjector>`.
-
-**Auth model:** Signed (Ed25519) listeners always run for agent-to-agent comms. When `auth = "none"`, a separate plain-text listener starts on `event_address` for unauthenticated external events. The signed listener is never replaced. REST webhook auth uses `RKAT_WEBHOOK_SECRET` env var with constant-time comparison (`subtle::ConstantTimeEq`).
+Comms supports `inproc`, TCP, and UDS. Inproc registry is namespace-segmented; Meerkat uses realm namespace for isolation.
 
 ### Memory
 
-Semantic memory indexes conversation history for cross-session retrieval via `memory_search` tool. Uses HNSW vectors backed by redb.
-
-### Structured Output
-
-JSON schema-based extraction with automatic retry on validation failure. Pass `output_schema` on any surface.
+Semantic memory (`memory_search`) and compaction integrate through the same session/runtime pipeline.
 
 ## Reference
 
-For complete API reference with all method signatures, parameters, return types, and complex multi-feature examples across all surfaces, load: `references/api_reference.md`
+For complete method signatures and multi-surface examples, load:
+`references/api_reference.md`

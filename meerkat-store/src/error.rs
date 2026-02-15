@@ -24,4 +24,16 @@ pub enum StoreError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("timed out acquiring realm manifest lock for '{realm_id}'")]
+    RealmManifestLockTimeout { realm_id: String },
+
+    #[error(
+        "realm backend mismatch for '{realm_id}': requested '{requested}', existing '{existing}'"
+    )]
+    RealmBackendMismatch {
+        realm_id: String,
+        requested: String,
+        existing: String,
+    },
 }

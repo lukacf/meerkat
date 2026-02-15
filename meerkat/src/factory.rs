@@ -11,6 +11,7 @@ use meerkat_client::{
     DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClient, LlmClientAdapter,
     LlmClientFactory, LlmProvider, ProviderResolver,
 };
+use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
@@ -22,7 +23,10 @@ use meerkat_core::{ConcurrencyLimits, SubAgentManager};
 use meerkat_core::{SessionId, SessionMeta};
 #[cfg(feature = "jsonl-store")]
 use meerkat_store::JsonlStore;
-#[cfg(feature = "memory-store")]
+#[cfg(all(
+    feature = "memory-store",
+    any(not(feature = "jsonl-store"), feature = "sub-agents")
+))]
 use meerkat_store::MemoryStore;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_store::SessionFilter;
@@ -36,10 +40,12 @@ use meerkat_tools::builtin::{
     ToolPolicyLayer,
 };
 use meerkat_tools::{BuiltinDispatcherConfig, CompositeDispatcherError};
-use tokio::sync::{RwLock, mpsc};
+#[cfg(any(not(feature = "memory-store"), feature = "sub-agents"))]
+use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 
 #[cfg(feature = "comms")]
-use crate::{build_comms_runtime_from_config, compose_tools_with_comms};
+use crate::compose_tools_with_comms;
 use crate::{create_default_hook_engine, resolve_layered_hooks_config};
 
 /// Ephemeral in-process store used when no storage backend feature is enabled.
@@ -113,6 +119,39 @@ impl SessionStore for EphemeralSessionStore {
 /// Type-erased agent using trait objects.
 pub type DynAgent = Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>;
 
+#[derive(Clone)]
+struct ErasedLlmClientOverride(Arc<dyn LlmClient>);
+
+#[cfg(all(feature = "sub-agents", feature = "comms"))]
+#[derive(Clone)]
+struct SubAgentCommsWiring {
+    parent_context: meerkat_comms::runtime::ParentCommsContext,
+    parent_trusted_peers: Arc<RwLock<meerkat_comms::TrustedPeers>>,
+}
+
+/// Encode an LLM client override for transport in `SessionBuildOptions`.
+///
+/// `SessionBuildOptions` lives in `meerkat-core` and cannot depend directly on
+/// `meerkat-client`, so the override is carried as `Arc<dyn Any + Send + Sync>`.
+pub fn encode_llm_client_override_for_service(
+    client: Arc<dyn LlmClient>,
+) -> Arc<dyn std::any::Any + Send + Sync> {
+    Arc::new(ErasedLlmClientOverride(client))
+}
+
+/// Decode an LLM client override from `SessionBuildOptions`.
+///
+/// Accepts the current typed wrapper and the legacy `Arc<dyn LlmClient>` payload
+/// to preserve compatibility with older callers.
+pub fn decode_llm_client_override_from_service(
+    value: &Arc<dyn std::any::Any + Send + Sync>,
+) -> Option<Arc<dyn LlmClient>> {
+    if let Some(typed) = value.as_ref().downcast_ref::<ErasedLlmClientOverride>() {
+        return Some(typed.0.clone());
+    }
+    value.as_ref().downcast_ref::<Arc<dyn LlmClient>>().cloned()
+}
+
 /// Full configuration for building an agent via [`AgentFactory::build_agent()`].
 pub struct AgentBuildConfig {
     /// Model name (e.g. "claude-sonnet-4-5").
@@ -164,6 +203,14 @@ pub struct AgentBuildConfig {
     /// `Some(ids)` = pre-load these skills into the system prompt.
     /// `Some(vec![])` is normalized to `None`.
     pub preload_skills: Option<Vec<meerkat_core::skills::SkillId>>,
+    /// Realm identity for cross-surface storage sharing/isolation.
+    pub realm_id: Option<String>,
+    /// Optional process/agent instance identifier within a realm.
+    pub instance_id: Option<String>,
+    /// Backend pinned by the realm manifest (e.g. "redb", "jsonl").
+    pub backend: Option<String>,
+    /// Config generation used when this session was created/resumed.
+    pub config_generation: Option<u64>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -194,6 +241,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("override_shell", &self.override_shell)
             .field("override_subagents", &self.override_subagents)
             .field("override_memory", &self.override_memory)
+            .field("realm_id", &self.realm_id)
+            .field("instance_id", &self.instance_id)
+            .field("backend", &self.backend)
+            .field("config_generation", &self.config_generation)
             .finish()
     }
 }
@@ -223,6 +274,82 @@ impl AgentBuildConfig {
             override_subagents: None,
             override_memory: None,
             preload_skills: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        }
+    }
+
+    /// Build config from a service `CreateSessionRequest` + event channel.
+    pub fn from_create_session_request(
+        req: &CreateSessionRequest,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Self {
+        let mut build = Self::new(req.model.clone());
+        build.system_prompt = req.system_prompt.clone();
+        build.max_tokens = req.max_tokens;
+        build.host_mode = req.host_mode;
+        if let Some(options) = &req.build {
+            build.apply_session_build_options(options);
+        }
+        build.event_tx = Some(event_tx);
+        build
+    }
+
+    /// Merge `SessionBuildOptions` into this build config.
+    pub fn apply_session_build_options(&mut self, build: &SessionBuildOptions) {
+        self.provider = build.provider;
+        self.output_schema = build.output_schema.clone();
+        self.structured_output_retries = build.structured_output_retries;
+        self.hooks_override = build.hooks_override.clone();
+        self.comms_name = build.comms_name.clone();
+        self.peer_meta = build.peer_meta.clone();
+        self.resume_session = build.resume_session.clone();
+        self.budget_limits = build.budget_limits.clone();
+        self.provider_params = build.provider_params.clone();
+        self.external_tools = build.external_tools.clone();
+        self.llm_client_override = build
+            .llm_client_override
+            .as_ref()
+            .and_then(decode_llm_client_override_from_service);
+        self.override_builtins = build.override_builtins;
+        self.override_shell = build.override_shell;
+        self.override_subagents = build.override_subagents;
+        self.override_memory = build.override_memory;
+        self.preload_skills = build.preload_skills.clone();
+        self.realm_id = build.realm_id.clone();
+        self.instance_id = build.instance_id.clone();
+        self.backend = build.backend.clone();
+        self.config_generation = build.config_generation;
+    }
+
+    /// Convert build options to the service transport representation.
+    pub fn to_session_build_options(&self) -> SessionBuildOptions {
+        SessionBuildOptions {
+            provider: self.provider,
+            output_schema: self.output_schema.clone(),
+            structured_output_retries: self.structured_output_retries,
+            hooks_override: self.hooks_override.clone(),
+            comms_name: self.comms_name.clone(),
+            peer_meta: self.peer_meta.clone(),
+            resume_session: self.resume_session.clone(),
+            budget_limits: self.budget_limits.clone(),
+            provider_params: self.provider_params.clone(),
+            external_tools: self.external_tools.clone(),
+            llm_client_override: self
+                .llm_client_override
+                .clone()
+                .map(encode_llm_client_override_for_service),
+            override_builtins: self.override_builtins,
+            override_shell: self.override_shell,
+            override_subagents: self.override_subagents,
+            override_memory: self.override_memory,
+            preload_skills: self.preload_skills.clone(),
+            realm_id: self.realm_id.clone(),
+            instance_id: self.instance_id.clone(),
+            backend: self.backend.clone(),
+            config_generation: self.config_generation,
         }
     }
 }
@@ -270,7 +397,15 @@ pub fn provider_key(provider: Provider) -> &'static str {
 #[derive(Clone)]
 pub struct AgentFactory {
     pub store_path: PathBuf,
+    /// Runtime root for realm-scoped artifacts (comms identity/trust, hook layers,
+    /// skill caches). When unset, falls back to project_root or store_path.
+    pub runtime_root: Option<PathBuf>,
     pub project_root: Option<PathBuf>,
+    /// Explicit root for project/workspace conventions (skills, hooks, AGENTS, MCP config).
+    /// When unset, convention loading remains disabled unless caller opts in.
+    pub context_root: Option<PathBuf>,
+    /// Optional user-global convention root (typically HOME).
+    pub user_config_root: Option<PathBuf>,
     pub enable_builtins: bool,
     pub enable_shell: bool,
     pub enable_subagents: bool,
@@ -290,7 +425,10 @@ impl std::fmt::Debug for AgentFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut d = f.debug_struct("AgentFactory");
         d.field("store_path", &self.store_path)
+            .field("runtime_root", &self.runtime_root)
             .field("project_root", &self.project_root)
+            .field("context_root", &self.context_root)
+            .field("user_config_root", &self.user_config_root)
             .field("enable_builtins", &self.enable_builtins)
             .field("enable_shell", &self.enable_shell)
             .field("enable_subagents", &self.enable_subagents)
@@ -309,7 +447,10 @@ impl AgentFactory {
     pub fn new(store_path: impl Into<PathBuf>) -> Self {
         Self {
             store_path: store_path.into(),
+            runtime_root: None,
             project_root: None,
+            context_root: None,
+            user_config_root: None,
             enable_builtins: false,
             enable_shell: false,
             enable_subagents: false,
@@ -335,6 +476,25 @@ impl AgentFactory {
     /// Set the project root used for tool persistence.
     pub fn project_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.project_root = Some(path.into());
+        self
+    }
+
+    /// Set convention context root used for project-level conventions
+    /// (skills/hooks/AGENTS/MCP definitions).
+    pub fn context_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.context_root = Some(path.into());
+        self
+    }
+
+    /// Set optional user-global convention root.
+    pub fn user_config_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.user_config_root = Some(path.into());
+        self
+    }
+
+    /// Set runtime root used for realm-scoped runtime artifacts.
+    pub fn runtime_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.runtime_root = Some(path.into());
         self
     }
 
@@ -377,6 +537,13 @@ impl AgentFactory {
     pub fn session_store(mut self, store: Arc<dyn SessionStore>) -> Self {
         self.custom_store = Some(store);
         self
+    }
+
+    fn realm_scope_root(&self, _build_config: &AgentBuildConfig) -> PathBuf {
+        self.runtime_root
+            .clone()
+            .or_else(|| self.project_root.clone())
+            .unwrap_or_else(|| self.store_path.clone())
     }
 
     /// Build an LLM adapter for the provided client/model.
@@ -478,6 +645,34 @@ impl AgentFactory {
         session_id: Option<String>,
         #[allow(unused_variables)] skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
+        self.build_builtin_dispatcher_with_skills_internal(
+            store,
+            config,
+            shell_config,
+            external,
+            session_id,
+            skill_engine,
+            #[cfg(all(feature = "sub-agents", feature = "comms"))]
+            None,
+        )
+        .await
+    }
+
+    /// Internal dispatcher builder used by `build_agent` when extra sub-agent
+    /// comms wiring is available from a live parent runtime.
+    #[allow(clippy::too_many_arguments)]
+    async fn build_builtin_dispatcher_with_skills_internal(
+        &self,
+        store: Arc<dyn TaskStore>,
+        config: BuiltinToolConfig,
+        shell_config: Option<ShellConfig>,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
+        session_id: Option<String>,
+        #[allow(unused_variables)] skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
+        #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
+            SubAgentCommsWiring,
+        >,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let builder = BuiltinDispatcherConfig {
             store,
             config,
@@ -501,7 +696,7 @@ impl AgentFactory {
                     engine,
                 ));
             }
-            return Ok(Arc::new(composite));
+            Ok(Arc::new(composite))
         }
 
         #[cfg(feature = "sub-agents")]
@@ -579,7 +774,39 @@ impl AgentFactory {
             );
 
             let parent_session = Arc::new(RwLock::new(Session::new()));
-            let sub_agent_config = SubAgentConfig::default();
+            let mut sub_agent_config = SubAgentConfig::default();
+            #[cfg(all(feature = "sub-agents", feature = "comms"))]
+            if let Some(ref comms) = sub_agent_comms {
+                sub_agent_config = sub_agent_config
+                    .with_enable_comms(true)
+                    .with_comms_base_dir(comms.parent_context.comms_base_dir.clone());
+            }
+
+            #[cfg(all(feature = "sub-agents", feature = "comms"))]
+            let state = Arc::new(match sub_agent_comms {
+                Some(comms) => SubAgentToolState::with_comms(
+                    manager,
+                    client_factory,
+                    sub_agent_tools,
+                    sub_agent_store,
+                    parent_session,
+                    sub_agent_config,
+                    0,
+                    comms.parent_context,
+                    comms.parent_trusted_peers,
+                ),
+                None => SubAgentToolState::new(
+                    manager,
+                    client_factory,
+                    sub_agent_tools,
+                    sub_agent_store,
+                    parent_session,
+                    sub_agent_config,
+                    0,
+                ),
+            });
+
+            #[cfg(not(all(feature = "sub-agents", feature = "comms")))]
             let state = Arc::new(SubAgentToolState::new(
                 manager,
                 client_factory,
@@ -638,8 +865,8 @@ impl AgentFactory {
         };
 
         // 3. Create LLM client
-        let llm_client: Arc<dyn LlmClient> = match build_config.llm_client_override {
-            Some(client) => client,
+        let llm_client: Arc<dyn LlmClient> = match build_config.llm_client_override.as_ref() {
+            Some(client) => Arc::clone(client),
             None => {
                 if ProviderResolver::api_key_for(provider).is_none() {
                     return Err(BuildAgentError::MissingApiKey {
@@ -670,6 +897,9 @@ impl AgentFactory {
 
         // 5. Resolve max_tokens
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
+        let _realm_scope_root = self.realm_scope_root(&build_config);
+        let conventions_context_root = self.context_root.as_deref();
+        let conventions_user_root = self.user_config_root.as_deref();
 
         // 6a. Build skill engine early so it can be passed to the tool dispatcher.
         #[cfg(feature = "skills")]
@@ -680,9 +910,11 @@ impl AgentFactory {
                 } else if !config.skills.enabled {
                     None
                 } else {
-                    match meerkat_skills::resolve_repositories(
+                    match meerkat_skills::resolve_repositories_with_roots(
                         &config.skills,
-                        self.project_root.as_deref(),
+                        conventions_context_root,
+                        conventions_user_root,
+                        Some(_realm_scope_root.as_path()),
                     )
                     .await
                     {
@@ -721,6 +953,50 @@ impl AgentFactory {
         let effective_subagents = build_config
             .override_subagents
             .unwrap_or(self.enable_subagents);
+        // 6b. Create comms runtime (before tool wiring so sub-agent tools can
+        // inherit parent comms context when auto-enabled).
+        #[cfg(feature = "comms")]
+        let comms_runtime = if build_config.host_mode {
+            let comms_name = build_config
+                .comms_name
+                .as_ref()
+                .ok_or(BuildAgentError::HostModeRequiresCommsName)?;
+            let runtime = crate::build_comms_runtime_from_config_scoped(
+                config,
+                _realm_scope_root.as_path(),
+                comms_name,
+                build_config.peer_meta.clone(),
+                // Realm ID is the comms inproc namespace boundary.
+                build_config.realm_id.clone(),
+            )
+            .await
+            .map_err(BuildAgentError::Comms)?;
+            Some(runtime)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "comms"))]
+        let _comms_runtime: Option<()> = None;
+
+        #[cfg(all(feature = "sub-agents", feature = "comms"))]
+        let sub_agent_comms = if config.comms.auto_enable_for_subagents && effective_subagents {
+            comms_runtime.as_ref().map(|runtime| SubAgentCommsWiring {
+                parent_context: meerkat_comms::runtime::ParentCommsContext {
+                    parent_name: runtime.participant_name().to_string(),
+                    parent_pubkey: *runtime.public_key().as_bytes(),
+                    parent_addr: runtime.advertised_address(),
+                    comms_base_dir: _realm_scope_root
+                        .join(".rkat")
+                        .join("subagents")
+                        .join("comms"),
+                    inproc_namespace: runtime.inproc_namespace().map(ToOwned::to_owned),
+                },
+                parent_trusted_peers: runtime.trusted_peers_shared(),
+            })
+        } else {
+            None
+        };
+
         #[allow(unused_mut)]
         let (mut tools, mut tool_usage_instructions) = self
             .build_tool_dispatcher_for_agent_with_overrides(
@@ -730,6 +1006,8 @@ impl AgentFactory {
                 effective_shell,
                 effective_subagents,
                 skill_engine.clone(),
+                #[cfg(all(feature = "sub-agents", feature = "comms"))]
+                sub_agent_comms,
             )
             .await?;
 
@@ -759,30 +1037,6 @@ impl AgentFactory {
             }
         };
 
-        // 8. Create comms runtime
-        #[cfg(feature = "comms")]
-        let comms_runtime = if build_config.host_mode {
-            let comms_name = build_config
-                .comms_name
-                .as_ref()
-                .ok_or(BuildAgentError::HostModeRequiresCommsName)?;
-            let base_dir = self
-                .project_root
-                .clone()
-                .unwrap_or_else(|| self.store_path.clone());
-            let runtime = build_comms_runtime_from_config(
-                config,
-                base_dir,
-                comms_name,
-                build_config.peer_meta.clone(),
-            )
-            .await
-            .map_err(BuildAgentError::Comms)?;
-            Some(runtime)
-        } else {
-            None
-        };
-
         // 9. Compose tools with comms
         #[cfg(feature = "comms")]
         if let Some(ref runtime) = comms_runtime {
@@ -795,11 +1049,9 @@ impl AgentFactory {
         }
 
         // 10. Resolve hooks
-        let hooks_root = self
-            .project_root
-            .as_deref()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let layered_hooks = resolve_layered_hooks_config(hooks_root, config).await;
+        let layered_hooks =
+            resolve_layered_hooks_config(conventions_context_root, conventions_user_root, config)
+                .await;
         let hook_engine = create_default_hook_engine(layered_hooks);
 
         // 11. Generate skill inventory section using the engine created in step 6a
@@ -875,6 +1127,7 @@ impl AgentFactory {
         let system_prompt = crate::assemble_system_prompt(
             config,
             per_request_prompt.as_deref(),
+            conventions_context_root,
             &extra_sections,
             &tool_usage_instructions,
         )
@@ -984,6 +1237,10 @@ impl AgentFactory {
             host_mode: build_config.host_mode,
             comms_name: build_config.comms_name,
             peer_meta: build_config.peer_meta,
+            realm_id: build_config.realm_id,
+            instance_id: build_config.instance_id,
+            backend: build_config.backend,
+            config_generation: build_config.config_generation,
         };
         if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
             tracing::warn!("Failed to store session metadata: {}", err);
@@ -1033,6 +1290,7 @@ impl AgentFactory {
     /// `effective_builtins`, `effective_shell`, and `effective_subagents` override
     /// the factory-level flags for this specific build. Delegates to
     /// [`Self::build_builtin_dispatcher`] for the full sub-agent wiring path.
+    #[allow(clippy::too_many_arguments)]
     async fn build_tool_dispatcher_for_agent_with_overrides(
         &self,
         _config: &Config,
@@ -1041,6 +1299,9 @@ impl AgentFactory {
         effective_shell: bool,
         effective_subagents: bool,
         skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
+        #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
+            SubAgentCommsWiring,
+        >,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -1087,13 +1348,15 @@ impl AgentFactory {
         let mut temp_factory = self.clone();
         temp_factory.enable_subagents = effective_subagents;
         let dispatcher = temp_factory
-            .build_builtin_dispatcher_with_skills(
+            .build_builtin_dispatcher_with_skills_internal(
                 task_store,
                 builtin_config,
                 shell_config,
                 external,
                 None,
                 skill_engine,
+                #[cfg(all(feature = "sub-agents", feature = "comms"))]
+                sub_agent_comms,
             )
             .await?;
 

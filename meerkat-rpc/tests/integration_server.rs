@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use futures::stream;
 use meerkat::AgentFactory;
 use meerkat_client::{LlmClient, LlmError};
-use meerkat_core::{Config, MemoryConfigStore, StopReason};
+use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, StopReason};
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -73,10 +73,14 @@ fn spawn_test_server() -> (
     let config = Config::default();
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
     let mut runtime = SessionRuntime::new(factory, config, 10, store);
-    runtime.default_llm_client = Some(Arc::new(MockLlmClient));
-    let runtime = Arc::new(runtime);
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(Config::default()));
+    runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+        Arc::clone(&config_store),
+        temp.path().join("config_state.json"),
+    )));
+    let runtime = Arc::new(runtime);
 
     let (server_reader, client_writer) = tokio::io::duplex(4096);
     let (client_reader, server_writer) = tokio::io::duplex(4096);
@@ -299,7 +303,7 @@ async fn config_get_patch_roundtrip() {
         "config/get failed: {}",
         get_resp
     );
-    let initial_max_tokens = get_resp["result"]["max_tokens"].as_u64().unwrap();
+    let initial_max_tokens = get_resp["result"]["config"]["max_tokens"].as_u64().unwrap();
 
     // Patch max_tokens
     let new_max_tokens = initial_max_tokens + 1000;
@@ -318,7 +322,7 @@ async fn config_get_patch_roundtrip() {
         "config/patch failed: {}",
         patch_resp
     );
-    assert_eq!(patch_resp["result"]["max_tokens"], new_max_tokens);
+    assert_eq!(patch_resp["result"]["config"]["max_tokens"], new_max_tokens);
 
     // Get again and verify
     let get_req2 = serde_json::json!({
@@ -330,7 +334,7 @@ async fn config_get_patch_roundtrip() {
 
     let get_resp2 = read_response(&mut reader).await;
     assert_eq!(get_resp2["id"], 3);
-    assert_eq!(get_resp2["result"]["max_tokens"], new_max_tokens);
+    assert_eq!(get_resp2["result"]["config"]["max_tokens"], new_max_tokens);
 
     drop(writer);
     server_handle.await.unwrap().unwrap();

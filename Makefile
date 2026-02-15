@@ -10,7 +10,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix lint lint-feature-matrix fmt fmt-check audit ci clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions release-preflight publish-dry-run
+.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions release-preflight publish-dry-run
 
 # Default target
 all: ci
@@ -89,10 +89,10 @@ test-feature-matrix-surface:
 	cargo check -p meerkat-rest --no-default-features --features comms
 	cargo check -p meerkat-mcp-server --no-default-features
 	cargo check -p meerkat-mcp-server --no-default-features --features comms
-	cargo check -p rkat --no-default-features
-	cargo check -p rkat --no-default-features --features mcp
-	cargo test -p rkat --no-default-features --features mcp -- --nocapture
-	cargo check -p rkat --no-default-features --features comms,mcp
+	cargo check -p rkat --no-default-features --features session-store
+	cargo check -p rkat --no-default-features --features session-store,mcp
+	cargo test -p rkat --no-default-features --features session-store,mcp -- --nocapture
+	cargo check -p rkat --no-default-features --features session-store,comms,mcp
 
 # Session capability matrix (A-F builds from spec)
 test-session-matrix:
@@ -112,6 +112,11 @@ test-session-matrix:
 # Full feature matrix
 test-feature-matrix: test-feature-matrix-lib test-feature-matrix-surface
 
+# Surface modularity guardrail: minimal feature builds + binary smoke checks.
+test-surface-modularity:
+	@echo "$(GREEN)Running surface modularity checks...$(NC)"
+	@scripts/check_surface_modularity.sh
+
 # Run clippy linter
 lint:
 	@echo "$(GREEN)Running clippy...$(NC)"
@@ -124,7 +129,7 @@ lint-feature-matrix:
 	cargo clippy -p meerkat-tools --no-default-features --features comms,mcp
 	cargo clippy -p meerkat --no-default-features --features openai,memory-store
 	cargo clippy -p meerkat --features all-providers,comms,mcp,sub-agents
-	cargo clippy -p rkat --no-default-features --features mcp
+	cargo clippy -p rkat --no-default-features --features session-store,mcp
 	cargo clippy -p meerkat-rpc --no-default-features
 
 # Check formatting
@@ -148,7 +153,7 @@ audit-alt:
 	cargo audit
 
 # Full CI pipeline - runs everything
-ci: fmt-check legacy-surface-gate verify-version-parity lint lint-feature-matrix test-all test-minimal test-feature-matrix audit
+ci: fmt-check legacy-surface-gate verify-version-parity lint lint-feature-matrix test-all test-minimal test-feature-matrix test-surface-modularity audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Milestone 0 gate: ensure legacy public surface names are either removed
@@ -306,6 +311,7 @@ help:
 	@echo "  $(GREEN)test-int-real$(NC) - Run integration-real tests (ignored)"
 	@echo "  $(GREEN)test-e2e$(NC)      - Run e2e tests (ignored)"
 	@echo "  $(GREEN)test-all$(NC)      - Run full test suite (CI)"
+	@echo "  $(GREEN)test-surface-modularity$(NC) - Minimal surface build + binary smoke checks"
 	@echo "  $(GREEN)lint$(NC)          - Run clippy linter"
 	@echo "  $(GREEN)lint-feature-matrix$(NC)- Run clippy across key feature combinations"
 	@echo "  $(GREEN)fmt$(NC)           - Fix code formatting"

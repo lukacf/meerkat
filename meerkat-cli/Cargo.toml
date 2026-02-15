@@ -39,12 +39,12 @@ required-features = ["integration-real-tests"]
 [dependencies]
 meerkat = { workspace = true }
 meerkat-core = { workspace = true }
+meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
-meerkat-rpc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -62,7 +62,7 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 
 [features]
-default = ["anthropic", "openai", "gemini", "jsonl-store", "sub-agents", "skills", "comms", "mcp"]
+default = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "sub-agents", "skills", "comms", "mcp"]
 
 # LLM providers (forwarded to facade)
 anthropic = ["meerkat/anthropic"]

@@ -43,6 +43,7 @@ impl CommsBootstrap {
     pub fn for_child_inproc(name: String, parent_context: ParentCommsContext) -> Self {
         let mut config = CoreCommsConfig::with_name(&name);
         config.enabled = true;
+        config.inproc_namespace = parent_context.inproc_namespace.clone();
         Self {
             config,
             base_dir: parent_context.comms_base_dir.clone(),
@@ -69,8 +70,11 @@ impl CommsBootstrap {
                         "ChildInproc mode requires parent_context".to_string(),
                     )
                 })?;
-                let runtime = CommsRuntime::inproc_only(&self.config.name)
-                    .map_err(|e| CommsBootstrapError::RuntimeError(e.to_string()))?;
+                let runtime = CommsRuntime::inproc_only_scoped(
+                    &self.config.name,
+                    self.config.inproc_namespace.clone(),
+                )
+                .map_err(|e| CommsBootstrapError::RuntimeError(e.to_string()))?;
 
                 let parent_peer = TrustedPeer {
                     name: parent.parent_name,
@@ -105,6 +109,7 @@ pub struct ParentCommsContext {
     pub parent_pubkey: [u8; 32],
     pub parent_addr: String,
     pub comms_base_dir: PathBuf,
+    pub inproc_namespace: Option<String>,
 }
 
 pub struct PreparedComms {

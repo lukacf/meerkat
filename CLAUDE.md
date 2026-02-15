@@ -84,7 +84,7 @@ meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 
 **Agent construction:** All surfaces use `AgentFactory::build_agent()` for centralized prompt assembly, provider resolution, tool dispatcher setup, comms wiring, and hook resolution. Zero `AgentBuilder::new()` calls in surface crates.
 
-**Session lifecycle:** All four surfaces (CLI, REST, MCP Server, JSON-RPC) route through `SessionService` for the full session lifecycle (create/turn/interrupt/read/list/archive). `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Surfaces stage per-request config via `build_config_slot` before calling `create_session()`.
+**Session lifecycle:** All four surfaces (CLI, REST, MCP Server, JSON-RPC) route through `SessionService` for the full session lifecycle (create/turn/interrupt/read/list/archive). `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Per-request build data is passed in-band via `CreateSessionRequest.build` / `SessionBuildOptions`.
 
 **Capability matrix:** See `docs/reference/capability-matrix.mdx` for build profiles, error codes, and feature behavior. See `docs/reference/session-contracts.mdx` for concurrency, durability, and compaction semantics.
 
@@ -110,7 +110,7 @@ Config stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user).
 
 ```bash
 # Start the JSON-RPC stdio server (for IDE/desktop integration)
-rkat rpc
+rkat-rpc
 ```
 
 The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/stdout. Unlike REST/MCP, it keeps agents alive between turns via `SessionRuntime` -- enabling fast multi-turn conversations, mid-turn cancellation, and event streaming without agent reconstruction overhead.

@@ -174,9 +174,9 @@ All surfaces share the same `SessionService` lifecycle and `AgentFactory` constr
 | `meerkat-comms` | Ed25519 encrypted P2P messaging |
 | `meerkat-contracts` | Wire types, error codes, capability registry |
 | `rkat` | CLI binary |
-| `meerkat-rest` | REST API server |
-| `meerkat-rpc` | JSON-RPC stdio server |
-| `meerkat-mcp-server` | MCP server (expose Meerkat as tools) |
+| `meerkat-rest` | REST API server (binary: `rkat-rest`) |
+| `meerkat-rpc` | JSON-RPC stdio server (binary: `rkat-rpc`) |
+| `meerkat-mcp-server` | MCP server surface (binary: `rkat-mcp`) |
 
 ## Examples
 

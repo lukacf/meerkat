@@ -487,7 +487,7 @@ async fn test_e2e_rkat_tcp_message_exchange() {
     // Spawn alice to send message
     instance_a
         .spawn(&format!(
-            "You are Alice. Send a message to bob (peer address: tcp://{}) saying 'Hello from Alice!' using the send_message tool.",
+            "You are Alice. Send a message to bob (peer address: tcp://{}) saying 'Hello from Alice!' using the send tool.",
             instance_b.tcp_addr()
         ))
         .expect("Should spawn alice");
@@ -749,7 +749,7 @@ async fn test_e2e_rkat_three_peer_coordination() {
     // Spawn coordinator to broadcast to both workers
     instance_a
         .spawn(&format!(
-            "You are the coordinator. Send a message to worker-1 at tcp://{} and worker-2 at tcp://{} saying 'Start working!' using send_message tool for each.",
+            "You are the coordinator. Send a message to worker-1 at tcp://{} and worker-2 at tcp://{} saying 'Start working!' using send tool for each.",
             instance_b.tcp_addr(),
             instance_c.tcp_addr()
         ))

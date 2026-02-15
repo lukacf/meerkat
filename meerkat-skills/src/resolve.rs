@@ -21,6 +21,20 @@ pub async fn resolve_repositories(
     config: &SkillsConfig,
     project_root: Option<&Path>,
 ) -> Result<Option<Arc<dyn SkillSource>>, SkillError> {
+    let user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    resolve_repositories_with_roots(config, project_root, user_root.as_deref(), project_root).await
+}
+
+/// Resolve repositories with explicit convention roots.
+///
+/// Precedence for default filesystem sources:
+/// context root (project) > user root > embedded.
+pub async fn resolve_repositories_with_roots(
+    config: &SkillsConfig,
+    context_root: Option<&Path>,
+    user_root: Option<&Path>,
+    cache_root: Option<&Path>,
+) -> Result<Option<Arc<dyn SkillSource>>, SkillError> {
     if !config.enabled {
         return Ok(None);
     }
@@ -28,21 +42,21 @@ pub async fn resolve_repositories(
     let mut sources: Vec<NamedSource> = Vec::new();
 
     if config.repositories.is_empty() {
-        // Default chain: project FS → user FS → embedded
-        let root = project_root.unwrap_or_else(|| Path::new("."));
-        sources.push(NamedSource {
-            name: "project".into(),
-            source: Box::new(FilesystemSkillSource::new(
-                root.join(".rkat/skills"),
-                SkillScope::Project,
-            )),
-        });
-
-        if let Some(home) = std::env::var_os("HOME") {
+        // Explicit default chain: context FS -> user FS.
+        if let Some(root) = context_root {
+            sources.push(NamedSource {
+                name: "project".into(),
+                source: Box::new(FilesystemSkillSource::new(
+                    root.join(".rkat/skills"),
+                    SkillScope::Project,
+                )),
+            });
+        }
+        if let Some(user) = user_root {
             sources.push(NamedSource {
                 name: "user".into(),
                 source: Box::new(FilesystemSkillSource::new(
-                    std::path::PathBuf::from(home).join(".rkat/skills"),
+                    user.join(".rkat/skills"),
                     SkillScope::User,
                 )),
             });
@@ -52,8 +66,11 @@ pub async fn resolve_repositories(
         for repo in &config.repositories {
             match &repo.transport {
                 SkillRepoTransport::Filesystem { path } => {
+                    let resolution_root = context_root
+                        .or(cache_root)
+                        .unwrap_or_else(|| Path::new("."));
                     let full_path = if Path::new(path).is_relative() {
-                        project_root.unwrap_or_else(|| Path::new(".")).join(path)
+                        resolution_root.join(path)
                     } else {
                         path.into()
                     };
@@ -130,7 +147,8 @@ pub async fn resolve_repositories(
                     };
 
                     // Derive cache dir from repo URL hash
-                    let cache_dir = project_root
+                    let cache_dir = cache_root
+                        .or(context_root)
                         .unwrap_or_else(|| Path::new("."))
                         .join(".rkat/skill-repos")
                         .join(sanitize_repo_name(url));
@@ -403,5 +421,68 @@ mod tests {
         let shared = skills.iter().find(|s| s.id.0 == "shared-skill").unwrap();
         assert_eq!(shared.description, "From first source");
         assert_eq!(shared.source_name, "first");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_with_explicit_roots_context_over_user() {
+        let tmp = TempDir::new().unwrap();
+        let context_root = tmp.path().join("context");
+        let user_root = tmp.path().join("user");
+        tokio::fs::create_dir_all(context_root.join(".rkat/skills/shared-skill"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(user_root.join(".rkat/skills/shared-skill"))
+            .await
+            .unwrap();
+
+        tokio::fs::write(
+            context_root.join(".rkat/skills/shared-skill/SKILL.md"),
+            "---\nname: shared-skill\ndescription: context description\n---\n\nContext.",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            user_root.join(".rkat/skills/shared-skill/SKILL.md"),
+            "---\nname: shared-skill\ndescription: user description\n---\n\nUser.",
+        )
+        .await
+        .unwrap();
+
+        let source = resolve_repositories_with_roots(
+            &SkillsConfig::default(),
+            Some(&context_root),
+            Some(&user_root),
+            Some(tmp.path()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let skills = source.list(&SkillFilter::default()).await.unwrap();
+        let shared = skills.iter().find(|s| s.id.0 == "shared-skill").unwrap();
+        assert_eq!(shared.description, "context description");
+        assert_eq!(shared.source_name, "project");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_with_no_roots_skips_filesystem_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let context_root = tmp.path().join("context");
+        tokio::fs::create_dir_all(context_root.join(".rkat/skills/ambient-skill"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            context_root.join(".rkat/skills/ambient-skill/SKILL.md"),
+            "---\nname: ambient-skill\ndescription: ambient\n---\n\nAmbient.",
+        )
+        .await
+        .unwrap();
+
+        let source = resolve_repositories_with_roots(&SkillsConfig::default(), None, None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let skills = source.list(&SkillFilter::default()).await.unwrap();
+        assert!(skills.iter().all(|s| s.id.0 != "ambient-skill"));
     }
 }

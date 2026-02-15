@@ -1,8 +1,27 @@
 ---
 title: "CLI configuration"
-description: "Environment variables, config files, MCP configuration, and exit codes for the rkat CLI."
+description: "Realm selection, storage behavior, environment variables, MCP config, and exit codes for rkat."
 icon: "sliders"
 ---
+
+## Global runtime scope flags
+
+All CLI commands accept realm scope flags:
+
+- `--realm <id>`
+- `--instance <id>`
+- `--realm-backend <redb|jsonl>` (creation hint only)
+
+These flags decide which realm config/session state is used.
+
+## Default realm behavior
+
+| Command surface | Default when `--realm` is omitted |
+|----------------|------------------------------------|
+| `rkat run`, `rkat resume`, `rkat sessions ...` | Workspace-derived stable realm (`ws-...`) |
+| `rkat-rpc` | New opaque realm (`realm-...`) |
+
+If you want CLI + RPC to share the same state, pass the same explicit `--realm` to both.
 
 ## Environment variables
 
@@ -12,88 +31,48 @@ Required API keys (at least one):
 |----------|----------|
 | `ANTHROPIC_API_KEY` | Anthropic Claude |
 | `OPENAI_API_KEY` | OpenAI GPT |
-| `GOOGLE_API_KEY` | Google Gemini |
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Google Gemini |
 
-See [providers](/concepts/providers) for the full list of environment variables and `RKAT_*` overrides.
+See [providers](/concepts/providers) for full key precedence (`RKAT_*` variants included).
 
 ## Config files
+
+Canonical runtime config for CLI commands is realm-scoped (`<realm>/config.toml` under platform data dir).
+
+Compatibility files still exist:
 
 | Scope | Path |
 |-------|------|
 | User | `~/.rkat/config.toml` |
 | Project | `.rkat/config.toml` |
 
-Project config overrides user config. CLI flags override both.
+These are useful for templates (`rkat init`) and compatibility workflows, but realm config is the runtime source of truth for CLI/RPC/REST/MCP surfaces.
 
-**Precedence:** defaults &rarr; user config &rarr; project config &rarr; env vars &rarr; CLI flags.
+## Session storage layout
 
-<Accordion title="Example config.toml">
-```toml
-[agent]
-model = "claude-opus-4-6"
-max_tokens_per_turn = 8192
+Realm storage lives under platform data dir:
 
-[budget]
-max_tokens = 50000
-max_duration = "5m"
+- macOS: `~/Library/Application Support/meerkat/realms/<realm>/`
+- Linux: `~/.local/share/meerkat/realms/<realm>/`
+- Windows: `%APPDATA%\meerkat\realms\<realm>\`
 
-[shell]
-program = "bash"
-timeout_secs = 30
-```
-</Accordion>
+Important files:
+
+- `realm_manifest.json` (backend pinning)
+- `config.toml` (realm config)
+- `sessions.redb` (when backend is redb)
+- `sessions_jsonl/` (when backend is jsonl)
 
 ## MCP configuration
 
-MCP servers are configured in TOML files:
+MCP servers are configured separately from realm runtime state:
 
 | Scope | Path |
 |-------|------|
 | User | `~/.rkat/mcp.toml` |
 | Project | `.rkat/mcp.toml` |
 
-Project servers take precedence over user servers with the same name.
-
-<Accordion title="Example mcp.toml">
-```toml
-# Stdio server (local process)
-[[servers]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
-
-# Stdio server with environment variables
-[[servers]]
-name = "database"
-command = "python"
-args = ["-m", "db_mcp_server"]
-env = { DATABASE_URL = "${DATABASE_URL}" }
-
-# HTTP server (streamable HTTP - default for URLs)
-[[servers]]
-name = "remote-api"
-url = "https://mcp.example.com/api"
-headers = { Authorization = "Bearer ${MCP_API_TOKEN}" }
-
-# Legacy SSE server
-[[servers]]
-name = "legacy-sse"
-url = "https://old.example.com/sse"
-transport = "sse"
-```
-
-Environment variable expansion is supported using `${VAR_NAME}` syntax.
-</Accordion>
-
-## Session storage
-
-Sessions are stored in the user's data directory:
-
-| Platform | Path |
-|----------|------|
-| macOS | `~/Library/Application Support/meerkat/sessions/` |
-| Linux | `~/.local/share/meerkat/sessions/` |
-| Windows | `%APPDATA%\meerkat\sessions\` |
+Project servers override user servers with the same name.
 
 ## Exit codes
 
@@ -115,6 +94,6 @@ Sessions are stored in the user's data directory:
 
 ## See also
 
-- [CLI commands](/cli/commands) - command reference
-- [Configuration](/concepts/configuration) - full configuration reference
-- [Providers](/concepts/providers) - provider setup and model tables
+- [Realms](/concepts/realms)
+- [CLI commands](/cli/commands)
+- [Configuration](/concepts/configuration)

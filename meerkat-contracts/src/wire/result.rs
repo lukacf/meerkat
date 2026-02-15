@@ -9,6 +9,8 @@ use meerkat_core::{RunResult, SchemaWarning, SessionId};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireRunResult {
     pub session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
     pub text: String,
     pub turns: u32,
     pub tool_calls: u32,
@@ -23,6 +25,7 @@ impl From<RunResult> for WireRunResult {
     fn from(r: RunResult) -> Self {
         Self {
             session_id: r.session_id,
+            session_ref: None,
             text: r.text,
             turns: r.turns,
             tool_calls: r.tool_calls,

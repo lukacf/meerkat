@@ -1,8 +1,10 @@
 /**
- * Meerkat client — spawns rkat rpc subprocess and communicates via JSON-RPC.
+ * Meerkat client — spawns rkat-rpc subprocess and communicates via JSON-RPC.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import { MeerkatError } from "./generated/errors.js";
 import type {
@@ -28,12 +30,123 @@ export class MeerkatClient {
     { resolve: (value: unknown) => void; reject: (reason: unknown) => void }
   >();
 
-  constructor(rkatPath = "rkat") {
+  constructor(rkatPath = "rkat-rpc") {
     this.rkatPath = rkatPath;
   }
 
-  async connect(): Promise<this> {
-    this.process = spawn(this.rkatPath, ["rpc"], {
+  private static commandExists(command: string): boolean {
+    if (path.isAbsolute(command) || command.includes(path.sep)) {
+      return existsSync(command);
+    }
+
+    const pathEnv = process.env.PATH ?? "";
+    if (!pathEnv) return false;
+
+    const exts =
+      process.platform === "win32"
+        ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM")
+            .split(";")
+            .filter((ext: string) => ext.length > 0)
+        : [""];
+
+    for (const dir of pathEnv.split(path.delimiter)) {
+      if (!dir) continue;
+      for (const ext of exts) {
+        const candidate =
+          process.platform === "win32" &&
+          ext &&
+          !command.toLowerCase().endsWith(ext.toLowerCase())
+            ? `${command}${ext}`
+            : command;
+        if (existsSync(path.join(dir, candidate))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  async connect(options?: {
+    realmId?: string;
+    instanceId?: string;
+    realmBackend?: "jsonl" | "redb";
+    isolated?: boolean;
+    stateRoot?: string;
+    contextRoot?: string;
+    userConfigRoot?: string;
+  }): Promise<this> {
+    if (options?.realmId && options?.isolated) {
+      throw new MeerkatError(
+        "INVALID_ARGS",
+        "realmId and isolated cannot both be set",
+      );
+    }
+    const args: string[] = [];
+    if (options?.isolated) {
+      args.push("--isolated");
+    }
+    if (options?.realmId) {
+      args.push("--realm", options.realmId);
+    }
+    if (options?.instanceId) {
+      args.push("--instance", options.instanceId);
+    }
+    if (options?.realmBackend) {
+      args.push("--realm-backend", options.realmBackend);
+    }
+    if (options?.stateRoot) {
+      args.push("--state-root", options.stateRoot);
+    }
+    if (options?.contextRoot) {
+      args.push("--context-root", options.contextRoot);
+    }
+    if (options?.userConfigRoot) {
+      args.push("--user-config-root", options.userConfigRoot);
+    }
+    const legacyRequiresNewBinary = Boolean(
+      options?.isolated ||
+        options?.realmId ||
+        options?.instanceId ||
+        options?.realmBackend ||
+        options?.stateRoot ||
+        options?.contextRoot ||
+        options?.userConfigRoot,
+    );
+    let command = this.rkatPath;
+    if (this.rkatPath === "rkat-rpc") {
+      if (!MeerkatClient.commandExists("rkat-rpc")) {
+        if (MeerkatClient.commandExists("rkat")) {
+          if (legacyRequiresNewBinary) {
+            throw new MeerkatError(
+              "LEGACY_BINARY_UNSUPPORTED",
+              "Realm/context options require the standalone rkat-rpc binary. Install rkat-rpc and retry.",
+            );
+          }
+          command = "rkat";
+          args.push("rpc");
+        } else {
+          throw new MeerkatError(
+            "BINARY_NOT_FOUND",
+            "rkat-rpc binary not found on PATH. Install rkat-rpc or set rkatPath explicitly.",
+          );
+        }
+      }
+    } else if (this.rkatPath === "rkat") {
+      if (legacyRequiresNewBinary) {
+        throw new MeerkatError(
+          "LEGACY_BINARY_UNSUPPORTED",
+          "Realm/context options require the standalone rkat-rpc binary. Install rkat-rpc and retry.",
+        );
+      }
+      args.push("rpc");
+    } else if (!MeerkatClient.commandExists(this.rkatPath)) {
+      throw new MeerkatError(
+        "BINARY_NOT_FOUND",
+        `rkat-rpc binary not found at '${this.rkatPath}'. Ensure it is installed and on your PATH.`,
+      );
+    }
+
+    this.process = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -317,6 +430,8 @@ export class MeerkatClient {
     const usage = data.usage as Record<string, unknown> | undefined;
     return {
       session_id: String(data.session_id ?? ""),
+      session_ref:
+        data.session_ref == null ? undefined : String(data.session_ref),
       text: String(data.text ?? ""),
       turns: Number(data.turns ?? 0),
       tool_calls: Number(data.tool_calls ?? 0),

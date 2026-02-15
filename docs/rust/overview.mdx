@@ -11,7 +11,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 | Area | Method / Type | Purpose |
 |------|---------------|---------|
 | **Setup** | `Config::load()` | Load configuration from disk |
-| | `AgentFactory::new(cwd)` | Create a factory for building agents |
+| | `AgentFactory::new(store_root)` | Create a factory for building agents |
 | | `build_ephemeral_service(factory, config, cap)` | Build an in-memory session service |
 | **Sessions** | `service.create_session(req)` | Create a session and run the first turn |
 | | `service.start_turn(id, req)` | Continue an existing session |
@@ -75,11 +75,13 @@ The recommended entry point is `SessionService` via `build_ephemeral_service`:
 ```rust
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat::service::{CreateSessionRequest, SessionService};
+use meerkat_store;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load().await?;
-    let factory = AgentFactory::new(std::env::current_dir()?);
+    let realm = meerkat_store::realm_paths("team-alpha");
+    let factory = AgentFactory::new(realm.root.clone()).runtime_root(realm.root);
     let service = build_ephemeral_service(factory, config, 64);
 
     let result = service.create_session(CreateSessionRequest {

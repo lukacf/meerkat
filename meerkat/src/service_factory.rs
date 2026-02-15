@@ -11,11 +11,11 @@ use meerkat_core::comms::{
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError};
 use meerkat_core::types::{RunResult, SessionId};
-use meerkat_core::{Config, Session};
+use meerkat_core::{Config, ConfigStore, Session};
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 use crate::{AgentBuildConfig, AgentFactory, DynAgent};
 use meerkat_client::LlmClient;
@@ -138,20 +138,12 @@ impl SessionAgent for FactoryAgent {
 }
 
 /// Implements [`SessionAgentBuilder`] by delegating to [`AgentFactory::build_agent()`].
-///
-/// Surfaces pass a full `AgentBuildConfig` via the `build_config_slot` before
-/// calling `SessionService::create_session()`. The builder picks it up and
-/// uses it to construct the agent.
-///
-/// If no config is staged, a minimal config is built from the
-/// `CreateSessionRequest` fields.
 pub struct FactoryAgentBuilder {
     factory: AgentFactory,
-    config: Config,
+    config_snapshot: Config,
+    config_store: Option<Arc<dyn ConfigStore>>,
     /// Optional default LLM client injected into all builds (for testing).
     pub default_llm_client: Option<Arc<dyn LlmClient>>,
-    /// Slot for passing a full `AgentBuildConfig` from the surface to the builder.
-    pub build_config_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
 }
 
 impl FactoryAgentBuilder {
@@ -159,16 +151,38 @@ impl FactoryAgentBuilder {
     pub fn new(factory: AgentFactory, config: Config) -> Self {
         Self {
             factory,
-            config,
+            config_snapshot: config,
+            config_store: None,
             default_llm_client: None,
-            build_config_slot: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Stage a build config for the next `build_agent` call.
-    pub async fn stage_config(&self, config: AgentBuildConfig) {
-        let mut slot = self.build_config_slot.lock().await;
-        *slot = Some(config);
+    /// Create a new builder that resolves config from a store on each build.
+    ///
+    /// If the store read fails, the builder falls back to `initial_config`.
+    pub fn new_with_config_store(
+        factory: AgentFactory,
+        initial_config: Config,
+        config_store: Arc<dyn ConfigStore>,
+    ) -> Self {
+        Self {
+            factory,
+            config_snapshot: initial_config,
+            config_store: Some(config_store),
+            default_llm_client: None,
+        }
+    }
+
+    async fn resolve_config(&self) -> Config {
+        if let Some(store) = &self.config_store {
+            match store.get().await {
+                Ok(config) => return config,
+                Err(err) => {
+                    tracing::warn!("Failed to read latest config from store: {err}");
+                }
+            }
+        }
+        self.config_snapshot.clone()
     }
 
     /// Get a reference to the factory.
@@ -178,7 +192,7 @@ impl FactoryAgentBuilder {
 
     /// Get a reference to the config.
     pub fn config(&self) -> &Config {
-        &self.config
+        &self.config_snapshot
     }
 }
 
@@ -191,20 +205,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         req: &CreateSessionRequest,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<FactoryAgent, SessionError> {
-        // If a full build config was staged, use it.
-        // Otherwise construct a minimal one from the request.
-        let mut build_config = {
-            let mut slot = self.build_config_slot.lock().await;
-            slot.take().unwrap_or_else(|| {
-                let mut bc = AgentBuildConfig::new(req.model.clone());
-                bc.system_prompt = req.system_prompt.clone();
-                bc.max_tokens = req.max_tokens;
-                bc
-            })
-        };
-
-        // Wire the event channel.
-        build_config.event_tx = Some(event_tx);
+        let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx);
 
         // Inject default LLM client if none provided.
         if build_config.llm_client_override.is_none() {
@@ -213,9 +214,11 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             }
         }
 
+        let config = self.resolve_config().await;
+
         let agent = self
             .factory
-            .build_agent(build_config, &self.config)
+            .build_agent(build_config, &config)
             .await
             .map_err(|e| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -257,10 +260,20 @@ mod tests {
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
     use meerkat_core::Config;
     use meerkat_core::comms::{InputSource, InputStreamMode};
+    use meerkat_core::service::SessionBuildOptions;
+    use meerkat_session::ephemeral::SessionAgent;
     use std::pin::Pin;
     use tempfile::TempDir;
 
-    struct MockLlmClient;
+    struct MockLlmClient {
+        delta: &'static str,
+    }
+
+    impl Default for MockLlmClient {
+        fn default() -> Self {
+            Self { delta: "ok" }
+        }
+    }
 
     #[async_trait]
     impl LlmClient for MockLlmClient {
@@ -272,7 +285,7 @@ mod tests {
         > {
             Box::pin(stream::iter(vec![
                 Ok(LlmEvent::TextDelta {
-                    delta: "ok".to_string(),
+                    delta: self.delta.to_string(),
                     meta: None,
                 }),
                 Ok(LlmEvent::Done {
@@ -297,7 +310,7 @@ mod tests {
         mut build_config: AgentBuildConfig,
     ) -> Result<FactoryAgent, String> {
         let factory = AgentFactory::new(temp.path().join("sessions"));
-        build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+        build_config.llm_client_override = Some(Arc::new(MockLlmClient::default()));
         let agent = factory
             .build_agent(build_config, &Config::default())
             .await
@@ -390,6 +403,44 @@ mod tests {
             "comms runtime should be configured but no trusted peers are registered"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_session_llm_override_is_applied_end_to_end() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient { delta: "default" }));
+
+        let build = SessionBuildOptions {
+            llm_client_override: Some(crate::encode_llm_client_override_for_service(Arc::new(
+                MockLlmClient { delta: "override" },
+            ))),
+            ..SessionBuildOptions::default()
+        };
+        let req = CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "ignored".to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            host_mode: false,
+            skill_references: None,
+            build: Some(build),
+        };
+
+        let (build_event_tx, _build_event_rx) = mpsc::channel(8);
+        let mut agent = builder
+            .build_agent(&req, build_event_tx)
+            .await
+            .map_err(|err| format!("{err}"))?;
+
+        let (run_event_tx, _run_event_rx) = mpsc::channel(8);
+        let result = SessionAgent::run_with_events(&mut agent, "hello".to_string(), run_event_tx)
+            .await
+            .map_err(|err| format!("{err}"))?;
+        assert_eq!(result.text, "override");
         Ok(())
     }
 }

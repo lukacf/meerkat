@@ -5,6 +5,7 @@
 pub mod adapter;
 mod error;
 pub mod index;
+pub mod realm;
 
 #[cfg(feature = "jsonl")]
 pub mod jsonl;
@@ -17,6 +18,14 @@ pub mod redb_store;
 pub use adapter::StoreAdapter;
 pub use error::StoreError;
 pub use index::SessionIndex;
+pub use realm::{
+    REALM_LEASE_HEARTBEAT_SECS, REALM_LEASE_STALE_TTL_SECS, RealmBackend, RealmLeaseGuard,
+    RealmLeaseRecord, RealmLeaseStatus, RealmManifest, RealmManifestEntry, RealmOrigin, RealmPaths,
+    derive_workspace_realm_id, ensure_realm_manifest, ensure_realm_manifest_in, fnv1a64_hex,
+    generate_realm_id, inspect_realm_leases, inspect_realm_leases_in, list_realm_manifests_in,
+    open_realm_session_store, open_realm_session_store_in, realm_lease_dir, realm_paths,
+    realm_paths_in, sanitize_realm_id, start_realm_lease, start_realm_lease_in,
+};
 pub use redb_store::RedbSessionStore;
 
 use async_trait::async_trait;
@@ -62,95 +71,3 @@ pub use jsonl::JsonlStore;
 
 #[cfg(feature = "memory")]
 pub use memory::MemoryStore;
-
-/// Resolve the session store path from config, with sensible fallbacks.
-///
-/// Precedence: `config.store.sessions_path` > `config.storage.directory` > platform data dir.
-pub fn resolve_store_path(config: &meerkat_core::Config) -> std::path::PathBuf {
-    config
-        .store
-        .sessions_path
-        .clone()
-        .or_else(|| config.storage.directory.clone())
-        .unwrap_or_else(|| {
-            dirs::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("meerkat")
-                .join("sessions")
-        })
-}
-
-/// Resolve the database directory from config, with sensible fallbacks.
-///
-/// Precedence: `store.database_dir` > `storage.directory/db` > platform data dir.
-pub fn resolve_database_dir(config: &meerkat_core::Config) -> std::path::PathBuf {
-    config
-        .store
-        .database_dir
-        .clone()
-        .or_else(|| config.storage.directory.as_ref().map(|d| d.join("db")))
-        .unwrap_or_else(|| {
-            dirs::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("meerkat")
-                .join("db")
-        })
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use meerkat_core::Config;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_resolve_database_dir_explicit() {
-        let mut config = Config::default();
-        config.store.database_dir = Some(PathBuf::from("/explicit/db"));
-        assert_eq!(resolve_database_dir(&config), PathBuf::from("/explicit/db"));
-    }
-
-    #[test]
-    fn test_resolve_database_dir_from_storage_directory() {
-        let mut config = Config::default();
-        config.storage.directory = Some(PathBuf::from("/data/meerkat"));
-        assert_eq!(
-            resolve_database_dir(&config),
-            PathBuf::from("/data/meerkat/db")
-        );
-    }
-
-    #[test]
-    fn test_resolve_database_dir_explicit_overrides_storage_directory() {
-        let mut config = Config::default();
-        config.store.database_dir = Some(PathBuf::from("/explicit/db"));
-        config.storage.directory = Some(PathBuf::from("/data/meerkat"));
-        assert_eq!(resolve_database_dir(&config), PathBuf::from("/explicit/db"));
-    }
-
-    #[test]
-    fn test_resolve_database_dir_platform_default() {
-        let config = Config::default();
-        let result = resolve_database_dir(&config);
-        // Falls through to platform data dir or "." fallback.
-        assert!(result.ends_with("db"), "expected path ending in 'db', got: {result:?}");
-    }
-
-    #[test]
-    fn test_store_config_database_dir_serde_roundtrip() {
-        let mut config = Config::default();
-        config.store.database_dir = Some(PathBuf::from("/test/db"));
-        let serialized = toml::to_string(&config).unwrap();
-        let deserialized: Config = toml::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.store.database_dir, Some(PathBuf::from("/test/db")));
-    }
-
-    #[test]
-    fn test_store_config_backward_compat_without_database_dir() {
-        // Config TOML without database_dir should deserialize with None.
-        let toml_str = "[store]\n";
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.store.database_dir, None);
-    }
-}

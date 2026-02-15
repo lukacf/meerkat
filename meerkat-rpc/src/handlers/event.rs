@@ -7,7 +7,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
-use super::parse_params;
+use super::{parse_params, parse_session_id_for_runtime};
 
 /// Parameters for `event/push`.
 #[derive(Deserialize)]
@@ -31,15 +31,9 @@ pub async fn handle_push(
         Err(resp) => return resp,
     };
 
-    let session_id = match meerkat_core::SessionId::parse(&params.session_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("Invalid session ID: {}", params.session_id),
-            );
-        }
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
+        Ok(sid) => sid,
+        Err(resp) => return resp,
     };
 
     // Build the event body. Don't add an [EVENT ...] prefix here —

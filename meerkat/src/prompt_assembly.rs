@@ -11,6 +11,7 @@
 //! 6. Dispatcher-provided tool usage instructions (appended last).
 
 use meerkat_core::{Config, SystemPromptConfig};
+use std::path::Path;
 
 /// Assemble the final system prompt. Single canonical path.
 ///
@@ -20,6 +21,7 @@ use meerkat_core::{Config, SystemPromptConfig};
 pub async fn assemble_system_prompt(
     config: &Config,
     per_request_prompt: Option<&str>,
+    context_root: Option<&Path>,
     extra_sections: &[&str],
     tool_usage_instructions: &str,
 ) -> String {
@@ -49,6 +51,19 @@ pub async fn assemble_system_prompt(
         if let Some(ref prompt) = config.agent.system_prompt {
             spc.system_prompt = Some(prompt.clone());
         }
+    }
+
+    // AGENTS.md is resolved only from explicit context roots.
+    if let Some(context) = context_root {
+        if let Some(project_agents) = meerkat_core::prompt::find_project_agents_md_in(context) {
+            spc = spc.with_project_agents_md(project_agents);
+        } else {
+            spc = spc.with_project_agents_md(context.join("AGENTS.md"));
+        }
+        // Disable global AGENTS.md lookup.
+        spc = spc.with_global_agents_md(context.join(".rkat/__disabled_global_agents__.md"));
+    } else {
+        spc = spc.without_agents_md();
     }
 
     // 4. compose() uses the override if set, otherwise DEFAULT_SYSTEM_PROMPT.
@@ -115,7 +130,8 @@ mod tests {
     #[tokio::test]
     async fn test_per_request_override_wins() {
         let config = default_config();
-        let result = assemble_system_prompt(&config, Some("Per-request prompt"), &[], "").await;
+        let result =
+            assemble_system_prompt(&config, Some("Per-request prompt"), None, &[], "").await;
         assert_eq!(result, "Per-request prompt");
     }
 
@@ -125,7 +141,8 @@ mod tests {
         config.agent.system_prompt = Some("Config inline prompt".to_string());
         config.agent.tool_instructions = Some("Config tool instructions".to_string());
 
-        let result = assemble_system_prompt(&config, Some("Per-request prompt"), &[], "").await;
+        let result =
+            assemble_system_prompt(&config, Some("Per-request prompt"), None, &[], "").await;
         // Per-request override skips config.agent.system_prompt and tool_instructions
         assert_eq!(result, "Per-request prompt");
         assert!(!result.contains("Config inline"));
@@ -138,6 +155,7 @@ mod tests {
         let result = assemble_system_prompt(
             &config,
             Some("Per-request prompt"),
+            None,
             &[],
             "Dispatcher tool instructions",
         )
@@ -159,7 +177,7 @@ mod tests {
         let mut config = default_config();
         config.agent.system_prompt_file = Some(file_path);
 
-        let result = assemble_system_prompt(&config, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "").await;
         assert!(result.contains("File-based prompt"));
         assert!(!result.contains(DEFAULT_SYSTEM_PROMPT));
     }
@@ -176,7 +194,7 @@ mod tests {
         config.agent.system_prompt_file = Some(file_path);
         config.agent.system_prompt = Some("Inline prompt".to_string());
 
-        let result = assemble_system_prompt(&config, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "").await;
         assert!(result.contains("File-based prompt"));
         assert!(!result.contains("Inline prompt"));
     }
@@ -187,7 +205,7 @@ mod tests {
         config.agent.system_prompt_file = Some(PathBuf::from("/nonexistent/path/prompt.txt"));
         config.agent.system_prompt = Some("Inline fallback".to_string());
 
-        let result = assemble_system_prompt(&config, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "").await;
         // File unreadable → falls through to inline
         assert!(result.contains("Inline fallback"));
     }
@@ -199,7 +217,7 @@ mod tests {
         let mut config = default_config();
         config.agent.system_prompt = Some("Inline prompt".to_string());
 
-        let result = assemble_system_prompt(&config, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "").await;
         assert!(result.contains("Inline prompt"));
         assert!(!result.contains(DEFAULT_SYSTEM_PROMPT));
     }
@@ -209,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn test_default_prompt_when_no_overrides() {
         let config = default_config();
-        let result = assemble_system_prompt(&config, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "").await;
         assert!(result.contains(DEFAULT_SYSTEM_PROMPT));
     }
 
@@ -220,7 +238,7 @@ mod tests {
         let mut config = default_config();
         config.agent.tool_instructions = Some("Use tools carefully".to_string());
 
-        let result = assemble_system_prompt(&config, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "").await;
         assert!(result.contains("Use tools carefully"));
     }
 
@@ -229,7 +247,7 @@ mod tests {
         let mut config = default_config();
         config.agent.tool_instructions = Some("Config tools".to_string());
 
-        let result = assemble_system_prompt(&config, None, &[], "Dispatcher tools").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "Dispatcher tools").await;
         let config_pos = result.find("Config tools").unwrap();
         let dispatcher_pos = result.find("Dispatcher tools").unwrap();
         assert!(
@@ -244,7 +262,7 @@ mod tests {
     async fn test_dispatcher_tool_instructions_appended() {
         let config = default_config();
         let result =
-            assemble_system_prompt(&config, None, &[], "Dispatcher tool instructions").await;
+            assemble_system_prompt(&config, None, None, &[], "Dispatcher tool instructions").await;
         assert!(result.contains("Dispatcher tool instructions"));
     }
 
@@ -255,6 +273,7 @@ mod tests {
         let config = default_config();
         let result = assemble_system_prompt(
             &config,
+            None,
             None,
             &["## Available Skills\n- /task-workflow"],
             "",
@@ -270,7 +289,8 @@ mod tests {
         config.agent.tool_instructions = Some("Config tools".to_string());
 
         let result =
-            assemble_system_prompt(&config, None, &["Skills section"], "Dispatcher tools").await;
+            assemble_system_prompt(&config, None, None, &["Skills section"], "Dispatcher tools")
+                .await;
         let skills_pos = result.find("Skills section").unwrap();
         let config_tools_pos = result.find("Config tools").unwrap();
         let dispatcher_pos = result.find("Dispatcher tools").unwrap();
@@ -281,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_extra_sections_no_double_newlines() {
         let config = default_config();
-        let result = assemble_system_prompt(&config, None, &["", ""], "").await;
+        let result = assemble_system_prompt(&config, None, None, &["", ""], "").await;
         // Should not have extra blank sections
         assert!(!result.contains("\n\n\n\n"));
     }
@@ -294,8 +314,14 @@ mod tests {
         config.agent.system_prompt = Some("Inline base".to_string());
         config.agent.tool_instructions = Some("Config tools".to_string());
 
-        let result =
-            assemble_system_prompt(&config, None, &["Skills inventory"], "Dispatcher tools").await;
+        let result = assemble_system_prompt(
+            &config,
+            None,
+            None,
+            &["Skills inventory"],
+            "Dispatcher tools",
+        )
+        .await;
 
         assert!(result.contains("Inline base"));
         assert!(result.contains("Skills inventory"));

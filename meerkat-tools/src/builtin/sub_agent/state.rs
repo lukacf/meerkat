@@ -546,6 +546,7 @@ mod tests {
             parent_pubkey: [42u8; 32],
             parent_addr: "tcp://127.0.0.1:4200".to_string(),
             comms_base_dir: PathBuf::from("/tmp/comms"),
+            inproc_namespace: None,
         };
 
         let parent_trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
@@ -600,6 +601,7 @@ mod tests {
             parent_pubkey: [1u8; 32],
             parent_addr: "uds:///tmp/orchestrator.sock".to_string(),
             comms_base_dir: PathBuf::from("/tmp/agents"),
+            inproc_namespace: None,
         };
 
         let parent_trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
@@ -688,6 +690,7 @@ mod tests {
             parent_pubkey: [1u8; 32],
             parent_addr: "tcp://127.0.0.1:4200".to_string(),
             comms_base_dir: PathBuf::from("/tmp/comms"),
+            inproc_namespace: None,
         };
 
         let state = SubAgentToolState::with_comms(

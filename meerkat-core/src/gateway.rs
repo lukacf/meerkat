@@ -450,7 +450,7 @@ mod tests {
         let base = Arc::new(MockDispatcher::new("base", &["task_create", "task_list"]));
         let overlay = Arc::new(MockDispatcher::new(
             "comms",
-            &["send_message", "list_peers"],
+            &["send", "peers"],
         ));
 
         let gateway = ToolGateway::new(base, Some(overlay)).unwrap();
@@ -460,8 +460,8 @@ mod tests {
         assert_eq!(tool_names.len(), 4);
         assert!(tool_names.contains(&"task_create"));
         assert!(tool_names.contains(&"task_list"));
-        assert!(tool_names.contains(&"send_message"));
-        assert!(tool_names.contains(&"list_peers"));
+        assert!(tool_names.contains(&"send"));
+        assert!(tool_names.contains(&"peers"));
     }
 
     #[test]
@@ -477,25 +477,25 @@ mod tests {
     fn test_gateway_collision_error() {
         let base = Arc::new(MockDispatcher::new(
             "base",
-            &["task_create", "send_message"],
+            &["task_create", "send"],
         ));
         let overlay = Arc::new(MockDispatcher::new(
             "comms",
-            &["send_message", "list_peers"],
+            &["send", "peers"],
         ));
 
         let result = ToolGateway::new(base, Some(overlay));
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("send_message"));
+        assert!(err.to_string().contains("send"));
         assert!(err.to_string().contains("collision"));
     }
 
     #[tokio::test]
     async fn test_gateway_routes_to_base() {
         let base = Arc::new(MockDispatcher::new("base", &["task_create"]));
-        let overlay = Arc::new(MockDispatcher::new("comms", &["send_message"]));
+        let overlay = Arc::new(MockDispatcher::new("comms", &["send"]));
 
         let gateway = ToolGateway::new(base, Some(overlay)).unwrap();
 
@@ -509,15 +509,15 @@ mod tests {
     #[tokio::test]
     async fn test_gateway_routes_to_overlay() {
         let base = Arc::new(MockDispatcher::new("base", &["task_create"]));
-        let overlay = Arc::new(MockDispatcher::new("comms", &["send_message"]));
+        let overlay = Arc::new(MockDispatcher::new("comms", &["send"]));
 
         let gateway = ToolGateway::new(base, Some(overlay)).unwrap();
 
-        let result = dispatch_json(&gateway, "send_message", json!({}))
+        let result = dispatch_json(&gateway, "send", json!({}))
             .await
             .unwrap();
         assert_eq!(result["source"], "comms");
-        assert_eq!(result["tool"], "send_message");
+        assert_eq!(result["tool"], "send");
     }
 
     #[tokio::test]
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn test_builder_multiple_dispatchers() {
         let base = Arc::new(MockDispatcher::new("base", &["task_create"]));
-        let comms = Arc::new(MockDispatcher::new("comms", &["send_message"]));
+        let comms = Arc::new(MockDispatcher::new("comms", &["send"]));
         let shell = Arc::new(MockDispatcher::new("shell", &["run_command"]));
 
         let gateway = ToolGatewayBuilder::new()
@@ -592,7 +592,7 @@ mod tests {
         let flag_clone = flag.clone();
 
         let base = Arc::new(MockDispatcher::new("base", &["task_create"]));
-        let comms = Arc::new(MockDispatcher::new("comms", &["send_message"]));
+        let comms = Arc::new(MockDispatcher::new("comms", &["send"]));
 
         let gateway = ToolGatewayBuilder::new()
             .add_dispatcher(base)
@@ -628,7 +628,7 @@ mod tests {
         let flag_clone = flag.clone();
 
         let base = Arc::new(MockDispatcher::new("base", &["task_create"]));
-        let comms = Arc::new(MockDispatcher::new("comms", &["send_message"]));
+        let comms = Arc::new(MockDispatcher::new("comms", &["send"]));
 
         let gateway = ToolGatewayBuilder::new()
             .add_dispatcher(base)
@@ -643,7 +643,7 @@ mod tests {
             .unwrap();
 
         // Try to dispatch unavailable tool
-        let result = dispatch_json(&gateway, "send_message", json!({})).await;
+        let result = dispatch_json(&gateway, "send", json!({})).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, ToolError::Unavailable { .. }));
@@ -651,7 +651,7 @@ mod tests {
 
         // Enable comms
         flag.store(true, Ordering::SeqCst);
-        let result = dispatch_json(&gateway, "send_message", json!({})).await;
+        let result = dispatch_json(&gateway, "send", json!({})).await;
         assert!(result.is_ok());
     }
 
@@ -660,8 +660,8 @@ mod tests {
         // Collision should be detected even if one dispatcher is conditionally hidden
         let flag = Arc::new(AtomicBool::new(false));
 
-        let base = Arc::new(MockDispatcher::new("base", &["send_message"]));
-        let comms = Arc::new(MockDispatcher::new("comms", &["send_message"]));
+        let base = Arc::new(MockDispatcher::new("base", &["send"]));
+        let comms = Arc::new(MockDispatcher::new("comms", &["send"]));
 
         let result = ToolGatewayBuilder::new()
             .add_dispatcher(base)
@@ -698,7 +698,7 @@ mod tests {
         assert_eq!(gateway.tools().len(), 1);
 
         // Some case
-        let overlay = Arc::new(MockDispatcher::new("comms", &["send_message"]));
+        let overlay = Arc::new(MockDispatcher::new("comms", &["send"]));
         let gateway = ToolGatewayBuilder::new()
             .add_dispatcher(base)
             .maybe_add_dispatcher(Some(overlay))
@@ -719,10 +719,10 @@ mod tests {
         let comms = Arc::new(MockDispatcher::new(
             "comms",
             &[
-                "send_message",
+                "send",
                 "send_request",
                 "send_response",
-                "list_peers",
+                "peers",
             ],
         ));
 
@@ -749,10 +749,10 @@ mod tests {
         assert_eq!(tools.len(), 5); // 1 base + 4 comms
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"task_create"));
-        assert!(names.contains(&"send_message"));
+        assert!(names.contains(&"send"));
         assert!(names.contains(&"send_request"));
         assert!(names.contains(&"send_response"));
-        assert!(names.contains(&"list_peers"));
+        assert!(names.contains(&"peers"));
 
         // Disable - ALL comms tools should disappear together
         flag.store(false, Ordering::SeqCst);

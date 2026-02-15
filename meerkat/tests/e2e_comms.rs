@@ -366,9 +366,9 @@ async fn create_agent_pair(
         .model(anthropic_model())
         .max_tokens_per_turn(1024)
         .system_prompt(
-            "You are Agent A. You can communicate with Agent B using the send_message tool. \
+            "You are Agent A. You can communicate with Agent B using the send tool. \
              When you receive a message from another agent, acknowledge it and respond appropriately. \
-             Use the list_peers tool to see available peers.",
+             Use the peers tool to see available peers.",
         )
         .build(llm_adapter_a, tools_a, store_adapter_a)
         .await;
@@ -377,9 +377,9 @@ async fn create_agent_pair(
         .model(anthropic_model())
         .max_tokens_per_turn(1024)
         .system_prompt(
-            "You are Agent B. You can communicate with Agent A using the send_message tool. \
+            "You are Agent B. You can communicate with Agent A using the send tool. \
              When you receive a message from another agent, acknowledge it and respond appropriately. \
-             Use the list_peers tool to see available peers.",
+             Use the peers tool to see available peers.",
         )
         .build(llm_adapter_b, tools_b, store_adapter_b)
         .await;
@@ -729,7 +729,7 @@ mod three_agent_coordination {
             .max_tokens_per_turn(1024)
             .system_prompt(
                 "You are Agent A, the coordinator. You can communicate with Agent B and Agent C. \
-                 Use list_peers to see available peers and send_message to communicate.",
+                 Use peers to see available peers and send to communicate.",
             )
             .build(llm_adapter_a, tools_a, store_adapter_a)
             .await;

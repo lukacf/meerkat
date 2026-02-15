@@ -6,14 +6,67 @@
 //!
 //! - `ANTHROPIC_API_KEY`: Required API key for Anthropic
 
-use meerkat_core::{Config, ProviderConfig};
+use clap::{Parser, ValueEnum};
+use meerkat_core::{Config, ProviderConfig, RealmConfig, RealmSelection, RuntimeBootstrap};
 use meerkat_rest::{AppState, router};
-use std::net::SocketAddr;
+use meerkat_store::RealmBackend;
+use std::{net::SocketAddr, path::PathBuf};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+#[derive(Parser, Debug)]
+#[command(name = "rkat-rest")]
+struct Args {
+    /// Explicit realm ID. Reuse to share state across processes/surfaces.
+    #[arg(long)]
+    realm: Option<String>,
+    /// Start in isolated mode (new generated realm).
+    #[arg(long)]
+    isolated: bool,
+    /// Optional instance ID for this server process.
+    #[arg(long)]
+    instance: Option<String>,
+    /// Realm backend when creating a new realm.
+    #[arg(long, value_enum)]
+    realm_backend: Option<RealmBackendArg>,
+    /// Optional override for realm state root.
+    #[arg(long)]
+    state_root: Option<PathBuf>,
+    /// Optional context root for filesystem conventions.
+    #[arg(long)]
+    context_root: Option<PathBuf>,
+    /// Optional user-level config root for additive conventions.
+    #[arg(long)]
+    user_config_root: Option<PathBuf>,
+    /// Expose resolved filesystem paths in config API responses.
+    #[arg(long, default_value_t = false)]
+    expose_paths: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RealmBackendArg {
+    Jsonl,
+    Redb,
+}
+
+impl From<RealmBackendArg> for RealmBackend {
+    fn from(value: RealmBackendArg) -> Self {
+        match value {
+            RealmBackendArg::Jsonl => RealmBackend::Jsonl,
+            RealmBackendArg::Redb => RealmBackend::Redb,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    let selection = RealmConfig::selection_from_inputs(
+        args.realm.clone(),
+        args.isolated,
+        RealmSelection::Isolated,
+    )?;
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
@@ -24,8 +77,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Build app state
-    let state = AppState::load().await?;
+    let state = AppState::load_with_bootstrap_and_options(
+        RuntimeBootstrap {
+            realm: RealmConfig {
+                selection,
+                instance_id: args.instance,
+                backend_hint: args
+                    .realm_backend
+                    .map(Into::into)
+                    .map(|b: RealmBackend| b.as_str().to_string()),
+                state_root: args.state_root,
+            },
+            context: meerkat_core::ContextConfig {
+                context_root: args.context_root,
+                user_config_root: args.user_config_root,
+            },
+        },
+        args.expose_paths,
+    )
+    .await?;
     tracing::info!(
+        realm_id = %state.realm_id,
+        backend = %state.backend,
         store_path = %state.store_path.display(),
         default_model = %state.default_model,
         max_tokens = state.max_tokens,

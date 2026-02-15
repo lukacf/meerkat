@@ -2607,6 +2607,7 @@ name = "meerkat-mcp-server"
 version = "0.3.2"
 dependencies = [
  "async-trait",
+ "clap",
  "dirs",
  "meerkat",
  "meerkat-client",
@@ -2651,6 +2652,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "clap",
  "dirs",
  "futures",
  "http-body-util",
@@ -2681,18 +2683,21 @@ version = "0.3.2"
 dependencies = [
  "async-stream",
  "async-trait",
+ "clap",
  "futures",
  "indexmap",
  "meerkat",
  "meerkat-client",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-store",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -3461,9 +3466,9 @@ dependencies = [
  "meerkat",
  "meerkat-client",
  "meerkat-comms",
+ "meerkat-contracts",
  "meerkat-core",
  "meerkat-mcp",
- "meerkat-rpc",
  "meerkat-store",
  "meerkat-tools",
  "serde",

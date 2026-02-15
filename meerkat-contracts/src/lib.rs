@@ -6,6 +6,7 @@
 pub mod capability;
 pub mod error;
 pub mod protocol;
+pub mod session_locator;
 pub mod version;
 pub mod wire;
 
@@ -19,6 +20,7 @@ pub use capability::{
 };
 pub use error::{CapabilityHint, ErrorCategory, ErrorCode, WireError};
 pub use protocol::Protocol;
+pub use session_locator::{SessionLocator, SessionLocatorError, format_session_ref};
 pub use version::ContractVersion;
 pub use wire::{
     CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams, WireEvent,

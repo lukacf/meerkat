@@ -45,11 +45,11 @@ This page is a quick-lookup index. For detailed usage with examples, see the [Ru
 
 | Function / Type | Purpose | Detailed docs |
 |-----------------|---------|---------------|
-| `AgentFactory::new(cwd)` | Create a factory for building agents | [Rust SDK](/rust/overview#quick-start) |
+| `AgentFactory::new(store_root)` | Create a factory for building agents | [Rust SDK](/rust/overview#quick-start) |
 | `AgentFactory::session_store(store)` | Override session store (e.g. BigQuery, DynamoDB) | [Rust SDK: custom stores](/rust/tools-and-stores#session-stores) |
 | `build_ephemeral_service(factory, config, cap)` | Build an in-memory session service | [Rust SDK](/rust/overview#sessions) |
 | `meerkat::with_anthropic(key)` | Quick-start builder for Anthropic | [Rust SDK](/rust/overview#quick-start) |
-| `Config::load()` | Load layered configuration from disk | [Configuration](/concepts/configuration) |
+| `Config::load()` | Load layered config (legacy/global-project flow) | [Configuration](/concepts/configuration) |
 
 ## Structured output types
 

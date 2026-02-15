@@ -12,11 +12,16 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[[bin]]
+name = "rkat-rpc"
+path = "src/main.rs"
+
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "jsonl-store", "session-store", "memory-store"] }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
+meerkat-store = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 indexmap = "2"
@@ -25,7 +30,9 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+clap = { workspace = true }
 
 [features]
 default = []

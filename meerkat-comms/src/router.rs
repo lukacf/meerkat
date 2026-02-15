@@ -62,6 +62,7 @@ pub struct Router {
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
+    inproc_namespace: Option<String>,
 }
 
 impl Router {
@@ -78,6 +79,7 @@ impl Router {
             config,
             require_peer_auth,
             inbox_sender,
+            inproc_namespace: None,
         }
     }
 
@@ -94,7 +96,14 @@ impl Router {
             config,
             require_peer_auth,
             inbox_sender,
+            inproc_namespace: None,
         }
+    }
+
+    /// Scope in-process routing to a namespace.
+    pub fn with_inproc_namespace(mut self, namespace: Option<String>) -> Self {
+        self.inproc_namespace = namespace;
+        self
     }
 
     pub fn keypair_arc(&self) -> Arc<Keypair> {
@@ -125,6 +134,7 @@ impl Router {
     }
 
     pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<Uuid, SendError> {
+        let inproc_namespace = self.inproc_namespace.as_deref().unwrap_or("");
         let peer = {
             let peers = self.trusted_peers.read().await;
             peers.get_by_name(peer_name).cloned()
@@ -134,7 +144,7 @@ impl Router {
                 None
             } else {
                 InprocRegistry::global()
-                    .get_by_name(peer_name)
+                    .get_by_name_in_namespace(inproc_namespace, peer_name)
                     .map(|(pubkey, _)| crate::TrustedPeer {
                         name: peer_name.to_string(),
                         pubkey,
@@ -171,7 +181,8 @@ impl Router {
             PeerAddr::Inproc(_) => {
                 let registry = InprocRegistry::global();
                 registry
-                    .send_with_signature(
+                    .send_with_signature_in_namespace(
+                        inproc_namespace,
                         &self.keypair,
                         peer_name,
                         envelope.kind,
@@ -234,11 +245,6 @@ impl Router {
             Ok(sent_id)
         }
     }
-
-    pub async fn send_message(&self, peer_name: &str, body: String) -> Result<Uuid, SendError> {
-        self.send(peer_name, MessageKind::Message { body }).await
-    }
-
     pub async fn send_request(
         &self,
         peer_name: &str,

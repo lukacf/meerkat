@@ -6,6 +6,10 @@ icon: "book"
 
 ## Wire types
 
+<Note>
+`get_config()` / `patch_config()` operate on the RPC config envelope (`config`, `generation`, `realm_id`, `instance_id`, `backend`, `resolved_paths`). `set_config()` currently forwards the payload you provide.
+</Note>
+
 <Accordion title="WireRunResult">
 ```python
 from meerkat import WireRunResult
@@ -207,9 +211,9 @@ from meerkat import MeerkatError, CapabilityUnavailableError, SessionNotFoundErr
 
 | Code | Description |
 |------|-------------|
-| `BINARY_NOT_FOUND` | `rkat` binary not found on PATH |
+| `BINARY_NOT_FOUND` | `rkat-rpc` binary not found on PATH |
 | `NOT_CONNECTED` | Operation attempted before `connect()` |
-| `CONNECTION_CLOSED` | `rkat rpc` process closed unexpectedly |
+| `CONNECTION_CLOSED` | `rkat-rpc` process closed unexpectedly |
 | `VERSION_MISMATCH` | Server contract version incompatible |
 | `CAPABILITY_UNAVAILABLE` | Capability check failed |
 

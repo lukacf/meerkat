@@ -354,14 +354,14 @@ mod tests {
             trusted_peers,
         };
 
-        // Legacy tool names should no longer be recognized
+        // Non-canonical tool names should not be recognized.
         assert!(
-            handle_tools_call(&ctx, "send_message", &json!({}))
+            handle_tools_call(&ctx, "send_request", &json!({}))
                 .await
                 .is_err()
         );
         assert!(
-            handle_tools_call(&ctx, "list_peers", &json!({}))
+            handle_tools_call(&ctx, "peer_list", &json!({}))
                 .await
                 .is_err()
         );

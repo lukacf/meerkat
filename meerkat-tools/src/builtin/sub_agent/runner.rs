@@ -547,6 +547,7 @@ mod tests {
             parent_pubkey: [42u8; 32],
             parent_addr: "uds:///tmp/parent.sock".to_string(),
             comms_base_dir: PathBuf::from("/tmp/comms"),
+            inproc_namespace: None,
         };
 
         let trusted = create_child_trusted_peers(&parent_context);

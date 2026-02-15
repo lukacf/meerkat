@@ -140,6 +140,7 @@ Implement the `SessionStore` trait and pass it to `AgentFactory::session_store()
 use async_trait::async_trait;
 use meerkat::{AgentFactory, SessionStore, SessionFilter, StoreError, Session, SessionId};
 use meerkat_core::SessionMeta;
+use meerkat_store;
 use std::sync::Arc;
 
 struct BigQueryStore { /* your storage backend */ }
@@ -167,7 +168,9 @@ impl SessionStore for BigQueryStore {
 
 // Wire into AgentFactory — all factory features (comms, hooks, skills, etc.) work unchanged
 let store: Arc<dyn SessionStore> = Arc::new(BigQueryStore { /* ... */ });
-let factory = AgentFactory::new(".rkat/sessions")
+let realm = meerkat_store::realm_paths("team-alpha");
+let factory = AgentFactory::new(realm.root.clone())
+    .runtime_root(realm.root)
     .session_store(store)
     .builtins(true)
     .shell(true);

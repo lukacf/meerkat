@@ -195,9 +195,28 @@ impl MethodRouter {
                 let config = self.config_store.get().await.unwrap_or_default();
                 handlers::capabilities::handle_get(id, &config)
             }
-            "config/get" => handlers::config::handle_get(id, &self.config_store).await,
-            "config/set" => handlers::config::handle_set(id, params, &self.config_store).await,
-            "config/patch" => handlers::config::handle_patch(id, params, &self.config_store).await,
+            "config/get" => {
+                handlers::config::handle_get(id, &self.config_store, self.runtime.config_runtime())
+                    .await
+            }
+            "config/set" => {
+                handlers::config::handle_set(
+                    id,
+                    params,
+                    &self.config_store,
+                    self.runtime.config_runtime(),
+                )
+                .await
+            }
+            "config/patch" => {
+                handlers::config::handle_patch(
+                    id,
+                    params,
+                    &self.config_store,
+                    self.runtime.config_runtime(),
+                )
+                .await
+            }
             _ => RpcResponse::error(
                 id,
                 error::METHOD_NOT_FOUND,
@@ -236,15 +255,13 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
-        let session_id = match SessionId::parse(&params.session_id) {
-            Ok(id) => id,
-            Err(_) => {
-                return RpcResponse::error(
-                    id,
-                    error::INVALID_PARAMS,
-                    format!("Invalid session ID: {}", params.session_id),
-                );
-            }
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
         };
 
         let comms = match self.runtime.comms_runtime(&session_id).await {
@@ -441,7 +458,7 @@ mod tests {
     use futures::stream;
     use meerkat::AgentFactory;
     use meerkat_client::{LlmClient, LlmError};
-    use meerkat_core::{Config, MemoryConfigStore, StopReason};
+    use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, StopReason};
     use serde::Serialize;
 
     use crate::protocol::RpcId;
@@ -492,10 +509,14 @@ mod tests {
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let mut runtime = SessionRuntime::new(factory, config, 10, store);
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
-        let runtime = Arc::new(runtime);
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
@@ -880,11 +901,18 @@ mod tests {
         let resp = router.dispatch(req).await.unwrap();
         let result = result_value(&resp);
 
-        // Config should be an object with known fields
+        // Config response should be an envelope with config + metadata
         assert!(result.is_object(), "Config should be a JSON object");
         assert!(
-            result.get("agent").is_some(),
-            "Config should have 'agent' field"
+            result.get("config").is_some(),
+            "Config envelope should include 'config'"
+        );
+        assert!(
+            result
+                .get("config")
+                .and_then(|cfg| cfg.get("agent"))
+                .is_some(),
+            "Config envelope should have 'config.agent' field"
         );
     }
 
@@ -896,7 +924,7 @@ mod tests {
         // Get the current config
         let get_req = make_request_no_params("config/get");
         let get_resp = router.dispatch(get_req).await.unwrap();
-        let mut config = result_value(&get_resp);
+        let mut config = result_value(&get_resp)["config"].clone();
 
         // Modify max_tokens
         config["max_tokens"] = serde_json::json!(2048);
@@ -905,13 +933,14 @@ mod tests {
         let set_req = make_request("config/set", &config);
         let set_resp = router.dispatch(set_req).await.unwrap();
         let set_result = result_value(&set_resp);
-        assert_eq!(set_result["ok"], true);
+        assert_eq!(set_result["config"]["max_tokens"], 2048);
+        assert!(set_result["generation"].as_u64().is_some());
 
         // Get again and verify
         let get_req2 = make_request_no_params("config/get");
         let get_resp2 = router.dispatch(get_req2).await.unwrap();
         let config2 = result_value(&get_resp2);
-        assert_eq!(config2["max_tokens"], 2048);
+        assert_eq!(config2["config"]["max_tokens"], 2048);
     }
 
     /// 12. `config/patch` merges a delta.
@@ -923,7 +952,7 @@ mod tests {
         let get_req = make_request_no_params("config/get");
         let get_resp = router.dispatch(get_req).await.unwrap();
         let initial = result_value(&get_resp);
-        let initial_max_tokens = initial["max_tokens"].as_u64().unwrap();
+        let initial_max_tokens = initial["config"]["max_tokens"].as_u64().unwrap();
 
         // Patch max_tokens to a different value
         let new_max_tokens = initial_max_tokens + 1000;
@@ -933,13 +962,13 @@ mod tests {
         );
         let patch_resp = router.dispatch(patch_req).await.unwrap();
         let patched = result_value(&patch_resp);
-        assert_eq!(patched["max_tokens"], new_max_tokens);
+        assert_eq!(patched["config"]["max_tokens"], new_max_tokens);
 
         // Verify via get
         let get_req2 = make_request_no_params("config/get");
         let get_resp2 = router.dispatch(get_req2).await.unwrap();
         let final_config = result_value(&get_resp2);
-        assert_eq!(final_config["max_tokens"], new_max_tokens);
+        assert_eq!(final_config["config"]["max_tokens"], new_max_tokens);
     }
 
     /// 13. A notification (request with no id) returns None (no response).

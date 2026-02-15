@@ -993,12 +993,11 @@ async fn continue_session(
                 build: Some(build),
             };
 
-            let r = state
+            state
                 .session_service
                 .create_session(svc_req)
                 .await
-                .map_err(|e| ApiError::Agent(format!("{e}")));
-            r
+                .map_err(|e| ApiError::Agent(format!("{e}")))
         }
         Err(err) => return session_error_to_api_result(err, &session_id),
     };

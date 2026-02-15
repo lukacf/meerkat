@@ -896,7 +896,7 @@ fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> RuntimeScope {
     RuntimeScope {
         realm_id,
         instance_id: cli.instance.clone(),
-        backend_hint: cli.realm_backend.map(Into::into).or_else(|| match surface {
+        backend_hint: cli.realm_backend.map(Into::into).or(match surface {
             CliSurfaceKind::Cli => {
                 #[cfg(feature = "jsonl-store")]
                 {
@@ -1221,8 +1221,7 @@ fn build_cli_service(
     config: Config,
 ) -> EphemeralSessionService<FactoryAgentBuilder> {
     let builder = FactoryAgentBuilder::new(factory, config);
-    let service = EphemeralSessionService::new(builder, 1);
-    service
+    EphemeralSessionService::new(builder, 1)
 }
 
 fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Error {

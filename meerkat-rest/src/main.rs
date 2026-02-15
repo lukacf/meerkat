@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Build app state
-    let state = AppState::load().await;
+    let state = AppState::load().await?;
     tracing::info!(
         store_path = %state.store_path.display(),
         default_model = %state.default_model,

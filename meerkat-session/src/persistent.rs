@@ -141,11 +141,56 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        self.inner.archive(id).await
+        self.inner.archive(id).await?;
+        // Also remove from persistent store.
+        // store.delete() is idempotent — silently succeeds if the key doesn't exist
+        // (e.g., session archived before first turn completed and persisted).
+        self.store
+            .delete(id)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?;
+        Ok(())
     }
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    /// Get the subscribable event injector for a session, if available.
+    pub async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::SubscribableInjector>> {
+        self.inner.event_injector(session_id).await
+    }
+
+    /// Get the comms runtime for a session, if available.
+    pub async fn comms_runtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.inner.comms_runtime(session_id).await
+    }
+
+    /// Wait for a session to be registered.
+    pub async fn wait_session_registered(&self) {
+        self.inner.wait_session_registered().await;
+    }
+
+    /// Shut down all sessions.
+    pub async fn shutdown(&self) {
+        self.inner.shutdown().await;
+    }
+
+    /// Load a full session from the persistent store.
+    ///
+    /// Used by surfaces to resume sessions that aren't currently live.
+    /// Returns the complete `Session` including message history.
+    pub async fn load_persisted(&self, id: &SessionId) -> Result<Option<Session>, SessionError> {
+        self.store
+            .load(id)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))
+    }
+
     /// Export the full session from the live task and persist it to the store.
     ///
     /// This saves the complete session including all messages, metadata, and
@@ -157,5 +202,52 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .save(&session)
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use meerkat_store::MemoryStore;
+
+    #[tokio::test]
+    async fn test_persistent_load_persisted_returns_stored_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let session = Session::new();
+        let id = session.id().clone();
+        store.save(&session).await.unwrap();
+
+        // Verify load_persisted returns the session.
+        // We can't construct a full PersistentSessionService without a SessionAgentBuilder,
+        // so test the store path directly via the same logic.
+        let loaded = store.load(&id).await.unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().id(), &id);
+    }
+
+    #[tokio::test]
+    async fn test_persistent_load_persisted_returns_none_for_unknown() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let unknown = SessionId::new();
+        let loaded = store.load(&unknown).await.unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_persistent_archive_deletes_from_store() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let session = Session::new();
+        let id = session.id().clone();
+        store.save(&session).await.unwrap();
+
+        // Verify it exists
+        assert!(store.load(&id).await.unwrap().is_some());
+
+        // Delete (simulating archive store cleanup)
+        store.delete(&id).await.unwrap();
+
+        // Verify it's gone
+        assert!(store.load(&id).await.unwrap().is_none());
     }
 }

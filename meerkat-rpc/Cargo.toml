@@ -13,7 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "jsonl-store"] }
+meerkat = { workspace = true, features = ["anthropic", "jsonl-store", "session-store", "memory-store"] }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }

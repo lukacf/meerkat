@@ -4,8 +4,8 @@
 //! as MCP tools: meerkat_run and meerkat_resume.
 
 use meerkat::{
-    AgentBuildConfig, AgentFactory, EphemeralSessionService, FactoryAgentBuilder, JsonlStore,
-    OutputSchema, SessionStore, ToolError, ToolResult,
+    AgentBuildConfig, AgentFactory, FactoryAgentBuilder, OutputSchema, PersistentSessionService,
+    RedbSessionStore, SessionStore, ToolError, ToolResult,
 };
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
@@ -171,16 +171,33 @@ fn resolve_store_path(config: &Config) -> PathBuf {
 /// (`builtins: true`, `shell: true`). Per-request tool configuration is
 /// controlled via `override_builtins` / `override_shell` in `AgentBuildConfig`.
 pub struct MeerkatMcpState {
-    service: EphemeralSessionService<FactoryAgentBuilder>,
+    service: PersistentSessionService<FactoryAgentBuilder>,
     build_config_slot: Arc<tokio::sync::Mutex<Option<AgentBuildConfig>>>,
 }
 
 impl MeerkatMcpState {
     /// Create a new MCP state with a session service backed by `AgentFactory`.
-    pub async fn new() -> Self {
+    pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let config = load_config_async().await;
         let store_path = resolve_store_path(&config);
         let project_root = resolve_project_root();
+
+        // Open service-level persistent store (redb).
+        let db_dir = meerkat_store::resolve_database_dir(&config);
+        std::fs::create_dir_all(&db_dir).map_err(|e| {
+            format!(
+                "Failed to create database directory {}: {e}",
+                db_dir.display()
+            )
+        })?;
+        let session_store: Arc<dyn SessionStore> = Arc::new(
+            RedbSessionStore::open(db_dir.join("sessions.redb")).map_err(|e| {
+                format!(
+                    "Failed to open session database at {}: {e}",
+                    db_dir.display()
+                )
+            })?,
+        );
 
         // Create factory with max-permissive flags; per-request overrides
         // in AgentBuildConfig control what tools are actually enabled.
@@ -191,7 +208,29 @@ impl MeerkatMcpState {
 
         let builder = FactoryAgentBuilder::new(factory, config);
         let build_config_slot = builder.build_config_slot.clone();
-        let service = EphemeralSessionService::new(builder, 100);
+        let service = PersistentSessionService::new(builder, 100, session_store);
+
+        Ok(Self {
+            service,
+            build_config_slot,
+        })
+    }
+
+    /// Test constructor that accepts an injected store (avoids opening redb at platform data dir).
+    #[cfg(test)]
+    pub(crate) async fn new_with_store(store: Arc<dyn SessionStore>) -> Self {
+        let config = load_config_async().await;
+        let store_path = resolve_store_path(&config);
+        let project_root = resolve_project_root();
+
+        let factory = AgentFactory::new(store_path)
+            .project_root(project_root)
+            .builtins(true)
+            .shell(true);
+
+        let builder = FactoryAgentBuilder::new(factory, config);
+        let build_config_slot = builder.build_config_slot.clone();
+        let service = PersistentSessionService::new(builder, 100, store);
 
         Self {
             service,
@@ -554,21 +593,14 @@ async fn handle_meerkat_resume(
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
     let config = load_config_async().await;
-    let store_path = resolve_store_path(&config);
-
-    // Load existing session from persistent store
-    let session_store = JsonlStore::new(store_path);
-    session_store
-        .init()
-        .await
-        .map_err(|e| format!("Store init failed: {}", e))?;
 
     let session_id =
         meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
-    let mut session = session_store
-        .load(&session_id)
+    let mut session = state
+        .service
+        .load_persisted(&session_id)
         .await
-        .map_err(|e| format!("Failed to load session: {}", e))?
+        .map_err(|e| format!("Failed to load session: {e}"))?
         .ok_or_else(|| format!("Session not found: {}", input.session_id))?;
 
     // Inject tool results into the session before resuming
@@ -1075,7 +1107,8 @@ mod tests {
     #[cfg(feature = "comms")]
     #[tokio::test]
     async fn test_handle_meerkat_run_host_mode_requires_comms_name() {
-        let state = MeerkatMcpState::new().await;
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
         let result = handle_meerkat_run(
             &state,
             MeerkatRunInput {

@@ -490,7 +490,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
-        let mut runtime = SessionRuntime::new(factory, config, 10);
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut runtime = SessionRuntime::new(factory, config, 10, store);
         runtime.default_llm_client = Some(Arc::new(MockLlmClient));
         let runtime = Arc::new(runtime);
         let config_store: Arc<dyn ConfigStore> =

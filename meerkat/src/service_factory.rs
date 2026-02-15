@@ -237,6 +237,18 @@ pub fn build_ephemeral_service(
     EphemeralSessionService::new(builder, max_sessions)
 }
 
+/// Convenience: build a `PersistentSessionService` backed by `AgentFactory`.
+#[cfg(feature = "session-store")]
+pub fn build_persistent_service(
+    factory: AgentFactory,
+    config: Config,
+    max_sessions: usize,
+    store: Arc<dyn meerkat_store::SessionStore>,
+) -> meerkat_session::PersistentSessionService<FactoryAgentBuilder> {
+    let builder = FactoryAgentBuilder::new(factory, config);
+    meerkat_session::PersistentSessionService::new(builder, max_sessions, store)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

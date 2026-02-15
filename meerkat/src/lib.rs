@@ -159,6 +159,8 @@ pub use factory::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent, pro
 // Factory-backed SessionService wiring
 mod service_factory;
 pub use service_factory::{FactoryAgent, FactoryAgentBuilder, build_ephemeral_service};
+#[cfg(feature = "session-store")]
+pub use service_factory::build_persistent_service;
 
 // Session service
 pub use meerkat_core::{
@@ -188,6 +190,9 @@ pub use meerkat_store::JsonlStore;
 
 #[cfg(feature = "memory-store")]
 pub use meerkat_store::MemoryStore;
+
+#[cfg(feature = "session-store")]
+pub use meerkat_store::RedbSessionStore;
 
 // Re-export tools
 pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidationError};

@@ -29,9 +29,8 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
-    AgentBuildConfig, AgentEvent, AgentFactory, EphemeralSessionService, FactoryAgentBuilder,
-    JsonlStore, LlmClient, OutputSchema, Session, SessionId, SessionMeta, SessionService,
-    SessionStore,
+    AgentBuildConfig, AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
+    PersistentSessionService, RedbSessionStore, Session, SessionId, SessionService, SessionStore,
 };
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
@@ -69,62 +68,11 @@ pub struct AppState {
     pub config_store: Arc<dyn ConfigStore>,
     pub event_tx: broadcast::Sender<SessionEvent>,
     /// Session service for managing agent lifecycle.
-    pub session_service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
+    pub session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     /// Slot for staging `AgentBuildConfig` before `session_service` calls.
     pub builder_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
     /// Webhook authentication, resolved once at startup from RKAT_WEBHOOK_SECRET.
     pub webhook_auth: webhook::WebhookAuth,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        let (event_tx, _) = broadcast::channel(256);
-        let instance_root = rest_instance_root();
-        let config_store: Arc<dyn ConfigStore> =
-            Arc::new(FileConfigStore::new(instance_root.join("config.toml")));
-
-        let config = Config::default();
-        let store_path = config
-            .store
-            .sessions_path
-            .clone()
-            .or_else(|| config.storage.directory.clone())
-            .unwrap_or_else(|| {
-                dirs::data_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("meerkat")
-                    .join("sessions")
-            });
-
-        let enable_builtins = config.tools.builtins_enabled;
-        let enable_shell = config.tools.shell_enabled;
-
-        let mut factory = AgentFactory::new(store_path.clone())
-            .builtins(enable_builtins)
-            .shell(enable_shell);
-        factory = factory.project_root(instance_root.clone());
-
-        let builder = FactoryAgentBuilder::new(factory, config.clone());
-        let builder_slot = builder.build_config_slot.clone();
-        let session_service = Arc::new(EphemeralSessionService::new(builder, 100));
-
-        Self {
-            store_path,
-            default_model: Cow::Owned(config.agent.model.to_string()),
-            max_tokens: config.agent.max_tokens_per_turn,
-            rest_host: Cow::Owned(config.rest.host.clone()),
-            rest_port: config.rest.port,
-            enable_builtins,
-            enable_shell,
-            project_root: Some(instance_root),
-            llm_client_override: None,
-            config_store,
-            event_tx,
-            session_service,
-            builder_slot,
-            webhook_auth: webhook::WebhookAuth::from_env(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -134,11 +82,11 @@ pub struct SessionEvent {
 }
 
 impl AppState {
-    pub async fn load() -> Self {
+    pub async fn load() -> Result<Self, Box<dyn std::error::Error>> {
         Self::load_from(rest_instance_root()).await
     }
 
-    async fn load_from(instance_root: PathBuf) -> Self {
+    async fn load_from(instance_root: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let (event_tx, _) = broadcast::channel(256);
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(FileConfigStore::new(instance_root.join("config.toml")));
@@ -176,11 +124,33 @@ impl AppState {
             .shell(enable_shell);
         factory = factory.project_root(instance_root.clone());
 
+        // Scope database to instance root when config doesn't specify an explicit path.
+        let db_dir = config
+            .store
+            .database_dir
+            .clone()
+            .unwrap_or_else(|| instance_root.join("db"));
+        std::fs::create_dir_all(&db_dir).map_err(|e| {
+            format!(
+                "Failed to create database directory {}: {e}",
+                db_dir.display()
+            )
+        })?;
+        let session_store: Arc<dyn SessionStore> = Arc::new(
+            RedbSessionStore::open(db_dir.join("sessions.redb")).map_err(|e| {
+                format!(
+                    "Failed to open session database at {}: {e}",
+                    db_dir.display()
+                )
+            })?,
+        );
+
         let builder = FactoryAgentBuilder::new(factory, config);
         let builder_slot = builder.build_config_slot.clone();
-        let session_service = Arc::new(EphemeralSessionService::new(builder, 100));
+        let session_service =
+            Arc::new(PersistentSessionService::new(builder, 100, session_store));
 
-        Self {
+        Ok(Self {
             store_path,
             default_model,
             max_tokens,
@@ -195,7 +165,7 @@ impl AppState {
             session_service,
             builder_slot,
             webhook_auth: webhook::WebhookAuth::from_env(),
-        }
+        })
     }
 }
 
@@ -776,28 +746,26 @@ async fn get_session(
     let session_id =
         SessionId::parse(&id).map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
 
-    let store = JsonlStore::new(state.store_path);
-    store
-        .init()
+    let view = state
+        .session_service
+        .read(&session_id)
         .await
-        .map_err(|e| ApiError::Internal(format!("Store init failed: {}", e)))?;
+        .map_err(|e| match e {
+            SessionError::NotFound { .. } => {
+                ApiError::NotFound(format!("Session not found: {}", id))
+            }
+            _ => ApiError::Internal(format!("{e}")),
+        })?;
 
-    let session = store
-        .load(&session_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to load session: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("Session not found: {}", id)))?;
-
-    let meta = SessionMeta::from(&session);
-    let created_at: DateTime<Utc> = meta.created_at.into();
-    let updated_at: DateTime<Utc> = meta.updated_at.into();
+    let created_at: DateTime<Utc> = view.state.created_at.into();
+    let updated_at: DateTime<Utc> = view.state.updated_at.into();
 
     Ok(Json(SessionDetailsResponse {
-        session_id: meta.id.to_string(),
+        session_id: view.state.session_id.to_string(),
         created_at: created_at.to_rfc3339(),
         updated_at: updated_at.to_rfc3339(),
-        message_count: meta.message_count,
-        total_tokens: meta.total_tokens,
+        message_count: view.state.message_count,
+        total_tokens: view.billing.total_tokens,
     }))
 }
 
@@ -842,19 +810,14 @@ async fn continue_session(
     let final_result = match result {
         Ok(run_result) => Ok(run_result),
         Err(SessionError::NotFound { .. }) => {
-            // The session isn't live in the service. Load it from the store,
-            // stage a build config with resume_session, and create a new
+            // The session isn't live in the service. Load it from the persistent
+            // store, stage a build config with resume_session, and create a new
             // service session.
-            let store = JsonlStore::new(state.store_path.clone());
-            store
-                .init()
+            let session = state
+                .session_service
+                .load_persisted(&session_id)
                 .await
-                .map_err(|e| ApiError::Internal(format!("Store init failed: {}", e)))?;
-
-            let session = store
-                .load(&session_id)
-                .await
-                .map_err(|e| ApiError::Internal(format!("Failed to load session: {}", e)))?
+                .map_err(|e| ApiError::Internal(format!("{e}")))?
                 .ok_or_else(|| ApiError::NotFound(format!("Session not found: {}", id)))?;
 
             let stored_metadata = session.session_metadata();
@@ -970,16 +933,11 @@ async fn session_events(
     let session_id =
         SessionId::parse(&id).map_err(|e| ApiError::BadRequest(invalid_session_id_message(e)))?;
 
-    let store = JsonlStore::new(state.store_path);
-    store
-        .init()
+    let session = state
+        .session_service
+        .load_persisted(&session_id)
         .await
-        .map_err(|e| ApiError::Internal(format!("Store init failed: {}", e)))?;
-
-    let session = store
-        .load(&session_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to load session: {}", e)))?
+        .map_err(|e| ApiError::Internal(format!("{e}")))?
         .ok_or_else(|| ApiError::NotFound(format!("Session not found: {}", id)))?;
 
     let mut rx = state.event_tx.subscribe();
@@ -1092,7 +1050,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_state_default() {
         let temp = TempDir::new().unwrap();
-        let state = AppState::load_from(temp.path().to_path_buf()).await;
+        let state = AppState::load_from(temp.path().to_path_buf()).await.unwrap();
         assert!(!state.default_model.is_empty());
         assert!(state.max_tokens > 0);
     }
@@ -1111,7 +1069,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_state_builtins_disabled_by_default() {
         let temp = TempDir::new().unwrap();
-        let state = AppState::load_from(temp.path().to_path_buf()).await;
+        let state = AppState::load_from(temp.path().to_path_buf()).await.unwrap();
         assert!(!state.enable_builtins);
         assert!(!state.enable_shell);
     }

@@ -79,3 +79,20 @@ pub fn resolve_store_path(config: &meerkat_core::Config) -> std::path::PathBuf {
                 .join("sessions")
         })
 }
+
+/// Resolve the database directory from config, with sensible fallbacks.
+///
+/// Precedence: `store.database_dir` > `storage.directory/db` > platform data dir.
+pub fn resolve_database_dir(config: &meerkat_core::Config) -> std::path::PathBuf {
+    config
+        .store
+        .database_dir
+        .clone()
+        .or_else(|| config.storage.directory.as_ref().map(|d| d.join("db")))
+        .unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("meerkat")
+                .join("db")
+        })
+}

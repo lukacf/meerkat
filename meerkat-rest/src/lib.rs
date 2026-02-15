@@ -30,7 +30,7 @@ use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
     AgentBuildConfig, AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
-    PersistentSessionService, RedbSessionStore, Session, SessionId, SessionService, SessionStore,
+    PersistentSessionService, Session, SessionId, SessionService,
 };
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
@@ -47,6 +47,7 @@ use std::borrow::Cow;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, broadcast, mpsc};
 
 /// Application state shared across handlers
@@ -73,6 +74,10 @@ pub struct AppState {
     pub builder_slot: Arc<Mutex<Option<AgentBuildConfig>>>,
     /// Webhook authentication, resolved once at startup from RKAT_WEBHOOK_SECRET.
     pub webhook_auth: webhook::WebhookAuth,
+    pub realm_id: String,
+    pub backend: String,
+    pub resolved_paths: meerkat_core::ConfigResolvedPaths,
+    pub config_generation: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,8 +93,37 @@ impl AppState {
 
     async fn load_from(instance_root: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let (event_tx, _) = broadcast::channel(256);
-        let config_store: Arc<dyn ConfigStore> =
-            Arc::new(FileConfigStore::new(instance_root.join("config.toml")));
+        let realm_id =
+            std::env::var("RKAT_REALM_ID").unwrap_or_else(|_| meerkat_store::generate_realm_id());
+        let backend_hint = match std::env::var("RKAT_REALM_BACKEND")
+            .unwrap_or_else(|_| String::new())
+            .as_str()
+        {
+            "redb" => Some(meerkat_store::RealmBackend::Redb),
+            "jsonl" => Some(meerkat_store::RealmBackend::Jsonl),
+            _ => Some(meerkat_store::RealmBackend::Redb),
+        };
+        let (manifest, session_store) =
+            meerkat_store::open_realm_session_store(&realm_id, backend_hint).await?;
+        let realm_paths = meerkat_store::realm_paths(&realm_id);
+        let resolved_paths = meerkat_core::ConfigResolvedPaths {
+            root: realm_paths.root.display().to_string(),
+            manifest_path: realm_paths.manifest_path.display().to_string(),
+            config_path: realm_paths.config_path.display().to_string(),
+            sessions_redb_path: realm_paths.sessions_redb_path.display().to_string(),
+            sessions_jsonl_dir: realm_paths.sessions_jsonl_dir.display().to_string(),
+        };
+        let base_config_store: Arc<dyn ConfigStore> =
+            Arc::new(FileConfigStore::new(realm_paths.config_path.clone()));
+        let config_store: Arc<dyn ConfigStore> = Arc::new(meerkat_core::TaggedConfigStore::new(
+            base_config_store,
+            meerkat_core::ConfigStoreMetadata {
+                realm_id: Some(realm_id.clone()),
+                instance_id: std::env::var("RKAT_INSTANCE_ID").ok(),
+                backend: Some(manifest.backend.as_str().to_string()),
+                resolved_paths: Some(resolved_paths.clone()),
+            },
+        ));
 
         let mut config = config_store
             .get()
@@ -99,17 +133,10 @@ impl AppState {
             tracing::warn!("Failed to apply env overrides: {}", err);
         }
 
-        let store_path = config
-            .store
-            .sessions_path
-            .clone()
-            .or_else(|| config.storage.directory.clone())
-            .unwrap_or_else(|| {
-                dirs::data_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("meerkat")
-                    .join("sessions")
-            });
+        let store_path = match manifest.backend {
+            meerkat_store::RealmBackend::Jsonl => realm_paths.sessions_jsonl_dir.clone(),
+            meerkat_store::RealmBackend::Redb => realm_paths.root.clone(),
+        };
 
         let enable_builtins = config.tools.builtins_enabled;
         let enable_shell = config.tools.shell_enabled;
@@ -120,35 +147,14 @@ impl AppState {
         let rest_port = config.rest.port;
 
         let mut factory = AgentFactory::new(store_path.clone())
+            .session_store(session_store.clone())
             .builtins(enable_builtins)
             .shell(enable_shell);
         factory = factory.project_root(instance_root.clone());
 
-        // Scope database to instance root when config doesn't specify an
-        // explicit database_dir, then resolve via the standard helper.
-        if config.store.database_dir.is_none() {
-            config.store.database_dir = Some(instance_root.join("db"));
-        }
-        let db_dir = meerkat_store::resolve_database_dir(&config);
-        std::fs::create_dir_all(&db_dir).map_err(|e| {
-            format!(
-                "Failed to create database directory {}: {e}",
-                db_dir.display()
-            )
-        })?;
-        let session_store: Arc<dyn SessionStore> = Arc::new(
-            RedbSessionStore::open(db_dir.join("sessions.redb")).map_err(|e| {
-                format!(
-                    "Failed to open session database at {}: {e}",
-                    db_dir.display()
-                )
-            })?,
-        );
-
         let builder = FactoryAgentBuilder::new(factory, config);
         let builder_slot = builder.build_config_slot.clone();
-        let session_service =
-            Arc::new(PersistentSessionService::new(builder, 100, session_store));
+        let session_service = Arc::new(PersistentSessionService::new(builder, 100, session_store));
 
         Ok(Self {
             store_path,
@@ -165,6 +171,10 @@ impl AppState {
             session_service,
             builder_slot,
             webhook_auth: webhook::WebhookAuth::from_env(),
+            realm_id,
+            backend: manifest.backend.as_str().to_string(),
+            resolved_paths,
+            config_generation: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -565,39 +575,122 @@ async fn get_capabilities(
 }
 
 /// Get the current config
-async fn get_config(State(state): State<AppState>) -> Result<Json<Config>, ApiError> {
+#[derive(Debug, Serialize)]
+struct ConfigEnvelopeResponse {
+    config: Config,
+    generation: u64,
+    realm_id: String,
+    backend: String,
+    resolved_paths: meerkat_core::ConfigResolvedPaths,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SetConfigRequest {
+    Wrapped {
+        config: Config,
+        #[serde(default)]
+        expected_generation: Option<u64>,
+    },
+    Direct(Config),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PatchConfigRequest {
+    Wrapped {
+        patch: Value,
+        #[serde(default)]
+        expected_generation: Option<u64>,
+    },
+    Direct(Value),
+}
+
+async fn get_config(
+    State(state): State<AppState>,
+) -> Result<Json<ConfigEnvelopeResponse>, ApiError> {
     let config = state
         .config_store
         .get()
         .await
         .map_err(|e| ApiError::Configuration(e.to_string()))?;
-    Ok(Json(config))
+    Ok(Json(ConfigEnvelopeResponse {
+        config,
+        generation: state.config_generation.load(Ordering::SeqCst),
+        realm_id: state.realm_id.clone(),
+        backend: state.backend.clone(),
+        resolved_paths: state.resolved_paths.clone(),
+    }))
 }
 
 /// Replace the current config
 async fn set_config(
     State(state): State<AppState>,
-    Json(config): Json<Config>,
-) -> Result<Json<Config>, ApiError> {
+    Json(req): Json<SetConfigRequest>,
+) -> Result<Json<ConfigEnvelopeResponse>, ApiError> {
+    let (config, expected_generation) = match req {
+        SetConfigRequest::Wrapped {
+            config,
+            expected_generation,
+        } => (config, expected_generation),
+        SetConfigRequest::Direct(config) => (config, None),
+    };
+    if let Some(expected) = expected_generation {
+        let current = state.config_generation.load(Ordering::SeqCst);
+        if expected != current {
+            return Err(ApiError::Configuration(format!(
+                "Generation conflict: expected {expected}, current {current}"
+            )));
+        }
+    }
     state
         .config_store
         .set(config.clone())
         .await
         .map_err(|e| ApiError::Configuration(e.to_string()))?;
-    Ok(Json(config))
+    state.config_generation.fetch_add(1, Ordering::SeqCst);
+    Ok(Json(ConfigEnvelopeResponse {
+        config,
+        generation: state.config_generation.load(Ordering::SeqCst),
+        realm_id: state.realm_id.clone(),
+        backend: state.backend.clone(),
+        resolved_paths: state.resolved_paths.clone(),
+    }))
 }
 
 /// Patch the current config using a JSON merge patch
 async fn patch_config(
     State(state): State<AppState>,
-    Json(delta): Json<Value>,
-) -> Result<Json<Config>, ApiError> {
+    Json(req): Json<PatchConfigRequest>,
+) -> Result<Json<ConfigEnvelopeResponse>, ApiError> {
+    let (delta, expected_generation) = match req {
+        PatchConfigRequest::Wrapped {
+            patch,
+            expected_generation,
+        } => (patch, expected_generation),
+        PatchConfigRequest::Direct(patch) => (patch, None),
+    };
+    if let Some(expected) = expected_generation {
+        let current = state.config_generation.load(Ordering::SeqCst);
+        if expected != current {
+            return Err(ApiError::Configuration(format!(
+                "Generation conflict: expected {expected}, current {current}"
+            )));
+        }
+    }
     let updated = state
         .config_store
         .patch(ConfigDelta(delta))
         .await
         .map_err(|e| ApiError::Configuration(e.to_string()))?;
-    Ok(Json(updated))
+    state.config_generation.fetch_add(1, Ordering::SeqCst);
+    Ok(Json(ConfigEnvelopeResponse {
+        config: updated,
+        generation: state.config_generation.load(Ordering::SeqCst),
+        realm_id: state.realm_id.clone(),
+        backend: state.backend.clone(),
+        resolved_paths: state.resolved_paths.clone(),
+    }))
 }
 
 /// Spawn a task that forwards events from an mpsc receiver to the broadcast channel,
@@ -1054,7 +1147,9 @@ mod tests {
     #[tokio::test]
     async fn test_app_state_default() {
         let temp = TempDir::new().unwrap();
-        let state = AppState::load_from(temp.path().to_path_buf()).await.unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
         assert!(!state.default_model.is_empty());
         assert!(state.max_tokens > 0);
     }
@@ -1073,7 +1168,9 @@ mod tests {
     #[tokio::test]
     async fn test_app_state_builtins_disabled_by_default() {
         let temp = TempDir::new().unwrap();
-        let state = AppState::load_from(temp.path().to_path_buf()).await.unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
         assert!(!state.enable_builtins);
         assert!(!state.enable_shell);
     }

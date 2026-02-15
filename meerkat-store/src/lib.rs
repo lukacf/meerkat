@@ -5,6 +5,7 @@
 pub mod adapter;
 mod error;
 pub mod index;
+pub mod realm;
 
 #[cfg(feature = "jsonl")]
 pub mod jsonl;
@@ -17,6 +18,10 @@ pub mod redb_store;
 pub use adapter::StoreAdapter;
 pub use error::StoreError;
 pub use index::SessionIndex;
+pub use realm::{
+    RealmBackend, RealmManifest, RealmPaths, derive_workspace_realm_id, ensure_realm_manifest,
+    generate_realm_id, open_realm_session_store, realm_paths, sanitize_realm_id,
+};
 pub use redb_store::RedbSessionStore;
 
 use async_trait::async_trait;
@@ -134,7 +139,10 @@ mod tests {
         let config = Config::default();
         let result = resolve_database_dir(&config);
         // Falls through to platform data dir or "." fallback.
-        assert!(result.ends_with("db"), "expected path ending in 'db', got: {result:?}");
+        assert!(
+            result.ends_with("db"),
+            "expected path ending in 'db', got: {result:?}"
+        );
     }
 
     #[test]
@@ -143,7 +151,10 @@ mod tests {
         config.store.database_dir = Some(PathBuf::from("/test/db"));
         let serialized = toml::to_string(&config).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.store.database_dir, Some(PathBuf::from("/test/db")));
+        assert_eq!(
+            deserialized.store.database_dir,
+            Some(PathBuf::from("/test/db"))
+        );
     }
 
     #[test]

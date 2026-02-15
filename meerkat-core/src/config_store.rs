@@ -4,6 +4,26 @@ use crate::config::{Config, ConfigDelta, ConfigError};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Resolved paths attached to a config store context.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConfigResolvedPaths {
+    pub root: String,
+    pub manifest_path: String,
+    pub config_path: String,
+    pub sessions_redb_path: String,
+    pub sessions_jsonl_dir: String,
+}
+
+/// Optional metadata for config endpoints.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConfigStoreMetadata {
+    pub realm_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub backend: Option<String>,
+    pub resolved_paths: Option<ConfigResolvedPaths>,
+}
 
 /// Abstraction over config persistence backends.
 #[async_trait]
@@ -16,6 +36,11 @@ pub trait ConfigStore: Send + Sync {
 
     /// Apply a config patch and return the updated config.
     async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError>;
+
+    /// Optional metadata to expose on config APIs.
+    fn metadata(&self) -> Option<ConfigStoreMetadata> {
+        None
+    }
 }
 
 /// In-memory config store for ephemeral settings.
@@ -51,6 +76,37 @@ impl ConfigStore for MemoryConfigStore {
         updated.validate()?;
         *config = updated.clone();
         Ok(updated)
+    }
+}
+
+/// Metadata-tagged config store wrapper.
+pub struct TaggedConfigStore {
+    inner: Arc<dyn ConfigStore>,
+    metadata: ConfigStoreMetadata,
+}
+
+impl TaggedConfigStore {
+    pub fn new(inner: Arc<dyn ConfigStore>, metadata: ConfigStoreMetadata) -> Self {
+        Self { inner, metadata }
+    }
+}
+
+#[async_trait]
+impl ConfigStore for TaggedConfigStore {
+    async fn get(&self) -> Result<Config, ConfigError> {
+        self.inner.get().await
+    }
+
+    async fn set(&self, config: Config) -> Result<(), ConfigError> {
+        self.inner.set(config).await
+    }
+
+    async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
+        self.inner.patch(delta).await
+    }
+
+    fn metadata(&self) -> Option<ConfigStoreMetadata> {
+        Some(self.metadata.clone())
     }
 }
 

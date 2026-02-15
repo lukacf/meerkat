@@ -54,10 +54,23 @@ class MeerkatClient:
                 "Ensure it is installed and on your PATH.",
             )
 
-    async def connect(self) -> "MeerkatClient":
+    async def connect(
+        self,
+        realm_id: Optional[str] = None,
+        instance_id: Optional[str] = None,
+        realm_backend: Optional[str] = None,
+    ) -> "MeerkatClient":
         """Start the rkat rpc subprocess and perform handshake."""
+        args = []
+        if realm_id:
+            args.extend(["--realm", realm_id])
+        if instance_id:
+            args.extend(["--instance", instance_id])
+        if realm_backend:
+            args.extend(["--realm-backend", realm_backend])
+        args.append("rpc")
         self._process = await asyncio.create_subprocess_exec(
-            self._rkat_path, "rpc",
+            self._rkat_path, *args,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

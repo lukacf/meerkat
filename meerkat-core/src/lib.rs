@@ -55,7 +55,10 @@ pub use config::{
     ResolvedSubAgentConfig, RetryConfig, ShellDefaults, StorageConfig, StoreConfig,
     SubAgentsConfig, ToolsConfig,
 };
-pub use config_store::{ConfigStore, FileConfigStore, MemoryConfigStore};
+pub use config_store::{
+    ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, FileConfigStore, MemoryConfigStore,
+    TaggedConfigStore,
+};
 pub use error::{AgentError, ToolError};
 pub use event::{
     AgentEvent, BudgetType, VerboseEventConfig, format_verbose_event,

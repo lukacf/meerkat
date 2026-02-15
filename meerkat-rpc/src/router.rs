@@ -880,11 +880,18 @@ mod tests {
         let resp = router.dispatch(req).await.unwrap();
         let result = result_value(&resp);
 
-        // Config should be an object with known fields
+        // Config response should be an envelope with config + metadata
         assert!(result.is_object(), "Config should be a JSON object");
         assert!(
-            result.get("agent").is_some(),
-            "Config should have 'agent' field"
+            result.get("config").is_some(),
+            "Config envelope should include 'config'"
+        );
+        assert!(
+            result
+                .get("config")
+                .and_then(|cfg| cfg.get("agent"))
+                .is_some(),
+            "Config envelope should have 'config.agent' field"
         );
     }
 
@@ -896,7 +903,7 @@ mod tests {
         // Get the current config
         let get_req = make_request_no_params("config/get");
         let get_resp = router.dispatch(get_req).await.unwrap();
-        let mut config = result_value(&get_resp);
+        let mut config = result_value(&get_resp)["config"].clone();
 
         // Modify max_tokens
         config["max_tokens"] = serde_json::json!(2048);
@@ -905,13 +912,14 @@ mod tests {
         let set_req = make_request("config/set", &config);
         let set_resp = router.dispatch(set_req).await.unwrap();
         let set_result = result_value(&set_resp);
-        assert_eq!(set_result["ok"], true);
+        assert_eq!(set_result["config"]["max_tokens"], 2048);
+        assert!(set_result["generation"].as_u64().is_some());
 
         // Get again and verify
         let get_req2 = make_request_no_params("config/get");
         let get_resp2 = router.dispatch(get_req2).await.unwrap();
         let config2 = result_value(&get_resp2);
-        assert_eq!(config2["max_tokens"], 2048);
+        assert_eq!(config2["config"]["max_tokens"], 2048);
     }
 
     /// 12. `config/patch` merges a delta.
@@ -923,7 +931,7 @@ mod tests {
         let get_req = make_request_no_params("config/get");
         let get_resp = router.dispatch(get_req).await.unwrap();
         let initial = result_value(&get_resp);
-        let initial_max_tokens = initial["max_tokens"].as_u64().unwrap();
+        let initial_max_tokens = initial["config"]["max_tokens"].as_u64().unwrap();
 
         // Patch max_tokens to a different value
         let new_max_tokens = initial_max_tokens + 1000;
@@ -933,13 +941,13 @@ mod tests {
         );
         let patch_resp = router.dispatch(patch_req).await.unwrap();
         let patched = result_value(&patch_resp);
-        assert_eq!(patched["max_tokens"], new_max_tokens);
+        assert_eq!(patched["config"]["max_tokens"], new_max_tokens);
 
         // Verify via get
         let get_req2 = make_request_no_params("config/get");
         let get_resp2 = router.dispatch(get_req2).await.unwrap();
         let final_config = result_value(&get_resp2);
-        assert_eq!(final_config["max_tokens"], new_max_tokens);
+        assert_eq!(final_config["config"]["max_tokens"], new_max_tokens);
     }
 
     /// 13. A notification (request with no id) returns None (no response).

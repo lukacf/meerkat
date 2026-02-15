@@ -24,7 +24,7 @@ use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::types::OutputSchema;
-use meerkat_store::{JsonlStore, SessionFilter};
+use meerkat_store::{RealmBackend, SessionFilter};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -134,8 +134,35 @@ async fn init_project_config() -> anyhow::Result<()> {
 #[command(name = "meerkat")]
 #[command(about = "Meerkat - Rust Agentic Interface Kit")]
 struct Cli {
+    /// Explicit realm ID (opaque). Reuse to share state across surfaces.
+    #[arg(long, global = true)]
+    realm: Option<String>,
+    /// Optional instance ID inside a realm.
+    #[arg(long, global = true)]
+    instance: Option<String>,
+    /// Realm backend when creating a new realm.
+    #[arg(long, global = true, value_enum)]
+    realm_backend: Option<RealmBackendArg>,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RealmBackendArg {
+    #[cfg(feature = "jsonl-store")]
+    Jsonl,
+    Redb,
+}
+
+impl From<RealmBackendArg> for RealmBackend {
+    fn from(value: RealmBackendArg) -> Self {
+        match value {
+            #[cfg(feature = "jsonl-store")]
+            RealmBackendArg::Jsonl => RealmBackend::Jsonl,
+            RealmBackendArg::Redb => RealmBackend::Redb,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -484,6 +511,9 @@ async fn main() -> anyhow::Result<ExitCode> {
 
     let cli = Cli::parse();
 
+    let cli_scope = resolve_runtime_scope(&cli, CliSurfaceKind::Cli);
+    let rpc_scope = resolve_runtime_scope(&cli, CliSurfaceKind::Rpc);
+
     let result = match cli.command {
         Commands::Init => init_project_config().await,
         #[cfg(feature = "comms")]
@@ -553,6 +583,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 verbose,
                 host,
                 stdin,
+                &cli_scope,
             )
             .await
         }
@@ -601,6 +632,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 verbose,
                 false, // host_mode
                 false, // stdin_events
+                &cli_scope,
             )
             .await
         }
@@ -611,21 +643,25 @@ async fn main() -> anyhow::Result<ExitCode> {
             hooks_override_file,
         } => {
             let overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json)?;
-            resume_session(&session_id, &prompt, overrides).await
+            resume_session(&session_id, &prompt, overrides, &cli_scope).await
         }
         Commands::Sessions { command } => match command {
-            SessionCommands::List { limit } => list_sessions(limit).await,
-            SessionCommands::Show { id } => show_session(&id).await,
-            SessionCommands::Delete { session_id } => delete_session(&session_id).await,
+            SessionCommands::List { limit } => list_sessions(limit, &cli_scope).await,
+            SessionCommands::Show { id } => show_session(&id, &cli_scope).await,
+            SessionCommands::Delete { session_id } => delete_session(&session_id, &cli_scope).await,
         },
         Commands::Mcp { command } => handle_mcp_command(command).await,
         Commands::Config { command } => match command {
-            ConfigCommands::Get { format } => handle_config_get(format).await,
-            ConfigCommands::Set { file, json, toml } => handle_config_set(file, json, toml).await,
-            ConfigCommands::Patch { file, json } => handle_config_patch(file, json).await,
+            ConfigCommands::Get { format } => handle_config_get(format, &cli_scope).await,
+            ConfigCommands::Set { file, json, toml } => {
+                handle_config_set(file, json, toml, &cli_scope).await
+            }
+            ConfigCommands::Patch { file, json } => {
+                handle_config_patch(file, json, &cli_scope).await
+            }
         },
-        Commands::Rpc => handle_rpc().await,
-        Commands::Capabilities => handle_capabilities().await,
+        Commands::Rpc => handle_rpc(&rpc_scope).await,
+        Commands::Capabilities => handle_capabilities(&cli_scope).await,
     };
 
     // Map result to exit code
@@ -670,8 +706,9 @@ async fn handle_run_command(
     verbose: bool,
     host: bool,
     stdin: bool,
+    scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
-    let (config, config_base_dir) = load_config().await?;
+    let (config, config_base_dir) = load_config(scope).await?;
 
     let model = model.unwrap_or_else(|| config.agent.model.to_string());
     let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
@@ -728,6 +765,7 @@ async fn handle_run_command(
                 &config,
                 config_base_dir,
                 hooks_override,
+                scope,
             )
             .await
         }
@@ -819,30 +857,76 @@ struct CommsOverrides {
     peer_meta: Option<meerkat_core::PeerMeta>,
 }
 
-async fn resolve_config_store() -> anyhow::Result<(Box<dyn ConfigStore>, PathBuf)> {
-    let cwd = std::env::current_dir()?;
-    if let Some(project_root) = meerkat_tools::builtin::find_project_root(&cwd) {
-        Ok((
-            Box::new(FileConfigStore::project(&project_root)),
-            project_root,
-        ))
-    } else {
-        let store = FileConfigStore::global()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to open global config store: {e}"))?;
-        // Use the global config directory (e.g., ~/.config/meerkat/) as base_dir
-        // so comms paths resolve correctly instead of using cwd
-        let base_dir = store
-            .path()
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| cwd);
-        Ok((Box::new(store), base_dir))
+#[derive(Clone, Copy)]
+enum CliSurfaceKind {
+    Cli,
+    Rpc,
+}
+
+#[derive(Clone)]
+struct RuntimeScope {
+    realm_id: String,
+    instance_id: Option<String>,
+    backend_hint: Option<RealmBackend>,
+}
+
+impl RuntimeScope {
+    fn backend_hint(&self) -> Option<RealmBackend> {
+        self.backend_hint
     }
 }
 
-async fn load_config() -> anyhow::Result<(Config, PathBuf)> {
-    let (store, base_dir) = resolve_config_store().await?;
+fn resolve_runtime_scope(cli: &Cli, surface: CliSurfaceKind) -> RuntimeScope {
+    let realm_id = if let Some(realm) = &cli.realm {
+        realm.clone()
+    } else {
+        match surface {
+            // CLI ergonomics: stable per-workspace default realm.
+            CliSurfaceKind::Cli => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let root = find_project_root(&cwd).unwrap_or(cwd);
+                meerkat_store::derive_workspace_realm_id(&root)
+            }
+            // Non-CLI surfaces default to isolated realms unless explicit.
+            CliSurfaceKind::Rpc => meerkat_store::generate_realm_id(),
+        }
+    };
+    RuntimeScope {
+        realm_id,
+        instance_id: cli.instance.clone(),
+        backend_hint: cli.realm_backend.map(Into::into).or_else(|| match surface {
+            CliSurfaceKind::Cli => {
+                #[cfg(feature = "jsonl-store")]
+                {
+                    Some(RealmBackend::Jsonl)
+                }
+                #[cfg(not(feature = "jsonl-store"))]
+                {
+                    Some(RealmBackend::Redb)
+                }
+            }
+            CliSurfaceKind::Rpc => Some(RealmBackend::Redb),
+        }),
+    }
+}
+
+async fn resolve_config_store(
+    scope: &RuntimeScope,
+) -> anyhow::Result<(Box<dyn ConfigStore>, PathBuf)> {
+    let paths = meerkat_store::realm_paths(&scope.realm_id);
+    if let Some(parent) = paths.config_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
+    }
+    Ok((
+        Box::new(FileConfigStore::new(paths.config_path)),
+        paths.root,
+    ))
+}
+
+async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> {
+    let (store, base_dir) = resolve_config_store(scope).await?;
     let mut config = store
         .get()
         .await
@@ -853,8 +937,8 @@ async fn load_config() -> anyhow::Result<(Config, PathBuf)> {
     Ok((config, base_dir))
 }
 
-async fn handle_config_get(format: ConfigFormat) -> anyhow::Result<()> {
-    let (store, _) = resolve_config_store().await?;
+async fn handle_config_get(format: ConfigFormat, scope: &RuntimeScope) -> anyhow::Result<()> {
+    let (store, _) = resolve_config_store(scope).await?;
     let config = store
         .get()
         .await
@@ -878,6 +962,7 @@ async fn handle_config_set(
     file: Option<PathBuf>,
     json: Option<String>,
     toml_payload: Option<String>,
+    scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let config = if let Some(path) = file {
         let content = tokio::fs::read_to_string(&path)
@@ -900,7 +985,7 @@ async fn handle_config_set(
         ));
     };
 
-    let (store, _) = resolve_config_store().await?;
+    let (store, _) = resolve_config_store(scope).await?;
     store
         .set(config)
         .await
@@ -908,7 +993,11 @@ async fn handle_config_set(
     Ok(())
 }
 
-async fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> anyhow::Result<()> {
+async fn handle_config_patch(
+    file: Option<PathBuf>,
+    json: Option<String>,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
     let patch_value: serde_json::Value = if let Some(path) = file {
         let content = tokio::fs::read_to_string(&path)
             .await
@@ -922,7 +1011,7 @@ async fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> any
         return Err(anyhow::anyhow!("Provide --file or --json to patch config"));
     };
 
-    let (store, _) = resolve_config_store().await?;
+    let (store, _) = resolve_config_store(scope).await?;
     store
         .patch(ConfigDelta(patch_value))
         .await
@@ -930,8 +1019,8 @@ async fn handle_config_patch(file: Option<PathBuf>, json: Option<String>) -> any
     Ok(())
 }
 
-async fn handle_capabilities() -> anyhow::Result<()> {
-    let (config, _) = load_config().await?;
+async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
+    let (config, _) = load_config(scope).await?;
     let response = meerkat::surface::build_capabilities_response(&config);
     println!(
         "{}",
@@ -940,9 +1029,11 @@ async fn handle_capabilities() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_rpc() -> anyhow::Result<()> {
-    let (config, _config_base_dir) = load_config().await?;
-    let store_path = get_session_store_dir().await;
+async fn handle_rpc(scope: &RuntimeScope) -> anyhow::Result<()> {
+    let (config, _config_base_dir) = load_config(scope).await?;
+    let (manifest, session_store) =
+        meerkat_store::open_realm_session_store(&scope.realm_id, scope.backend_hint()).await?;
+    let store_path = realm_store_path(&manifest, scope);
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let project_root = find_project_root(&cwd);
 
@@ -955,13 +1046,6 @@ async fn handle_rpc() -> anyhow::Result<()> {
         .subagents(true)
         .memory(true);
 
-    let db_dir = meerkat_store::resolve_database_dir(&config);
-    std::fs::create_dir_all(&db_dir)?;
-    let session_store: Arc<dyn meerkat_store::SessionStore> = Arc::new(
-        meerkat_store::RedbSessionStore::open(db_dir.join("sessions.redb"))
-            .map_err(|e| anyhow::anyhow!("Failed to open session database: {e}"))?,
-    );
-
     let runtime = Arc::new(meerkat_rpc::session_runtime::SessionRuntime::new(
         factory,
         config,
@@ -969,8 +1053,25 @@ async fn handle_rpc() -> anyhow::Result<()> {
         session_store,
     ));
 
-    let (config_store, _base_dir) = resolve_config_store().await?;
-    let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::from(config_store);
+    let (config_store, _base_dir) = resolve_config_store(scope).await?;
+    let base_store: Arc<dyn meerkat_core::ConfigStore> = Arc::from(config_store);
+    let realm_paths = meerkat_store::realm_paths(&scope.realm_id);
+    let tagged = meerkat_core::TaggedConfigStore::new(
+        base_store,
+        meerkat_core::ConfigStoreMetadata {
+            realm_id: Some(scope.realm_id.clone()),
+            instance_id: scope.instance_id.clone(),
+            backend: Some(manifest.backend.as_str().to_string()),
+            resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
+                root: realm_paths.root.display().to_string(),
+                manifest_path: realm_paths.manifest_path.display().to_string(),
+                config_path: realm_paths.config_path.display().to_string(),
+                sessions_redb_path: realm_paths.sessions_redb_path.display().to_string(),
+                sessions_jsonl_dir: realm_paths.sessions_jsonl_dir.display().to_string(),
+            }),
+        },
+    );
+    let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(tagged);
 
     meerkat_rpc::serve_stdio(runtime, config_store)
         .await
@@ -979,19 +1080,22 @@ async fn handle_rpc() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Get the default session store directory
-async fn get_session_store_dir() -> std::path::PathBuf {
-    let config: meerkat_core::Config = meerkat_core::Config::load().await.unwrap_or_default();
-    config
-        .storage
-        .directory
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
+/// Create the realm-scoped session store backend.
+async fn create_session_store(
+    scope: &RuntimeScope,
+) -> anyhow::Result<(meerkat_store::RealmManifest, Arc<dyn SessionStore>)> {
+    meerkat_store::open_realm_session_store(&scope.realm_id, scope.backend_hint())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to open realm session store: {e}"))
 }
 
-/// Create the session store (persistent)
-async fn create_session_store() -> Arc<JsonlStore> {
-    let dir = get_session_store_dir().await;
-    Arc::new(JsonlStore::new(dir))
+fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScope) -> PathBuf {
+    let paths = meerkat_store::realm_paths(&scope.realm_id);
+    match manifest.backend {
+        #[cfg(feature = "jsonl-store")]
+        RealmBackend::Jsonl => paths.sessions_jsonl_dir,
+        RealmBackend::Redb => paths.root,
+    }
 }
 
 /// Create MCP tool dispatcher from config files
@@ -1141,6 +1245,7 @@ async fn run_agent(
     config: &Config,
     _config_base_dir: PathBuf,
     hooks_override: HookRunOverrides,
+    scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let host_mode = resolve_host_mode(host_mode)?;
 
@@ -1167,7 +1272,9 @@ async fn run_agent(
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project_root = find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
 
-    let factory = AgentFactory::new(get_session_store_dir().await)
+    let (manifest, session_store) = create_session_store(scope).await?;
+    let factory = AgentFactory::new(realm_store_path(&manifest, scope))
+        .session_store(session_store)
         .project_root(project_root)
         .builtins(enable_builtins)
         .shell(enable_shell)
@@ -1372,20 +1479,21 @@ async fn resume_session(
     session_id: &str,
     prompt: &str,
     hooks_override: HookRunOverrides,
+    scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     // Parse session ID
     let session_id = SessionId::parse(session_id)
         .map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", session_id, e))?;
 
     // Load the session from store
-    let store = create_session_store().await;
+    let (manifest, store) = create_session_store(scope).await?;
     let session = store
         .load(&session_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
 
-    let (config, _config_base_dir) = load_config().await?;
+    let (config, _config_base_dir) = load_config(scope).await?;
     let stored_metadata = session.session_metadata();
     let tooling = stored_metadata
         .as_ref()
@@ -1439,7 +1547,8 @@ async fn resume_session(
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project_root = find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
 
-    let factory = AgentFactory::new(get_session_store_dir().await)
+    let factory = AgentFactory::new(realm_store_path(&manifest, scope))
+        .session_store(store.clone())
         .project_root(project_root)
         .builtins(tooling.builtins)
         .shell(tooling.shell)
@@ -1509,13 +1618,9 @@ async fn resume_session(
     Ok(())
 }
 
-/// List sessions.
-///
-/// TODO: Migrate to `PersistentSessionService::list()` when the `session-store`
-/// feature is wired into the CLI. Currently uses direct `JsonlStore` access
-/// because `EphemeralSessionService` only tracks live (in-memory) sessions.
-async fn list_sessions(limit: usize) -> anyhow::Result<()> {
-    let store = create_session_store().await;
+/// List sessions from the realm-scoped persistent backend.
+async fn list_sessions(limit: usize, scope: &RuntimeScope) -> anyhow::Result<()> {
+    let (_manifest, store) = create_session_store(scope).await?;
     let filter = SessionFilter {
         limit: Some(limit),
         ..Default::default()
@@ -1554,16 +1659,13 @@ async fn list_sessions(limit: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Show session details.
-///
-/// TODO: Migrate to `PersistentSessionService::read()` when the `session-store`
-/// feature is wired into the CLI. Currently uses direct `JsonlStore` access.
-async fn show_session(id: &str) -> anyhow::Result<()> {
+/// Show session details from the realm-scoped persistent backend.
+async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     // Parse session ID
     let session_id =
         SessionId::parse(id).map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", id, e))?;
 
-    let store = create_session_store().await;
+    let (_manifest, store) = create_session_store(scope).await?;
     let session = store
         .load(&session_id)
         .await
@@ -1652,16 +1754,13 @@ async fn show_session(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Delete a session.
-///
-/// TODO: Migrate to `PersistentSessionService::archive()` when the `session-store`
-/// feature is wired into the CLI. Currently uses direct `JsonlStore` access.
-async fn delete_session(id: &str) -> anyhow::Result<()> {
+/// Delete a session from the realm-scoped persistent backend.
+async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     // Parse session ID
     let session_id =
         SessionId::parse(id).map_err(|e| anyhow::anyhow!("Invalid session ID '{}': {}", id, e))?;
 
-    let store = create_session_store().await;
+    let (_manifest, store) = create_session_store(scope).await?;
 
     // Check if session exists first
     if !store
@@ -1827,10 +1926,7 @@ mod tests {
     #[test]
     fn test_resolve_host_mode_rejects_when_comms_disabled() {
         let err = resolve_host_mode(true).expect_err("host mode should be rejected");
-        assert!(
-            err.to_string()
-                .contains("host_mode requires comms support")
-        );
+        assert!(err.to_string().contains("host_mode requires comms support"));
     }
 
     #[cfg(feature = "comms")]

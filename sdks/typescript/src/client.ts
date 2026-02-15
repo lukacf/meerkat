@@ -32,8 +32,23 @@ export class MeerkatClient {
     this.rkatPath = rkatPath;
   }
 
-  async connect(): Promise<this> {
-    this.process = spawn(this.rkatPath, ["rpc"], {
+  async connect(options?: {
+    realmId?: string;
+    instanceId?: string;
+    realmBackend?: "jsonl" | "redb";
+  }): Promise<this> {
+    const args: string[] = [];
+    if (options?.realmId) {
+      args.push("--realm", options.realmId);
+    }
+    if (options?.instanceId) {
+      args.push("--instance", options.instanceId);
+    }
+    if (options?.realmBackend) {
+      args.push("--realm-backend", options.realmBackend);
+    }
+    args.push("rpc");
+    this.process = spawn(this.rkatPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
 

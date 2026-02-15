@@ -299,7 +299,7 @@ async fn config_get_patch_roundtrip() {
         "config/get failed: {}",
         get_resp
     );
-    let initial_max_tokens = get_resp["result"]["max_tokens"].as_u64().unwrap();
+    let initial_max_tokens = get_resp["result"]["config"]["max_tokens"].as_u64().unwrap();
 
     // Patch max_tokens
     let new_max_tokens = initial_max_tokens + 1000;
@@ -318,7 +318,7 @@ async fn config_get_patch_roundtrip() {
         "config/patch failed: {}",
         patch_resp
     );
-    assert_eq!(patch_resp["result"]["max_tokens"], new_max_tokens);
+    assert_eq!(patch_resp["result"]["config"]["max_tokens"], new_max_tokens);
 
     // Get again and verify
     let get_req2 = serde_json::json!({
@@ -330,7 +330,7 @@ async fn config_get_patch_roundtrip() {
 
     let get_resp2 = read_response(&mut reader).await;
     assert_eq!(get_resp2["id"], 3);
-    assert_eq!(get_resp2["result"]["max_tokens"], new_max_tokens);
+    assert_eq!(get_resp2["result"]["config"]["max_tokens"], new_max_tokens);
 
     drop(writer);
     server_handle.await.unwrap().unwrap();

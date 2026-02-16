@@ -273,17 +273,21 @@ publish-dry-run:
 	           meerkat-mcp-server meerkat-hooks meerkat-skills meerkat-comms \
 	           meerkat-rpc meerkat-rest meerkat; do \
 		printf "  %-25s" "$$pkg..."; \
-		if cargo publish -p $$pkg --dry-run 2>&1 | grep -q "error"; then \
-			echo "$(RED)FAIL$(NC)"; \
-			FAIL=1; \
-		else \
+		log_file=$$(mktemp); \
+		if cargo publish -p $$pkg --dry-run --allow-dirty > "$$log_file" 2>&1; then \
 			echo "$(GREEN)OK$(NC)"; \
+		else \
+			echo "$(RED)FAIL$(NC)"; \
+			echo "    $(YELLOW)Top failure lines from $$pkg publish dry-run:$(NC)"; \
+			rg -n "^\\s*error(:|\\[)" "$$log_file" | head -n 20 || true; \
+			FAIL=1; \
 		fi; \
+		rm -f "$$log_file"; \
 	done; \
 	if [ $$FAIL -ne 0 ]; then \
 		echo "$(RED)Some crates are not publish-ready$(NC)"; \
 		exit 1; \
-	fi
+	fi; \
 	@echo "$(GREEN)All crates are publish-ready$(NC)"
 
 # Verify version matches tag (for release validation)

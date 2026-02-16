@@ -19,6 +19,7 @@
 # Cargo lock is committed for binaries
 # Cargo.lock
 .claude/ralph-loop.local.md
+.claude/skills/rct-development
 
 # Temporary files
 nohup.out

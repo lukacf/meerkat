@@ -20,6 +20,11 @@ Run these before release:
 2. `make verify-version-parity`
 3. `make verify-schema-freshness`
 
+For a full local dry-run that includes registry-facing publish checks without uploading,
+run:
+
+4. `make release-dry-run`
+
 Version and contract compatibility must already be in sync via:
 
 - `Cargo.toml` workspace version
@@ -190,5 +195,7 @@ with minimal surface-area, no behavior changes to runtime APIs.
   - Rust: `cargo publish --dry-run` for each crate in publish list.
   - Python: `python -m twine check` on the built wheel/sdist, no upload.
   - TypeScript: `npm publish --dry-run`.
+- Local equivalent:
+  - `make release-dry-run`
 - Example:
   - `gh workflow run release.yml -f publish_release_packages=true -f registry_dry_run=true`

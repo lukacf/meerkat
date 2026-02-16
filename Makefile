@@ -10,7 +10,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions release-preflight publish-dry-run
+.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions release-preflight publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run
 
 # Default target
 all: ci
@@ -264,6 +264,29 @@ release-preflight: ci verify-schema-freshness
 	@echo "$(GREEN)Ready to release. Run:$(NC)"
 	@echo "  cargo release <patch|minor|major>"
 
+# Dry-run publish for Python SDK (build + twine check only)
+publish-dry-run-python:
+	@echo "$(GREEN)Checking Python SDK publish readiness...$(NC)"
+	@cd sdks/python && \
+		python3 -m pip install --upgrade build twine; \
+		rm -rf dist; \
+		python3 -m build; \
+		python3 -m twine check dist/*
+
+# Dry-run publish for TypeScript SDK (npm --dry-run)
+publish-dry-run-typescript:
+	@echo "$(GREEN)Checking TypeScript SDK publish readiness...$(NC)"
+	@cd sdks/typescript && \
+		npm ci && \
+		npm publish --access public --dry-run
+
+# Full dry-run release path: all validation + dry-run publish checks (no actual uploads)
+release-dry-run: release-preflight
+	@echo "$(GREEN)Running full registry dry-run (no uploads)...$(NC)"
+	@$(MAKE) publish-dry-run
+	@$(MAKE) publish-dry-run-python
+	@$(MAKE) publish-dry-run-typescript
+
 # Dry-run cargo publish for all publishable crates
 publish-dry-run:
 	@set -euo pipefail; \
@@ -356,4 +379,7 @@ help:
 	@echo "  $(GREEN)regen-schemas$(NC)         - Re-emit schemas + run SDK codegen"
 	@echo "  $(GREEN)release-preflight$(NC)     - Full pre-release checklist (CI + freshness)"
 	@echo "  $(GREEN)publish-dry-run$(NC)       - Dry-run cargo publish for all crates"
+	@echo "  $(GREEN)publish-dry-run-python$(NC) - Dry-run Python SDK publish check (build + twine check)"
+	@echo "  $(GREEN)publish-dry-run-typescript$(NC)- Dry-run TypeScript SDK publish check (npm publish --dry-run)"
+	@echo "  $(GREEN)release-dry-run$(NC)       - Full preflight + dry-run registry checks (no uploads)"
 	@echo "  $(GREEN)help$(NC)          - Show this help message"

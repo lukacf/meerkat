@@ -266,15 +266,34 @@ release-preflight: ci verify-schema-freshness
 
 # Dry-run cargo publish for all publishable crates
 publish-dry-run:
-	@echo "$(GREEN)Checking publish readiness...$(NC)"
-	@FAIL=0; \
+	@set -euo pipefail; \
+	echo "$(GREEN)Checking publish readiness...$(NC)"; \
+	tmp_cfg=$$(mktemp); \
+	printf '%s\n' "[patch.crates-io]" \
+		"meerkat-core = { path = \"$(CURDIR)/meerkat-core\" }" \
+		"meerkat-client = { path = \"$(CURDIR)/meerkat-client\" }" \
+		"meerkat-store = { path = \"$(CURDIR)/meerkat-store\" }" \
+		"meerkat-tools = { path = \"$(CURDIR)/meerkat-tools\" }" \
+		"meerkat-session = { path = \"$(CURDIR)/meerkat-session\" }" \
+		"meerkat-memory = { path = \"$(CURDIR)/meerkat-memory\" }" \
+		"meerkat-mcp = { path = \"$(CURDIR)/meerkat-mcp\" }" \
+		"meerkat-mcp-server = { path = \"$(CURDIR)/meerkat-mcp-server\" }" \
+		"meerkat-hooks = { path = \"$(CURDIR)/meerkat-hooks\" }" \
+		"meerkat-skills = { path = \"$(CURDIR)/meerkat-skills\" }" \
+		"meerkat-comms = { path = \"$(CURDIR)/meerkat-comms\" }" \
+		"meerkat-rpc = { path = \"$(CURDIR)/meerkat-rpc\" }" \
+		"meerkat-rest = { path = \"$(CURDIR)/meerkat-rest\" }" \
+		"meerkat-contracts = { path = \"$(CURDIR)/meerkat-contracts\" }" \
+		"meerkat = { path = \"$(CURDIR)/meerkat\" }" \
+		> "$$tmp_cfg"; \
+	FAIL=0; \
 	for pkg in meerkat-core meerkat-contracts meerkat-client meerkat-store \
 	           meerkat-tools meerkat-session meerkat-memory meerkat-mcp \
 	           meerkat-mcp-server meerkat-hooks meerkat-skills meerkat-comms \
 	           meerkat-rpc meerkat-rest meerkat; do \
 		printf "  %-25s" "$$pkg..."; \
 		log_file=$$(mktemp); \
-		if cargo publish -p $$pkg --dry-run --allow-dirty > "$$log_file" 2>&1; then \
+		if cargo publish -p $$pkg --dry-run --allow-dirty --config "$$tmp_cfg" > "$$log_file" 2>&1; then \
 			echo "$(GREEN)OK$(NC)"; \
 		else \
 			echo "$(RED)FAIL$(NC)"; \
@@ -284,11 +303,12 @@ publish-dry-run:
 		fi; \
 		rm -f "$$log_file"; \
 	done; \
+	rm -f "$$tmp_cfg"; \
 	if [ $$FAIL -ne 0 ]; then \
 		echo "$(RED)Some crates are not publish-ready$(NC)"; \
 		exit 1; \
 	fi; \
-	@echo "$(GREEN)All crates are publish-ready$(NC)"
+	echo "$(GREEN)All crates are publish-ready$(NC)"
 
 # Verify version matches tag (for release validation)
 verify-version:

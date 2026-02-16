@@ -266,13 +266,33 @@ jobs:
             meerkat-rest
             meerkat
           )
+          tmp_cfg="$(mktemp)"
+          cat > "$tmp_cfg" <<EOF
+          [patch.crates-io]
+          meerkat-core = { path = "$GITHUB_WORKSPACE/meerkat-core" }
+          meerkat-client = { path = "$GITHUB_WORKSPACE/meerkat-client" }
+          meerkat-store = { path = "$GITHUB_WORKSPACE/meerkat-store" }
+          meerkat-tools = { path = "$GITHUB_WORKSPACE/meerkat-tools" }
+          meerkat-session = { path = "$GITHUB_WORKSPACE/meerkat-session" }
+          meerkat-memory = { path = "$GITHUB_WORKSPACE/meerkat-memory" }
+          meerkat-mcp = { path = "$GITHUB_WORKSPACE/meerkat-mcp" }
+          meerkat-mcp-server = { path = "$GITHUB_WORKSPACE/meerkat-mcp-server" }
+          meerkat-hooks = { path = "$GITHUB_WORKSPACE/meerkat-hooks" }
+          meerkat-skills = { path = "$GITHUB_WORKSPACE/meerkat-skills" }
+          meerkat-comms = { path = "$GITHUB_WORKSPACE/meerkat-comms" }
+          meerkat-rpc = { path = "$GITHUB_WORKSPACE/meerkat-rpc" }
+          meerkat-rest = { path = "$GITHUB_WORKSPACE/meerkat-rest" }
+          meerkat-contracts = { path = "$GITHUB_WORKSPACE/meerkat-contracts" }
+          meerkat = { path = "$GITHUB_WORKSPACE/meerkat" }
+          EOF
           for c in "${crates[@]}"; do
             if [[ "$DRY_RUN" == "true" ]]; then
-              cargo publish -p "$c" --locked --dry-run
+              cargo publish -p "$c" --locked --dry-run --config "$tmp_cfg"
             else
-              cargo publish -p "$c" --locked
+              cargo publish -p "$c" --locked --config "$tmp_cfg"
             fi
           done
+          rm -f "$tmp_cfg"
 
       - name: Publish Python SDK
         env:

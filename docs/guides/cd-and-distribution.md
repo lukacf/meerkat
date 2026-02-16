@@ -110,11 +110,13 @@ For MCP-style tooling (`claude mcp add`, `npx`), provide a CLI entrypoint packag
 
 - `cargo release ...` (or equivalent scripted sequence)
 - Rust crates should be published first or concurrently after checks pass.
+- Dry-run mode: run the same validation/build path without registry writes using manual dispatch input `registry_dry_run=true`.
 
 ### Job 5 — Publish language packages
 
 - Publish Python wheel (`meerkat-sdk`) from same version
 - Publish TypeScript package (`@meerkat/sdk`, optional MCP wrapper package)
+- Both packages support dry-run behavior in registry publish mode so you can validate metadata/build without actually uploading.
 
 ### Job 6 — Post-release smoke
 
@@ -178,3 +180,15 @@ You only mentioned Cargo is already configured; Pip/npm still require separate c
 
 This is a plan/rulebook currently. Code and workflows should follow this sequence
 with minimal surface-area, no behavior changes to runtime APIs.
+
+## Registry publish dry-run
+
+- Workflow dispatch inputs:
+  - `publish_release_packages` (default: false): enable publish job.
+  - `registry_dry_run` (default: false): keep publish jobs in dry-run mode.
+- Dry-run behavior:
+  - Rust: `cargo publish --dry-run` for each crate in publish list.
+  - Python: `python -m twine check` on the built wheel/sdist, no upload.
+  - TypeScript: `npm publish --dry-run`.
+- Example:
+  - `gh workflow run release.yml -f publish_release_packages=true -f registry_dry_run=true`

@@ -11,6 +11,11 @@ on:
         required: false
         default: false
         type: boolean
+      registry_dry_run:
+        description: "Run registry publish steps in dry-run mode"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -207,7 +212,7 @@ jobs:
   publish_registries:
     name: Publish crates + SDK packages
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release_packages == 'true'
-    needs: [release_validate, publish_github_release]
+    needs: [release_validate]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -238,6 +243,12 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
+          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Running cargo publish in dry-run mode"
+          else
+            echo "Publishing crates to crates.io"
+          fi
           crates=(
             meerkat-core
             meerkat-contracts
@@ -256,7 +267,11 @@ jobs:
             meerkat
           )
           for c in "${crates[@]}"; do
-            cargo publish -p "$c" --locked
+            if [[ "$DRY_RUN" == "true" ]]; then
+              cargo publish -p "$c" --locked --dry-run
+            else
+              cargo publish -p "$c" --locked
+            fi
           done
 
       - name: Publish Python SDK
@@ -266,10 +281,16 @@ jobs:
         working-directory: sdks/python
         run: |
           set -euo pipefail
+          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
           python -m pip install --upgrade build twine
           rm -rf dist
           python -m build
-          python -m twine upload dist/*
+          python -m twine check dist/*
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Python SDK dry-run: skipping upload"
+          else
+            python -m twine upload dist/*
+          fi
 
       - name: Publish TypeScript SDK
         env:
@@ -277,7 +298,12 @@ jobs:
         working-directory: sdks/typescript
         run: |
           set -euo pipefail
+          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
           npm ci
           npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
           npm run build
-          npm publish --access public
+          if [[ "$DRY_RUN" == "true" ]]; then
+            npm publish --access public --dry-run
+          else
+            npm publish --access public
+          fi

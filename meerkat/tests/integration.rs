@@ -26,7 +26,7 @@ mod llm_normalization {
     }
 
     #[tokio::test]
-    #[ignore = "e2e: live API"]
+    #[ignore = "integration-real: live API"]
     async fn e2e_anthropic_normalizes_to_llm_event() {
         let Some(api_key) = first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]) else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -93,7 +93,7 @@ mod llm_normalization {
 
     #[cfg(feature = "openai")]
     #[tokio::test]
-    #[ignore = "e2e: live API"]
+    #[ignore = "integration-real: live API"]
     async fn e2e_openai_normalizes_to_llm_event() {
         let Some(api_key) = first_env(&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]) else {
             eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
@@ -131,7 +131,7 @@ mod llm_normalization {
 
     #[cfg(feature = "gemini")]
     #[tokio::test]
-    #[ignore = "e2e: live API"]
+    #[ignore = "integration-real: live API"]
     async fn e2e_gemini_normalizes_to_llm_event() {
         let Some(api_key) = first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
         else {

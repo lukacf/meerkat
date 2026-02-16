@@ -399,7 +399,7 @@ mod two_agent_message {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "e2e: live API"]
+    #[ignore = "integration-real: live API"]
     async fn e2e_llm_message_exchange() {
         let api_key = anthropic_api_key();
 
@@ -453,7 +453,7 @@ mod request_response {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "e2e: live API"]
+    #[ignore = "integration-real: live API"]
     async fn e2e_llm_request_response() {
         let api_key = anthropic_api_key();
 
@@ -510,7 +510,7 @@ mod multi_turn_comms {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "e2e: live API"]
+    #[ignore = "integration-real: live API"]
     async fn e2e_llm_multi_turn() {
         let api_key = anthropic_api_key();
 
@@ -572,7 +572,7 @@ mod three_agent_coordination {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "e2e: live API"]
+    #[ignore = "integration-real: live API"]
     async fn e2e_llm_three_agent_coordination() {
         let api_key = anthropic_api_key();
 

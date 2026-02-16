@@ -1251,11 +1251,37 @@ async fn delete_realm(
     }
 
     let paths = meerkat_store::realm_paths_in(state_root, realm_id);
-    tokio::fs::remove_dir_all(&paths.root)
+    remove_realm_root_with_retries(&paths, force)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to delete realm '{}': {}", realm_id, e))?;
     println!("Deleted realm '{}'", realm_id);
     Ok(())
+}
+
+async fn remove_realm_root_with_retries(
+    paths: &meerkat_store::RealmPaths,
+    force: bool,
+) -> anyhow::Result<()> {
+    let max_attempts: usize = if force { 12 } else { 1 };
+    let mut delay = Duration::from_millis(25);
+    let lease_dir = meerkat_store::realm_lease_dir(paths);
+
+    for attempt in 1..=max_attempts {
+        match tokio::fs::remove_dir_all(&paths.root).await {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                if !force || attempt >= max_attempts {
+                    return Err(err.into());
+                }
+                let _ = tokio::fs::remove_dir_all(&lease_dir).await;
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(1));
+            }
+        }
+    }
+
+    unreachable!();
 }
 
 async fn prune_realms(
@@ -1344,7 +1370,7 @@ async fn prune_realms_inner(
         }
 
         let paths = meerkat_store::realm_paths_in(state_root, &manifest.realm_id);
-        if let Err(err) = tokio::fs::remove_dir_all(&paths.root).await {
+        if let Err(err) = remove_realm_root_with_retries(&paths, force).await {
             outcome
                 .leftovers
                 .push(format!("{} ({})", manifest.realm_id, err));

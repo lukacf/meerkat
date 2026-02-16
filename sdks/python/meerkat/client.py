@@ -1,8 +1,17 @@
 """Meerkat client — spawns rkat-rpc subprocess and communicates via JSON-RPC."""
 
 import asyncio
+import os
 import json
+import platform
+import shutil
+import tarfile
+import tempfile
+from pathlib import Path
+from urllib.error import URLError
 from typing import Optional
+import urllib.request
+import zipfile
 
 from .errors import CapabilityUnavailableError, MeerkatError
 from .generated.types import (
@@ -13,6 +22,10 @@ from .generated.types import (
     WireUsage,
 )
 from .streaming import StreamingTurn, _StdoutDispatcher
+
+_MEERKAT_REPO = ("lukacf", "meerkat")
+_MEERKAT_BINARY = "rkat-rpc"
+_MEERKAT_BINARY_CACHE_ROOT = Path.home() / ".cache" / "meerkat" / "bin" / _MEERKAT_BINARY
 
 
 class MeerkatClient:
@@ -39,26 +52,12 @@ class MeerkatClient:
     """
 
     def __init__(self, rkat_path: str = "rkat-rpc"):
-        import shutil
-
         self._rkat_path = rkat_path
         self._legacy_rpc_subcommand = False
         self._process: Optional[asyncio.subprocess.Process] = None
         self._request_id = 0
         self._capabilities: Optional[CapabilitiesResponse] = None
         self._dispatcher: Optional[_StdoutDispatcher] = None
-
-        if not shutil.which(self._rkat_path):
-            if self._rkat_path == "rkat-rpc" and shutil.which("rkat"):
-                # Transitional fallback for older installs.
-                self._rkat_path = "rkat"
-                self._legacy_rpc_subcommand = True
-            else:
-                raise MeerkatError(
-                    "BINARY_NOT_FOUND",
-                    f"rkat-rpc binary not found at '{self._rkat_path}'. "
-                    "Ensure it is installed and on your PATH.",
-                )
 
     async def connect(
         self,
@@ -76,6 +75,10 @@ class MeerkatClient:
                 "INVALID_ARGS",
                 "realm_id and isolated cannot both be set",
             )
+        resolved_path, use_legacy_rpc = await self._resolve_rkat_binary(self._rkat_path)
+        self._rkat_path = resolved_path
+        self._legacy_rpc_subcommand = use_legacy_rpc
+
         legacy_requires_new_binary = any(
             [
                 isolated,
@@ -343,6 +346,158 @@ class MeerkatClient:
         return await self._request("comms/peers", {"session_id": session_id})
 
     # --- Internal ---
+    async def _resolve_rkat_binary(self, requested_path: str) -> tuple[str, bool]:
+        override = os.environ.get("MEERKAT_BIN_PATH")
+        if override:
+            override = override.strip()
+            if not override:
+                raise MeerkatError(
+                    "BINARY_NOT_FOUND",
+                    "MEERKAT_BIN_PATH is set to an empty path.",
+                )
+            candidate = self._resolve_candidate_path(override)
+            if candidate is None:
+                raise MeerkatError(
+                    "BINARY_NOT_FOUND",
+                    f"Binary not found at MEERKAT_BIN_PATH='{override}'. "
+                    "Set MEERKAT_BIN_PATH to a valid executable.",
+                )
+            return str(candidate), Path(candidate).name == "rkat"
+
+        if requested_path != _MEERKAT_BINARY:
+            candidate = self._resolve_candidate_path(requested_path)
+            if candidate is None:
+                raise MeerkatError(
+                    "BINARY_NOT_FOUND",
+                    f"Binary not found at '{requested_path}'. "
+                    "Set rkat_path to a valid path or use MEERKAT_BIN_PATH.",
+                )
+            return str(candidate), Path(candidate).name == "rkat"
+
+        candidate = self._resolve_candidate_path(_MEERKAT_BINARY)
+        if candidate is not None:
+            return str(candidate), False
+
+        try:
+            cached = await self._download_rkat_rpc_binary()
+        except MeerkatError:
+            if shutil.which("rkat"):
+                return "rkat", True
+            raise
+
+        if cached is not None:
+            return cached, False
+
+        if shutil.which("rkat"):
+            return "rkat", True
+
+        raise MeerkatError(
+            "BINARY_NOT_FOUND",
+            f"Could not find '{_MEERKAT_BINARY}' on PATH and auto-download failed."
+            " Set MEERKAT_BIN_PATH to a local executable.",
+        )
+
+    @staticmethod
+    def _resolve_candidate_path(command_or_path: str) -> Optional[str]:
+        if "/" in command_or_path or "\\" in command_or_path:
+            candidate = Path(command_or_path).expanduser()
+            if candidate.is_file():
+                return str(candidate)
+            return None
+        return shutil.which(command_or_path)
+
+    @staticmethod
+    def _platform_target() -> tuple[str, str, str]:
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+        if system == "darwin":
+            target = {
+                "x86_64": "x86_64-apple-darwin",
+                "amd64": "x86_64-apple-darwin",
+                "arm64": "aarch64-apple-darwin",
+                "aarch64": "aarch64-apple-darwin",
+            }.get(machine)
+            if target is None:
+                raise MeerkatError("UNSUPPORTED_PLATFORM", f"Unsupported macOS architecture '{machine}'")
+            return target, "tar.gz", _MEERKAT_BINARY
+
+        if system == "linux":
+            if machine in {"x86_64", "amd64"}:
+                return "x86_64-unknown-linux-gnu", "tar.gz", _MEERKAT_BINARY
+            raise MeerkatError(
+                "UNSUPPORTED_PLATFORM",
+                f"Unsupported Linux architecture '{machine}'.",
+            )
+
+        if system == "windows":
+            if machine in {"x86_64", "amd64"}:
+                return "x86_64-pc-windows-msvc", "zip", f"{_MEERKAT_BINARY}.exe"
+            raise MeerkatError(
+                "UNSUPPORTED_PLATFORM",
+                f"Unsupported Windows architecture '{machine}'.",
+            )
+
+        raise MeerkatError("UNSUPPORTED_PLATFORM", f"Unsupported platform '{system}'.")
+
+    async def _download_rkat_rpc_binary(self) -> Optional[str]:
+        target, archive_ext, binary_name = self._platform_target()
+        owner, repo = _MEERKAT_REPO
+        version = CONTRACT_VERSION
+        artifact = f"{_MEERKAT_BINARY}-v{version}-{target}.{archive_ext}"
+        url = f"https://github.com/{owner}/{repo}/releases/download/v{version}/{artifact}"
+        cache_dir = _MEERKAT_BINARY_CACHE_ROOT / f"v{version}" / target
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached = cache_dir / binary_name
+        if cached.exists():
+            return str(cached)
+
+        try:
+            with urllib.request.urlopen(url) as response:
+                payload = response.read()
+        except (URLError, OSError) as exc:
+            raise MeerkatError(
+                "BINARY_DOWNLOAD_FAILED",
+                f"Failed to download {_MEERKAT_BINARY} from {url}: {exc}",
+            ) from exc
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / f"{_MEERKAT_BINARY}.{archive_ext}"
+            with archive_path.open("wb") as fp:
+                fp.write(payload)
+
+            temp_binary = cache_dir / f".{binary_name}.download"
+            if archive_ext == "tar.gz":
+                with tarfile.open(archive_path, "r:gz") as archive:
+                    members = [m for m in archive.getmembers() if Path(m.name).name == binary_name]
+                    if not members:
+                        raise MeerkatError(
+                            "BINARY_DOWNLOAD_FAILED",
+                            f"Downloaded archive does not contain '{binary_name}'.",
+                        )
+                    with archive.extractfile(members[0]) as source, temp_binary.open("wb") as out:
+                        if source is None:
+                            raise MeerkatError(
+                                "BINARY_DOWNLOAD_FAILED",
+                                f"Could not extract '{binary_name}' from {artifact}.",
+                            )
+                        out.write(source.read())
+            else:
+                with zipfile.ZipFile(archive_path, "r") as archive:
+                    candidate_names = [entry.filename for entry in archive.infolist()]
+                    if not any(Path(name).name == binary_name for name in candidate_names):
+                        raise MeerkatError(
+                            "BINARY_DOWNLOAD_FAILED",
+                            f"Downloaded archive does not contain '{binary_name}'.",
+                        )
+                    with archive.open(
+                        next(name for name in candidate_names if Path(name).name == binary_name),
+                    ) as source, temp_binary.open("wb") as out:
+                        out.write(source.read())
+
+            if os.name != "nt":
+                temp_binary.chmod(0o755)
+            temp_binary.replace(cached)
+            return str(cached)
 
     async def _request(self, method: str, params: dict) -> dict:
         """Send a JSON-RPC request and return the result.

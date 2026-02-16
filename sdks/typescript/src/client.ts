@@ -3,7 +3,13 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { MeerkatError } from "./generated/errors.js";
@@ -14,10 +20,31 @@ import type {
 } from "./generated/types.js";
 import { CONTRACT_VERSION } from "./generated/types.js";
 
+const MEERKAT_REPO = "lukacf/meerkat";
+const MEERKAT_RELEASE_BINARY = "meerkat-rpc";
+const MEERKAT_BINARY_CACHE_ROOT = path.join(
+  os.homedir(),
+  ".cache",
+  "meerkat",
+  "bin",
+  MEERKAT_RELEASE_BINARY,
+);
+
 /** Supplementary discovery metadata for a comms peer. */
 export interface PeerMeta {
   description?: string;
   labels?: Record<string, string>;
+}
+
+interface ResolvedBinary {
+  command: string;
+  useLegacySubcommand: boolean;
+}
+
+interface PlatformTarget {
+  target: string;
+  archiveExt: "tar.gz" | "zip";
+  binaryName: string;
 }
 
 export class MeerkatClient {
@@ -34,13 +61,13 @@ export class MeerkatClient {
     this.rkatPath = rkatPath;
   }
 
-  private static commandExists(command: string): boolean {
-    if (path.isAbsolute(command) || command.includes(path.sep)) {
-      return existsSync(command);
+  private static commandPath(command: string): string | null {
+    if (path.isAbsolute(command)) {
+      return existsSync(command) ? command : null;
     }
 
     const pathEnv = process.env.PATH ?? "";
-    if (!pathEnv) return false;
+    if (!pathEnv) return null;
 
     const exts =
       process.platform === "win32"
@@ -58,12 +85,210 @@ export class MeerkatClient {
           !command.toLowerCase().endsWith(ext.toLowerCase())
             ? `${command}${ext}`
             : command;
-        if (existsSync(path.join(dir, candidate))) {
-          return true;
-        }
+        const fullPath = path.join(dir, candidate);
+        if (existsSync(fullPath)) return fullPath;
       }
     }
-    return false;
+    return null;
+  }
+
+  private static resolveCandidatePath(commandOrPath: string): string | null {
+    if (commandOrPath.includes(path.sep) || commandOrPath.includes("/")) {
+      const candidate = path.resolve(commandOrPath);
+      return existsSync(candidate) ? candidate : null;
+    }
+    return MeerkatClient.commandPath(commandOrPath);
+  }
+
+  private static platformTarget(): PlatformTarget {
+    const architecture = os.arch();
+    if (process.platform === "darwin") {
+      if (architecture === "x64") return { target: "x86_64-apple-darwin", archiveExt: "tar.gz", binaryName: "rkat-rpc" };
+      if (architecture === "arm64") {
+        return {
+          target: "aarch64-apple-darwin",
+          archiveExt: "tar.gz",
+          binaryName: "rkat-rpc",
+        };
+      }
+      throw new MeerkatError(
+        "UNSUPPORTED_PLATFORM",
+        `Unsupported macOS architecture '${architecture}'.`,
+      );
+    }
+    if (process.platform === "linux") {
+      if (architecture === "x64") {
+        return {
+          target: "x86_64-unknown-linux-gnu",
+          archiveExt: "tar.gz",
+          binaryName: "rkat-rpc",
+        };
+      }
+      throw new MeerkatError(
+        "UNSUPPORTED_PLATFORM",
+        `Unsupported Linux architecture '${architecture}'.`,
+      );
+    }
+    if (process.platform === "win32") {
+      if (architecture === "x64") {
+        return {
+          target: "x86_64-pc-windows-msvc",
+          archiveExt: "zip",
+          binaryName: "rkat-rpc.exe",
+        };
+      }
+      throw new MeerkatError(
+        "UNSUPPORTED_PLATFORM",
+        `Unsupported Windows architecture '${architecture}'.`,
+      );
+    }
+    throw new MeerkatError(
+      "UNSUPPORTED_PLATFORM",
+      `Unsupported platform '${process.platform}'.`,
+    );
+  }
+
+  private static async runCommand(
+    command: string,
+    args: string[],
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn(command, args, { stdio: ["ignore", "inherit", "pipe"] });
+      let stderr = "";
+      proc.stderr?.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      proc.on("error", (error) => {
+        reject(error);
+      });
+      proc.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(
+          new MeerkatError(
+            "ARCHIVE_EXTRACT_FAILED",
+            `${command} failed with code ${code}: ${stderr.trim()}`,
+          ),
+        );
+      });
+    });
+  }
+
+  private static async extractZip(archivePath: string, destinationDir: string): Promise<void> {
+    try {
+      await MeerkatClient.runCommand("tar", ["-xf", archivePath, "-C", destinationDir]);
+      return;
+    } catch (error) {
+      await MeerkatClient.runCommand("powershell", [
+        "-NoProfile",
+        "-Command",
+        `Expand-Archive -LiteralPath '${archivePath.replaceAll("'", "''")}' -DestinationPath '${destinationDir.replaceAll(
+          "'",
+          "''",
+        )}' -Force`,
+      ]);
+    }
+  }
+
+  private static async ensureDownloadedBinary(): Promise<string> {
+    const { target, archiveExt, binaryName } = MeerkatClient.platformTarget();
+    const version = CONTRACT_VERSION;
+    const asset = `${MEERKAT_RELEASE_BINARY}-v${version}-${target}.${archiveExt}`;
+    const url = `https://github.com/${MEERKAT_REPO}/releases/download/v${version}/${asset}`;
+
+    const baseDir = path.join(MEERKAT_BINARY_CACHE_ROOT, `v${version}`, target);
+    mkdirSync(baseDir, { recursive: true });
+
+    const cached = path.join(baseDir, binaryName);
+    if (existsSync(cached)) {
+      return cached;
+    }
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new MeerkatError(
+        "BINARY_DOWNLOAD_FAILED",
+        `Failed to download binary from ${url} (HTTP ${response.status})`,
+      );
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const archivePath = path.join(baseDir, asset);
+    writeFileSync(archivePath, Buffer.from(arrayBuffer));
+
+    try {
+      if (archiveExt === "tar.gz") {
+        await MeerkatClient.runCommand("tar", ["-xzf", archivePath, "-C", baseDir]);
+      } else {
+        await MeerkatClient.extractZip(archivePath, baseDir);
+      }
+    } catch (error) {
+      throw new MeerkatError(
+        "BINARY_DOWNLOAD_EXTRACT_FAILED",
+        `Failed to extract ${archivePath}: ${String(error)}`,
+      );
+    }
+
+    if (process.platform !== "win32") {
+      chmodSync(cached, 0o755);
+    }
+    return cached;
+  }
+
+  private static async resolveBinaryPath(requestedPath: string): Promise<ResolvedBinary> {
+    const overridden = process.env.MEERKAT_BIN_PATH?.trim();
+    if (overridden) {
+      const candidate = MeerkatClient.resolveCandidatePath(overridden);
+      if (!candidate) {
+        throw new MeerkatError(
+          "BINARY_NOT_FOUND",
+          `Binary not found at MEERKAT_BIN_PATH='${overridden}'. Set it to a valid executable.`,
+        );
+      }
+      return {
+        command: candidate,
+        useLegacySubcommand: path.basename(candidate) === "rkat",
+      };
+    }
+
+    if (requestedPath !== "rkat-rpc") {
+      const candidate = MeerkatClient.resolveCandidatePath(requestedPath);
+      if (!candidate) {
+        throw new MeerkatError(
+          "BINARY_NOT_FOUND",
+          `Binary not found at '${requestedPath}'. Set rkatPath to a valid path or use MEERKAT_BIN_PATH.`,
+        );
+      }
+      return {
+        command: candidate,
+        useLegacySubcommand: path.basename(candidate) === "rkat",
+      };
+    }
+
+    const defaultBinary = MeerkatClient.commandPath("rkat-rpc");
+    if (defaultBinary) {
+      return {
+        command: defaultBinary,
+        useLegacySubcommand: false,
+      };
+    }
+
+    try {
+      const downloaded = await MeerkatClient.ensureDownloadedBinary();
+      return { command: downloaded, useLegacySubcommand: false };
+    } catch (error) {
+      const legacy = MeerkatClient.commandPath("rkat");
+      if (legacy) {
+        return { command: legacy, useLegacySubcommand: true };
+      }
+      if (error instanceof MeerkatError) throw error;
+      throw new MeerkatError(
+        "BINARY_NOT_FOUND",
+        `Could not find '${MEERKAT_RELEASE_BINARY}' and auto-download failed.`,
+      );
+    }
   }
 
   async connect(options?: {
@@ -81,28 +306,9 @@ export class MeerkatClient {
         "realmId and isolated cannot both be set",
       );
     }
+    const resolved = await MeerkatClient.resolveBinaryPath(this.rkatPath);
+    this.rkatPath = resolved.command;
     const args: string[] = [];
-    if (options?.isolated) {
-      args.push("--isolated");
-    }
-    if (options?.realmId) {
-      args.push("--realm", options.realmId);
-    }
-    if (options?.instanceId) {
-      args.push("--instance", options.instanceId);
-    }
-    if (options?.realmBackend) {
-      args.push("--realm-backend", options.realmBackend);
-    }
-    if (options?.stateRoot) {
-      args.push("--state-root", options.stateRoot);
-    }
-    if (options?.contextRoot) {
-      args.push("--context-root", options.contextRoot);
-    }
-    if (options?.userConfigRoot) {
-      args.push("--user-config-root", options.userConfigRoot);
-    }
     const legacyRequiresNewBinary = Boolean(
       options?.isolated ||
         options?.realmId ||
@@ -112,26 +318,7 @@ export class MeerkatClient {
         options?.contextRoot ||
         options?.userConfigRoot,
     );
-    let command = this.rkatPath;
-    if (this.rkatPath === "rkat-rpc") {
-      if (!MeerkatClient.commandExists("rkat-rpc")) {
-        if (MeerkatClient.commandExists("rkat")) {
-          if (legacyRequiresNewBinary) {
-            throw new MeerkatError(
-              "LEGACY_BINARY_UNSUPPORTED",
-              "Realm/context options require the standalone rkat-rpc binary. Install rkat-rpc and retry.",
-            );
-          }
-          command = "rkat";
-          args.push("rpc");
-        } else {
-          throw new MeerkatError(
-            "BINARY_NOT_FOUND",
-            "rkat-rpc binary not found on PATH. Install rkat-rpc or set rkatPath explicitly.",
-          );
-        }
-      }
-    } else if (this.rkatPath === "rkat") {
+    if (resolved.useLegacySubcommand) {
       if (legacyRequiresNewBinary) {
         throw new MeerkatError(
           "LEGACY_BINARY_UNSUPPORTED",
@@ -139,14 +326,30 @@ export class MeerkatClient {
         );
       }
       args.push("rpc");
-    } else if (!MeerkatClient.commandExists(this.rkatPath)) {
-      throw new MeerkatError(
-        "BINARY_NOT_FOUND",
-        `rkat-rpc binary not found at '${this.rkatPath}'. Ensure it is installed and on your PATH.`,
-      );
+    } else {
+      if (options?.isolated) {
+        args.push("--isolated");
+      }
+      if (options?.realmId) {
+        args.push("--realm", options.realmId);
+      }
+      if (options?.instanceId) {
+        args.push("--instance", options.instanceId);
+      }
+      if (options?.realmBackend) {
+        args.push("--realm-backend", options.realmBackend);
+      }
+      if (options?.stateRoot) {
+        args.push("--state-root", options.stateRoot);
+      }
+      if (options?.contextRoot) {
+        args.push("--context-root", options.contextRoot);
+      }
+      if (options?.userConfigRoot) {
+        args.push("--user-config-root", options.userConfigRoot);
+      }
     }
-
-    this.process = spawn(command, args, {
+    this.process = spawn(this.rkatPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
 

@@ -64,10 +64,10 @@ async fn spawn_test_server_or_skip(
     match spawn_test_server(app).await {
         Ok(server) => Ok(Some(server)),
         Err(e) => {
-            if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-                if io_err.kind() == std::io::ErrorKind::PermissionDenied {
-                    return Ok(None);
-                }
+            if let Some(io_err) = e.downcast_ref::<std::io::Error>()
+                && io_err.kind() == std::io::ErrorKind::PermissionDenied
+            {
+                return Ok(None);
             }
             Err(e)
         }
@@ -80,13 +80,13 @@ fn schema_for<T: JsonSchema>() -> Value {
 
     // Some generators omit empty `properties`/`required` for `{}`.
     // Our tool schema contract expects explicit presence of both keys.
-    if let Value::Object(ref mut obj) = value {
-        if obj.get("type").and_then(Value::as_str) == Some("object") {
-            obj.entry("properties".to_string())
-                .or_insert_with(|| Value::Object(Map::new()));
-            obj.entry("required".to_string())
-                .or_insert_with(|| Value::Array(Vec::new()));
-        }
+    if let Value::Object(ref mut obj) = value
+        && obj.get("type").and_then(Value::as_str) == Some("object")
+    {
+        obj.entry("properties".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        obj.entry("required".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
     }
 
     value

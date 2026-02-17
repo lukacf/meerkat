@@ -701,21 +701,21 @@ where
         let mut prefix_parts: Vec<String> = Vec::new();
 
         // 1. Consume pending_skill_references (from wire format / API)
-        if let Some(refs) = self.pending_skill_references.take() {
-            if !refs.is_empty() {
-                match engine.resolve_and_render(&refs).await {
-                    Ok(resolved) => {
-                        for skill in &resolved {
-                            tracing::info!(
-                                skill_id = %skill.id.0,
-                                "Per-turn skill activation via skill_references"
-                            );
-                            prefix_parts.push(skill.rendered_body.clone());
-                        }
+        if let Some(refs) = self.pending_skill_references.take()
+            && !refs.is_empty()
+        {
+            match engine.resolve_and_render(&refs).await {
+                Ok(resolved) => {
+                    for skill in &resolved {
+                        tracing::info!(
+                            skill_id = %skill.id.0,
+                            "Per-turn skill activation via skill_references"
+                        );
+                        prefix_parts.push(skill.rendered_body.clone());
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to resolve skill_references");
-                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to resolve skill_references");
                 }
             }
         }

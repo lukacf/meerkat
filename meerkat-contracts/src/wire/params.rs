@@ -73,15 +73,15 @@ pub struct SkillsParams {
 impl SkillsParams {
     /// Normalize: `Some([])` → `None` for both fields.
     pub fn normalize(&mut self) {
-        if let Some(ref v) = self.preload_skills {
-            if v.is_empty() {
-                self.preload_skills = None;
-            }
+        if let Some(ref v) = self.preload_skills
+            && v.is_empty()
+        {
+            self.preload_skills = None;
         }
-        if let Some(ref v) = self.skill_references {
-            if v.is_empty() {
-                self.skill_references = None;
-            }
+        if let Some(ref v) = self.skill_references
+            && v.is_empty()
+        {
+            self.skill_references = None;
         }
     }
 }

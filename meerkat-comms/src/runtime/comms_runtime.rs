@@ -160,10 +160,10 @@ impl CoreCommsRuntime for CommsRuntime {
 
         // Check for DISMISS in authenticated messages
         for msg in &drained {
-            if let DrainedMessage::Authenticated(m) = msg {
-                if is_dismiss(m) {
-                    self.dismiss_flag.store(true, Ordering::SeqCst);
-                }
+            if let DrainedMessage::Authenticated(m) = msg
+                && is_dismiss(m)
+            {
+                self.dismiss_flag.store(true, Ordering::SeqCst);
             }
         }
 
@@ -486,10 +486,10 @@ impl CoreCommsRuntime for CommsRuntime {
 
         // Check for DISMISS in authenticated messages
         for msg in &drained {
-            if let DrainedMessage::Authenticated(m) = msg {
-                if is_dismiss(m) {
-                    self.dismiss_flag.store(true, Ordering::SeqCst);
-                }
+            if let DrainedMessage::Authenticated(m) = msg
+                && is_dismiss(m)
+            {
+                self.dismiss_flag.store(true, Ordering::SeqCst);
             }
         }
 
@@ -795,14 +795,15 @@ impl CommsRuntime {
         // === Plain event listeners — run ADDITIONALLY when auth=Open ===
         if self.config.auth == meerkat_core::CommsAuthMode::Open {
             // Enforce loopback-only on plain TCP listener unless explicitly overridden
-            if let Some(addr) = &self.config.event_listen_tcp {
-                if !addr.ip().is_loopback() && !self.config.allow_external_unauthenticated {
-                    return Err(CommsRuntimeError::UnsafeBinding(
-                        "Plain event listener on non-loopback address is a prompt injection \
-                         vector; set allow_external_unauthenticated=true to override"
-                            .to_string(),
-                    ));
-                }
+            if let Some(addr) = &self.config.event_listen_tcp
+                && !addr.ip().is_loopback()
+                && !self.config.allow_external_unauthenticated
+            {
+                return Err(CommsRuntimeError::UnsafeBinding(
+                    "Plain event listener on non-loopback address is a prompt injection \
+                     vector; set allow_external_unauthenticated=true to override"
+                        .to_string(),
+                ));
             }
 
             if let Some(ref addr) = self.config.event_listen_tcp {
@@ -976,14 +977,14 @@ impl CommsRuntime {
     pub fn mark_interaction_complete(&self, interaction_id: Uuid) {
         let mut registry = self.interaction_stream_registry.lock();
         let mut should_remove = false;
-        if let Some(entry) = registry.get_mut(&interaction_id) {
-            if entry.transition(ReservationState::Attached, ReservationState::Completed) {
-                tracing::debug!(
-                    interaction_id = %interaction_id,
-                    "interaction stream completed by terminal event"
-                );
-                should_remove = true;
-            }
+        if let Some(entry) = registry.get_mut(&interaction_id)
+            && entry.transition(ReservationState::Attached, ReservationState::Completed)
+        {
+            tracing::debug!(
+                interaction_id = %interaction_id,
+                "interaction stream completed by terminal event"
+            );
+            should_remove = true;
         }
         if should_remove {
             self.subscriber_registry.lock().remove(&interaction_id);
@@ -1132,10 +1133,10 @@ async fn spawn_uds_listener(
 ) -> Result<ListenerHandle, std::io::Error> {
     use tokio::net::UnixListener;
     let path = path.to_path_buf();
-    if let Err(err) = tokio::fs::remove_file(&path).await {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            return Err(err);
-        }
+    if let Err(err) = tokio::fs::remove_file(&path).await
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(err);
     }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         tokio::fs::create_dir_all(parent).await?;
@@ -1229,10 +1230,10 @@ async fn spawn_plain_uds_listener(
 ) -> Result<ListenerHandle, std::io::Error> {
     use tokio::net::UnixListener;
     let path = path.to_path_buf();
-    if let Err(err) = tokio::fs::remove_file(&path).await {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            return Err(err);
-        }
+    if let Err(err) = tokio::fs::remove_file(&path).await
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(err);
     }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         tokio::fs::create_dir_all(parent).await?;

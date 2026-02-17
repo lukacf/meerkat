@@ -179,10 +179,10 @@ impl HttpSkillSource {
     async fn get_descriptors(&self) -> Result<Vec<SkillDescriptor>, SkillError> {
         {
             let cache = self.cache.read().await;
-            if let Some((ref descs, fetched_at)) = cache.descriptors {
-                if fetched_at.elapsed() < self.cache_ttl {
-                    return Ok(descs.clone());
-                }
+            if let Some((ref descs, fetched_at)) = cache.descriptors
+                && fetched_at.elapsed() < self.cache_ttl
+            {
+                return Ok(descs.clone());
             }
         }
 
@@ -207,10 +207,10 @@ impl SkillSource for HttpSkillSource {
         // Check per-ID cache
         {
             let cache = self.cache.read().await;
-            if let Some((doc, fetched_at)) = cache.documents.get(id) {
-                if fetched_at.elapsed() < self.cache_ttl {
-                    return Ok(doc.clone());
-                }
+            if let Some((doc, fetched_at)) = cache.documents.get(id)
+                && fetched_at.elapsed() < self.cache_ttl
+            {
+                return Ok(doc.clone());
             }
         }
 

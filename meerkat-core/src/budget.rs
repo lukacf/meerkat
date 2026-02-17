@@ -278,15 +278,15 @@ impl BudgetPool {
 
     /// Check if pool is exhausted
     pub fn is_exhausted(&self) -> bool {
-        if let Some(available) = self.available_tokens() {
-            if available == 0 {
-                return true;
-            }
+        if let Some(available) = self.available_tokens()
+            && available == 0
+        {
+            return true;
         }
-        if let Some(available) = self.available_duration() {
-            if available.is_zero() {
-                return true;
-            }
+        if let Some(available) = self.available_duration()
+            && available.is_zero()
+        {
+            return true;
         }
         false
     }

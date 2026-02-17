@@ -46,10 +46,10 @@ impl Compactor for DefaultCompactor {
         // Loop guard: enforce minimum turns between compactions.
         // Use saturating_sub to prevent underflow when last_compaction_turn
         // comes from an earlier run and current_turn has reset.
-        if let Some(last) = ctx.last_compaction_turn {
-            if ctx.current_turn.saturating_sub(last) < self.config.min_turns_between_compactions {
-                return false;
-            }
+        if let Some(last) = ctx.last_compaction_turn
+            && ctx.current_turn.saturating_sub(last) < self.config.min_turns_between_compactions
+        {
+            return false;
         }
 
         // Trigger on either threshold

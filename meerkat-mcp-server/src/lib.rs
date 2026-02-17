@@ -14,9 +14,9 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionError, SessionService, StartTurnRequest,
 };
 use meerkat_core::{
-    AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore,
-    ConfigRuntimeError, FileConfigStore, HookRunOverrides, Provider, RealmSelection,
-    RuntimeBootstrap, Session, ToolCallView, format_verbose_event,
+    AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
+    ConfigStore, FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap,
+    Session, ToolCallView, format_verbose_event,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -723,13 +723,11 @@ async fn handle_meerkat_config(
             config_envelope_value(snapshot, state.expose_paths())
         }
         ConfigAction::Set => {
-            let config = input
-                .config
-                .ok_or_else(|| ToolCallError::invalid_params("config is required for action=set"))?;
-            let config: Config =
-                serde_json::from_value(config).map_err(|e| {
-                    ToolCallError::invalid_params(format!("Invalid config: {e}"))
-                })?;
+            let config = input.config.ok_or_else(|| {
+                ToolCallError::invalid_params("config is required for action=set")
+            })?;
+            let config: Config = serde_json::from_value(config)
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?;
             let snapshot = state
                 .config_runtime
                 .set(config, input.expected_generation)
@@ -738,9 +736,9 @@ async fn handle_meerkat_config(
             config_envelope_value(snapshot, state.expose_paths())
         }
         ConfigAction::Patch => {
-            let patch = input
-                .patch
-                .ok_or_else(|| ToolCallError::invalid_params("patch is required for action=patch"))?;
+            let patch = input.patch.ok_or_else(|| {
+                ToolCallError::invalid_params("patch is required for action=patch")
+            })?;
             let snapshot = state
                 .config_runtime
                 .patch(ConfigDelta(patch), input.expected_generation)
@@ -857,10 +855,10 @@ async fn handle_meerkat_run(
 
     let result = state.service.create_session(req).await;
     drop(event_tx);
-    if let Some(task) = event_task {
-        if let Err(e) = task.await {
-            tracing::warn!("event task panicked: {e}");
-        }
+    if let Some(task) = event_task
+        && let Err(e) = task.await
+    {
+        tracing::warn!("event task panicked: {e}");
     }
 
     format_agent_result(result, &session_id)
@@ -1025,10 +1023,10 @@ async fn handle_meerkat_resume(
     };
 
     drop(event_tx);
-    if let Some(task) = event_task {
-        if let Err(e) = task.await {
-            tracing::warn!("event task panicked: {e}");
-        }
+    if let Some(task) = event_task
+        && let Err(e) = task.await
+    {
+        tracing::warn!("event task panicked: {e}");
     }
 
     format_agent_result(result, &session_id)

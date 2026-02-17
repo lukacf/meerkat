@@ -81,10 +81,10 @@ impl SessionProjector {
             last_seq = stored.seq;
 
             // Track last assistant text for summary
-            if let AgentEvent::TextComplete { content } = &stored.event {
-                if !content.is_empty() {
-                    last_assistant_text = Some(content.clone());
-                }
+            if let AgentEvent::TextComplete { content } = &stored.event
+                && !content.is_empty()
+            {
+                last_assistant_text = Some(content.clone());
             }
         }
 

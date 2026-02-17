@@ -188,10 +188,10 @@ impl GeminiClient {
             body["systemInstruction"] = system;
         }
 
-        if let Some(temp) = request.temperature {
-            if let Some(num) = serde_json::Number::from_f64(temp as f64) {
-                body["generationConfig"]["temperature"] = Value::Number(num);
-            }
+        if let Some(temp) = request.temperature
+            && let Some(num) = serde_json::Number::from_f64(temp as f64)
+        {
+            body["generationConfig"]["temperature"] = Value::Number(num);
         }
 
         // Extract provider-specific parameters from both formats:
@@ -284,17 +284,17 @@ impl GeminiClient {
                     }
 
                     // Special handling for "type" field - Gemini doesn't support array types
-                    if key == "type" {
-                        if let Value::Array(types) = value {
-                            // Find the first non-null type
-                            let primary_type = types
-                                .iter()
-                                .find(|t| t.as_str() != Some("null"))
-                                .cloned()
-                                .unwrap_or_else(|| Value::String("string".to_string()));
-                            sanitized.insert(key.clone(), primary_type);
-                            continue;
-                        }
+                    if key == "type"
+                        && let Value::Array(types) = value
+                    {
+                        // Find the first non-null type
+                        let primary_type = types
+                            .iter()
+                            .find(|t| t.as_str() != Some("null"))
+                            .cloned()
+                            .unwrap_or_else(|| Value::String("string".to_string()));
+                        sanitized.insert(key.clone(), primary_type);
+                        continue;
                     }
 
                     sanitized.insert(key.clone(), Self::sanitize_schema_for_gemini(value));
@@ -363,21 +363,21 @@ fn sanitize_gemini_value(
                     continue;
                 }
 
-                if key == "type" {
-                    if let Value::Array(types) = value {
-                        let primary = types
-                            .iter()
-                            .find(|t| t.as_str() != Some("null"))
-                            .cloned()
-                            .unwrap_or_else(|| Value::String("string".to_string()));
-                        warnings.push(SchemaWarning {
+                if key == "type"
+                    && let Value::Array(types) = value
+                {
+                    let primary = types
+                        .iter()
+                        .find(|t| t.as_str() != Some("null"))
+                        .cloned()
+                        .unwrap_or_else(|| Value::String("string".to_string()));
+                    warnings.push(SchemaWarning {
                             provider,
                             path: join_path(path, key),
                             message: "Collapsed array type to a single type; nullable/union semantics may be lost for Gemini".to_string(),
                         });
-                        sanitized.insert(key.clone(), primary);
-                        continue;
-                    }
+                    sanitized.insert(key.clone(), primary);
+                    continue;
                 }
 
                 let next = join_path(path, key);
@@ -490,6 +490,7 @@ impl LlmClient for GeminiClient {
                             if let Some(candidates) = resp.candidates {
                                 for cand in candidates {
                                     if let Some(content) = cand.content {
+                                        #[allow(clippy::collapsible_if)]
                                         if let Some(parts) = content.parts {
                                             for part in parts {
                                                 // Build meta from thoughtSignature if present
@@ -500,7 +501,10 @@ impl LlmClient for GeminiClient {
                                                 });
 
                                                 if let Some(text) = part.text {
-                                                    yield LlmEvent::TextDelta { delta: text, meta: meta.clone() };
+                                                    yield LlmEvent::TextDelta {
+                                                        delta: text,
+                                                        meta: meta.clone(),
+                                                    };
                                                 }
                                                 if let Some(fc) = part.function_call {
                                                     let id = format!("fc_{}", tool_call_index);

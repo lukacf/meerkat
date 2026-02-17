@@ -708,11 +708,11 @@ async fn integration_real_regression_kill_terminates_process() {
     let pid: i32 = {
         let mut parsed = None;
         for _ in 0..20 {
-            if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-                if let Ok(value) = contents.trim().parse::<i32>() {
-                    parsed = Some(value);
-                    break;
-                }
+            if let Ok(contents) = std::fs::read_to_string(&pid_path)
+                && let Ok(value) = contents.trim().parse::<i32>()
+            {
+                parsed = Some(value);
+                break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

@@ -512,14 +512,14 @@ fn validate_backend_hint(
     manifest: &RealmManifest,
     backend_hint: Option<RealmBackend>,
 ) -> Result<(), StoreError> {
-    if let Some(requested) = backend_hint {
-        if requested != manifest.backend {
-            return Err(StoreError::RealmBackendMismatch {
-                realm_id: manifest.realm_id.clone(),
-                requested: requested.as_str().to_string(),
-                existing: manifest.backend.as_str().to_string(),
-            });
-        }
+    if let Some(requested) = backend_hint
+        && requested != manifest.backend
+    {
+        return Err(StoreError::RealmBackendMismatch {
+            realm_id: manifest.realm_id.clone(),
+            requested: requested.as_str().to_string(),
+            existing: manifest.backend.as_str().to_string(),
+        });
     }
     Ok(())
 }
@@ -648,15 +648,24 @@ pub async fn open_realm_session_store_in(
 }
 
 pub fn fnv1a64_hex(input: &str) -> String {
-    meerkat_core::runtime_bootstrap::fnv1a64_hex(input)
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("{hash:016x}")
 }
 
 pub fn derive_workspace_realm_id(path: &Path) -> String {
-    meerkat_core::runtime_bootstrap::derive_workspace_realm_id(path)
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let key = canonical.to_string_lossy();
+    format!("ws-{}", fnv1a64_hex(&key))
 }
 
 pub fn generate_realm_id() -> String {
-    meerkat_core::runtime_bootstrap::generate_realm_id()
+    format!("realm-{}", Uuid::now_v7())
 }
 
 #[cfg(test)]

@@ -166,10 +166,10 @@ mod tests {
             return values.contains(expected);
         }
 
-        if let Some(ref_path) = schema.get("$ref").and_then(Value::as_str) {
-            if let Some(resolved) = schema_resolve_ref(root, ref_path) {
-                return schema_allows_value(root, resolved, expected);
-            }
+        if let Some(ref_path) = schema.get("$ref").and_then(Value::as_str)
+            && let Some(resolved) = schema_resolve_ref(root, ref_path)
+        {
+            return schema_allows_value(root, resolved, expected);
         }
 
         for key in ["anyOf", "oneOf", "allOf"] {

@@ -760,10 +760,8 @@ fn spawn_event_forwarder(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
-            if verbose {
-                if let Some(line) = format_verbose_event(&event) {
-                    tracing::info!("{}", line);
-                }
+            if verbose && let Some(line) = format_verbose_event(&event) {
+                tracing::info!("{}", line);
             }
             let _ = broadcast_tx.send(SessionEvent {
                 session_id: session_id.clone(),
@@ -786,13 +784,13 @@ fn run_result_to_response(
 fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<SessionId, ApiError> {
     let locator = SessionLocator::parse(input)
         .map_err(|e| ApiError::BadRequest(format!("Invalid session locator '{input}': {e}")))?;
-    if let Some(realm) = locator.realm_id.as_deref() {
-        if realm != state.realm_id {
-            return Err(ApiError::BadRequest(format!(
-                "Session locator realm '{}' does not match active realm '{}'",
-                realm, state.realm_id
-            )));
-        }
+    if let Some(realm) = locator.realm_id.as_deref()
+        && realm != state.realm_id
+    {
+        return Err(ApiError::BadRequest(format!(
+            "Session locator realm '{}' does not match active realm '{}'",
+            realm, state.realm_id
+        )));
     }
     Ok(locator.session_id)
 }

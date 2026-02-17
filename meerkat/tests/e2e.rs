@@ -116,10 +116,10 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
 
         // Complete any buffered tool calls
         for (_, buffer) in tool_call_buffers {
-            if let Some(tc) = buffer.try_complete() {
-                if !tool_calls.iter().any(|t| t.id == tc.id) {
-                    tool_calls.push(tc);
-                }
+            if let Some(tc) = buffer.try_complete()
+                && !tool_calls.iter().any(|t| t.id == tc.id)
+            {
+                tool_calls.push(tc);
             }
         }
 

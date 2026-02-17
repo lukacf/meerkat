@@ -113,10 +113,10 @@ impl Config {
         // 1. Load project config (if exists). Local config replaces global.
         if let Some(path) = Self::find_project_config_from(start_dir).await {
             config.merge_file(&path).await?;
-        } else if let Some(path) = home_dir.map(|home| home.join(".rkat/config.toml")) {
-            if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-                config.merge_file(&path).await?;
-            }
+        } else if let Some(path) = home_dir.map(|home| home.join(".rkat/config.toml"))
+            && tokio::fs::try_exists(&path).await.unwrap_or(false)
+        {
+            config.merge_file(&path).await?;
         }
 
         // 2. Apply environment variable overrides (secrets only)
@@ -151,20 +151,20 @@ impl Config {
     ) -> Result<HooksConfig, ConfigError> {
         let mut hooks = HooksConfig::default();
 
-        if let Some(global_path) = home_dir.map(|home| home.join(".rkat/config.toml")) {
-            if tokio::fs::try_exists(&global_path).await.unwrap_or(false) {
-                let content = tokio::fs::read_to_string(&global_path).await?;
-                let cfg: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
-                hooks.append_entries_from(&cfg.hooks);
-            }
+        if let Some(global_path) = home_dir.map(|home| home.join(".rkat/config.toml"))
+            && tokio::fs::try_exists(&global_path).await.unwrap_or(false)
+        {
+            let content = tokio::fs::read_to_string(&global_path).await?;
+            let cfg: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
+            hooks.append_entries_from(&cfg.hooks);
         }
 
-        if let Some(project_path) = Self::find_project_config_from(start_dir).await {
-            if tokio::fs::try_exists(&project_path).await.unwrap_or(false) {
-                let content = tokio::fs::read_to_string(&project_path).await?;
-                let cfg: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
-                hooks.append_entries_from(&cfg.hooks);
-            }
+        if let Some(project_path) = Self::find_project_config_from(start_dir).await
+            && tokio::fs::try_exists(&project_path).await.unwrap_or(false)
+        {
+            let content = tokio::fs::read_to_string(&project_path).await?;
+            let cfg: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
+            hooks.append_entries_from(&cfg.hooks);
         }
 
         Ok(hooks)
@@ -502,20 +502,21 @@ impl Config {
         }
 
         // If default_model is not "inherit", it must be in the allowlist for some provider
-        if sa.default_model != "inherit" && sa.default_provider != "inherit" {
-            if let Some(provider) = Provider::parse_strict(&sa.default_provider) {
-                let models = sa
-                    .allowed_models
-                    .get(provider.as_str())
-                    .cloned()
-                    .unwrap_or_default();
-                if !models.iter().any(|m| m == &sa.default_model) {
-                    return Err(ConfigError::Validation(format!(
-                        "sub_agents.default_model '{}' is not in allowed_models for provider '{}'",
-                        sa.default_model,
-                        provider.as_str()
-                    )));
-                }
+        if sa.default_model != "inherit"
+            && sa.default_provider != "inherit"
+            && let Some(provider) = Provider::parse_strict(&sa.default_provider)
+        {
+            let models = sa
+                .allowed_models
+                .get(provider.as_str())
+                .cloned()
+                .unwrap_or_default();
+            if !models.iter().any(|m| m == &sa.default_model) {
+                return Err(ConfigError::Validation(format!(
+                    "sub_agents.default_model '{}' is not in allowed_models for provider '{}'",
+                    sa.default_model,
+                    provider.as_str()
+                )));
             }
         }
 
@@ -1445,10 +1446,10 @@ pub fn find_project_root(start_dir: &std::path::Path) -> Option<PathBuf> {
 /// 2. User's home directory ~/.rkat/
 pub fn data_dir() -> Option<PathBuf> {
     // 1. Check for project root .rkat
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(root) = find_project_root(&cwd) {
-            return Some(root.join(".rkat"));
-        }
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(root) = find_project_root(&cwd)
+    {
+        return Some(root.join(".rkat"));
     }
 
     // 2. Fallback to ~/.rkat

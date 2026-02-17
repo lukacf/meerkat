@@ -39,10 +39,10 @@ fn anthropic_api_key() -> Option<String> {
 
 fn first_env(vars: &[&str]) -> Option<String> {
     for name in vars {
-        if let Ok(value) = std::env::var(name) {
-            if !value.is_empty() {
-                return Some(value);
-            }
+        if let Ok(value) = std::env::var(name)
+            && !value.is_empty()
+        {
+            return Some(value);
         }
     }
     None

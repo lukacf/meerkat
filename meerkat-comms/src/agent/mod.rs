@@ -80,10 +80,10 @@ where
     ) -> Result<RunResult, AgentError> {
         let mut last_result = self.run(initial_prompt).await?;
         loop {
-            if let Some(ref rx) = cancel_rx {
-                if *rx.borrow() {
-                    return Err(AgentError::Cancelled);
-                }
+            if let Some(ref rx) = cancel_rx
+                && *rx.borrow()
+            {
+                return Err(AgentError::Cancelled);
             }
             let first_msg = if let Some(ref mut rx) = cancel_rx {
                 tokio::select! {

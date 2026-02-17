@@ -208,10 +208,10 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx);
 
         // Inject default LLM client if none provided.
-        if build_config.llm_client_override.is_none() {
-            if let Some(ref client) = self.default_llm_client {
-                build_config.llm_client_override = Some(client.clone());
-            }
+        if build_config.llm_client_override.is_none()
+            && let Some(ref client) = self.default_llm_client
+        {
+            build_config.llm_client_override = Some(client.clone());
         }
 
         let config = self.resolve_config().await;

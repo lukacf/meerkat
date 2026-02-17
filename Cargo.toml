@@ -24,7 +24,7 @@ members = [
 [workspace.package]
 version = "0.3.3"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89.0"
 license = "MIT OR Apache-2.0"
 authors = ["Luka Crnkovic-Friis"]
 repository = "https://github.com/lukacf/meerkat"
@@ -47,7 +47,7 @@ toml = "0.8"
 toml_edit = "0.22"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 # Error handling
 thiserror = "2.0"

@@ -77,10 +77,10 @@ impl OpenAiClient {
             "summary": "auto"
         });
 
-        if let Some(temp) = request.temperature {
-            if let Some(num) = serde_json::Number::from_f64(temp as f64) {
-                body["temperature"] = Value::Number(num);
-            }
+        if let Some(temp) = request.temperature
+            && let Some(num) = serde_json::Number::from_f64(temp as f64)
+        {
+            body["temperature"] = Value::Number(num);
         }
 
         if !request.tools.is_empty() {
@@ -377,19 +377,19 @@ impl LlmClient for OpenAiClient {
                                                                 if let Some(part_type) = part.get("type").and_then(|t| t.as_str()) {
                                                                     match part_type {
                                                                         "output_text" => {
-                                                                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                                                                if !saw_stream_text_delta {
-                                                                                    assembler.on_text_delta(text, None);
-                                                                                    yield LlmEvent::TextDelta { delta: text.to_string(), meta: None };
-                                                                                }
+                                                                            if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                                                                                && !saw_stream_text_delta
+                                                                            {
+                                                                                assembler.on_text_delta(text, None);
+                                                                                yield LlmEvent::TextDelta { delta: text.to_string(), meta: None };
                                                                             }
                                                                         }
                                                                         "refusal" => {
-                                                                            if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str()) {
-                                                                                if !saw_stream_text_delta {
-                                                                                    assembler.on_text_delta(refusal, None);
-                                                                                    yield LlmEvent::TextDelta { delta: refusal.to_string(), meta: None };
-                                                                                }
+                                                                            if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str())
+                                                                                && !saw_stream_text_delta
+                                                                            {
+                                                                                assembler.on_text_delta(refusal, None);
+                                                                                yield LlmEvent::TextDelta { delta: refusal.to_string(), meta: None };
                                                                             }
                                                                         }
                                                                         _ => {}

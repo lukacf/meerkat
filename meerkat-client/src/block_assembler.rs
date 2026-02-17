@@ -87,13 +87,12 @@ impl BlockAssembler {
     /// Text deltas can always succeed - no Result needed.
     /// `meta` is used by Gemini for thoughtSignature on text parts.
     pub fn on_text_delta(&mut self, delta: &str, meta: Option<Box<ProviderMeta>>) {
-        if meta.is_none() {
-            if let Some(BlockSlot::Finalized(AssistantBlock::Text { text, meta: None })) =
+        if meta.is_none()
+            && let Some(BlockSlot::Finalized(AssistantBlock::Text { text, meta: None })) =
                 self.slots.last_mut()
-            {
-                text.push_str(delta);
-                return;
-            }
+        {
+            text.push_str(delta);
+            return;
         }
         // Insert new text block
         self.slots.push(BlockSlot::Finalized(AssistantBlock::Text {
@@ -129,13 +128,13 @@ impl BlockAssembler {
     ///
     /// Provider adapter converts raw JSON to typed `ProviderMeta` before calling.
     pub fn on_reasoning_complete(&mut self, meta: Option<Box<ProviderMeta>>) {
-        if let Some(buf) = self.reasoning_buffer.take() {
-            if let Some(slot) = self.slots.get_mut(buf.block_key.0) {
-                *slot = BlockSlot::Finalized(AssistantBlock::Reasoning {
-                    text: buf.text,
-                    meta,
-                });
-            }
+        if let Some(buf) = self.reasoning_buffer.take()
+            && let Some(slot) = self.slots.get_mut(buf.block_key.0)
+        {
+            *slot = BlockSlot::Finalized(AssistantBlock::Reasoning {
+                text: buf.text,
+                meta,
+            });
         }
         // Complete without prior start is silently ignored - provider protocol quirk
     }

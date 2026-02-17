@@ -74,11 +74,9 @@ fn spawn_event_handler(
         use std::io::Write;
 
         while let Some(event) = agent_event_rx.recv().await {
-            if stream {
-                if let AgentEvent::TextDelta { delta } = &event {
-                    print!("{}", delta);
-                    let _ = std::io::stdout().flush();
-                }
+            if stream && let AgentEvent::TextDelta { delta } = &event {
+                print!("{}", delta);
+                let _ = std::io::stdout().flush();
             }
 
             if !verbose {
@@ -742,12 +740,12 @@ async fn main() -> anyhow::Result<ExitCode> {
         Ok(()) => ExitCode::from(EXIT_SUCCESS),
         Err(e) => {
             // Check if it's a budget exhaustion error
-            if let Some(agent_err) = e.downcast_ref::<AgentError>() {
-                if agent_err.is_graceful() {
-                    // Budget exhausted - this is a graceful termination
-                    eprintln!("Budget exhausted: {}", agent_err);
-                    return Ok(ExitCode::from(EXIT_BUDGET_EXHAUSTED));
-                }
+            if let Some(agent_err) = e.downcast_ref::<AgentError>()
+                && agent_err.is_graceful()
+            {
+                // Budget exhausted - this is a graceful termination
+                eprintln!("Budget exhausted: {}", agent_err);
+                return Ok(ExitCode::from(EXIT_BUDGET_EXHAUSTED));
             }
             eprintln!("Error: {}", e);
             ExitCode::from(EXIT_ERROR)
@@ -1786,15 +1784,15 @@ async fn run_agent(
                 result.usage.input_tokens,
                 result.usage.output_tokens
             );
-            if let Some(warnings) = &result.schema_warnings {
-                if !warnings.is_empty() {
-                    eprintln!("\n[Schema warnings]");
-                    for warning in warnings {
-                        eprintln!(
-                            "- {:?} {}: {}",
-                            warning.provider, warning.path, warning.message
-                        );
-                    }
+            if let Some(warnings) = &result.schema_warnings
+                && !warnings.is_empty()
+            {
+                eprintln!("\n[Schema warnings]");
+                for warning in warnings {
+                    eprintln!(
+                        "- {:?} {}: {}",
+                        warning.provider, warning.path, warning.message
+                    );
                 }
             }
         }
@@ -2236,10 +2234,10 @@ async fn find_session_matches(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to list realms in '{}': {e}", root.display()))?;
         for entry in manifests {
-            if let Some(target_realm) = locator.realm_id.as_deref() {
-                if entry.manifest.realm_id != target_realm {
-                    continue;
-                }
+            if let Some(target_realm) = locator.realm_id.as_deref()
+                && entry.manifest.realm_id != target_realm
+            {
+                continue;
             }
 
             let store = meerkat_store::open_realm_session_store_in(

@@ -127,12 +127,11 @@ impl GitSkillSource {
         // Re-check after acquiring lock (another caller may have synced)
         {
             let last = self.last_sync.read().await;
-            if let Some(synced_at) = *last {
-                if self.config.git_ref.is_immutable()
-                    || synced_at.elapsed() < self.config.refresh_interval
-                {
-                    return Ok(());
-                }
+            if let Some(synced_at) = *last
+                && (self.config.git_ref.is_immutable()
+                    || synced_at.elapsed() < self.config.refresh_interval)
+            {
+                return Ok(());
             }
         }
 
@@ -141,21 +140,21 @@ impl GitSkillSource {
 
         if repo_dir.join(".git").exists() {
             // Already cloned — fetch if branch
-            if !self.config.git_ref.is_immutable() {
-                if let Err(e) = self.gix_fetch().await {
-                    // Fetch failed — serve stale if we have data
-                    let has_data = self.inner.read().await.is_some();
-                    if has_data {
-                        tracing::warn!(
-                            "Git fetch failed for '{}', serving stale cache: {e}",
-                            self.config.repo_url
-                        );
-                        let mut last = self.last_sync.write().await;
-                        *last = Some(Instant::now()); // Reset TTL to avoid hammering
-                        return Ok(());
-                    }
-                    return Err(e);
+            if !self.config.git_ref.is_immutable()
+                && let Err(e) = self.gix_fetch().await
+            {
+                // Fetch failed — serve stale if we have data
+                let has_data = self.inner.read().await.is_some();
+                if has_data {
+                    tracing::warn!(
+                        "Git fetch failed for '{}', serving stale cache: {e}",
+                        self.config.repo_url
+                    );
+                    let mut last = self.last_sync.write().await;
+                    *last = Some(Instant::now()); // Reset TTL to avoid hammering
+                    return Ok(());
                 }
+                return Err(e);
             }
         } else {
             // First access — clone
@@ -253,10 +252,10 @@ fn gix_clone_blocking(
     }
 
     // Shallow clone
-    if !matches!(git_ref, GitRef::Commit(_)) {
-        if let Some(d) = depth.and_then(NonZeroU32::try_from_u32) {
-            prepare = prepare.with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(d));
-        }
+    if !matches!(git_ref, GitRef::Commit(_))
+        && let Some(d) = depth.and_then(NonZeroU32::try_from_u32)
+    {
+        prepare = prepare.with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(d));
     }
 
     // Authentication: inject token via gix credential callback

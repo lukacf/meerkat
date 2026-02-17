@@ -448,10 +448,7 @@ mod tests {
     #[test]
     fn test_gateway_merges_tools() {
         let base = Arc::new(MockDispatcher::new("base", &["task_create", "task_list"]));
-        let overlay = Arc::new(MockDispatcher::new(
-            "comms",
-            &["send", "peers"],
-        ));
+        let overlay = Arc::new(MockDispatcher::new("comms", &["send", "peers"]));
 
         let gateway = ToolGateway::new(base, Some(overlay)).unwrap();
 
@@ -475,14 +472,8 @@ mod tests {
 
     #[test]
     fn test_gateway_collision_error() {
-        let base = Arc::new(MockDispatcher::new(
-            "base",
-            &["task_create", "send"],
-        ));
-        let overlay = Arc::new(MockDispatcher::new(
-            "comms",
-            &["send", "peers"],
-        ));
+        let base = Arc::new(MockDispatcher::new("base", &["task_create", "send"]));
+        let overlay = Arc::new(MockDispatcher::new("comms", &["send", "peers"]));
 
         let result = ToolGateway::new(base, Some(overlay));
 
@@ -513,9 +504,7 @@ mod tests {
 
         let gateway = ToolGateway::new(base, Some(overlay)).unwrap();
 
-        let result = dispatch_json(&gateway, "send", json!({}))
-            .await
-            .unwrap();
+        let result = dispatch_json(&gateway, "send", json!({})).await.unwrap();
         assert_eq!(result["source"], "comms");
         assert_eq!(result["tool"], "send");
     }
@@ -718,12 +707,7 @@ mod tests {
         // Dispatcher with multiple tools
         let comms = Arc::new(MockDispatcher::new(
             "comms",
-            &[
-                "send",
-                "send_request",
-                "send_response",
-                "peers",
-            ],
+            &["send", "send_request", "send_response", "peers"],
         ));
 
         let gateway = ToolGatewayBuilder::new()

@@ -23,10 +23,10 @@ use tokio::time::timeout;
 /// Return the Anthropic API key if set, or `None`.
 fn anthropic_api_key() -> Option<String> {
     for var in &["ANTHROPIC_API_KEY", "RKAT_ANTHROPIC_API_KEY"] {
-        if let Ok(val) = std::env::var(var) {
-            if !val.is_empty() {
-                return Some(val);
-            }
+        if let Ok(val) = std::env::var(var)
+            && !val.is_empty()
+        {
+            return Some(val);
         }
     }
     None

@@ -294,10 +294,10 @@ impl RedbSessionIndex {
                     break;
                 }
             }
-            if let Some(created_after) = filter.created_after {
-                if meta.created_at < created_after {
-                    continue;
-                }
+            if let Some(created_after) = filter.created_after
+                && meta.created_at < created_after
+            {
+                continue;
             }
 
             if offset > 0 {

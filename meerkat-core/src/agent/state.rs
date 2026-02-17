@@ -123,62 +123,62 @@ where
             }
 
             // Check compaction trigger (before CallingLlm)
-            if self.state == LoopState::CallingLlm {
-                if let Some(ref compactor) = self.compactor {
-                    let ctx = crate::agent::compact::build_compaction_context(
+            if self.state == LoopState::CallingLlm
+                && let Some(ref compactor) = self.compactor
+            {
+                let ctx = crate::agent::compact::build_compaction_context(
+                    self.session.messages(),
+                    self.last_input_tokens,
+                    self.last_compaction_turn,
+                    turn_count,
+                );
+                if compactor.should_compact(&ctx) {
+                    let outcome = crate::agent::compact::run_compaction(
+                        self.client.as_ref(),
+                        compactor,
                         self.session.messages(),
                         self.last_input_tokens,
-                        self.last_compaction_turn,
                         turn_count,
-                    );
-                    if compactor.should_compact(&ctx) {
-                        let outcome = crate::agent::compact::run_compaction(
-                            self.client.as_ref(),
-                            compactor,
-                            self.session.messages(),
-                            self.last_input_tokens,
-                            turn_count,
-                            &event_tx,
-                            &self.event_tap,
-                        )
-                        .await;
+                        &event_tx,
+                        &self.event_tap,
+                    )
+                    .await;
 
-                        if let Ok(outcome) = outcome {
-                            // Replace session messages
-                            *self.session.messages_mut() = outcome.new_messages;
-                            // Record compaction usage
-                            self.session.record_usage(outcome.summary_usage.clone());
-                            self.budget.record_usage(&outcome.summary_usage);
-                            // Update tracking
-                            self.last_input_tokens = 0;
-                            self.last_compaction_turn = Some(turn_count);
+                    if let Ok(outcome) = outcome {
+                        // Replace session messages
+                        *self.session.messages_mut() = outcome.new_messages;
+                        // Record compaction usage
+                        self.session.record_usage(outcome.summary_usage.clone());
+                        self.budget.record_usage(&outcome.summary_usage);
+                        // Update tracking
+                        self.last_input_tokens = 0;
+                        self.last_compaction_turn = Some(turn_count);
 
-                            // Index discarded messages into memory store (fire-and-forget)
-                            if let Some(ref memory_store) = self.memory_store {
-                                let store = Arc::clone(memory_store);
-                                let session_id = self.session.id().clone();
-                                let discarded = outcome.discarded;
-                                tokio::spawn(async move {
-                                    for message in &discarded {
-                                        let content = message.as_indexable_text();
-                                        if !content.is_empty() {
-                                            let metadata = crate::memory::MemoryMetadata {
-                                                session_id: session_id.clone(),
-                                                turn: Some(turn_count),
-                                                indexed_at: std::time::SystemTime::now(),
-                                            };
-                                            if let Err(e) = store.index(&content, metadata).await {
-                                                tracing::warn!(
-                                                    "failed to index compaction discard into memory: {e}"
-                                                );
-                                            }
+                        // Index discarded messages into memory store (fire-and-forget)
+                        if let Some(ref memory_store) = self.memory_store {
+                            let store = Arc::clone(memory_store);
+                            let session_id = self.session.id().clone();
+                            let discarded = outcome.discarded;
+                            tokio::spawn(async move {
+                                for message in &discarded {
+                                    let content = message.as_indexable_text();
+                                    if !content.is_empty() {
+                                        let metadata = crate::memory::MemoryMetadata {
+                                            session_id: session_id.clone(),
+                                            turn: Some(turn_count),
+                                            indexed_at: std::time::SystemTime::now(),
+                                        };
+                                        if let Err(e) = store.index(&content, metadata).await {
+                                            tracing::warn!(
+                                                "failed to index compaction discard into memory: {e}"
+                                            );
                                         }
                                     }
-                                });
-                            }
+                                }
+                            });
                         }
-                        // On failure: non-fatal, continue with uncompacted history
                     }
+                    // On failure: non-fatal, continue with uncompacted history
                 }
             }
 

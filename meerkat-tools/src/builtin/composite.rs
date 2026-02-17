@@ -229,10 +229,10 @@ impl AgentToolDispatcher for CompositeDispatcher {
         // First check if it's an allowed tool
         if !self.allowed_tools.contains(call.name) {
             // Check external dispatcher for non-allowed tools
-            if let Some(ref ext) = self.external {
-                if ext.tools().iter().any(|t| t.name == call.name) {
-                    return ext.dispatch(call).await;
-                }
+            if let Some(ref ext) = self.external
+                && ext.tools().iter().any(|t| t.name == call.name)
+            {
+                return ext.dispatch(call).await;
             }
             return Err(ToolError::NotFound {
                 name: call.name.to_string(),

@@ -291,7 +291,17 @@ jobs:
             if [[ "$DRY_RUN" == "true" ]]; then
               cargo publish -p "$c" --locked --dry-run --config "$tmp_cfg"
             else
-              cargo publish -p "$c" --locked --config "$tmp_cfg"
+              output=$(cargo publish -p "$c" --locked --config "$tmp_cfg" 2>&1) && true
+              rc=$?
+              if [[ $rc -eq 0 ]]; then
+                echo "  $c: published"
+              elif echo "$output" | grep -q "already uploaded"; then
+                echo "  $c: already published, skipping"
+              else
+                echo "$output" >&2
+                echo "  $c: FAILED" >&2
+                exit $rc
+              fi
             fi
           done
           rm -f "$tmp_cfg"
@@ -311,7 +321,7 @@ jobs:
           if [[ "$DRY_RUN" == "true" ]]; then
             echo "Python SDK dry-run: skipping upload"
           else
-            python -m twine upload dist/*
+            python -m twine upload --skip-existing dist/*
           fi
 
       - name: Publish TypeScript SDK

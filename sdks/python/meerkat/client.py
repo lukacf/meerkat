@@ -453,7 +453,7 @@ class MeerkatClient:
             return str(cached)
 
         try:
-            with urllib.request.urlopen(url) as response:
+            with urllib.request.urlopen(url, timeout=30) as response:
                 payload = response.read()
         except (URLError, OSError) as exc:
             raise MeerkatError(

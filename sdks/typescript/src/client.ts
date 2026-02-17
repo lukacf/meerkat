@@ -7,6 +7,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -235,6 +236,8 @@ export class MeerkatClient {
         "BINARY_DOWNLOAD_EXTRACT_FAILED",
         `Failed to extract ${archivePath}: ${String(error)}`,
       );
+    } finally {
+      try { unlinkSync(archivePath); } catch { /* best-effort cleanup */ }
     }
 
     if (process.platform !== "win32") {

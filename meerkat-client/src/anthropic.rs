@@ -1779,7 +1779,10 @@ mod tests {
         server.abort();
 
         assert!(saw_text, "Expected text delta");
-        assert!(saw_done, "Expected Done event from message_delta stop_reason");
+        assert!(
+            saw_done,
+            "Expected Done event from message_delta stop_reason"
+        );
         assert!(done_is_success, "Expected successful Done outcome");
     }
 

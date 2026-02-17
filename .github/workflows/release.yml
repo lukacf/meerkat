@@ -295,7 +295,7 @@ jobs:
               rc=$?
               if [[ $rc -eq 0 ]]; then
                 echo "  $c: published"
-              elif echo "$output" | grep -q "already uploaded"; then
+              elif echo "$output" | grep -q "already exists\|already uploaded"; then
                 echo "  $c: already published, skipping"
               else
                 echo "$output" >&2

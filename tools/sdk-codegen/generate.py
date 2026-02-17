@@ -52,6 +52,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "@dataclass\nclass WireRunResult:\n"
     types_content += '    """Run result from agent execution."""\n'
     types_content += "    session_id: str = ''\n"
+    types_content += "    session_ref: Optional[str] = None\n"
     types_content += "    text: str = ''\n"
     types_content += "    turns: int = 0\n"
     types_content += "    tool_calls: int = 0\n"
@@ -141,6 +142,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
 
     types_content += "export interface WireRunResult {\n"
     types_content += "  session_id: string;\n"
+    types_content += "  session_ref?: string;\n"
     types_content += "  text: string;\n"
     types_content += "  turns: number;\n"
     types_content += "  tool_calls: number;\n"

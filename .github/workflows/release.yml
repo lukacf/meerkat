@@ -45,6 +45,9 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
       # Use smoke preflight in CI release gate — the full feature matrix
       # runs in regular CI on push/PR. Release validation only needs core
       # checks (fmt, lint, tests, audit) to avoid 15+ minute delays.

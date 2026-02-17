@@ -24,6 +24,9 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
       - name: Verify Rust/Cargo lock and toolchain
         run: rustc --version && cargo --version
 

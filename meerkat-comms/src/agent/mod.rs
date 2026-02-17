@@ -8,7 +8,9 @@ pub mod types;
 pub use dispatcher::{
     CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, wrap_with_comms,
 };
-pub use listener::{ListenerHandle, spawn_tcp_listener, spawn_uds_listener};
+pub use listener::{ListenerHandle, spawn_tcp_listener};
+#[cfg(unix)]
+pub use listener::spawn_uds_listener;
 pub use manager::{CommsManager, CommsManagerConfig};
 pub use types::{CommsContent, CommsMessage, CommsStatus, MessageIntent};
 

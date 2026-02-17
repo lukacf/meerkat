@@ -1,0 +1,10 @@
+[build]
+# macOS host + Apple Silicon cross matrix notes:
+# cross will use containerized targets; keep outputs deterministic by
+# installing required OpenSSL development packages for Linux target builds.
+
+[target.x86_64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update",
+    "apt-get install -y --no-install-recommends ca-certificates pkg-config libssl-dev",
+]

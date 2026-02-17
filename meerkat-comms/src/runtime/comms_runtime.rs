@@ -17,6 +17,7 @@ use meerkat_core::comms::{
 use meerkat_core::config::PlainEventSource;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;

@@ -74,10 +74,10 @@ jobs:
           - runs-on: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
-          - runs-on: macos-14
+          - runs-on: macos-15
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-          - runs-on: macos-13
+          - runs-on: macos-15
             target: x86_64-apple-darwin
             archive_ext: tar.gz
           - runs-on: windows-latest
@@ -98,9 +98,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SURFACES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
-          for surface in "${SURFACES[@]}"; do
-            cargo build -p "$surface" --release --target "${{ matrix.target }}"
+          # Package names (for cargo build -p) — binary names differ via [[bin]]
+          PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
+          for pkg in "${PACKAGES[@]}"; do
+            cargo build -p "$pkg" --release --target "${{ matrix.target }}"
           done
 
       - name: Package artifacts
@@ -111,26 +112,26 @@ jobs:
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
-          SURFACES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
+          # Binary names as produced by [[bin]] declarations in Cargo.toml
+          BINARIES=("rkat" "rkat-rpc" "rkat-rest" "rkat-mcp")
           mkdir -p dist
           VERSION="${VERSION#v}"
           VERSION="${VERSION//\//-}"
 
-          for surface in "${SURFACES[@]}"; do
+          for bin in "${BINARIES[@]}"; do
             if [[ "${RUNNER_OS}" == "Windows" ]]; then
-              src="target/${TARGET}/release/${surface}.exe"
-              artifact_name="${surface}-${VERSION}-${TARGET}.${ARCHIVE_EXT}"
+              src="target/${TARGET}/release/${bin}.exe"
             else
-              src="target/${TARGET}/release/${surface}"
-              artifact_name="${surface}-${VERSION}-${TARGET}.${ARCHIVE_EXT}"
+              src="target/${TARGET}/release/${bin}"
             fi
+            artifact_name="${bin}-${VERSION}-${TARGET}.${ARCHIVE_EXT}"
 
             if [[ ! -f "$src" ]]; then
               echo "Missing expected binary at $src" >&2
               exit 1
             fi
 
-            python3 - "$surface" "$src" "dist/$artifact_name" "$ARCHIVE_EXT" <<'PY'
+            python3 - "$bin" "$src" "dist/$artifact_name" "$ARCHIVE_EXT" <<'PY'
             import pathlib
             import sys
             import tarfile

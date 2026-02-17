@@ -112,7 +112,6 @@ jobs:
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
-          # Binary names as produced by [[bin]] declarations in Cargo.toml
           BINARIES=("rkat" "rkat-rpc" "rkat-rest" "rkat-mcp")
           mkdir -p dist
           VERSION="${VERSION#v}"
@@ -131,26 +130,12 @@ jobs:
               exit 1
             fi
 
-            python3 - "$bin" "$src" "dist/$artifact_name" "$ARCHIVE_EXT" <<'PY'
-            import pathlib
-            import sys
-            import tarfile
-            import zipfile
-
-            name, source_path, archive_path, archive_ext = sys.argv[1:5]
-            source = pathlib.Path(source_path)
-            archive = pathlib.Path(archive_path)
-
-            if archive_ext == "zip":
-                archive.parent.mkdir(parents=True, exist_ok=True)
-                with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    zf.write(source, arcname=source.name)
-            else:
-                with tarfile.open(archive, "w:gz") as tf:
-                    tf.add(source, arcname=source.name)
-
-            print(f"packaged={name} -> {archive}")
-            PY
+            if [[ "$ARCHIVE_EXT" == "zip" ]]; then
+              (cd "$(dirname "$src")" && zip -j "${GITHUB_WORKSPACE}/dist/${artifact_name}" "$(basename "$src")")
+            else
+              tar -czf "dist/${artifact_name}" -C "$(dirname "$src")" "$(basename "$src")"
+            fi
+            echo "packaged=${bin} -> dist/${artifact_name}"
           done
 
       - name: Upload artifacts

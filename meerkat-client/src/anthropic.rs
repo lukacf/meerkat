@@ -734,6 +734,45 @@ impl LlmClient for AnthropicClient {
                                     saw_done = true;
                                 }
                             }
+                            "error" => {
+                                // Anthropic streaming error (e.g. overloaded_error mid-stream)
+                                let error_msg = $event.error
+                                    .as_ref()
+                                    .and_then(|e| e.get("message"))
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("unknown streaming error");
+                                let error_type = $event.error
+                                    .as_ref()
+                                    .and_then(|e| e.get("type"))
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("unknown");
+
+                                tracing::error!(
+                                    error_type,
+                                    error_msg,
+                                    "Anthropic streaming error"
+                                );
+
+                                let error = match error_type {
+                                    "overloaded_error" => LlmError::ServerOverloaded,
+                                    "rate_limit_error" => LlmError::RateLimited { retry_after_ms: None },
+                                    "api_error" => LlmError::ServerError {
+                                        status: 500,
+                                        message: error_msg.to_string(),
+                                    },
+                                    _ => LlmError::Unknown {
+                                        message: format!("{error_type}: {error_msg}"),
+                                    },
+                                };
+
+                                if !saw_done {
+                                    saw_event = true;
+                                    yield LlmEvent::Done {
+                                        outcome: LlmDoneOutcome::Error { error },
+                                    };
+                                    saw_done = true;
+                                }
+                            }
                             _ => {}
                         }
                     };
@@ -822,11 +861,13 @@ struct AnthropicEvent {
     content_block: Option<AnthropicContentBlock>,
     message: Option<AnthropicMessage>,
     usage: Option<AnthropicUsage>,
+    /// Error object for streaming error events
+    error: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct AnthropicDelta {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     delta_type: String,
     text: Option<String>,
     partial_json: Option<String>,
@@ -1660,5 +1701,166 @@ mod tests {
         // Second block should be text
         assert_eq!(assistant_content[1]["type"], "text");
         Ok(())
+    }
+
+    // =========================================================================
+    // SSE stream regression tests
+    // =========================================================================
+
+    use axum::{Router, extract::State, response::IntoResponse, routing::post};
+    use tokio::net::TcpListener;
+
+    async fn messages_sse(State(payload): State<String>) -> impl IntoResponse {
+        ([("content-type", "text/event-stream")], payload)
+    }
+
+    async fn spawn_anthropic_stub_server(payload: String) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/v1/messages", post(messages_sse))
+            .with_state(payload);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    /// Regression: message_delta with stop_reason (no "type" in delta) must yield Done.
+    ///
+    /// Previously, AnthropicDelta required delta_type (mapped from "type") as a non-optional
+    /// String. Anthropic's message_delta sends {"delta": {"stop_reason": "end_turn"}} with
+    /// no "type" field, causing the entire event to fail serde parsing silently. When the
+    /// stream ended before message_stop arrived, no Done was ever emitted.
+    #[tokio::test]
+    async fn test_regression_message_delta_stop_reason_without_type_yields_done() {
+        // Simulate a stream where message_stop is NOT sent (e.g., connection dropped
+        // after message_delta). Done must come from message_delta's stop_reason.
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            // message_delta has "delta": {"stop_reason": "end_turn"} with NO "type" field
+            r#"data: {"type":"message_delta","usage":{"output_tokens":5},"delta":{"stop_reason":"end_turn"}}"#,
+            // Simulate stream ending WITHOUT message_stop (connection dropped)
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage {
+                content: "hello".to_string(),
+            })],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut saw_text = false;
+        let mut saw_done = false;
+        let mut done_is_success = false;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::TextDelta { delta, .. } if delta == "Hello" => saw_text = true,
+                LlmEvent::Done { outcome } => {
+                    saw_done = true;
+                    done_is_success = matches!(outcome, LlmDoneOutcome::Success { .. });
+                    break;
+                }
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert!(saw_text, "Expected text delta");
+        assert!(
+            saw_done,
+            "Expected Done event from message_delta stop_reason"
+        );
+        assert!(done_is_success, "Expected successful Done outcome");
+    }
+
+    /// Regression: Anthropic streaming error event must yield Done with error.
+    #[tokio::test]
+    async fn test_regression_anthropic_error_event_yields_done_with_error() {
+        let payload = [
+            r#"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage {
+                content: "hello".to_string(),
+            })],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut saw_error_done = false;
+        while let Some(event) = stream.next().await {
+            if let LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            } = event.expect("stream event")
+            {
+                assert!(
+                    matches!(error, LlmError::ServerOverloaded),
+                    "expected ServerOverloaded, got: {error:?}"
+                );
+                saw_error_done = true;
+                break;
+            }
+        }
+        server.abort();
+
+        assert!(saw_error_done, "Expected Done with error outcome");
+    }
+
+    /// Normal stream with message_stop should still work (baseline).
+    #[tokio::test]
+    async fn test_normal_stream_with_message_stop_yields_done() {
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":3},"delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage {
+                content: "hello".to_string(),
+            })],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut done_count = 0;
+        while let Some(event) = stream.next().await {
+            if let LlmEvent::Done { .. } = event.expect("stream event") {
+                done_count += 1;
+                break;
+            }
+        }
+        server.abort();
+
+        assert_eq!(done_count, 1, "Expected exactly one Done event");
     }
 }

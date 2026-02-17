@@ -289,18 +289,21 @@ release-preflight-smoke: ci-smoke verify-schema-freshness
 # Dry-run publish for Python SDK (build + twine check only)
 publish-dry-run-python:
 	@echo "$(GREEN)Checking Python SDK publish readiness...$(NC)"
-	@cd sdks/python && \
-		python3 -m pip install --upgrade build twine; \
-		rm -rf dist; \
-		python3 -m build; \
-		python3 -m twine check dist/*
+	@(cd sdks/python && \
+		python3 -m pip install --upgrade build twine && \
+		rm -rf dist *.egg-info && \
+		python3 -m build && \
+		python3 -m twine check dist/* && \
+		rm -rf dist *.egg-info build)
 
 # Dry-run publish for TypeScript SDK (npm --dry-run)
 publish-dry-run-typescript:
 	@echo "$(GREEN)Checking TypeScript SDK publish readiness...$(NC)"
-	@cd sdks/typescript && \
-		npm ci && \
-		npm publish --access public --dry-run
+	@(cd sdks/typescript && \
+		npm install --ignore-scripts && \
+		npm run build && \
+		npm publish --access public --dry-run && \
+		rm -rf dist)
 
 # Full dry-run release path: all validation + dry-run publish checks (no actual uploads)
 release-dry-run: release-preflight

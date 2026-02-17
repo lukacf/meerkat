@@ -321,7 +321,7 @@ jobs:
         run: |
           set -euo pipefail
           DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
-          npm ci
+          npm install --ignore-scripts
           npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
           npm run build
           if [[ "$DRY_RUN" == "true" ]]; then

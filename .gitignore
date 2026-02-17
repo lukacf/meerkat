@@ -34,7 +34,13 @@ vendor
 __pycache__/
 *.pyc
 *.pyo
+sdks/python/dist/
+sdks/python/*.egg-info/
 
 # Node
 node_modules/
 .playwright-mcp/
+
+# TypeScript SDK build output
+sdks/typescript/dist/
+sdks/typescript/package-lock.json

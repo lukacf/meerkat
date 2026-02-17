@@ -1,5 +1,5 @@
 {
-  "name": "@meerkat/sdk",
+  "name": "@rkat/sdk",
   "version": "0.3.4",
   "description": "TypeScript SDK for Meerkat agent runtime",
   "type": "module",

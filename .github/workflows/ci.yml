@@ -20,8 +20,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          profile: minimal
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2

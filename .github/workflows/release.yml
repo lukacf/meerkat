@@ -41,8 +41,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          profile: minimal
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -89,8 +87,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          profile: minimal
 
       - name: Add release target
         run: rustup target add ${{ matrix.target }}
@@ -240,8 +236,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          profile: minimal
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2

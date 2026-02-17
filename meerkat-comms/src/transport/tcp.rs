@@ -112,10 +112,10 @@ mod tests {
         let listener = match TcpTransportListener::bind(addr).await {
             Ok(listener) => listener,
             Err(e) => {
-                if let TransportError::Io(ref err) = e {
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return;
-                    }
+                if let TransportError::Io(ref err) = e
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    return;
                 }
                 panic!("TcpTransportListener::bind failed: {e:?}");
             }
@@ -130,10 +130,10 @@ mod tests {
         let listener = match TcpTransportListener::bind(addr).await {
             Ok(listener) => listener,
             Err(e) => {
-                if let TransportError::Io(ref err) = e {
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return;
-                    }
+                if let TransportError::Io(ref err) = e
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    return;
                 }
                 panic!("TcpTransportListener::bind failed: {e:?}");
             }
@@ -149,10 +149,10 @@ mod tests {
         let _conn = match TcpConnection::connect(local).await {
             Ok(conn) => conn,
             Err(e) => {
-                if let TransportError::Io(ref err) = e {
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return;
-                    }
+                if let TransportError::Io(ref err) = e
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    return;
                 }
                 panic!("TcpConnection::connect failed: {e:?}");
             }
@@ -166,10 +166,10 @@ mod tests {
         let listener = match TcpTransportListener::bind(addr).await {
             Ok(listener) => listener,
             Err(e) => {
-                if let TransportError::Io(ref err) = e {
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return;
-                    }
+                if let TransportError::Io(ref err) = e
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    return;
                 }
                 panic!("TcpTransportListener::bind failed: {e:?}");
             }
@@ -189,10 +189,10 @@ mod tests {
         let mut client = match TcpConnection::connect(local).await {
             Ok(conn) => conn,
             Err(e) => {
-                if let TransportError::Io(ref err) = e {
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return;
-                    }
+                if let TransportError::Io(ref err) = e
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    return;
                 }
                 panic!("TcpConnection::connect failed: {e:?}");
             }

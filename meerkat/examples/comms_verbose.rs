@@ -156,16 +156,16 @@ impl AgentLlmClient for LoggingLlmAdapter {
 
         // Complete any buffered tool calls
         for (_, buffer) in tool_call_buffers {
-            if let Some(tc) = buffer.try_complete() {
-                if !tool_calls.iter().any(|t| t.id == tc.id) {
-                    println!("\n┌─── LLM REQUESTED TOOL: {} ───┐", tc.name);
-                    println!(
-                        "│ Args: {}",
-                        serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string())
-                    );
-                    println!("└────────────────────────────────────────┘");
-                    tool_calls.push(tc);
-                }
+            if let Some(tc) = buffer.try_complete()
+                && !tool_calls.iter().any(|t| t.id == tc.id)
+            {
+                println!("\n┌─── LLM REQUESTED TOOL: {} ───┐", tc.name);
+                println!(
+                    "│ Args: {}",
+                    serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string())
+                );
+                println!("└────────────────────────────────────────┘");
+                tool_calls.push(tc);
             }
         }
 
@@ -426,10 +426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╚══════════════════════════════════════════════════════════════╝");
 
     let result_a = agent_a
-        .run(
-            "Send the message 'Hello from Agent A!' to agent-b using the send tool."
-                .to_string(),
-        )
+        .run("Send the message 'Hello from Agent A!' to agent-b using the send tool.".to_string())
         .await?;
 
     println!("\n═══════════════════════════════════════════════════════════════");

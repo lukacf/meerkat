@@ -26,6 +26,43 @@ pub fn format_session_ref(realm_id: &str, session_id: &SessionId) -> String {
     format!("{realm_id}:{session_id}")
 }
 
+fn is_uuid_like(input: &str) -> bool {
+    if input.len() != 36 {
+        return false;
+    }
+    let bytes = input.as_bytes();
+    if bytes[8] != b'-' || bytes[13] != b'-' || bytes[18] != b'-' || bytes[23] != b'-' {
+        return false;
+    }
+    input.as_bytes().iter().enumerate().all(|(idx, byte)| {
+        idx == 8 || idx == 13 || idx == 18 || idx == 23 || byte.is_ascii_hexdigit()
+    })
+}
+
+fn validate_explicit_realm_id(realm_id: &str) -> Result<(), SessionLocatorError> {
+    const MAX_LEN: usize = 64;
+    if realm_id.is_empty() || realm_id.len() > MAX_LEN {
+        return Err(SessionLocatorError::InvalidRealmId(realm_id.to_string()));
+    }
+    if realm_id.contains(':') || realm_id.chars().any(char::is_whitespace) {
+        return Err(SessionLocatorError::InvalidRealmId(realm_id.to_string()));
+    }
+    let mut chars = realm_id.chars();
+    let first = chars
+        .next()
+        .ok_or_else(|| SessionLocatorError::InvalidRealmId(realm_id.to_string()))?;
+    if !first.is_ascii_alphanumeric() {
+        return Err(SessionLocatorError::InvalidRealmId(realm_id.to_string()));
+    }
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+        return Err(SessionLocatorError::InvalidRealmId(realm_id.to_string()));
+    }
+    if is_uuid_like(realm_id) {
+        return Err(SessionLocatorError::InvalidRealmId(realm_id.to_string()));
+    }
+    Ok(())
+}
+
 impl SessionLocator {
     /// Parse either a bare `<session_id>` or `<realm_id>:<session_id>`.
     pub fn parse(input: &str) -> Result<Self, SessionLocatorError> {
@@ -33,8 +70,7 @@ impl SessionLocator {
             if realm_part.is_empty() || session_part.is_empty() {
                 return Err(SessionLocatorError::InvalidFormat);
             }
-            meerkat_core::runtime_bootstrap::validate_explicit_realm_id(realm_part)
-                .map_err(|_| SessionLocatorError::InvalidRealmId(realm_part.to_string()))?;
+            validate_explicit_realm_id(realm_part)?;
             let session_id = SessionId::parse(session_part)
                 .map_err(|_| SessionLocatorError::InvalidSessionId(session_part.to_string()))?;
             return Ok(Self {
@@ -57,13 +93,13 @@ impl SessionLocator {
         active_realm_id: &str,
     ) -> Result<SessionId, SessionLocatorError> {
         let locator = Self::parse(input)?;
-        if let Some(provided) = locator.realm_id {
-            if provided != active_realm_id {
-                return Err(SessionLocatorError::RealmMismatch {
-                    provided,
-                    active: active_realm_id.to_string(),
-                });
-            }
+        if let Some(provided) = locator.realm_id
+            && provided != active_realm_id
+        {
+            return Err(SessionLocatorError::RealmMismatch {
+                provided,
+                active: active_realm_id.to_string(),
+            });
         }
         Ok(locator.session_id)
     }
@@ -96,6 +132,22 @@ mod tests {
         assert!(matches!(
             SessionLocator::parse("not-a-session"),
             Err(SessionLocatorError::InvalidSessionId(_))
+        ));
+        assert!(matches!(
+            SessionLocator::parse("::"),
+            Err(SessionLocatorError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn session_locator_rejects_invalid_realm_ids() {
+        assert!(matches!(
+            validate_explicit_realm_id("bad:name"),
+            Err(SessionLocatorError::InvalidRealmId(_))
+        ));
+        assert!(matches!(
+            validate_explicit_realm_id("550e8400-e29b-41d4-a716-446655440000"),
+            Err(SessionLocatorError::InvalidRealmId(_))
         ));
     }
 

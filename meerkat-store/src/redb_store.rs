@@ -98,11 +98,10 @@ impl SessionStore for RedbSessionStore {
                 if let Some(old_data) = by_id_table
                     .get(id_key.as_slice())
                     .map_err(|e| StoreError::Database(Box::new(e.into())))?
+                    && let Ok(old_session) = serde_json::from_slice::<Session>(old_data.value())
                 {
-                    if let Ok(old_session) = serde_json::from_slice::<Session>(old_data.value()) {
-                        let old_key = updated_key(&session_id, old_session.updated_at());
-                        let _ = by_updated_table.remove(old_key.as_slice());
-                    }
+                    let old_key = updated_key(&session_id, old_session.updated_at());
+                    let _ = by_updated_table.remove(old_key.as_slice());
                 }
 
                 by_id_table
@@ -191,32 +190,31 @@ impl SessionStore for RedbSessionStore {
                 if let Some(data) = by_id
                     .get(id_key.as_slice())
                     .map_err(|e| StoreError::Database(Box::new(e.into())))?
+                    && let Ok(session) = serde_json::from_slice::<Session>(data.value())
                 {
-                    if let Ok(session) = serde_json::from_slice::<Session>(data.value()) {
-                        let meta = SessionMeta::from(&session);
+                    let meta = SessionMeta::from(&session);
 
-                        // Apply filters
-                        if let Some(after) = filter.created_after {
-                            if meta.created_at < after {
-                                continue;
-                            }
-                        }
-                        if let Some(after) = filter.updated_after {
-                            if meta.updated_at < after {
-                                continue;
-                            }
-                        }
+                    // Apply filters
+                    if let Some(after) = filter.created_after
+                        && meta.created_at < after
+                    {
+                        continue;
+                    }
+                    if let Some(after) = filter.updated_after
+                        && meta.updated_at < after
+                    {
+                        continue;
+                    }
 
-                        results.push(meta);
+                    results.push(meta);
 
-                        // Early exit: collect enough to satisfy offset + limit without overflow.
-                        let effective_limit = filter
-                            .offset
-                            .unwrap_or(0)
-                            .saturating_add(filter.limit.unwrap_or(usize::MAX));
-                        if results.len() >= effective_limit {
-                            break;
-                        }
+                    // Early exit: collect enough to satisfy offset + limit without overflow.
+                    let effective_limit = filter
+                        .offset
+                        .unwrap_or(0)
+                        .saturating_add(filter.limit.unwrap_or(usize::MAX));
+                    if results.len() >= effective_limit {
+                        break;
                     }
                 }
             }
@@ -261,11 +259,10 @@ impl SessionStore for RedbSessionStore {
                 if let Some(data) = by_id_table
                     .get(id_key.as_slice())
                     .map_err(|e| StoreError::Database(Box::new(e.into())))?
+                    && let Ok(session) = serde_json::from_slice::<Session>(data.value())
                 {
-                    if let Ok(session) = serde_json::from_slice::<Session>(data.value()) {
-                        let old_key = updated_key(&id_owned, session.updated_at());
-                        let _ = by_updated_table.remove(old_key.as_slice());
-                    }
+                    let old_key = updated_key(&id_owned, session.updated_at());
+                    let _ = by_updated_table.remove(old_key.as_slice());
                 }
 
                 let _ = by_id_table.remove(id_key.as_slice());

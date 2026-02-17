@@ -74,11 +74,9 @@ fn spawn_event_handler(
         use std::io::Write;
 
         while let Some(event) = agent_event_rx.recv().await {
-            if stream {
-                if let AgentEvent::TextDelta { delta } = &event {
-                    print!("{}", delta);
-                    let _ = std::io::stdout().flush();
-                }
+            if stream && let AgentEvent::TextDelta { delta } = &event {
+                print!("{}", delta);
+                let _ = std::io::stdout().flush();
             }
 
             if !verbose {
@@ -742,12 +740,12 @@ async fn main() -> anyhow::Result<ExitCode> {
         Ok(()) => ExitCode::from(EXIT_SUCCESS),
         Err(e) => {
             // Check if it's a budget exhaustion error
-            if let Some(agent_err) = e.downcast_ref::<AgentError>() {
-                if agent_err.is_graceful() {
-                    // Budget exhausted - this is a graceful termination
-                    eprintln!("Budget exhausted: {}", agent_err);
-                    return Ok(ExitCode::from(EXIT_BUDGET_EXHAUSTED));
-                }
+            if let Some(agent_err) = e.downcast_ref::<AgentError>()
+                && agent_err.is_graceful()
+            {
+                // Budget exhausted - this is a graceful termination
+                eprintln!("Budget exhausted: {}", agent_err);
+                return Ok(ExitCode::from(EXIT_BUDGET_EXHAUSTED));
             }
             eprintln!("Error: {}", e);
             ExitCode::from(EXIT_ERROR)
@@ -1251,11 +1249,37 @@ async fn delete_realm(
     }
 
     let paths = meerkat_store::realm_paths_in(state_root, realm_id);
-    tokio::fs::remove_dir_all(&paths.root)
+    remove_realm_root_with_retries(&paths, force)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to delete realm '{}': {}", realm_id, e))?;
     println!("Deleted realm '{}'", realm_id);
     Ok(())
+}
+
+async fn remove_realm_root_with_retries(
+    paths: &meerkat_store::RealmPaths,
+    force: bool,
+) -> anyhow::Result<()> {
+    let max_attempts: usize = if force { 12 } else { 1 };
+    let mut delay = Duration::from_millis(25);
+    let lease_dir = meerkat_store::realm_lease_dir(paths);
+
+    for attempt in 1..=max_attempts {
+        match tokio::fs::remove_dir_all(&paths.root).await {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                if !force || attempt >= max_attempts {
+                    return Err(err.into());
+                }
+                let _ = tokio::fs::remove_dir_all(&lease_dir).await;
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(1));
+            }
+        }
+    }
+
+    unreachable!("retry loop exhausted without returning");
 }
 
 async fn prune_realms(
@@ -1344,7 +1368,7 @@ async fn prune_realms_inner(
         }
 
         let paths = meerkat_store::realm_paths_in(state_root, &manifest.realm_id);
-        if let Err(err) = tokio::fs::remove_dir_all(&paths.root).await {
+        if let Err(err) = remove_realm_root_with_retries(&paths, force).await {
             outcome
                 .leftovers
                 .push(format!("{} ({})", manifest.realm_id, err));
@@ -1760,15 +1784,15 @@ async fn run_agent(
                 result.usage.input_tokens,
                 result.usage.output_tokens
             );
-            if let Some(warnings) = &result.schema_warnings {
-                if !warnings.is_empty() {
-                    eprintln!("\n[Schema warnings]");
-                    for warning in warnings {
-                        eprintln!(
-                            "- {:?} {}: {}",
-                            warning.provider, warning.path, warning.message
-                        );
-                    }
+            if let Some(warnings) = &result.schema_warnings
+                && !warnings.is_empty()
+            {
+                eprintln!("\n[Schema warnings]");
+                for warning in warnings {
+                    eprintln!(
+                        "- {:?} {}: {}",
+                        warning.provider, warning.path, warning.message
+                    );
                 }
             }
         }
@@ -2210,10 +2234,10 @@ async fn find_session_matches(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to list realms in '{}': {e}", root.display()))?;
         for entry in manifests {
-            if let Some(target_realm) = locator.realm_id.as_deref() {
-                if entry.manifest.realm_id != target_realm {
-                    continue;
-                }
+            if let Some(target_realm) = locator.realm_id.as_deref()
+                && entry.manifest.realm_id != target_realm
+            {
+                continue;
             }
 
             let store = meerkat_store::open_realm_session_store_in(

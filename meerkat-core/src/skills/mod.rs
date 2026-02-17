@@ -222,15 +222,16 @@ pub fn apply_filter(skills: &[SkillDescriptor], filter: &SkillFilter) -> Vec<Ski
     skills
         .iter()
         .filter(|s| {
-            if let Some(ref prefix) = filter.collection {
-                if !collection_matches_prefix(s.id.collection(), prefix) {
-                    return false;
-                }
+            if let Some(ref prefix) = filter.collection
+                && !collection_matches_prefix(s.id.collection(), prefix)
+            {
+                return false;
             }
-            if let Some(ref q) = query_lower {
-                if !s.name.to_lowercase().contains(q) && !s.description.to_lowercase().contains(q) {
-                    return false;
-                }
+            if let Some(ref q) = query_lower
+                && !s.name.to_lowercase().contains(q)
+                && !s.description.to_lowercase().contains(q)
+            {
+                return false;
             }
             true
         })

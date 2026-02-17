@@ -111,6 +111,7 @@ exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
     #{ allow = ["Zlib"], crate = "adler32" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,

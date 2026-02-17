@@ -530,13 +530,12 @@ impl BuiltinTool for AgentSpawnTool {
         if let Some(model_prop) = schema
             .get_mut("properties")
             .and_then(|p| p.get_mut("model"))
+            && let Some(obj) = model_prop.as_object_mut()
         {
-            if let Some(obj) = model_prop.as_object_mut() {
-                obj.insert(
-                    "description".to_string(),
-                    Value::String(format!("Model name (provider-specific). {}", models_desc)),
-                );
-            }
+            obj.insert(
+                "description".to_string(),
+                Value::String(format!("Model name (provider-specific). {}", models_desc)),
+            );
         }
 
         ToolDef {

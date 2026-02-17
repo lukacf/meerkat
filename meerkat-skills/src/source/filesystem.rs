@@ -103,12 +103,12 @@ async fn load_collection_descriptions_recursive(
     {
         match tokio::fs::read_to_string(&collection_file).await {
             Ok(content) => {
-                if let Ok(relative) = dir.strip_prefix(root) {
-                    if let Some(rel_str) = relative.to_str() {
-                        let path = rel_str.replace(std::path::MAIN_SEPARATOR, "/");
-                        if !path.is_empty() {
-                            descriptions.insert(path, content.trim().to_string());
-                        }
+                if let Ok(relative) = dir.strip_prefix(root)
+                    && let Some(rel_str) = relative.to_str()
+                {
+                    let path = rel_str.replace(std::path::MAIN_SEPARATOR, "/");
+                    if !path.is_empty() {
+                        descriptions.insert(path, content.trim().to_string());
                     }
                 }
             }

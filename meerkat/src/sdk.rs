@@ -348,11 +348,11 @@ pub fn spawn_event_logger(
         use std::io::Write;
 
         while let Some(event) = agent_event_rx.recv().await {
-            if config.stream {
-                if let AgentEvent::TextDelta { delta } = &event {
-                    print!("{}", delta);
-                    let _ = std::io::stdout().flush();
-                }
+            if config.stream
+                && let AgentEvent::TextDelta { delta } = &event
+            {
+                print!("{}", delta);
+                let _ = std::io::stdout().flush();
             }
 
             if !config.verbose {

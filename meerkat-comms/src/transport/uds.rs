@@ -22,10 +22,10 @@ impl UdsListener {
     /// Bind to a Unix domain socket path.
     pub async fn bind(path: &Path) -> Result<Self, TransportError> {
         // Remove existing socket file if present (without blocking the executor).
-        if let Err(err) = tokio::fs::remove_file(path).await {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                return Err(err.into());
-            }
+        if let Err(err) = tokio::fs::remove_file(path).await
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(err.into());
         }
 
         let listener = UnixListener::bind(path)?;
@@ -117,10 +117,10 @@ mod tests {
         let listener = match UdsListener::bind(&path).await {
             Ok(listener) => listener,
             Err(e) => {
-                if let TransportError::Io(ref err) = e {
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return;
-                    }
+                if let TransportError::Io(ref err) = e
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    return;
                 }
                 panic!("UdsListener::bind failed: {e:?}");
             }
@@ -137,10 +137,10 @@ mod tests {
         let listener = match UdsListener::bind(&path).await {
             Ok(listener) => listener,
             Err(e) => {
-                if let TransportError::Io(ref err) = e {
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return;
-                    }
+                if let TransportError::Io(ref err) = e
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    return;
                 }
                 panic!("UdsListener::bind failed: {e:?}");
             }
@@ -156,10 +156,10 @@ mod tests {
         let _conn = match UdsConnection::connect(&path_clone).await {
             Ok(conn) => conn,
             Err(e) => {
-                if let TransportError::Io(ref err) = e {
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return;
-                    }
+                if let TransportError::Io(ref err) = e
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    return;
                 }
                 panic!("UdsConnection::connect failed: {e:?}");
             }
@@ -175,10 +175,10 @@ mod tests {
         let listener = match UdsListener::bind(&path).await {
             Ok(listener) => listener,
             Err(e) => {
-                if let TransportError::Io(ref err) = e {
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return;
-                    }
+                if let TransportError::Io(ref err) = e
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    return;
                 }
                 panic!("UdsListener::bind failed: {e:?}");
             }
@@ -196,10 +196,10 @@ mod tests {
         let mut client = match UdsConnection::connect(&path).await {
             Ok(conn) => conn,
             Err(e) => {
-                if let TransportError::Io(ref err) = e {
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return;
-                    }
+                if let TransportError::Io(ref err) = e
+                    && err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    return;
                 }
                 panic!("UdsConnection::connect failed: {e:?}");
             }

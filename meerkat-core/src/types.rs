@@ -268,13 +268,13 @@ impl OutputSchema {
         let schema = schemars::schema_for!(T);
         let mut value = serde_json::to_value(&schema).map_err(|_| SchemaError::InvalidRoot)?;
         // Ensure object schemas always have `properties` and `required` keys.
-        if let Value::Object(ref mut obj) = value {
-            if obj.get("type").and_then(Value::as_str) == Some("object") {
-                obj.entry("properties".to_string())
-                    .or_insert_with(|| Value::Object(Map::new()));
-                obj.entry("required".to_string())
-                    .or_insert_with(|| Value::Array(Vec::new()));
-            }
+        if let Value::Object(ref mut obj) = value
+            && obj.get("type").and_then(Value::as_str) == Some("object")
+        {
+            obj.entry("properties".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            obj.entry("required".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
         }
         OutputSchema::new(value)
     }

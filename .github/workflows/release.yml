@@ -1,0 +1,331 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish_release_packages:
+        description: "Publish Rust/Python/TypeScript artifacts to registries"
+        required: false
+        default: false
+        type: boolean
+      registry_dry_run:
+        description: "Run registry publish steps in dry-run mode"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Required GitHub Actions secrets for full release:
+#   CARGO_REGISTRY_TOKEN  - crates.io API token
+#   PYPI_API_TOKEN        - PyPI API token (scoped to meerkat-sdk package)
+#   NPM_TOKEN             - npm access token (scoped to @meerkat org or publish)
+
+jobs:
+  release_validate:
+    name: Validate release branch/state
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      # Use smoke preflight in CI release gate — the full feature matrix
+      # runs in regular CI on push/PR. Release validation only needs core
+      # checks (fmt, lint, tests, audit) to avoid 15+ minute delays.
+      - name: Run preflight checks
+        run: |
+          make release-preflight-smoke
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            make verify-version
+          else
+            echo "Skipping tag-version check (non-tag workflow trigger)."
+          fi
+
+  build_binaries:
+    name: Build and package surface binaries
+    needs: [release_validate]
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - runs-on: macos-15
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+          - runs-on: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add release target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build surface binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Package names (for cargo build -p) — binary names differ via [[bin]]
+          PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
+          for pkg in "${PACKAGES[@]}"; do
+            cargo build -p "$pkg" --release --target "${{ matrix.target }}"
+          done
+
+      - name: Package artifacts
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ github.ref_name }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          set -euo pipefail
+          BINARIES=("rkat" "rkat-rpc" "rkat-rest" "rkat-mcp")
+          mkdir -p dist
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION//\//-}"
+
+          for bin in "${BINARIES[@]}"; do
+            if [[ "${RUNNER_OS}" == "Windows" ]]; then
+              src="target/${TARGET}/release/${bin}.exe"
+            else
+              src="target/${TARGET}/release/${bin}"
+            fi
+            artifact_name="${bin}-${VERSION}-${TARGET}.${ARCHIVE_EXT}"
+
+            if [[ ! -f "$src" ]]; then
+              echo "Missing expected binary at $src" >&2
+              exit 1
+            fi
+
+            if [[ "$ARCHIVE_EXT" == "zip" ]]; then
+              (cd "$(dirname "$src")" && zip -j "${GITHUB_WORKSPACE}/dist/${artifact_name}" "$(basename "$src")")
+            else
+              tar -czf "dist/${artifact_name}" -C "$(dirname "$src")" "$(basename "$src")"
+            fi
+            echo "packaged=${bin} -> dist/${artifact_name}"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: meerkat-${{ matrix.target }}-${{ matrix.runs-on }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish_github_release:
+    name: Publish GitHub release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build_binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Build checksum manifest
+        working-directory: release-artifacts
+        run: |
+          set -euo pipefail
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) | sort > manifest_files.txt
+          if [[ ! -s manifest_files.txt ]]; then
+            echo "No release artifacts found" >&2
+            exit 1
+          fi
+          xargs sha256sum < manifest_files.txt > checksums.sha256
+          python3 - <<'PY'
+          import os
+          import json
+          from pathlib import Path
+
+          paths = [
+              p.as_posix().lstrip("./")
+              for p in sorted(Path(".").rglob("*"))
+              if p.is_file() and (p.name.endswith(".tar.gz") or p.name.endswith(".zip"))
+          ]
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          manifest = {
+              "version": tag.lstrip("v"),
+              "tag": tag,
+              "artifacts": paths,
+              "checksums": "checksums.sha256",
+          }
+
+          with open("index.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2)
+          PY
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-artifacts/**/*.tar.gz
+            release-artifacts/**/*.zip
+            release-artifacts/checksums.sha256
+            release-artifacts/index.json
+          draft: false
+          fail_on_unmatched_files: true
+
+  # Registry publishing runs automatically on tag pushes alongside binary
+  # builds. For recovery (e.g. npm was down during the tag-triggered run),
+  # re-run via workflow_dispatch:
+  #
+  #   gh workflow run release.yml --ref v<VERSION> \
+  #     -f publish_release_packages=true \
+  #     -f registry_dry_run=false
+  #
+  # Use registry_dry_run=true to validate without uploading.
+  publish_registries:
+    name: Publish crates + SDK packages
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release_packages == 'true')
+    needs: [release_validate, build_binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python + Node tooling
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Python publishing tools
+        run: python -m pip install --upgrade build twine
+
+      - name: Publish Rust crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Running cargo publish in dry-run mode"
+          else
+            echo "Publishing crates to crates.io"
+          fi
+          crates=(
+            meerkat-core
+            meerkat-contracts
+            meerkat-client
+            meerkat-store
+            meerkat-tools
+            meerkat-session
+            meerkat-memory
+            meerkat-mcp
+            meerkat-mcp-server
+            meerkat-hooks
+            meerkat-skills
+            meerkat-comms
+            meerkat-rpc
+            meerkat-rest
+            meerkat
+          )
+          tmp_cfg="$(mktemp)"
+          cat > "$tmp_cfg" <<EOF
+          [patch.crates-io]
+          meerkat-core = { path = "$GITHUB_WORKSPACE/meerkat-core" }
+          meerkat-client = { path = "$GITHUB_WORKSPACE/meerkat-client" }
+          meerkat-store = { path = "$GITHUB_WORKSPACE/meerkat-store" }
+          meerkat-tools = { path = "$GITHUB_WORKSPACE/meerkat-tools" }
+          meerkat-session = { path = "$GITHUB_WORKSPACE/meerkat-session" }
+          meerkat-memory = { path = "$GITHUB_WORKSPACE/meerkat-memory" }
+          meerkat-mcp = { path = "$GITHUB_WORKSPACE/meerkat-mcp" }
+          meerkat-mcp-server = { path = "$GITHUB_WORKSPACE/meerkat-mcp-server" }
+          meerkat-hooks = { path = "$GITHUB_WORKSPACE/meerkat-hooks" }
+          meerkat-skills = { path = "$GITHUB_WORKSPACE/meerkat-skills" }
+          meerkat-comms = { path = "$GITHUB_WORKSPACE/meerkat-comms" }
+          meerkat-rpc = { path = "$GITHUB_WORKSPACE/meerkat-rpc" }
+          meerkat-rest = { path = "$GITHUB_WORKSPACE/meerkat-rest" }
+          meerkat-contracts = { path = "$GITHUB_WORKSPACE/meerkat-contracts" }
+          meerkat = { path = "$GITHUB_WORKSPACE/meerkat" }
+          EOF
+          for c in "${crates[@]}"; do
+            if [[ "$DRY_RUN" == "true" ]]; then
+              cargo publish -p "$c" --locked --dry-run --config "$tmp_cfg"
+            else
+              cargo publish -p "$c" --locked --config "$tmp_cfg"
+            fi
+          done
+          rm -f "$tmp_cfg"
+
+      - name: Publish Python SDK
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        working-directory: sdks/python
+        run: |
+          set -euo pipefail
+          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
+          python -m pip install --upgrade build twine
+          rm -rf dist
+          python -m build
+          python -m twine check dist/*
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Python SDK dry-run: skipping upload"
+          else
+            python -m twine upload dist/*
+          fi
+
+      - name: Publish TypeScript SDK
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: sdks/typescript
+        run: |
+          set -euo pipefail
+          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
+          npm ci
+          npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
+          npm run build
+          if [[ "$DRY_RUN" == "true" ]]; then
+            npm publish --access public --dry-run
+          else
+            npm publish --access public
+          fi

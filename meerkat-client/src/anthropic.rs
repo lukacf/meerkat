@@ -283,10 +283,10 @@ impl AnthropicClient {
             body["system"] = Value::String(system);
         }
 
-        if let Some(temp) = request.temperature {
-            if let Some(num) = serde_json::Number::from_f64(temp as f64) {
-                body["temperature"] = Value::Number(num);
-            }
+        if let Some(temp) = request.temperature
+            && let Some(num) = serde_json::Number::from_f64(temp as f64)
+        {
+            body["temperature"] = Value::Number(num);
         }
 
         if !request.tools.is_empty() {
@@ -510,10 +510,10 @@ impl LlmClient for AnthropicClient {
                 }
 
                 // 1M context window (opt-in via provider_params)
-                if let Some(ref params) = request.provider_params {
-                    if params.get("context").and_then(|v| v.as_str()) == Some("1m") {
-                        betas.push("context-1m-2025-08-07");
-                    }
+                if let Some(ref params) = request.provider_params
+                    && params.get("context").and_then(|v| v.as_str()) == Some("1m")
+                {
+                    betas.push("context-1m-2025-08-07");
                 }
 
                 // Compaction API (beta)

@@ -150,20 +150,20 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             .send()
             .await
             .map_err(StreamableHttpError::Client)?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            if let Some(header) = response.headers().get(WWW_AUTHENTICATE) {
-                let header = header
-                    .to_str()
-                    .map_err(|_| {
-                        StreamableHttpError::UnexpectedServerResponse(
-                            "invalid www-authenticate header value".into(),
-                        )
-                    })?
-                    .to_string();
-                return Err(StreamableHttpError::AuthRequired(AuthRequiredError {
-                    www_authenticate_header: header,
-                }));
-            }
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && let Some(header) = response.headers().get(WWW_AUTHENTICATE)
+        {
+            let header = header
+                .to_str()
+                .map_err(|_| {
+                    StreamableHttpError::UnexpectedServerResponse(
+                        "invalid www-authenticate header value".into(),
+                    )
+                })?
+                .to_string();
+            return Err(StreamableHttpError::AuthRequired(AuthRequiredError {
+                www_authenticate_header: header,
+            }));
         }
         let status = response.status();
         let response = response

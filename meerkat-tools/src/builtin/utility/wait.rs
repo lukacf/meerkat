@@ -106,20 +106,20 @@ impl BuiltinTool for WaitTool {
                         "status": "complete"
                     }))
                 }
-                result = rx.changed() => {
-                    if result.is_ok() {
-                        if let Some(interrupt) = rx.borrow().as_ref() {
-                            let waited = start.elapsed().as_secs_f64();
-                            return Ok(json!({
-                                "waited_seconds": waited,
-                                "requested_seconds": seconds,
-                                "status": "interrupted",
-                                "reason": format!("Wait interrupted after {:.1}s: {}", waited, interrupt.reason)
-                            }));
-                        }
-                    }
-                    // Channel closed or no interrupt data - complete normally
-                    Ok(json!({
+            result = rx.changed() => {
+                if result.is_ok()
+                    && let Some(interrupt) = rx.borrow().as_ref()
+                {
+                    let waited = start.elapsed().as_secs_f64();
+                    return Ok(json!({
+                        "waited_seconds": waited,
+                        "requested_seconds": seconds,
+                        "status": "interrupted",
+                        "reason": format!("Wait interrupted after {:.1}s: {}", waited, interrupt.reason)
+                    }));
+                }
+                // Channel closed or no interrupt data - complete normally
+                Ok(json!({
                         "waited_seconds": seconds,
                         "status": "complete"
                     }))

@@ -144,10 +144,10 @@ impl ConfigRuntime {
         let _guard = self.process_lock.lock().await;
         let _file_lock = self.acquire_file_lock().await?;
         let current = self.read_generation().await?;
-        if let Some(expected) = expected_generation {
-            if expected != current {
-                return Err(ConfigRuntimeError::GenerationConflict { expected, current });
-            }
+        if let Some(expected) = expected_generation
+            && expected != current
+        {
+            return Err(ConfigRuntimeError::GenerationConflict { expected, current });
         }
 
         self.store.set(config.clone()).await?;
@@ -170,10 +170,10 @@ impl ConfigRuntime {
         let _guard = self.process_lock.lock().await;
         let _file_lock = self.acquire_file_lock().await?;
         let current = self.read_generation().await?;
-        if let Some(expected) = expected_generation {
-            if expected != current {
-                return Err(ConfigRuntimeError::GenerationConflict { expected, current });
-            }
+        if let Some(expected) = expected_generation
+            && expected != current
+        {
+            return Err(ConfigRuntimeError::GenerationConflict { expected, current });
         }
 
         let updated = self.store.patch(delta).await?;

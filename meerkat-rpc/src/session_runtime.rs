@@ -221,10 +221,10 @@ impl SessionRuntime {
 
         if let Some(mut build_config) = pending_config {
             // Inject default LLM client if the caller didn't provide one.
-            if build_config.llm_client_override.is_none() {
-                if let Some(ref client) = self.default_llm_client {
-                    build_config.llm_client_override = Some(client.clone());
-                }
+            if build_config.llm_client_override.is_none()
+                && let Some(ref client) = self.default_llm_client
+            {
+                build_config.llm_client_override = Some(client.clone());
             }
             let runtime_generation = if build_config.config_generation.is_none() {
                 if let Some(runtime) = &self.config_runtime {

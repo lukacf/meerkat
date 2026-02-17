@@ -630,13 +630,12 @@ async fn session_task<A: SessionAgent>(
                         tokio::select! {
                             result = &mut run_fut => break result,
                             Some(event) = agent_event_rx.recv() => {
-                                if event_stream_open {
-                                    if let Some(ref tx) = event_tx {
-                                        if tx.send(event).await.is_err() {
-                                            event_stream_open = false;
-                                            tracing::warn!("session event stream receiver dropped; continuing without streaming events");
-                                        }
-                                    }
+                                if event_stream_open
+                                    && let Some(ref tx) = event_tx
+                                    && tx.send(event).await.is_err()
+                                {
+                                    event_stream_open = false;
+                                    tracing::warn!("session event stream receiver dropped; continuing without streaming events");
                                 }
                             }
                         }
@@ -644,15 +643,14 @@ async fn session_task<A: SessionAgent>(
 
                     // Drain any remaining events
                     while let Ok(event) = agent_event_rx.try_recv() {
-                        if event_stream_open {
-                            if let Some(ref tx) = event_tx {
-                                if tx.send(event).await.is_err() {
-                                    event_stream_open = false;
-                                    tracing::warn!(
-                                        "session event stream receiver dropped while draining events"
-                                    );
-                                }
-                            }
+                        if event_stream_open
+                            && let Some(ref tx) = event_tx
+                            && tx.send(event).await.is_err()
+                        {
+                            event_stream_open = false;
+                            tracing::warn!(
+                                "session event stream receiver dropped while draining events"
+                            );
                         }
                     }
 

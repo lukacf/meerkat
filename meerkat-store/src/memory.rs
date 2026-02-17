@@ -44,15 +44,15 @@ impl SessionStore for MemoryStore {
         let mut metas: Vec<SessionMeta> = sessions
             .values()
             .filter(|s| {
-                if let Some(created_after) = filter.created_after {
-                    if s.created_at() < created_after {
-                        return false;
-                    }
+                if let Some(created_after) = filter.created_after
+                    && s.created_at() < created_after
+                {
+                    return false;
                 }
-                if let Some(updated_after) = filter.updated_after {
-                    if s.updated_at() < updated_after {
-                        return false;
-                    }
+                if let Some(updated_after) = filter.updated_after
+                    && s.updated_at() < updated_after
+                {
+                    return false;
                 }
                 true
             })

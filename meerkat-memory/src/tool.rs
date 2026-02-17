@@ -33,13 +33,13 @@ struct MemorySearchInput {
 fn input_schema() -> Value {
     let schema = schemars::schema_for!(MemorySearchInput);
     let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
-    if let Value::Object(ref mut obj) = value {
-        if obj.get("type").and_then(Value::as_str) == Some("object") {
-            obj.entry("properties".to_string())
-                .or_insert_with(|| Value::Object(Map::new()));
-            obj.entry("required".to_string())
-                .or_insert_with(|| Value::Array(Vec::new()));
-        }
+    if let Value::Object(ref mut obj) = value
+        && obj.get("type").and_then(Value::as_str) == Some("object")
+    {
+        obj.entry("properties".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        obj.entry("required".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
     }
     value
 }

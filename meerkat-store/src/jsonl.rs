@@ -315,16 +315,16 @@ impl SessionStore for JsonlStore {
         let meta_path = self.metadata_path(id);
 
         // Use async remove_file and handle NotFound instead of sync path.exists()
-        if let Err(e) = fs::remove_file(&path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(e.into());
-            }
+        if let Err(e) = fs::remove_file(&path).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(e.into());
         }
 
-        if let Err(e) = fs::remove_file(&meta_path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(e.into());
-            }
+        if let Err(e) = fs::remove_file(&meta_path).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(e.into());
         }
 
         let index = self.index().await?;

@@ -1,11 +1,15 @@
 //! Router for Meerkat comms - high-level send API.
 
 use futures::{SinkExt, StreamExt};
+#[cfg(not(unix))]
+use std::io::ErrorKind;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 use tokio_util::codec::Framed;
 use uuid::Uuid;
@@ -168,11 +172,18 @@ impl Router {
         }
 
         match addr {
+            #[cfg(unix)]
             PeerAddr::Uds(path) => {
                 let mut stream = UnixStream::connect(&path).await?;
                 self.send_on_stream(&mut stream, envelope, wait_for_ack)
                     .await
             }
+            #[cfg(not(unix))]
+            PeerAddr::Uds(_path) => Err(std::io::Error::new(
+                ErrorKind::Unsupported,
+                "unix domain sockets are not supported on this platform",
+            )
+            .into()),
             PeerAddr::Tcp(addr_str) => {
                 let mut stream = TcpStream::connect(&addr_str).await?;
                 self.send_on_stream(&mut stream, envelope, wait_for_ack)

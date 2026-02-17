@@ -9,13 +9,13 @@ pub fn schema_for<T: JsonSchema>() -> Value {
 
     // Some generators omit empty `properties`/`required` for `{}`.
     // Our tool schema contract expects explicit presence of both keys.
-    if let Value::Object(ref mut obj) = value {
-        if obj.get("type").and_then(Value::as_str) == Some("object") {
-            obj.entry("properties".to_string())
-                .or_insert_with(|| Value::Object(Map::new()));
-            obj.entry("required".to_string())
-                .or_insert_with(|| Value::Array(Vec::new()));
-        }
+    if let Value::Object(ref mut obj) = value
+        && obj.get("type").and_then(Value::as_str) == Some("object")
+    {
+        obj.entry("properties".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        obj.entry("required".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
     }
 
     value

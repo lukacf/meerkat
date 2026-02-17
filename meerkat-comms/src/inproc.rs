@@ -194,11 +194,11 @@ impl InprocRegistry {
     /// Unregister an agent by pubkey from an explicit namespace.
     pub fn unregister_in_namespace(&self, namespace: &str, pubkey: &PubKey) -> bool {
         let mut state = self.state.write();
-        if let Some(namespace_state) = state.namespaces.get_mut(namespace) {
-            if let Some(peer) = namespace_state.peers.remove(pubkey) {
-                namespace_state.names.remove(&peer.name);
-                return true;
-            }
+        if let Some(namespace_state) = state.namespaces.get_mut(namespace)
+            && let Some(peer) = namespace_state.peers.remove(pubkey)
+        {
+            namespace_state.names.remove(&peer.name);
+            return true;
         }
         false
     }

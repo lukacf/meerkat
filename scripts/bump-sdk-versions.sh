@@ -25,7 +25,12 @@ echo "Bumping SDK versions to $VERSION"
 
 PYPROJECT="$ROOT/sdks/python/pyproject.toml"
 if [ -f "$PYPROJECT" ]; then
-    sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" "$PYPROJECT"
+    # Portable sed -i: macOS requires '' arg, GNU does not.
+    if sed --version >/dev/null 2>&1; then
+        sed -i "s/^version = \".*\"/version = \"$VERSION\"/" "$PYPROJECT"
+    else
+        sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" "$PYPROJECT"
+    fi
     echo "  Updated: $PYPROJECT"
 fi
 

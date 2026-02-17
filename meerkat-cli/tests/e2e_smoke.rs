@@ -39,10 +39,10 @@ fn anthropic_api_key() -> Option<String> {
 
 fn first_env(vars: &[&str]) -> Option<String> {
     for name in vars {
-        if let Ok(value) = std::env::var(name) {
-            if !value.is_empty() {
-                return Some(value);
-            }
+        if let Ok(value) = std::env::var(name)
+            && !value.is_empty()
+        {
+            return Some(value);
         }
     }
     None
@@ -95,7 +95,7 @@ async fn write_smoke_config(
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "e2e: live API"]
+#[ignore = "integration-real: live API"]
 async fn e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
         return Ok(());
@@ -213,7 +213,7 @@ async fn inner_e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "e2e: live API"]
+#[ignore = "integration-real: live API"]
 async fn e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
         return Ok(());
@@ -301,7 +301,7 @@ async fn inner_e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "e2e: spawns rkat binary"]
+#[ignore = "integration-real: spawns rkat binary"]
 async fn e2e_cli_capabilities_and_config() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_prereqs() {
         return Ok(());
@@ -425,7 +425,7 @@ async fn inner_e2e_cli_capabilities_and_config() -> Result<(), Box<dyn std::erro
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "e2e: live API"]
+#[ignore = "integration-real: live API"]
 async fn e2e_cli_structured_output() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
         return Ok(());

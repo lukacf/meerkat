@@ -3,6 +3,7 @@
 //! Provides functions to spawn UDS and TCP listeners that accept connections
 //! and feed validated messages into the inbox.
 
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::Arc;
 

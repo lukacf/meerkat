@@ -8,7 +8,9 @@ pub mod types;
 pub use dispatcher::{
     CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, wrap_with_comms,
 };
-pub use listener::{ListenerHandle, spawn_tcp_listener, spawn_uds_listener};
+#[cfg(unix)]
+pub use listener::spawn_uds_listener;
+pub use listener::{ListenerHandle, spawn_tcp_listener};
 pub use manager::{CommsManager, CommsManagerConfig};
 pub use types::{CommsContent, CommsMessage, CommsStatus, MessageIntent};
 
@@ -80,10 +82,10 @@ where
     ) -> Result<RunResult, AgentError> {
         let mut last_result = self.run(initial_prompt).await?;
         loop {
-            if let Some(ref rx) = cancel_rx {
-                if *rx.borrow() {
-                    return Err(AgentError::Cancelled);
-                }
+            if let Some(ref rx) = cancel_rx
+                && *rx.borrow()
+            {
+                return Err(AgentError::Cancelled);
             }
             let first_msg = if let Some(ref mut rx) = cancel_rx {
                 tokio::select! {

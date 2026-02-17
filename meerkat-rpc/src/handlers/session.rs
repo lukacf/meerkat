@@ -1,12 +1,12 @@
 //! `session/*` method handlers.
 
-use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
-use tokio::sync::mpsc;
-
 use meerkat::AgentBuildConfig;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::{HookRunOverrides, OutputSchema, Provider};
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
@@ -131,7 +131,7 @@ pub struct ReadSessionResult {
 pub async fn handle_create(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    runtime: &SessionRuntime,
+    runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
 ) -> RpcResponse {
     let params: CreateSessionParams = match parse_params(params) {
@@ -202,13 +202,56 @@ pub async fn handle_create(
     let skill_refs = params
         .skill_references
         .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
-    let result = match runtime
-        .start_turn(&session_id, params.prompt, event_tx, skill_refs)
-        .await
-    {
-        Ok(r) => r,
-        Err(rpc_err) => {
-            return RpcResponse::error(id, rpc_err.code, rpc_err.message);
+    let result = if params.host_mode {
+        let runtime_for_turn = Arc::clone(&runtime);
+        let sid_for_turn = session_id.clone();
+        let event_tx_for_turn = event_tx.clone();
+        let prompt_for_turn = params.prompt.clone();
+        let skill_refs_for_turn = skill_refs.clone();
+        tokio::spawn(async move {
+            if let Err(rpc_err) = runtime_for_turn
+                .start_turn(
+                    &sid_for_turn,
+                    prompt_for_turn,
+                    event_tx_for_turn,
+                    skill_refs_for_turn,
+                )
+                .await
+            {
+                tracing::error!(
+                    session_id = %sid_for_turn,
+                    error = %rpc_err.code,
+                    "Host-mode session start failed: {}",
+                    rpc_err.message
+                );
+            }
+        });
+
+        if !await_comms_runtime_ready(&runtime, &session_id).await {
+            tracing::warn!(
+                session_id = %session_id,
+                "Host-mode session started without comms runtime before create response timeout"
+            );
+        }
+
+        meerkat_core::RunResult {
+            text: String::new(),
+            session_id: session_id.clone(),
+            usage: Default::default(),
+            turns: 0,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+        }
+    } else {
+        match runtime
+            .start_turn(&session_id, params.prompt, event_tx, skill_refs)
+            .await
+        {
+            Ok(r) => r,
+            Err(rpc_err) => {
+                return RpcResponse::error(id, rpc_err.code, rpc_err.message);
+            }
         }
     };
 
@@ -217,6 +260,29 @@ pub async fn handle_create(
         .realm_id()
         .map(|realm| meerkat_contracts::format_session_ref(realm, &response.session_id));
     RpcResponse::success(id, response)
+}
+
+#[cfg(feature = "comms")]
+async fn await_comms_runtime_ready(
+    runtime: &SessionRuntime,
+    session_id: &meerkat_core::SessionId,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(250);
+    while tokio::time::Instant::now() < deadline {
+        if runtime.comms_runtime(session_id).await.is_some() {
+            return true;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
+#[cfg(not(feature = "comms"))]
+async fn await_comms_runtime_ready(
+    _runtime: &SessionRuntime,
+    _session_id: &meerkat_core::SessionId,
+) -> bool {
+    true
 }
 
 /// Handle `session/list`.

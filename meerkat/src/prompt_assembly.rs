@@ -47,10 +47,10 @@ pub async fn assemble_system_prompt(
     }
 
     // 3. Config-level inline override (lower precedence than file).
-    if spc.system_prompt.is_none() {
-        if let Some(ref prompt) = config.agent.system_prompt {
-            spc.system_prompt = Some(prompt.clone());
-        }
+    if spc.system_prompt.is_none()
+        && let Some(ref prompt) = config.agent.system_prompt
+    {
+        spc.system_prompt = Some(prompt.clone());
     }
 
     // AGENTS.md is resolved only from explicit context roots.

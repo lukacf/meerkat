@@ -457,7 +457,7 @@ fn skip_if_no_prereqs() -> bool {
 }
 
 #[tokio::test]
-#[ignore = "e2e: network + live API"]
+#[ignore = "integration-real: network + live API"]
 async fn test_e2e_rkat_tcp_message_exchange() {
     if skip_if_no_prereqs() {
         return;
@@ -513,7 +513,7 @@ async fn test_e2e_rkat_tcp_message_exchange() {
 }
 
 #[tokio::test]
-#[ignore = "e2e: network + live API"]
+#[ignore = "integration-real: network + live API"]
 async fn test_e2e_rkat_uds_message_exchange() {
     if skip_if_no_prereqs() {
         return;
@@ -618,7 +618,7 @@ trusted_peers_path = "{}"
 }
 
 #[tokio::test]
-#[ignore = "e2e: network + live API"]
+#[ignore = "integration-real: network + live API"]
 async fn test_e2e_rkat_request_response_flow() {
     if skip_if_no_prereqs() {
         return;
@@ -661,7 +661,7 @@ async fn test_e2e_rkat_request_response_flow() {
 }
 
 #[tokio::test]
-#[ignore = "e2e: network + live API"]
+#[ignore = "integration-real: network + live API"]
 async fn test_e2e_rkat_untrusted_rejected() {
     if skip_if_no_prereqs() {
         return;
@@ -715,7 +715,7 @@ async fn test_e2e_rkat_untrusted_rejected() {
 }
 
 #[tokio::test]
-#[ignore = "e2e: network + live API"]
+#[ignore = "integration-real: network + live API"]
 async fn test_e2e_rkat_three_peer_coordination() {
     if skip_if_no_prereqs() {
         return;
@@ -780,7 +780,7 @@ async fn test_e2e_rkat_three_peer_coordination() {
 /// When RKAT_TEST_LLM_DELAY_MS is set, it simulates slow LLM processing.
 /// The ack should still return within 100ms even if LLM takes >1s.
 #[tokio::test]
-#[ignore = "e2e: network + live API"]
+#[ignore = "integration-real: network + live API"]
 async fn test_e2e_rkat_ack_is_immediate() {
     if skip_if_no_prereqs() {
         return;
@@ -838,7 +838,7 @@ async fn test_e2e_rkat_ack_is_immediate() {
 /// to continue working (exit or send more messages) without waiting for
 /// the recipient's LLM to generate a response.
 #[tokio::test]
-#[ignore = "e2e: network + live API"]
+#[ignore = "integration-real: network + live API"]
 async fn test_e2e_rkat_sender_nonblocking() {
     if skip_if_no_prereqs() {
         return;

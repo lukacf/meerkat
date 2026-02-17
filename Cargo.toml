@@ -22,9 +22,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89.0"
 license = "MIT OR Apache-2.0"
 authors = ["Luka Crnkovic-Friis"]
 repository = "https://github.com/lukacf/meerkat"
@@ -47,7 +47,7 @@ toml = "0.8"
 toml_edit = "0.22"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 # Error handling
 thiserror = "2.0"
@@ -97,22 +97,22 @@ subtle = "2.6"
 tempfile = "3.14"
 
 # Internal crates
-meerkat-core = { version = "0.3.2", path = "meerkat-core" }
-meerkat-client = { version = "0.3.2", path = "meerkat-client", default-features = false }
-meerkat-store = { version = "0.3.2", path = "meerkat-store", default-features = false }
-meerkat-tools = { version = "0.3.2", path = "meerkat-tools", default-features = false }
-meerkat-mcp = { version = "0.3.2", path = "meerkat-mcp" }
-meerkat-mcp-server = { version = "0.3.2", path = "meerkat-mcp-server" }
-meerkat-cli = { version = "0.3.2", path = "meerkat-cli" }
-meerkat-rest = { version = "0.3.2", path = "meerkat-rest" }
-meerkat = { version = "0.3.2", path = "meerkat", default-features = false }
-meerkat-comms = { version = "0.3.2", path = "meerkat-comms" }
-meerkat-hooks = { version = "0.3.2", path = "meerkat-hooks" }
-meerkat-rpc = { version = "0.3.2", path = "meerkat-rpc" }
-meerkat-session = { version = "0.3.2", path = "meerkat-session", default-features = false }
-meerkat-memory = { version = "0.3.2", path = "meerkat-memory", default-features = false }
-meerkat-contracts = { version = "0.3.2", path = "meerkat-contracts", default-features = false }
-meerkat-skills = { version = "0.3.2", path = "meerkat-skills" }
+meerkat-core = { version = "0.3.3", path = "meerkat-core" }
+meerkat-client = { version = "0.3.3", path = "meerkat-client", default-features = false }
+meerkat-store = { version = "0.3.3", path = "meerkat-store", default-features = false }
+meerkat-tools = { version = "0.3.3", path = "meerkat-tools", default-features = false }
+meerkat-mcp = { version = "0.3.3", path = "meerkat-mcp" }
+meerkat-mcp-server = { version = "0.3.3", path = "meerkat-mcp-server" }
+meerkat-cli = { version = "0.3.3", path = "meerkat-cli" }
+meerkat-rest = { version = "0.3.3", path = "meerkat-rest" }
+meerkat = { version = "0.3.3", path = "meerkat", default-features = false }
+meerkat-comms = { version = "0.3.3", path = "meerkat-comms" }
+meerkat-hooks = { version = "0.3.3", path = "meerkat-hooks" }
+meerkat-rpc = { version = "0.3.3", path = "meerkat-rpc" }
+meerkat-session = { version = "0.3.3", path = "meerkat-session", default-features = false }
+meerkat-memory = { version = "0.3.3", path = "meerkat-memory", default-features = false }
+meerkat-contracts = { version = "0.3.3", path = "meerkat-contracts", default-features = false }
+meerkat-skills = { version = "0.3.3", path = "meerkat-skills" }
 
 
 [workspace.lints.rust]
@@ -150,5 +150,5 @@ tag-message = "Release v{{version}}"
 # Bump SDK versions + regenerate schemas before committing
 # cargo-release runs hooks from each crate dir, so resolve workspace root via git
 pre-release-hook = ["bash", "-c", "$(git rev-parse --show-toplevel)/scripts/release-hook.sh {{version}}"]
-publish = true
+publish = false
 push = true

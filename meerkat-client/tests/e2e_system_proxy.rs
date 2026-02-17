@@ -6,7 +6,7 @@
 //! system proxy discovery. It should be run only in full-access environments.
 
 #[test]
-#[ignore = "e2e: requires full macOS system proxy access"]
+#[ignore = "integration-real: requires full macOS system proxy access"]
 fn e2e_system_proxy_discovery_does_not_panic() {
     let result = std::panic::catch_unwind(|| {
         let _client = reqwest::Client::builder().build();

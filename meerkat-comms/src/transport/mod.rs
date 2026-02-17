@@ -5,6 +5,7 @@
 pub mod codec;
 pub mod plain_codec;
 pub mod tcp;
+#[cfg(unix)]
 pub mod uds;
 
 use std::io;

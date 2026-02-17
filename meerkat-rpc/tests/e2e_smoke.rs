@@ -23,10 +23,10 @@ use tokio::time::timeout;
 /// Return the Anthropic API key if set, or `None`.
 fn anthropic_api_key() -> Option<String> {
     for var in &["ANTHROPIC_API_KEY", "RKAT_ANTHROPIC_API_KEY"] {
-        if let Ok(val) = std::env::var(var) {
-            if !val.is_empty() {
-                return Some(val);
-            }
+        if let Ok(val) = std::env::var(var)
+            && !val.is_empty()
+        {
+            return Some(val);
         }
     }
     None
@@ -127,7 +127,7 @@ async fn read_response_with_notifications(
 /// session/read -> session/list (verify present) -> session/archive ->
 /// session/list (verify gone).
 #[tokio::test]
-#[ignore = "e2e: live API"]
+#[ignore = "integration-real: live API"]
 async fn e2e_scenario_15_full_rpc_conversation_flow() {
     let api_key = match anthropic_api_key() {
         Some(key) => key,
@@ -348,7 +348,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
 /// Exercises: initialization, tool calling, multi-turn, structured output,
 /// session CRUD, capabilities, config — all through a single RPC connection.
 #[tokio::test]
-#[ignore = "e2e: live API"]
+#[ignore = "integration-real: live API"]
 async fn e2e_scenario_16_kitchen_sink() {
     let api_key = match anthropic_api_key() {
         Some(key) => key,
@@ -615,7 +615,7 @@ async fn e2e_scenario_16_kitchen_sink() {
 /// turn/start follow-up -> collect more events. Verify notification structure
 /// and context maintained across turns.
 #[tokio::test]
-#[ignore = "e2e: live API"]
+#[ignore = "integration-real: live API"]
 async fn e2e_scenario_17_multi_turn_event_streaming() {
     let api_key = match anthropic_api_key() {
         Some(key) => key,

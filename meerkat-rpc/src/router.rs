@@ -171,8 +171,13 @@ impl MethodRouter {
         let response = match request.method.as_str() {
             "initialize" => handlers::initialize::handle_initialize(id),
             "session/create" => {
-                handlers::session::handle_create(id, params, &self.runtime, &self.notification_sink)
-                    .await
+                handlers::session::handle_create(
+                    id,
+                    params,
+                    self.runtime.clone(),
+                    &self.notification_sink,
+                )
+                .await
             }
             "session/list" => handlers::session::handle_list(id, &self.runtime).await,
             "session/read" => handlers::session::handle_read(id, params, &self.runtime).await,
@@ -606,6 +611,8 @@ mod tests {
     #[cfg(feature = "comms")]
     #[tokio::test]
     async fn comms_stream_open_requires_reserved_interaction() {
+        use tokio::time::{Duration, timeout};
+
         let (router, _notif_rx) = test_router().await;
 
         // Create a session.
@@ -617,7 +624,10 @@ mod tests {
                 "comms_name": "router-stream-test",
             }),
         );
-        let create_resp = router.dispatch(create_req).await.unwrap();
+        let create_resp = timeout(Duration::from_secs(5), router.dispatch(create_req))
+            .await
+            .unwrap()
+            .unwrap();
         let created = result_value(&create_resp);
         let session_id = created["session_id"].as_str().unwrap().to_string();
 
@@ -626,7 +636,11 @@ mod tests {
             "comms/stream_open",
             serde_json::json!({"session_id": session_id, "scope": "session"}),
         );
-        let session_stream_resp = router.dispatch(open_session_scope).await.unwrap();
+        let session_stream_resp =
+            timeout(Duration::from_secs(5), router.dispatch(open_session_scope))
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(error_code(&session_stream_resp), error::INVALID_PARAMS);
 
         // Reserve interaction stream via send.
@@ -640,7 +654,10 @@ mod tests {
                 "allow_self_session": true
             }),
         );
-        let send_resp = router.dispatch(send_req).await.unwrap();
+        let send_resp = timeout(Duration::from_secs(5), router.dispatch(send_req))
+            .await
+            .unwrap()
+            .unwrap();
         let send_result = result_value(&send_resp);
         assert_eq!(send_result["kind"], "input_accepted");
         let interaction_id = send_result["interaction_id"].as_str().unwrap();
@@ -654,7 +671,10 @@ mod tests {
                 "interaction_id": interaction_id,
             }),
         );
-        let open_resp = router.dispatch(open_req).await.unwrap();
+        let open_resp = timeout(Duration::from_secs(5), router.dispatch(open_req))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(open_resp.error.is_none());
         let opened = result_value(&open_resp);
         let stream_id = opened["stream_id"].as_str().unwrap();
@@ -663,7 +683,10 @@ mod tests {
             "comms/stream_close",
             serde_json::json!({"stream_id": stream_id}),
         );
-        let close_resp = router.dispatch(close_req).await.unwrap();
+        let close_resp = timeout(Duration::from_secs(5), router.dispatch(close_req))
+            .await
+            .unwrap()
+            .unwrap();
         let closed = result_value(&close_resp);
         assert_eq!(closed["closed"], true);
         assert_eq!(closed["already_closed"], false);
@@ -673,7 +696,10 @@ mod tests {
             "comms/stream_close",
             serde_json::json!({"stream_id": stream_id}),
         );
-        let close_again_resp = router.dispatch(close_again_req).await.unwrap();
+        let close_again_resp = timeout(Duration::from_secs(5), router.dispatch(close_again_req))
+            .await
+            .unwrap()
+            .unwrap();
         let close_again = result_value(&close_again_resp);
         assert_eq!(close_again["closed"], true);
         assert_eq!(close_again["already_closed"], true);

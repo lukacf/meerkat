@@ -170,19 +170,78 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 
 ```bash
 make ci          # Full CI: fmt, lint, feature matrix, tests, audit, version parity
+make ci-smoke    # Faster CI: skips full feature matrix expansion
 make test        # Fast tests only (unit + integration-fast)
 make lint        # Clippy with all features
 make fmt         # Auto-fix formatting
+make audit       # Security audit via cargo-deny
 ```
+
+**`make ci` runs** (in order): `fmt-check` → `legacy-surface-gate` → `verify-version-parity` → `lint` → `lint-feature-matrix` → `test-all` → `test-minimal` → `test-feature-matrix` → `test-surface-modularity` → `audit`
+
+### GitHub Workflows
+
+**CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, and manual dispatch:
+- Single `quality` job: runs `make ci` (full pipeline)
+
+**Release** (`.github/workflows/release.yml`) — runs on `v*` tag push or manual dispatch:
+
+| Job | Trigger | What it does |
+|-----|---------|-------------|
+| `release_validate` | Always | `make release-preflight-smoke` + tag-version check (tags only) |
+| `build_binaries` | Always | Matrix build for 4 targets, packages 4 binaries each (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) |
+| `publish_github_release` | Tags only | Downloads artifacts, generates `checksums.sha256` + `index.json`, publishes GitHub Release |
+| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 15 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
+
+**Build matrix:**
+
+| Platform | Target |
+|----------|--------|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` |
+| macOS ARM64 | `aarch64-apple-darwin` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` |
+
+**Manual dispatch options:**
+```bash
+# Build-only validation (no publish)
+gh workflow run release.yml --ref main
+
+# Dry-run publish (validate all registries without uploading)
+gh workflow run release.yml --ref main -f publish_release_packages=true -f registry_dry_run=true
+
+# Recovery: re-publish after registry outage during a tag-triggered release
+gh workflow run release.yml --ref v0.3.4 -f publish_release_packages=true
+```
+
+### Pre-commit Hooks
+
+Installed via `make install-hooks`. Two stages:
+
+**On commit** (`pre-commit`):
+- Runs tests only on changed crates (`scripts/test-changed-crates.sh`)
+
+**On push** (`pre-push`):
+- Secret detection (gitleaks)
+- Trailing whitespace, YAML/TOML validation, merge conflict check, large file check
+- `make test` (fast tests: unit + integration-fast)
+- `cargo clippy` (workspace, all features, warnings as errors)
+- `cargo doc` (workspace docs build)
+- `make audit` (cargo-deny security audit)
 
 ### Version Parity Contract
 
-There are two version numbers that must stay in lock-step:
+Five files must agree on the same version:
 
-| Concept | Source of truth | Must match |
-|---------|----------------|------------|
-| **Package version** | `workspace.package.version` in `Cargo.toml` | `sdks/python/pyproject.toml`, `sdks/typescript/package.json` |
-| **Contract version** | `ContractVersion::CURRENT` in `meerkat-contracts/src/version.rs` | `artifacts/schemas/version.json`, SDK `CONTRACT_VERSION` |
+| File | Field |
+|------|-------|
+| `Cargo.toml` (workspace root) | `workspace.package.version` — **source of truth** |
+| `meerkat-contracts/src/version.rs` | `ContractVersion::CURRENT` |
+| `sdks/python/pyproject.toml` | `version` |
+| `sdks/typescript/package.json` | `version` |
+| `artifacts/schemas/version.json` | `contract_version` |
+
+Additionally, all 15 internal crate dependencies in `Cargo.toml` must match the workspace version.
 
 **`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
 
@@ -191,6 +250,24 @@ make regen-schemas           # Re-emit schemas + regenerate SDK types
 make verify-version-parity   # Confirm everything is in sync
 ```
 
+### Schema Generation and SDK Codegen
+
+When wire types in `meerkat-contracts` change:
+
+```bash
+make regen-schemas
+# Runs:
+#   cargo run -p meerkat-contracts --features schema --bin emit-schemas
+#   python3 tools/sdk-codegen/generate.py
+```
+
+This updates:
+- `artifacts/schemas/` — JSON schema artifacts
+- `sdks/python/meerkat/generated/` — Python generated types
+- `sdks/typescript/src/generated/` — TypeScript generated types
+
+**`make verify-schema-freshness`** detects stale committed schemas by comparing git HEAD against freshly emitted output.
+
 ### Releasing
 
 ```bash
@@ -198,14 +275,50 @@ make release-preflight       # Full CI + schema freshness + changelog check
 cargo release patch          # Bump, tag, push (uses cargo-release)
 ```
 
-`cargo-release` automatically calls `scripts/release-hook.sh` which bumps SDK versions, regenerates schemas, verifies parity, and stages all files for the release commit.
+**What `cargo release patch` does:**
+
+1. Bumps `workspace.package.version` in `Cargo.toml`
+2. Fires `scripts/release-hook.sh` (pre-release hook, sentinel-guarded to run once):
+   - `scripts/bump-sdk-versions.sh` — updates Python and TypeScript SDK versions
+   - `emit-schemas` + `generate.py` — regenerates schema artifacts and SDK types
+   - `verify-version-parity.sh` — sanity check before commit
+   - Stages all modified files (SDK configs, generated types, schema artifacts)
+3. Creates release commit (`chore: release v{version}`)
+4. Tags as `v{version}`
+5. Pushes commit + tag to remote → triggers release workflow
+
+**Cargo.toml release config** (`workspace.metadata.release`):
+- `tag-name = "v{{version}}"`, `push = true`, `publish = false` (registry publish handled by GitHub Actions)
+
+### Dry-run Publishing
+
+```bash
+make publish-dry-run              # Parallel dry-run for all 15 Rust crates
+make publish-dry-run-python       # Build + twine check (no upload)
+make publish-dry-run-typescript   # npm publish --dry-run
+make release-dry-run              # Full preflight + all registry dry-runs
+make release-dry-run-smoke        # Smoke preflight + all registry dry-runs
+```
+
+### Registry Secrets
+
+Required GitHub Actions secrets for full release:
+- `CARGO_REGISTRY_TOKEN` — crates.io API token
+- `PYPI_API_TOKEN` — PyPI API token
+- `NPM_TOKEN` — npm access token
+
+### Crate Publish Order
+
+The 15 crates are published in dependency order:
+`meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat`
 
 ### Key Rules for AI Agents
 
-- **Never bump `workspace.package.version` without also running `scripts/bump-sdk-versions.sh`** -- the CI gate will catch drift
-- **Never change types in `meerkat-contracts` without running `make regen-schemas`** -- schema artifacts and SDK types will be stale
-- **Always run `make test` (or `cargo rct`) before committing** -- pre-commit hooks enforce this
-- **`ContractVersion::CURRENT` must equal `workspace.package.version`** -- they are lock-stepped
+- **Never bump `workspace.package.version` without also running `scripts/bump-sdk-versions.sh`** — the CI gate will catch drift
+- **Never change types in `meerkat-contracts` without running `make regen-schemas`** — schema artifacts and SDK types will be stale
+- **Always run `make test` (or `cargo rct`) before committing** — pre-commit hooks enforce this
+- **`ContractVersion::CURRENT` must equal `workspace.package.version`** — they are lock-stepped
+- **Use `cargo release patch` for releases** — never manually bump versions or create tags; the release hook handles SDK sync, schema regen, and parity verification automatically
 
 ## Testing with Multiple Providers
 

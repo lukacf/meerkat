@@ -48,7 +48,7 @@ which = { workspace = true }
 nix = { workspace = true }
 
 [features]
-default = ["anthropic", "jsonl-store", "comms", "mcp", "sub-agents", "skills"]
+default = ["anthropic", "openai", "gemini"]
 integration-real-tests = []
 
 # LLM providers

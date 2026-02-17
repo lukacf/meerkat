@@ -91,7 +91,7 @@ for pkg in "${PACKAGES[@]}"; do
   FAIL=1
   printf "  %-25sFAIL\n" "$pkg_name"
   if [ -f "$LOG_DIR/$pkg.log" ]; then
-    rg -n "^\\s*error(:|\\[)" "$LOG_DIR/$pkg.log" | head -n 20 || cat "$LOG_DIR/$pkg.log"
+    grep -nE "^\\s*error(:|\\[)" "$LOG_DIR/$pkg.log" | head -n 20 || cat "$LOG_DIR/$pkg.log"
   fi
 done
 

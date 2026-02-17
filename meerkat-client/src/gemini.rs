@@ -490,6 +490,8 @@ impl LlmClient for GeminiClient {
                             if let Some(candidates) = resp.candidates {
                                 for cand in candidates {
                                     if let Some(content) = cand.content {
+                                        // Not collapsed: inner loop processes heterogeneous part types
+                                        // (text, function_call, function_response) independently.
                                         #[allow(clippy::collapsible_if)]
                                         if let Some(parts) = content.parts {
                                             for part in parts {

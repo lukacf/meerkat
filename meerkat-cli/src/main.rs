@@ -1279,7 +1279,7 @@ async fn remove_realm_root_with_retries(
         }
     }
 
-    unreachable!();
+    unreachable!("retry loop exhausted without returning");
 }
 
 async fn prune_realms(

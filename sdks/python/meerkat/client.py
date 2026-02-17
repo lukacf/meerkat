@@ -440,8 +440,9 @@ class MeerkatClient:
 
         raise MeerkatError("UNSUPPORTED_PLATFORM", f"Unsupported platform '{system}'.")
 
-    async def _download_rkat_rpc_binary(self) -> Optional[str]:
-        target, archive_ext, binary_name = self._platform_target()
+    @staticmethod
+    async def _download_rkat_rpc_binary() -> Optional[str]:
+        target, archive_ext, binary_name = MeerkatClient._platform_target()
         owner, repo = _MEERKAT_REPO
         version = CONTRACT_VERSION
         artifact = f"{_MEERKAT_BINARY}-v{version}-{target}.{archive_ext}"

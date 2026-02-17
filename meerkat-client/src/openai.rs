@@ -12,6 +12,7 @@ use meerkat_core::{AssistantBlock, Message, OutputSchema, ProviderMeta, StopReas
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
+use std::collections::HashSet;
 use std::pin::Pin;
 
 /// Client for OpenAI Responses API
@@ -274,6 +275,13 @@ impl OpenAiClient {
                 continue;
             }
 
+            // Reasoning without encrypted_content is not safely replayable —
+            // OpenAI requires exact follower linkage that Meerkat can't guarantee.
+            let has_encrypted_content = items[i]
+                .get("encrypted_content")
+                .and_then(|v| v.as_str())
+                .is_some();
+
             // Check if the next item is a valid output for this reasoning
             let has_valid_follower = items.get(i + 1).is_some_and(|next| {
                 let next_type = next.get("type").and_then(|t| t.as_str());
@@ -286,12 +294,14 @@ impl OpenAiClient {
                 }
             });
 
-            if has_valid_follower {
+            if has_valid_follower && has_encrypted_content {
                 i += 1;
             } else {
                 tracing::warn!(
                     reasoning_id = items[i].get("id").and_then(|id| id.as_str()),
-                    "stripping orphaned reasoning item (no valid following output)"
+                    has_follower = has_valid_follower,
+                    has_encrypted = has_encrypted_content,
+                    "stripping reasoning item (orphaned or missing encrypted_content)"
                 );
                 items.remove(i);
                 // Don't increment i — the next element shifted into this position
@@ -329,8 +339,14 @@ impl LlmClient for OpenAiClient {
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|_| LlmError::NetworkTimeout {
-                        duration_ms: 30000,
+                    .map_err(|e| {
+                        if e.is_timeout() {
+                            LlmError::NetworkTimeout { duration_ms: 30000 }
+                        } else if e.is_connect() {
+                            LlmError::ConnectionReset
+                        } else {
+                            LlmError::Unknown { message: e.to_string() }
+                        }
                     })?;
 
                 let status_code = response.status().as_u16();
@@ -345,6 +361,9 @@ impl LlmClient for OpenAiClient {
                 let mut assembler = BlockAssembler::new();
                 let mut usage = Usage::default();
                 let mut saw_stream_text_delta = false;
+                let mut streamed_tool_ids: HashSet<String> = HashSet::with_capacity(4);
+                let mut streamed_reasoning_ids: HashSet<String> = HashSet::with_capacity(2);
+                let mut done_emitted = false;
 
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
@@ -364,6 +383,10 @@ impl LlmClient for OpenAiClient {
                         if let Some(event) = parsed_event {
                             // Handle response.completed event (non-streaming final response)
                             if event.event_type == "response.completed" {
+                                if done_emitted {
+                                    // Already processed a terminal event, skip
+                                    continue;
+                                }
                                 if let Some(response_obj) = &event.response {
                                     // Process output items
                                     if let Some(output) = response_obj.get("output").and_then(|o| o.as_array()) {
@@ -405,6 +428,11 @@ impl LlmClient for OpenAiClient {
                                                             continue;
                                                         };
 
+                                                        // Skip if already emitted via streaming
+                                                        if streamed_reasoning_ids.contains(reasoning_id) {
+                                                            continue;
+                                                        }
+
                                                         // Extract summary text
                                                         let mut summary_text = String::new();
                                                         if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
@@ -445,6 +473,11 @@ impl LlmClient for OpenAiClient {
                                                             tracing::warn!("function_call missing call_id");
                                                             continue;
                                                         };
+
+                                                        // Skip if already emitted via streaming
+                                                        if streamed_tool_ids.contains(call_id) {
+                                                            continue;
+                                                        }
                                                         let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
                                                             tracing::warn!(call_id, "function_call missing name");
                                                             continue;
@@ -523,6 +556,7 @@ impl LlmClient for OpenAiClient {
                                         _ => StopReason::EndTurn,
                                     };
 
+                                    done_emitted = true;
                                     yield LlmEvent::Done {
                                         outcome: LlmDoneOutcome::Success { stop_reason },
                                     };
@@ -566,6 +600,7 @@ impl LlmClient for OpenAiClient {
                                     );
 
                                     let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
+                                    streamed_tool_ids.insert(call_id.clone());
                                     yield LlmEvent::ToolCallComplete {
                                         id: call_id.clone(),
                                         name,
@@ -577,9 +612,11 @@ impl LlmClient for OpenAiClient {
                             else if event.event_type == "response.reasoning_summary.done" || event.event_type == "response.reasoning.done" {
                                 // Extract reasoning item details from the item field
                                 if let Some(item) = &event.item {
-                                    let reasoning_id = item.get("id")
-                                        .and_then(|i| i.as_str())
-                                        .unwrap_or_default();
+                                    let Some(reasoning_id) = item.get("id")
+                                        .and_then(|i| i.as_str()) else {
+                                        tracing::warn!("reasoning item missing id, skipping");
+                                        continue;
+                                    };
 
                                     let mut summary_text = String::new();
                                     if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
@@ -608,6 +645,7 @@ impl LlmClient for OpenAiClient {
                                     }
                                     assembler.on_reasoning_complete(meta.clone());
 
+                                    streamed_reasoning_ids.insert(reasoning_id.to_string());
                                     yield LlmEvent::ReasoningComplete {
                                         text: summary_text,
                                         meta,
@@ -615,7 +653,7 @@ impl LlmClient for OpenAiClient {
                                 }
                             }
                             else if event.event_type == "response.done" {
-                                // Final done event with usage
+                                // Final done event — always update usage
                                 if let Some(response_obj) = &event.response {
                                     if let Some(usage_obj) = response_obj.get("usage") {
                                         usage.input_tokens = usage_obj.get("input_tokens")
@@ -627,33 +665,74 @@ impl LlmClient for OpenAiClient {
                                         yield LlmEvent::UsageUpdate { usage: usage.clone() };
                                     }
 
-                                    let stop_reason = match response_obj.get("status").and_then(|s| s.as_str()) {
-                                        Some("completed") => {
-                                            let has_tool_calls = response_obj.get("output")
-                                                .and_then(|o| o.as_array())
-                                                .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
-                                                .unwrap_or(false);
-                                            if has_tool_calls {
-                                                StopReason::ToolUse
-                                            } else {
-                                                StopReason::EndTurn
+                                    if !done_emitted {
+                                        let stop_reason = match response_obj.get("status").and_then(|s| s.as_str()) {
+                                            Some("completed") => {
+                                                let has_tool_calls = response_obj.get("output")
+                                                    .and_then(|o| o.as_array())
+                                                    .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
+                                                    .unwrap_or(false);
+                                                if has_tool_calls {
+                                                    StopReason::ToolUse
+                                                } else {
+                                                    StopReason::EndTurn
+                                                }
                                             }
-                                        }
-                                        Some("incomplete") => {
-                                            match response_obj.get("incomplete_details").and_then(|d| d.get("reason")).and_then(|r| r.as_str()) {
-                                                Some("max_output_tokens") => StopReason::MaxTokens,
-                                                Some("content_filter") => StopReason::ContentFilter,
-                                                _ => StopReason::EndTurn,
+                                            Some("incomplete") => {
+                                                match response_obj.get("incomplete_details").and_then(|d| d.get("reason")).and_then(|r| r.as_str()) {
+                                                    Some("max_output_tokens") => StopReason::MaxTokens,
+                                                    Some("content_filter") => StopReason::ContentFilter,
+                                                    _ => StopReason::EndTurn,
+                                                }
                                             }
-                                        }
-                                        Some("cancelled") => StopReason::Cancelled,
-                                        _ => StopReason::EndTurn,
-                                    };
+                                            Some("cancelled") => StopReason::Cancelled,
+                                            _ => StopReason::EndTurn,
+                                        };
 
-                                    yield LlmEvent::Done {
-                                        outcome: LlmDoneOutcome::Success { stop_reason },
-                                    };
+                                        done_emitted = true;
+                                        yield LlmEvent::Done {
+                                            outcome: LlmDoneOutcome::Success { stop_reason },
+                                        };
+                                    }
                                 }
+                            }
+                            else if event.event_type == "error" {
+                                // Streaming error event from OpenAI
+                                let error_msg = event.error
+                                    .as_ref()
+                                    .and_then(|e| e.get("message"))
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("unknown streaming error");
+                                let error_code = event.error
+                                    .as_ref()
+                                    .and_then(|e| e.get("code"))
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("unknown");
+
+                                tracing::error!(
+                                    code = error_code,
+                                    message = error_msg,
+                                    "OpenAI streaming error"
+                                );
+
+                                let error = match error_code {
+                                    "rate_limit_exceeded" => LlmError::RateLimited { retry_after_ms: None },
+                                    "server_error" => LlmError::ServerError {
+                                        status: 500,
+                                        message: error_msg.to_string(),
+                                    },
+                                    "invalid_request_error" => LlmError::InvalidRequest {
+                                        message: error_msg.to_string(),
+                                    },
+                                    _ => LlmError::Unknown {
+                                        message: format!("{error_code}: {error_msg}"),
+                                    },
+                                };
+
+                                done_emitted = true;
+                                yield LlmEvent::Done {
+                                    outcome: LlmDoneOutcome::Error { error },
+                                };
                             }
                         }
                     }
@@ -691,6 +770,8 @@ struct ResponsesStreamEvent {
     item: Option<Value>,
     /// Full response object for response.done and response.completed
     response: Option<Value>,
+    /// Error object for streaming error events
+    error: Option<Value>,
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1595,7 +1676,7 @@ mod tests {
                             text: "I should search".to_string(),
                             meta: Some(Box::new(ProviderMeta::OpenAi {
                                 id: "rs_valid".to_string(),
-                                encrypted_content: None,
+                                encrypted_content: Some("enc_valid".to_string()),
                             })),
                         },
                         AssistantBlock::ToolUse {
@@ -1613,7 +1694,7 @@ mod tests {
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
-        // Reasoning + function_call is a valid pair — both preserved
+        // Reasoning with encrypted_content + function_call is a valid pair — both preserved
         assert_eq!(input.len(), 3);
         assert_eq!(input[1]["type"], "reasoning");
         assert_eq!(input[2]["type"], "function_call");
@@ -1739,5 +1820,213 @@ mod tests {
             })
             .unwrap_or(false);
         assert!(!has_tools);
+    }
+
+    // =========================================================================
+    // Reasoning encrypted_content stripping tests
+    // =========================================================================
+
+    #[test]
+    fn test_reasoning_without_encrypted_content_is_stripped() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let args = RawValue::from_string(r#"{"q":"test"}"#.to_string()).unwrap();
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Hello".to_string(),
+                }),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::Reasoning {
+                            text: "I should search".to_string(),
+                            meta: Some(Box::new(ProviderMeta::OpenAi {
+                                id: "rs_no_enc".to_string(),
+                                encrypted_content: None,
+                            })),
+                        },
+                        AssistantBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "search".to_string(),
+                            args,
+                            meta: None,
+                        },
+                    ],
+                    stop_reason: StopReason::ToolUse,
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input should be array");
+
+        // Reasoning without encrypted_content is stripped even with valid follower
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[1]["type"], "function_call");
+    }
+
+    #[test]
+    fn test_reasoning_with_encrypted_content_is_preserved() {
+        use meerkat_core::BlockAssistantMessage;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage {
+                    content: "Hello".to_string(),
+                }),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![
+                        AssistantBlock::Reasoning {
+                            text: "Let me think".to_string(),
+                            meta: Some(Box::new(ProviderMeta::OpenAi {
+                                id: "rs_enc".to_string(),
+                                encrypted_content: Some("enc_data_here".to_string()),
+                            })),
+                        },
+                        AssistantBlock::Text {
+                            text: "Here is my answer".to_string(),
+                            meta: None,
+                        },
+                    ],
+                    stop_reason: StopReason::EndTurn,
+                }),
+            ],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input should be array");
+
+        // Reasoning with encrypted_content + valid follower is preserved
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["encrypted_content"], "enc_data_here");
+        assert_eq!(input[2]["type"], "message");
+    }
+
+    // =========================================================================
+    // Stream deduplication tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_stream_does_not_duplicate_tool_calls_when_completed_replays() {
+        let payload = [
+            // Streaming tool call events
+            r#"data: {"type":"response.function_call_arguments.delta","call_id":"call_1","name":"get_weather","delta":"{\"loc"}"#,
+            r#"data: {"type":"response.function_call_arguments.delta","call_id":"call_1","delta":"ation\":\"Tokyo\"}"}"#,
+            r#"data: {"type":"response.function_call_arguments.done","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"Tokyo\"}"}"#,
+            // response.completed replays the same tool call
+            r#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"Tokyo\"}"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            r#"data: {"type":"response.done","response":{"status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"Tokyo\"}"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage {
+                content: "weather".to_string(),
+            })],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut tool_completes = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::ToolCallComplete { id, .. } => tool_completes.push(id),
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        // Should only get one ToolCallComplete, not duplicated from response.completed
+        assert_eq!(tool_completes.len(), 1);
+        assert_eq!(tool_completes[0], "call_1");
+    }
+
+    #[tokio::test]
+    async fn test_stream_does_not_duplicate_reasoning_when_completed_replays() {
+        let payload = [
+            // Streaming reasoning events
+            r#"data: {"type":"response.reasoning_summary_text.delta","delta":"thinking..."}"#,
+            r#"data: {"type":"response.reasoning.done","item":{"id":"rs_1","summary":[{"type":"summary_text","text":"thinking..."}],"encrypted_content":"enc_xyz"}}"#,
+            // response.completed replays the same reasoning
+            r#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking..."}],"encrypted_content":"enc_xyz"},{"type":"message","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            r#"data: {"type":"response.done","response":{"status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage {
+                content: "hello".to_string(),
+            })],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut reasoning_completes = 0;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::ReasoningComplete { .. } => reasoning_completes += 1,
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        // Should only get one ReasoningComplete, not duplicated from response.completed
+        assert_eq!(reasoning_completes, 1);
+    }
+
+    #[tokio::test]
+    async fn test_stream_error_event_yields_done_with_error() {
+        let payload = [
+            r#"data: {"type":"error","error":{"code":"server_error","message":"Internal server error"}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage {
+                content: "hello".to_string(),
+            })],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut saw_error_done = false;
+        while let Some(event) = stream.next().await {
+            if let LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            } = event.expect("stream event")
+            {
+                assert!(
+                    matches!(error, LlmError::ServerError { status: 500, .. }),
+                    "expected ServerError, got: {error:?}"
+                );
+                let msg = error.to_string();
+                assert!(
+                    msg.contains("Internal server error"),
+                    "error should contain message: {msg}"
+                );
+                saw_error_done = true;
+                break;
+            }
+        }
+        server.abort();
+
+        assert!(saw_error_done, "Expected Done with error outcome");
     }
 }

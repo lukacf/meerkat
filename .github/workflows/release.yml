@@ -24,6 +24,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# Required GitHub Actions secrets for full release:
+#   CARGO_REGISTRY_TOKEN  - crates.io API token
+#   PYPI_API_TOKEN        - PyPI API token (scoped to meerkat-sdk package)
+#   NPM_TOKEN             - npm access token (scoped to @meerkat org or publish)
+
 jobs:
   release_validate:
     name: Validate release branch/state
@@ -42,9 +47,12 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
 
+      # Use smoke preflight in CI release gate — the full feature matrix
+      # runs in regular CI on push/PR. Release validation only needs core
+      # checks (fmt, lint, tests, audit) to avoid 15+ minute delays.
       - name: Run preflight checks
         run: |
-          make release-preflight
+          make release-preflight-smoke
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             make verify-version
           else
@@ -61,6 +69,9 @@ jobs:
         include:
           - runs-on: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
           - runs-on: macos-14
             target: aarch64-apple-darwin
@@ -209,6 +220,15 @@ jobs:
           draft: false
           fail_on_unmatched_files: true
 
+  # Registry publishing is a separate manual step after verifying the
+  # GitHub Release looks correct. Trigger via workflow_dispatch with
+  # publish_release_packages=true. Use registry_dry_run=true first to
+  # validate without uploading.
+  #
+  # Full publish command:
+  #   gh workflow run release.yml --ref v<VERSION> \
+  #     -f publish_release_packages=true \
+  #     -f registry_dry_run=false
   publish_registries:
     name: Publish crates + SDK packages
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release_packages == 'true'

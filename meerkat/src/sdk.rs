@@ -371,6 +371,7 @@ pub fn spawn_event_logger(
 mod tests {
     use super::*;
     use meerkat_core::ToolCallView;
+    use meerkat_core::ToolError;
     use meerkat_core::{
         HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig,
     };

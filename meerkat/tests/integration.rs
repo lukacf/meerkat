@@ -6,6 +6,7 @@
 
 use meerkat::*;
 use schemars::JsonSchema;
+#[cfg(feature = "mcp")]
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -236,6 +237,7 @@ mod tool_dispatch {
         );
     }
 
+    #[cfg(feature = "mcp")]
     #[test]
     fn test_tool_timeout_enforced() {
         // Create dispatcher with registry and router
@@ -271,6 +273,7 @@ mod tool_dispatch {
 }
 
 /// CP-SESSION-TX: Session checkpoint atomicity
+#[cfg(feature = "jsonl-store")]
 mod session_persistence {
     use super::*;
     use tempfile::TempDir;

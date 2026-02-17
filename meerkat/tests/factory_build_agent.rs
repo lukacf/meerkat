@@ -434,6 +434,7 @@ async fn test_enabled_false_skips_skills() {
     assert!(metadata.tooling.active_skills.is_none());
 }
 
+#[cfg(feature = "skills")]
 #[tokio::test]
 async fn test_preload_missing_skill_fails_build() {
     let factory = AgentFactory::new("/tmp/test-store");

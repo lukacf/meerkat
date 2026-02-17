@@ -10,7 +10,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions release-preflight publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run
+.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions
 
 # Default target
 all: ci
@@ -156,6 +156,11 @@ audit-alt:
 ci: fmt-check legacy-surface-gate verify-version-parity lint lint-feature-matrix test-all test-minimal test-feature-matrix test-surface-modularity audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
+# Developer smoke CI pipeline for faster pre-release iteration.
+# Keeps core validation, skips full feature matrix clippy/test expansion.
+ci-smoke: fmt-check legacy-surface-gate verify-version-parity lint test-all test-minimal audit
+	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
+
 # Milestone 0 gate: ensure legacy public surface names are either removed
 # or explicitly whitelisted during migration.
 legacy-surface-gate:
@@ -264,6 +269,23 @@ release-preflight: ci verify-schema-freshness
 	@echo "$(GREEN)Ready to release. Run:$(NC)"
 	@echo "  cargo release <patch|minor|major>"
 
+# Smoke pre-release checklist.
+# Useful for local iteration; skips full feature-matrix expansion.
+release-preflight-smoke: ci-smoke verify-schema-freshness
+	@echo ""
+	@echo "$(GREEN)Pre-release checklist (smoke):$(NC)"
+	@echo "  1. CHANGELOG.md [Unreleased] section populated?"
+	@grep -q '## \[Unreleased\]' CHANGELOG.md && echo "     [Unreleased] section exists" || echo "     $(RED)WARNING: no [Unreleased] section$(NC)"
+	@if git diff --quiet CHANGELOG.md 2>/dev/null; then \
+		echo "  $(YELLOW)   WARNING: CHANGELOG.md has no uncommitted changes$(NC)"; \
+	else \
+		echo "     CHANGELOG.md has pending changes"; \
+	fi
+	@echo "  2. Core preflight checks passed (smoke)"
+	@echo "  3. Schema artifacts are fresh (above)"
+	@echo ""
+	@echo "$(GREEN)Ready for smoke dry-run. Use release-preflight for full checks.$(NC)"
+
 # Dry-run publish for Python SDK (build + twine check only)
 publish-dry-run-python:
 	@echo "$(GREEN)Checking Python SDK publish readiness...$(NC)"
@@ -287,51 +309,17 @@ release-dry-run: release-preflight
 	@$(MAKE) publish-dry-run-python
 	@$(MAKE) publish-dry-run-typescript
 
+# Smoke dry-run path for local iteration.
+release-dry-run-smoke: release-preflight-smoke
+	@echo "$(GREEN)Running smoke registry dry-run (no uploads)...$(NC)"
+	@$(MAKE) publish-dry-run
+	@$(MAKE) publish-dry-run-python
+	@$(MAKE) publish-dry-run-typescript
+
 # Dry-run cargo publish for all publishable crates
 publish-dry-run:
-	@set -euo pipefail; \
-	echo "$(GREEN)Checking publish readiness...$(NC)"; \
-	tmp_cfg=$$(mktemp); \
-	printf '%s\n' "[patch.crates-io]" \
-		"meerkat-core = { path = \"$(CURDIR)/meerkat-core\" }" \
-		"meerkat-client = { path = \"$(CURDIR)/meerkat-client\" }" \
-		"meerkat-store = { path = \"$(CURDIR)/meerkat-store\" }" \
-		"meerkat-tools = { path = \"$(CURDIR)/meerkat-tools\" }" \
-		"meerkat-session = { path = \"$(CURDIR)/meerkat-session\" }" \
-		"meerkat-memory = { path = \"$(CURDIR)/meerkat-memory\" }" \
-		"meerkat-mcp = { path = \"$(CURDIR)/meerkat-mcp\" }" \
-		"meerkat-mcp-server = { path = \"$(CURDIR)/meerkat-mcp-server\" }" \
-		"meerkat-hooks = { path = \"$(CURDIR)/meerkat-hooks\" }" \
-		"meerkat-skills = { path = \"$(CURDIR)/meerkat-skills\" }" \
-		"meerkat-comms = { path = \"$(CURDIR)/meerkat-comms\" }" \
-		"meerkat-rpc = { path = \"$(CURDIR)/meerkat-rpc\" }" \
-		"meerkat-rest = { path = \"$(CURDIR)/meerkat-rest\" }" \
-		"meerkat-contracts = { path = \"$(CURDIR)/meerkat-contracts\" }" \
-		"meerkat = { path = \"$(CURDIR)/meerkat\" }" \
-		> "$$tmp_cfg"; \
-	FAIL=0; \
-	for pkg in meerkat-core meerkat-contracts meerkat-client meerkat-store \
-	           meerkat-tools meerkat-session meerkat-memory meerkat-mcp \
-	           meerkat-mcp-server meerkat-hooks meerkat-skills meerkat-comms \
-	           meerkat-rpc meerkat-rest meerkat; do \
-		printf "  %-25s" "$$pkg..."; \
-		log_file=$$(mktemp); \
-		if cargo publish -p $$pkg --dry-run --allow-dirty --config "$$tmp_cfg" > "$$log_file" 2>&1; then \
-			echo "$(GREEN)OK$(NC)"; \
-		else \
-			echo "$(RED)FAIL$(NC)"; \
-			echo "    $(YELLOW)Top failure lines from $$pkg publish dry-run:$(NC)"; \
-			rg -n "^\\s*error(:|\\[)" "$$log_file" | head -n 20 || true; \
-			FAIL=1; \
-		fi; \
-		rm -f "$$log_file"; \
-	done; \
-	rm -f "$$tmp_cfg"; \
-	if [ $$FAIL -ne 0 ]; then \
-		echo "$(RED)Some crates are not publish-ready$(NC)"; \
-		exit 1; \
-	fi; \
-	echo "$(GREEN)All crates are publish-ready$(NC)"
+	@echo "$(GREEN)Checking publish readiness...$(NC)"; \
+	MEERKAT_PUBLISH_DRY_RUN_JOBS=$${MEERKAT_PUBLISH_DRY_RUN_JOBS:-4} scripts/publish-dry-run.sh
 
 # Verify version matches tag (for release validation)
 verify-version:
@@ -370,6 +358,7 @@ help:
 	@echo "  $(GREEN)coverage$(NC)      - Generate test coverage report"
 	@echo "  $(GREEN)clean$(NC)         - Remove build artifacts"
 	@echo "  $(GREEN)install-hooks$(NC) - Install git hooks"
+	@echo "  $(GREEN)ci-smoke$(NC)       - Run CI smoke pipeline (no full feature matrices)"
 	@echo "  $(GREEN)verify-version$(NC)- Verify Cargo.toml version matches git tag"
 	@echo ""
 	@echo "Release targets:"
@@ -378,8 +367,10 @@ help:
 	@echo "  $(GREEN)bump-sdk-versions$(NC)     - Bump Python + TS versions to match Cargo"
 	@echo "  $(GREEN)regen-schemas$(NC)         - Re-emit schemas + run SDK codegen"
 	@echo "  $(GREEN)release-preflight$(NC)     - Full pre-release checklist (CI + freshness)"
+	@echo "  $(GREEN)release-preflight-smoke$(NC)- Smoke pre-release checklist"
 	@echo "  $(GREEN)publish-dry-run$(NC)       - Dry-run cargo publish for all crates"
 	@echo "  $(GREEN)publish-dry-run-python$(NC) - Dry-run Python SDK publish check (build + twine check)"
 	@echo "  $(GREEN)publish-dry-run-typescript$(NC)- Dry-run TypeScript SDK publish check (npm publish --dry-run)"
 	@echo "  $(GREEN)release-dry-run$(NC)       - Full preflight + dry-run registry checks (no uploads)"
+	@echo "  $(GREEN)release-dry-run-smoke$(NC)  - Smoke preflight + registry dry-run checks (no uploads)"
 	@echo "  $(GREEN)help$(NC)          - Show this help message"

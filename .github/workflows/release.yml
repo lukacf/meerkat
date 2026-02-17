@@ -128,7 +128,7 @@ jobs:
             fi
 
             if [[ "$ARCHIVE_EXT" == "zip" ]]; then
-              (cd "$(dirname "$src")" && zip -j "${GITHUB_WORKSPACE}/dist/${artifact_name}" "$(basename "$src")")
+              7z a -tzip "${GITHUB_WORKSPACE}/dist/${artifact_name}" "$(cygpath -w "$src")"
             else
               tar -czf "dist/${artifact_name}" -C "$(dirname "$src")" "$(basename "$src")"
             fi

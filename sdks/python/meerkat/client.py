@@ -120,6 +120,7 @@ class MeerkatClient:
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        assert self._process.stdout is not None, "stdout pipe not available"
         self._dispatcher = _StdoutDispatcher(self._process.stdout)
         self._dispatcher.start()
 
@@ -412,8 +413,6 @@ class MeerkatClient:
         machine = platform.machine().lower()
         if system == "darwin":
             target = {
-                "x86_64": "x86_64-apple-darwin",
-                "amd64": "x86_64-apple-darwin",
                 "arm64": "aarch64-apple-darwin",
                 "aarch64": "aarch64-apple-darwin",
             }.get(machine)
@@ -424,6 +423,8 @@ class MeerkatClient:
         if system == "linux":
             if machine in {"x86_64", "amd64"}:
                 return "x86_64-unknown-linux-gnu", "tar.gz", _MEERKAT_BINARY
+            if machine in {"aarch64", "arm64"}:
+                return "aarch64-unknown-linux-gnu", "tar.gz", _MEERKAT_BINARY
             raise MeerkatError(
                 "UNSUPPORTED_PLATFORM",
                 f"Unsupported Linux architecture '{machine}'.",
@@ -474,12 +475,13 @@ class MeerkatClient:
                             "BINARY_DOWNLOAD_FAILED",
                             f"Downloaded archive does not contain '{binary_name}'.",
                         )
-                    with archive.extractfile(members[0]) as source, temp_binary.open("wb") as out:
-                        if source is None:
-                            raise MeerkatError(
-                                "BINARY_DOWNLOAD_FAILED",
-                                f"Could not extract '{binary_name}' from {artifact}.",
-                            )
+                    source = archive.extractfile(members[0])
+                    if source is None:
+                        raise MeerkatError(
+                            "BINARY_DOWNLOAD_FAILED",
+                            f"Could not extract '{binary_name}' from {artifact}.",
+                        )
+                    with source, temp_binary.open("wb") as out:
                         out.write(source.read())
             else:
                 with zipfile.ZipFile(archive_path, "r") as archive:

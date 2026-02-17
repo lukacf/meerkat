@@ -77,9 +77,6 @@ jobs:
           - runs-on: macos-15
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-          - runs-on: macos-15
-            target: x86_64-apple-darwin
-            archive_ext: tar.gz
           - runs-on: windows-latest
             target: x86_64-pc-windows-msvc
             archive_ext: zip
@@ -205,19 +202,21 @@ jobs:
           draft: false
           fail_on_unmatched_files: true
 
-  # Registry publishing is a separate manual step after verifying the
-  # GitHub Release looks correct. Trigger via workflow_dispatch with
-  # publish_release_packages=true. Use registry_dry_run=true first to
-  # validate without uploading.
+  # Registry publishing runs automatically on tag pushes alongside binary
+  # builds. For recovery (e.g. npm was down during the tag-triggered run),
+  # re-run via workflow_dispatch:
   #
-  # Full publish command:
   #   gh workflow run release.yml --ref v<VERSION> \
   #     -f publish_release_packages=true \
   #     -f registry_dry_run=false
+  #
+  # Use registry_dry_run=true to validate without uploading.
   publish_registries:
     name: Publish crates + SDK packages
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release_packages == 'true'
-    needs: [release_validate]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release_packages == 'true')
+    needs: [release_validate, build_binaries]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

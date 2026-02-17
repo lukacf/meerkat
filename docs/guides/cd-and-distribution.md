@@ -43,17 +43,12 @@ Release artifacts are built for each surface binary:
 - `meerkat-rest`
 - `meerkat-mcp-server`
 
-Build at least:
+Build targets:
 
-- `x86_64-apple-darwin`
 - `aarch64-apple-darwin`
 - `x86_64-unknown-linux-gnu`
-- `x86_64-pc-windows-msvc`
-
-Recommended optional additions:
-
 - `aarch64-unknown-linux-gnu`
-- `aarch64-pc-windows-msvc` (if you need it)
+- `x86_64-pc-windows-msvc`
 
 Publish as release assets, for example:
 

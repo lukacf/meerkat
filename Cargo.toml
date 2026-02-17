@@ -150,5 +150,5 @@ tag-message = "Release v{{version}}"
 # Bump SDK versions + regenerate schemas before committing
 # cargo-release runs hooks from each crate dir, so resolve workspace root via git
 pre-release-hook = ["bash", "-c", "$(git rev-parse --show-toplevel)/scripts/release-hook.sh {{version}}"]
-publish = true
+publish = false
 push = true

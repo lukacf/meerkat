@@ -21,7 +21,7 @@ import type {
 import { CONTRACT_VERSION } from "./generated/types.js";
 
 const MEERKAT_REPO = "lukacf/meerkat";
-const MEERKAT_RELEASE_BINARY = "meerkat-rpc";
+const MEERKAT_RELEASE_BINARY = "rkat-rpc";
 const MEERKAT_BINARY_CACHE_ROOT = path.join(
   os.homedir(),
   ".cache",
@@ -103,7 +103,6 @@ export class MeerkatClient {
   private static platformTarget(): PlatformTarget {
     const architecture = os.arch();
     if (process.platform === "darwin") {
-      if (architecture === "x64") return { target: "x86_64-apple-darwin", archiveExt: "tar.gz", binaryName: "rkat-rpc" };
       if (architecture === "arm64") {
         return {
           target: "aarch64-apple-darwin",
@@ -113,13 +112,20 @@ export class MeerkatClient {
       }
       throw new MeerkatError(
         "UNSUPPORTED_PLATFORM",
-        `Unsupported macOS architecture '${architecture}'.`,
+        `Unsupported macOS architecture '${architecture}'. Only Apple Silicon (arm64) is supported.`,
       );
     }
     if (process.platform === "linux") {
       if (architecture === "x64") {
         return {
           target: "x86_64-unknown-linux-gnu",
+          archiveExt: "tar.gz",
+          binaryName: "rkat-rpc",
+        };
+      }
+      if (architecture === "arm64") {
+        return {
+          target: "aarch64-unknown-linux-gnu",
           archiveExt: "tar.gz",
           binaryName: "rkat-rpc",
         };

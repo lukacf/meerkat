@@ -53,7 +53,7 @@ Those tools excel at interactive development with rich terminal UIs. Meerkat has
 
 ```toml
 [dependencies]
-meerkat = "0.2"
+meerkat = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -101,17 +101,44 @@ rkat run --model gemini-3-flash-preview "Explain async/await"
 
 ### Modularity
 
-Pick only what you need:
+The `meerkat` crate defaults to providers only — add subsystems as you need them:
 
 ```toml
-# Minimal: just the agent loop + one provider
-meerkat = { version = "0.1", default-features = false, features = ["anthropic"] }
+# Default: all three providers, nothing else
+[dependencies]
+meerkat = "0.3"
 
-# Add persistence and compaction
-meerkat = { version = "0.1", features = ["anthropic", "session-store", "session-compaction"] }
+# Just one provider
+meerkat = { version = "0.3", default-features = false, features = ["anthropic"] }
 
-# Everything
-meerkat = { version = "0.1", features = ["all-providers", "session-store", "session-compaction", "memory-store-session"] }
+# Add session persistence and compaction
+meerkat = { version = "0.3", features = ["jsonl-store", "session-store", "session-compaction"] }
+
+# Full harness: persistence, memory, comms, MCP, sub-agents, skills
+meerkat = { version = "0.3", features = [
+    "all-providers", "jsonl-store", "session-store", "session-compaction",
+    "memory-store-session", "comms", "mcp", "sub-agents", "skills"
+] }
+```
+
+| Feature | What it adds |
+|---------|-------------|
+| `anthropic`, `openai`, `gemini` | Individual LLM providers (all three on by default) |
+| `all-providers` | Shorthand for all three |
+| `jsonl-store` | File-based session persistence |
+| `session-store` | Durable session storage (redb) |
+| `session-compaction` | Auto-compact long conversations |
+| `memory-store` | In-memory session storage (testing) |
+| `memory-store-session` | Semantic memory with HNSW indexing |
+| `comms` | Ed25519 inter-agent messaging |
+| `mcp` | MCP protocol client and tool routing |
+| `sub-agents` | Spawn/fork child agents |
+| `skills` | Composable knowledge packs |
+
+The prebuilt binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) include everything. For a custom binary build:
+
+```bash
+cargo install rkat --no-default-features --features "anthropic,openai,session-store,mcp"
 ```
 
 Disabled capabilities return typed errors (`SessionError::PersistenceDisabled`, etc.) — no panics, no silent degradation.
@@ -179,50 +206,6 @@ All surfaces share the same `SessionService` lifecycle and `AgentFactory` constr
 | `meerkat-mcp-server` | MCP server surface (binary: `rkat-mcp`) |
 
 ## Examples
-
-### Custom Tools
-
-```rust
-use meerkat::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
-use meerkat::error::ToolError;
-use async_trait::async_trait;
-use serde_json::json;
-use std::sync::Arc;
-
-struct Calculator;
-
-#[async_trait]
-impl AgentToolDispatcher for Calculator {
-    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        vec![Arc::new(ToolDef {
-            name: "add".into(),
-            description: "Add two numbers".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "a": {"type": "number"},
-                    "b": {"type": "number"}
-                },
-                "required": ["a", "b"]
-            }),
-        })].into()
-    }
-
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
-        #[derive(serde::Deserialize)]
-        struct AddArgs { a: f64, b: f64 }
-
-        match call.name {
-            "add" => {
-                let args: AddArgs = call.parse_args()
-                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-                Ok(ToolResult::success(call.id, (args.a + args.b).to_string()))
-            }
-            _ => Err(ToolError::not_found(call.name)),
-        }
-    }
-}
-```
 
 ### Streaming
 

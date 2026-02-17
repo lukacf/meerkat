@@ -28,25 +28,34 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
   <Step title="Add the dependency">
     ```toml
     [dependencies]
-    meerkat = "0.2"
+    meerkat = "0.3"
     tokio = { version = "1", features = ["full"] }
     ```
   </Step>
   <Step title="Choose feature flags">
+    The default includes all three LLM providers and nothing else — add subsystems as needed:
     <CodeGroup>
-    ```toml Default (Anthropic + JSONL storage)
+    ```toml Default (all providers, no storage)
     [dependencies]
-    meerkat = "0.2"
+    meerkat = "0.3"
     ```
 
-    ```toml All LLM providers
+    ```toml Add persistence
     [dependencies]
-    meerkat = { version = "0.2", features = ["all-providers"] }
+    meerkat = { version = "0.3", features = ["jsonl-store", "session-store"] }
     ```
 
-    ```toml Storage backends
+    ```toml Full harness
     [dependencies]
-    meerkat = { version = "0.2", features = ["jsonl-store", "memory-store"] }
+    meerkat = { version = "0.3", features = [
+        "jsonl-store", "session-store", "session-compaction",
+        "memory-store-session", "comms", "mcp", "sub-agents", "skills"
+    ] }
+    ```
+
+    ```toml Minimal (single provider)
+    [dependencies]
+    meerkat = { version = "0.3", default-features = false, features = ["anthropic"] }
     ```
     </CodeGroup>
   </Step>
@@ -56,14 +65,18 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 | Feature | Description | Default |
 |---------|-------------|---------|
 | `anthropic` | Anthropic Claude API client | Yes |
-| `openai` | OpenAI API client | No |
-| `gemini` | Google Gemini API client | No |
-| `all-providers` | All LLM providers | No |
-| `jsonl-store` | File-based session persistence | Yes |
-| `memory-store` | In-memory session storage | No |
+| `openai` | OpenAI API client | Yes |
+| `gemini` | Google Gemini API client | Yes |
+| `all-providers` | Shorthand for all three providers | No |
+| `jsonl-store` | File-based session persistence | No |
+| `memory-store` | In-memory session storage (testing) | No |
 | `session-store` | Persistent sessions (redb-backed) | No |
 | `session-compaction` | Auto-compact long conversations | No |
 | `memory-store-session` | Semantic memory indexing | No |
+| `comms` | Ed25519 inter-agent messaging | No |
+| `mcp` | MCP protocol client and tool routing | No |
+| `sub-agents` | Spawn/fork child agents | No |
+| `skills` | Composable knowledge packs | No |
 </Accordion>
 
 ---

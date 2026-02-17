@@ -107,6 +107,34 @@ Config APIs return a realm-scoped envelope:
 
 `config/set` and `config/patch` support `expected_generation` for CAS.
 
+## Feature composition
+
+The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini). Everything else is opt-in via Cargo features:
+
+```toml
+# Default: three providers, no storage/comms/tools
+meerkat = "0.3"
+
+# Single provider, minimal
+meerkat = { version = "0.3", default-features = false, features = ["anthropic"] }
+
+# Add persistence + memory + comms
+meerkat = { version = "0.3", features = [
+    "jsonl-store", "session-store", "session-compaction",
+    "memory-store-session", "comms", "mcp", "sub-agents", "skills"
+] }
+```
+
+Available features: `anthropic`, `openai`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `sub-agents`, `skills`.
+
+Prebuilt binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) include everything. Custom binary builds:
+
+```bash
+cargo install rkat --no-default-features --features "anthropic,openai,session-store,mcp"
+```
+
+Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`) — no panics.
+
 ## Core features
 
 ### Sessions

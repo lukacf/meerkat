@@ -13,7 +13,6 @@ export interface WireUsage {
 
 export interface WireRunResult {
   session_id: string;
-  session_ref?: string;
   text: string;
   turns: number;
   tool_calls: number;

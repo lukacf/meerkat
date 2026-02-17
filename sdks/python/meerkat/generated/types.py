@@ -24,7 +24,6 @@ class WireUsage:
 class WireRunResult:
     """Run result from agent execution."""
     session_id: str = ''
-    session_ref: Optional[str] = None
     text: str = ''
     turns: int = 0
     tool_calls: int = 0

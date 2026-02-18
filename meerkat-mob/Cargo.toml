@@ -1,0 +1,52 @@
+[package]
+name = "meerkat-mob"
+description = "Multi-agent orchestration runtime for Meerkat"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# Internal crates
+meerkat-core = { workspace = true }
+meerkat-comms = { workspace = true }
+meerkat = { workspace = true, features = ["comms", "session-compaction", "memory-store", "anthropic", "openai", "gemini"] }
+meerkat-session = { workspace = true, features = ["session-compaction", "session-store"] }
+meerkat-client = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Utilities
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tempfile = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+meerkat-store = { workspace = true }
+
+[lints]
+workspace = true

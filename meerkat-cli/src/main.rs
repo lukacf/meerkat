@@ -7,6 +7,7 @@ mod stdin_events;
 use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_contracts::{SessionLocator, SessionLocatorError, format_session_ref};
 use meerkat_core::AgentToolDispatcher;
+use meerkat_mob::{MobDefinition, Prefab, ProfileName};
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::service::{
@@ -20,6 +21,7 @@ use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, S
 use meerkat_mcp::McpRouterAdapter;
 use meerkat_store::SessionStore;
 use meerkat_tools::find_project_root;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -339,6 +341,12 @@ enum Commands {
         command: McpCommands,
     },
 
+    /// Mob orchestration commands
+    Mob {
+        #[command(subcommand)]
+        command: MobCommands,
+    },
+
     /// Config management
     Config {
         #[command(subcommand)]
@@ -552,6 +560,49 @@ enum McpCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum MobCommands {
+    /// List available prefab templates.
+    Prefabs,
+    /// Create a mob from --prefab or --definition.
+    Create {
+        #[arg(long)]
+        prefab: Option<String>,
+        #[arg(long)]
+        definition: Option<PathBuf>,
+    },
+    /// List mobs in local mob registry.
+    List,
+    /// Show status for a mob.
+    Status { mob_id: String },
+    /// Spawn a meerkat.
+    Spawn {
+        mob_id: String,
+        profile: String,
+        meerkat_id: String,
+    },
+    /// Retire a meerkat.
+    Retire { mob_id: String, meerkat_id: String },
+    /// Wire two peers.
+    Wire { mob_id: String, a: String, b: String },
+    /// Unwire two peers.
+    Unwire { mob_id: String, a: String, b: String },
+    /// Send external turn to a meerkat.
+    Turn {
+        mob_id: String,
+        meerkat_id: String,
+        message: String,
+    },
+    /// Stop a mob.
+    Stop { mob_id: String },
+    /// Resume a mob.
+    Resume { mob_id: String },
+    /// Complete a mob.
+    Complete { mob_id: String },
+    /// Destroy a mob.
+    Destroy { mob_id: String },
+}
+
 /// CLI-side scope enum (maps to McpScope)
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliMcpScope {
@@ -723,6 +774,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         },
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
         Commands::Mcp { command } => handle_mcp_command(command).await,
+        Commands::Mob { command } => handle_mob_command(command, &cli_scope).await,
         Commands::Config { command } => match command {
             ConfigCommands::Get { format } => handle_config_get(format, &cli_scope).await,
             ConfigCommands::Set { file, json, toml } => {
@@ -2339,6 +2391,436 @@ async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct PersistedMobRegistry {
+    mobs: std::collections::BTreeMap<String, PersistedMob>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedMob {
+    definition: MobDefinition,
+    ops: Vec<PersistedMobOp>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PersistedMobOp {
+    Spawn {
+        profile: String,
+        meerkat_id: String,
+    },
+    Retire {
+        meerkat_id: String,
+    },
+    Wire {
+        a: String,
+        b: String,
+    },
+    Unwire {
+        a: String,
+        b: String,
+    },
+    Stop,
+    Resume,
+    Complete,
+}
+
+fn mob_registry_path(scope: &RuntimeScope) -> PathBuf {
+    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
+    paths.root.join("mob_registry.json")
+}
+
+fn mob_registry_lock_path(scope: &RuntimeScope) -> PathBuf {
+    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
+    paths.root.join("mob_registry.lock")
+}
+
+struct MobRegistryLock {
+    path: PathBuf,
+}
+
+impl Drop for MobRegistryLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+async fn acquire_mob_registry_lock(scope: &RuntimeScope) -> anyhow::Result<MobRegistryLock> {
+    let path = mob_registry_lock_path(scope);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to create mob registry lock directory '{}': {e}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let max_wait = Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    loop {
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => {
+                let pid = std::process::id();
+                let mut writer = tokio::io::BufWriter::new(file);
+                let _ = writer.write_all(format!("{pid}\n").as_bytes()).await;
+                return Ok(MobRegistryLock { path });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Ok(meta) = tokio::fs::metadata(&path).await
+                    && let Ok(modified) = meta.modified()
+                    && let Ok(age) = modified.elapsed()
+                    && age > Duration::from_secs(30)
+                {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+                if started.elapsed() >= max_wait {
+                    return Err(anyhow::anyhow!(
+                        "timed out waiting for mob registry lock '{}'",
+                        path.display()
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to acquire mob registry lock '{}': {e}",
+                    path.display()
+                ));
+            }
+        }
+    }
+}
+
+async fn load_mob_registry(scope: &RuntimeScope) -> anyhow::Result<PersistedMobRegistry> {
+    let path = mob_registry_path(scope);
+    if !path.exists() {
+        return Ok(PersistedMobRegistry::default());
+    }
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read mob registry '{}': {e}", path.display()))?;
+    let parsed = serde_json::from_str::<PersistedMobRegistry>(&content)
+        .map_err(|e| anyhow::anyhow!("failed to parse mob registry '{}': {e}", path.display()))?;
+    Ok(parsed)
+}
+
+async fn save_mob_registry(scope: &RuntimeScope, registry: &PersistedMobRegistry) -> anyhow::Result<()> {
+    let path = mob_registry_path(scope);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to create mob registry directory '{}': {e}",
+                parent.display()
+            )
+        })?;
+    }
+    let content = serde_json::to_string_pretty(registry)
+        .map_err(|e| anyhow::anyhow!("failed to encode mob registry: {e}"))?;
+    let tmp_path = path.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    tokio::fs::write(&tmp_path, content)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to write temp mob registry '{}': {e}", tmp_path.display()))?;
+    tokio::fs::rename(&tmp_path, &path)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to commit mob registry '{}': {e}", path.display()))
+}
+
+fn push_mob_op(
+    registry: &mut PersistedMobRegistry,
+    mob_id: &str,
+    op: PersistedMobOp,
+) -> anyhow::Result<()> {
+    let mob = registry
+        .mobs
+        .get_mut(mob_id)
+        .ok_or_else(|| anyhow::anyhow!("mob not found in persisted registry: {mob_id}"))?;
+    mob.ops.push(op);
+    Ok(())
+}
+
+async fn replay_mob_op(
+    state: &meerkat_mob_mcp::MobMcpState,
+    mob_id: &meerkat_mob::MobId,
+    op: &PersistedMobOp,
+) -> anyhow::Result<()> {
+    match op {
+        PersistedMobOp::Spawn {
+            profile,
+            meerkat_id,
+        } => state
+            .mob_spawn(
+                mob_id,
+                ProfileName::from(profile.clone()),
+                meerkat_mob::MeerkatId::from(meerkat_id.clone()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        PersistedMobOp::Retire { meerkat_id } => state
+            .mob_retire(mob_id, meerkat_mob::MeerkatId::from(meerkat_id.clone()))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        PersistedMobOp::Wire { a, b } => state
+            .mob_wire(
+                mob_id,
+                meerkat_mob::MeerkatId::from(a.clone()),
+                meerkat_mob::MeerkatId::from(b.clone()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        PersistedMobOp::Unwire { a, b } => state
+            .mob_unwire(
+                mob_id,
+                meerkat_mob::MeerkatId::from(a.clone()),
+                meerkat_mob::MeerkatId::from(b.clone()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        PersistedMobOp::Stop => state
+            .mob_stop(mob_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        PersistedMobOp::Resume => state
+            .mob_resume(mob_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        PersistedMobOp::Complete => state
+            .mob_complete(mob_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+    };
+    Ok(())
+}
+
+async fn hydrate_mob_state(
+    scope: &RuntimeScope,
+) -> anyhow::Result<(Arc<meerkat_mob_mcp::MobMcpState>, PersistedMobRegistry)> {
+    let registry = load_mob_registry(scope).await?;
+    let state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+    for (mob_id, persisted) in &registry.mobs {
+        let created = state
+            .mob_create_definition(persisted.definition.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if created.as_str() != mob_id {
+            return Err(anyhow::anyhow!(
+                "mob registry id mismatch: key='{}' definition='{}'",
+                mob_id,
+                created
+            ));
+        }
+        for op in &persisted.ops {
+            replay_mob_op(state.as_ref(), &created, op).await?;
+        }
+    }
+    Ok((state, registry))
+}
+
+async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
+    let _lock = acquire_mob_registry_lock(scope).await?;
+    let (state, mut registry) = hydrate_mob_state(scope).await?;
+    match command {
+        MobCommands::Prefabs => {
+            for prefab in Prefab::all() {
+                println!("{}", prefab.key());
+            }
+            Ok(())
+        }
+        MobCommands::Create { prefab, definition } => {
+            let (mob_id, definition) = if let Some(prefab_key) = prefab {
+                let prefab = Prefab::from_key(&prefab_key)
+                    .ok_or_else(|| anyhow::anyhow!("unknown prefab '{}'", prefab_key))?;
+                let definition = prefab.definition();
+                let mob_id = state
+                    .mob_create_definition(definition.clone())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                    .to_string();
+                (mob_id, definition)
+            } else if let Some(path) = definition {
+                let content = std::fs::read_to_string(&path).map_err(|e| {
+                    anyhow::anyhow!("failed reading definition '{}': {e}", path.display())
+                })?;
+                let definition = MobDefinition::from_toml(&content).map_err(|e| {
+                    anyhow::anyhow!("failed parsing TOML definition '{}': {e}", path.display())
+                })?;
+                let mob_id = state
+                    .mob_create_definition(definition.clone())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                    .to_string();
+                (mob_id, definition)
+            } else {
+                return Err(anyhow::anyhow!(
+                    "provide one of --prefab <name> or --definition <file>"
+                ));
+            };
+            registry
+                .mobs
+                .insert(mob_id.clone(), PersistedMob { definition, ops: vec![] });
+            save_mob_registry(scope, &registry).await?;
+            println!("{mob_id}");
+            Ok(())
+        }
+        MobCommands::List => {
+            for (id, status) in state.mob_list().await {
+                println!("{id}\t{}", status.as_str());
+            }
+            Ok(())
+        }
+        MobCommands::Status { mob_id } => {
+            let status = state
+                .mob_status(&meerkat_mob::MobId::from(mob_id))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{}", status.as_str());
+            Ok(())
+        }
+        MobCommands::Spawn {
+            mob_id,
+            profile,
+            meerkat_id,
+        } => {
+            state
+                .mob_spawn(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    ProfileName::from(profile.clone()),
+                    meerkat_mob::MeerkatId::from(meerkat_id.clone()),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            push_mob_op(
+                &mut registry,
+                &mob_id,
+                PersistedMobOp::Spawn {
+                    profile,
+                    meerkat_id,
+                },
+            )?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+        MobCommands::Retire { mob_id, meerkat_id } => {
+            state
+                .mob_retire(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    meerkat_mob::MeerkatId::from(meerkat_id.clone()),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            push_mob_op(
+                &mut registry,
+                &mob_id,
+                PersistedMobOp::Retire {
+                    meerkat_id,
+                },
+            )?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+        MobCommands::Wire { mob_id, a, b } => {
+            state
+                .mob_wire(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    meerkat_mob::MeerkatId::from(a.clone()),
+                    meerkat_mob::MeerkatId::from(b.clone()),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            push_mob_op(
+                &mut registry,
+                &mob_id,
+                PersistedMobOp::Wire {
+                    a,
+                    b,
+                },
+            )?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+        MobCommands::Unwire { mob_id, a, b } => {
+            state
+                .mob_unwire(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    meerkat_mob::MeerkatId::from(a.clone()),
+                    meerkat_mob::MeerkatId::from(b.clone()),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            push_mob_op(
+                &mut registry,
+                &mob_id,
+                PersistedMobOp::Unwire {
+                    a,
+                    b,
+                },
+            )?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+        MobCommands::Turn {
+            mob_id,
+            meerkat_id,
+            message,
+        } => {
+            state
+                .mob_external_turn(
+                    &meerkat_mob::MobId::from(mob_id),
+                    meerkat_mob::MeerkatId::from(meerkat_id),
+                    message,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(())
+        }
+        MobCommands::Stop { mob_id } => {
+            state
+                .mob_stop(&meerkat_mob::MobId::from(mob_id.clone()))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            push_mob_op(&mut registry, &mob_id, PersistedMobOp::Stop)?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+        MobCommands::Resume { mob_id } => {
+            state
+                .mob_resume(&meerkat_mob::MobId::from(mob_id.clone()))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            push_mob_op(&mut registry, &mob_id, PersistedMobOp::Resume)?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+        MobCommands::Complete { mob_id } => {
+            state
+                .mob_complete(&meerkat_mob::MobId::from(mob_id.clone()))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            push_mob_op(&mut registry, &mob_id, PersistedMobOp::Complete)?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+        MobCommands::Destroy { mob_id } => {
+            state
+                .mob_destroy(&meerkat_mob::MobId::from(mob_id.clone()))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            registry.mobs.remove(&mob_id);
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+    }
+}
+
 /// LLM Provider selection
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default)]
 pub enum Provider {
@@ -3024,5 +3506,144 @@ mod tests {
         assert_eq!(matches[1].state_root, state_root);
         assert_eq!(matches[0].session_id, sid);
         assert_eq!(matches[1].session_id, sid);
+    }
+
+    fn test_scope_with_context(root: PathBuf) -> RuntimeScope {
+        RuntimeScope {
+            locator: RealmLocator {
+                state_root: root.clone(),
+                realm_id: "test-realm".to_string(),
+            },
+            instance_id: None,
+            backend_hint: Some(RealmBackend::Redb),
+            origin_hint: RealmOrigin::Explicit,
+            context_root: Some(root),
+            user_config_root: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mob_create_prefab_and_list_registry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+
+        handle_mob_command(
+            MobCommands::Create {
+                prefab: Some("coding_swarm".to_string()),
+                definition: None,
+            },
+            &scope,
+        )
+        .await
+        .expect("mob create should succeed");
+
+        let registry = load_mob_registry(&scope).await.expect("registry should load");
+        assert!(registry.mobs.contains_key("coding_swarm"));
+
+        handle_mob_command(MobCommands::List, &scope)
+            .await
+            .expect("mob list should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_mob_prefabs_and_lifecycle_commands_parse_and_dispatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let scope_2 = test_scope_with_context(temp.path().to_path_buf());
+
+        handle_mob_command(MobCommands::Prefabs, &scope)
+            .await
+            .expect("prefabs should succeed");
+        handle_mob_command(
+            MobCommands::Create {
+                prefab: Some("pipeline".to_string()),
+                definition: None,
+            },
+            &scope,
+        )
+        .await
+        .expect("create should succeed");
+
+        // New invocation context should rehydrate created mobs from persisted registry.
+        handle_mob_command(MobCommands::List, &scope_2)
+            .await
+            .expect("list should succeed across invocations");
+
+        handle_mob_command(
+            MobCommands::Status {
+                mob_id: "pipeline".to_string(),
+            },
+            &scope_2,
+        )
+        .await
+        .expect("status should succeed");
+        handle_mob_command(
+            MobCommands::Stop {
+                mob_id: "pipeline".to_string(),
+            },
+            &scope,
+        )
+        .await
+        .expect("stop should succeed");
+        handle_mob_command(
+            MobCommands::Resume {
+                mob_id: "pipeline".to_string(),
+            },
+            &scope,
+        )
+        .await
+        .expect("resume should succeed");
+        handle_mob_command(
+            MobCommands::Complete {
+                mob_id: "pipeline".to_string(),
+            },
+            &scope,
+        )
+        .await
+        .expect("complete should succeed");
+        handle_mob_command(
+            MobCommands::Destroy {
+                mob_id: "pipeline".to_string(),
+            },
+            &scope,
+        )
+        .await
+        .expect("destroy should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_mob_registry_serializes_concurrent_writers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope_a = test_scope_with_context(temp.path().to_path_buf());
+        let scope_b = test_scope_with_context(temp.path().to_path_buf());
+
+        let a = tokio::spawn(async move {
+            handle_mob_command(
+                MobCommands::Create {
+                    prefab: Some("pipeline".to_string()),
+                    definition: None,
+                },
+                &scope_a,
+            )
+            .await
+        });
+        let b = tokio::spawn(async move {
+            handle_mob_command(
+                MobCommands::Create {
+                    prefab: Some("code_review".to_string()),
+                    definition: None,
+                },
+                &scope_b,
+            )
+            .await
+        });
+
+        a.await.expect("join A").expect("create A");
+        b.await.expect("join B").expect("create B");
+
+        let scope_read = test_scope_with_context(temp.path().to_path_buf());
+        let registry = load_mob_registry(&scope_read).await.expect("registry");
+        assert!(registry.mobs.contains_key("pipeline"));
+        assert!(registry.mobs.contains_key("code_review"));
     }
 }

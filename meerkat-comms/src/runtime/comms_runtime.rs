@@ -201,6 +201,13 @@ impl CoreCommsRuntime for CommsRuntime {
         Ok(())
     }
 
+    async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
+        let public_key = PubKey::from_peer_id(peer_id)
+            .map_err(|err| SendError::Validation(err.to_string()))?;
+        let removed = self.router.remove_trusted_peer(&public_key).await;
+        Ok(removed)
+    }
+
     fn dismiss_received(&self) -> bool {
         self.dismiss_flag.swap(false, Ordering::SeqCst)
     }
@@ -2279,6 +2286,84 @@ mod tests {
         assert!(
             matches!(result, Err(SendError::Validation(_))),
             "allow_self_session=false should reject self-input"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_trusted_peer_removes_from_peers_and_revokes_send() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("rm-sender-{suffix}");
+        let receiver_name = format!("rm-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+
+        // Add receiver as trusted peer of sender
+        let peer_spec = meerkat_core::comms::TrustedPeerSpec::new(
+            &receiver_name,
+            receiver.public_key().to_peer_id(),
+            format!("inproc://{receiver_name}"),
+        )
+        .expect("valid peer spec");
+
+        CoreCommsRuntime::add_trusted_peer(&sender, peer_spec)
+            .await
+            .expect("add_trusted_peer should succeed");
+
+        // Verify receiver appears in sender's peers
+        let peers = CoreCommsRuntime::peers(&sender).await;
+        let receiver_entries: Vec<_> = peers
+            .iter()
+            .filter(|entry| entry.name.as_str() == receiver_name)
+            .collect();
+        assert_eq!(
+            receiver_entries.len(),
+            1,
+            "receiver should appear in sender's peers after add"
+        );
+
+        // Remove the trusted peer
+        let peer_id = receiver.public_key().to_peer_id();
+        let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_id)
+            .await
+            .expect("remove_trusted_peer should succeed");
+        assert!(removed, "remove should return true for existing peer");
+
+        // Verify receiver no longer appears in sender's peers
+        let peers_after = CoreCommsRuntime::peers(&sender).await;
+        let receiver_entries_after: Vec<_> = peers_after
+            .iter()
+            .filter(|entry| entry.name.as_str() == receiver_name)
+            .collect();
+        assert!(
+            receiver_entries_after.is_empty(),
+            "receiver should not appear in sender's peers after removal"
+        );
+
+        // Verify sending to the removed peer fails (PeerNotFound)
+        let cmd = CommsCommand::PeerMessage {
+            to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
+            body: "should fail".to_string(),
+        };
+        let result = CoreCommsRuntime::send(&sender, cmd).await;
+        assert!(
+            matches!(result, Err(SendError::PeerNotFound(_))),
+            "send to removed peer should fail with PeerNotFound, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_trusted_peer_returns_false_for_absent_peer() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender = CommsRuntime::inproc_only(&format!("rm-absent-{suffix}")).unwrap();
+        let other = CommsRuntime::inproc_only(&format!("rm-absent-other-{suffix}")).unwrap();
+
+        let peer_id = other.public_key().to_peer_id();
+        let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_id)
+            .await
+            .expect("remove_trusted_peer should succeed even for absent peer");
+        assert!(
+            !removed,
+            "remove should return false for peer that was never trusted"
         );
     }
 }

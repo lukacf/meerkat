@@ -165,6 +165,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             _ => live_result,
         }
     }
+
+    async fn comms_runtime(
+        &self,
+        id: &SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.inner.comms_runtime(id).await
+    }
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {

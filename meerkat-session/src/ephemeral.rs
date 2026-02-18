@@ -576,6 +576,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())
     }
+
+    async fn comms_runtime(
+        &self,
+        id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.comms_runtime(id).await
+    }
 }
 
 // ---------------------------------------------------------------------------

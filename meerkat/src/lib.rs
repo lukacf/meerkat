@@ -97,6 +97,7 @@ pub use meerkat_core::{
     OperationResult,
     OperationSpec,
     OutputSchema,
+    PeerMeta,
     // Provider
     Provider,
     ProviderConfig,
@@ -167,8 +168,8 @@ pub use service_factory::{FactoryAgent, FactoryAgentBuilder, build_ephemeral_ser
 
 // Session service
 pub use meerkat_core::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionUsage, SessionView, StartTurnRequest,
+    CreateSessionRequest, SessionBuildOptions, SessionError, SessionInfo, SessionQuery,
+    SessionService, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 #[cfg(feature = "session-compaction")]
 pub use meerkat_session::DefaultCompactor;

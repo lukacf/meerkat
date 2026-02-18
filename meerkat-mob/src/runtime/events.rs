@@ -1,21 +1,23 @@
-use crate::model::{MobEventCategory, MobEventKind, NewMobEvent};
+use crate::model::{
+    FlowId, MeerkatId, MobEventCategory, MobEventKind, MobId, NewMobEvent, RunId, StepId,
+};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 pub(crate) struct MobEventBuilder {
     timestamp: DateTime<Utc>,
     category: MobEventCategory,
-    mob_id: String,
-    run_id: Option<String>,
-    flow_id: Option<String>,
-    step_id: Option<String>,
-    meerkat_id: Option<String>,
+    mob_id: MobId,
+    run_id: Option<RunId>,
+    flow_id: Option<FlowId>,
+    step_id: Option<StepId>,
+    meerkat_id: Option<MeerkatId>,
     kind: MobEventKind,
     payload: Value,
 }
 
 impl MobEventBuilder {
-    pub(crate) fn new(mob_id: String, category: MobEventCategory, kind: MobEventKind) -> Self {
+    pub(crate) fn new(mob_id: MobId, category: MobEventCategory, kind: MobEventKind) -> Self {
         Self {
             timestamp: Utc::now(),
             category,
@@ -29,22 +31,22 @@ impl MobEventBuilder {
         }
     }
 
-    pub(crate) fn run_id(mut self, run_id: impl Into<String>) -> Self {
+    pub(crate) fn run_id(mut self, run_id: impl Into<RunId>) -> Self {
         self.run_id = Some(run_id.into());
         self
     }
 
-    pub(crate) fn flow_id(mut self, flow_id: impl Into<String>) -> Self {
+    pub(crate) fn flow_id(mut self, flow_id: impl Into<FlowId>) -> Self {
         self.flow_id = Some(flow_id.into());
         self
     }
 
-    pub(crate) fn step_id(mut self, step_id: impl Into<String>) -> Self {
+    pub(crate) fn step_id(mut self, step_id: impl Into<StepId>) -> Self {
         self.step_id = Some(step_id.into());
         self
     }
 
-    pub(crate) fn meerkat_id(mut self, meerkat_id: impl Into<String>) -> Self {
+    pub(crate) fn meerkat_id(mut self, meerkat_id: impl Into<MeerkatId>) -> Self {
         self.meerkat_id = Some(meerkat_id.into());
         self
     }

@@ -13,6 +13,11 @@ macro_rules! id_newtype {
 
         impl $name {
             #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            #[must_use]
             pub fn into_inner(self) -> String {
                 self.0
             }
@@ -33,6 +38,38 @@ macro_rules! id_newtype {
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(&self.0)
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl std::borrow::Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl From<&$name> for String {
+            fn from(value: &$name) -> Self {
+                value.0.clone()
             }
         }
     };
@@ -94,7 +131,7 @@ pub struct MobSpecBody {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobSpec {
-    pub mob_id: String,
+    pub mob_id: MobId,
     pub revision: MobSpecRevision,
     pub roles: BTreeMap<String, RoleSpec>,
     pub topology: TopologySpec,
@@ -150,8 +187,8 @@ pub enum SpawnStrategy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeerkatIdentity {
-    pub meerkat_id: String,
-    pub role: String,
+    pub meerkat_id: MeerkatId,
+    pub role: RoleId,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
     #[serde(default)]
@@ -176,10 +213,10 @@ pub enum TriggerSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowStepSpec {
-    pub step_id: String,
+    pub step_id: StepId,
     pub targets: StepTargets,
     #[serde(default)]
-    pub depends_on: Vec<String>,
+    pub depends_on: Vec<StepId>,
     #[serde(default)]
     pub dispatch_mode: DispatchMode,
     #[serde(default)]
@@ -202,13 +239,13 @@ pub struct FlowStepSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepTargets {
-    pub role: String,
+    pub role: RoleId,
     #[serde(default = "default_target_meerkat_selector")]
-    pub meerkat_id: String,
+    pub meerkat_id: MeerkatId,
 }
 
-fn default_target_meerkat_selector() -> String {
-    "*".to_string()
+fn default_target_meerkat_selector() -> MeerkatId {
+    MeerkatId::from("*")
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -448,8 +485,8 @@ fn default_run_ttl_secs() -> u64 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobActivationRequest {
-    pub mob_id: String,
-    pub flow_id: String,
+    pub mob_id: MobId,
+    pub flow_id: FlowId,
     #[serde(default)]
     pub payload: Value,
     #[serde(default)]
@@ -459,16 +496,16 @@ pub struct MobActivationRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct MobActivationResponse {
-    pub run_id: String,
+    pub run_id: RunId,
     pub status: MobRunStatus,
     pub spec_revision: MobSpecRevision,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobRun {
-    pub run_id: String,
-    pub mob_id: String,
-    pub flow_id: String,
+    pub run_id: RunId,
+    pub mob_id: MobId,
+    pub flow_id: FlowId,
     pub spec_revision: MobSpecRevision,
     pub status: MobRunStatus,
     pub created_at: DateTime<Utc>,
@@ -476,9 +513,9 @@ pub struct MobRun {
     pub completed_at: Option<DateTime<Utc>>,
     pub activation_payload: Value,
     #[serde(default)]
-    pub step_statuses: BTreeMap<String, StepRunStatus>,
+    pub step_statuses: BTreeMap<StepId, StepRunStatus>,
     #[serde(default)]
-    pub step_outputs: BTreeMap<String, Value>,
+    pub step_outputs: BTreeMap<StepId, Value>,
     #[serde(default)]
     pub step_ledger: Vec<StepLedgerEntry>,
     #[serde(default)]
@@ -511,8 +548,8 @@ pub enum StepRunStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepLedgerEntry {
     pub timestamp: DateTime<Utc>,
-    pub step_id: String,
-    pub target_meerkat: String,
+    pub step_id: StepId,
+    pub target_meerkat: MeerkatId,
     #[serde(default)]
     pub logical_key: String,
     pub attempt: u32,
@@ -524,8 +561,8 @@ pub struct StepLedgerEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureLedgerEntry {
     pub timestamp: DateTime<Utc>,
-    pub step_id: Option<String>,
-    pub target_meerkat: Option<String>,
+    pub step_id: Option<StepId>,
+    pub target_meerkat: Option<MeerkatId>,
     pub error: String,
 }
 
@@ -534,9 +571,9 @@ pub struct MobRunFilter {
     #[serde(default)]
     pub status: Option<MobRunStatus>,
     #[serde(default)]
-    pub mob_id: Option<String>,
+    pub mob_id: Option<MobId>,
     #[serde(default)]
-    pub flow_id: Option<String>,
+    pub flow_id: Option<FlowId>,
     #[serde(default)]
     pub limit: Option<usize>,
     #[serde(default)]
@@ -560,11 +597,11 @@ pub struct MobEvent {
     pub cursor: u64,
     pub timestamp: DateTime<Utc>,
     pub category: MobEventCategory,
-    pub mob_id: String,
-    pub run_id: Option<String>,
-    pub flow_id: Option<String>,
-    pub step_id: Option<String>,
-    pub meerkat_id: Option<String>,
+    pub mob_id: MobId,
+    pub run_id: Option<RunId>,
+    pub flow_id: Option<FlowId>,
+    pub step_id: Option<StepId>,
+    pub meerkat_id: Option<MeerkatId>,
     pub kind: MobEventKind,
     #[serde(default)]
     pub payload: Value,
@@ -574,11 +611,11 @@ pub struct MobEvent {
 pub struct NewMobEvent {
     pub timestamp: DateTime<Utc>,
     pub category: MobEventCategory,
-    pub mob_id: String,
-    pub run_id: Option<String>,
-    pub flow_id: Option<String>,
-    pub step_id: Option<String>,
-    pub meerkat_id: Option<String>,
+    pub mob_id: MobId,
+    pub run_id: Option<RunId>,
+    pub flow_id: Option<FlowId>,
+    pub step_id: Option<StepId>,
+    pub meerkat_id: Option<MeerkatId>,
     pub kind: MobEventKind,
     #[serde(default)]
     pub payload: Value,
@@ -619,7 +656,7 @@ pub enum MobEventKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobReconcileRequest {
-    pub mob_id: String,
+    pub mob_id: MobId,
     #[serde(default)]
     pub mode: ReconcileMode,
 }
@@ -660,9 +697,9 @@ pub struct PollEventsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeerkatInstance {
-    pub mob_id: String,
-    pub role: String,
-    pub meerkat_id: String,
+    pub mob_id: MobId,
+    pub role: RoleId,
+    pub meerkat_id: MeerkatId,
     pub session_id: String,
     pub comms_name: String,
     pub labels: BTreeMap<String, String>,
@@ -684,14 +721,14 @@ pub struct ConditionContext {
     #[serde(default)]
     pub activation: Value,
     #[serde(default)]
-    pub steps: BTreeMap<String, StepOutput>,
+    pub steps: BTreeMap<StepId, StepOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowContext {
-    pub run_id: String,
-    pub mob_id: String,
-    pub flow_id: String,
+    pub run_id: RunId,
+    pub mob_id: MobId,
+    pub flow_id: FlowId,
     pub spec_revision: MobSpecRevision,
     #[serde(default)]
     pub activation_payload: Value,
@@ -709,9 +746,9 @@ pub enum MeerkatInstanceStatus {
 
 impl MobRun {
     pub fn new(
-        run_id: String,
-        mob_id: String,
-        flow_id: String,
+        run_id: RunId,
+        mob_id: MobId,
+        flow_id: FlowId,
         spec_revision: MobSpecRevision,
         activation_payload: Value,
     ) -> Self {

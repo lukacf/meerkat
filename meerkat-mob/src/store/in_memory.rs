@@ -1,8 +1,8 @@
 use super::{MobEventStore, MobRunStore, MobSpecStore};
 use crate::error::{MobError, MobResult};
 use crate::model::{
-    FailureLedgerEntry, MobEvent, MobRun, MobRunFilter, MobRunStatus, MobSpec, MobSpecRevision,
-    NewMobEvent, StepLedgerEntry,
+    FailureLedgerEntry, MobEvent, MobId, MobRun, MobRunFilter, MobRunStatus, MobSpec,
+    MobSpecRevision, NewMobEvent, RunId, StepId, StepLedgerEntry,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 
 #[derive(Default)]
 pub struct InMemoryMobSpecStore {
-    specs: RwLock<HashMap<String, MobSpec>>,
+    specs: RwLock<HashMap<MobId, MobSpec>>,
 }
 
 #[async_trait]
@@ -29,7 +29,7 @@ impl MobSpecStore for InMemoryMobSpecStore {
             && current != Some(expected)
         {
             return Err(MobError::SpecRevisionConflict {
-                mob_id: spec.mob_id,
+                mob_id: spec.mob_id.to_string(),
                 expected: Some(expected),
                 current,
             });
@@ -40,7 +40,12 @@ impl MobSpecStore for InMemoryMobSpecStore {
     }
 
     async fn get_spec(&self, mob_id: &str) -> MobResult<Option<MobSpec>> {
-        Ok(self.specs.read().await.get(mob_id).cloned())
+        Ok(self
+            .specs
+            .read()
+            .await
+            .get(&MobId::from(mob_id))
+            .cloned())
     }
 
     async fn list_specs(&self) -> MobResult<Vec<MobSpec>> {
@@ -50,14 +55,14 @@ impl MobSpecStore for InMemoryMobSpecStore {
     }
 
     async fn delete_spec(&self, mob_id: &str) -> MobResult<()> {
-        self.specs.write().await.remove(mob_id);
+        self.specs.write().await.remove(&MobId::from(mob_id));
         Ok(())
     }
 }
 
 #[derive(Default)]
 pub struct InMemoryMobRunStore {
-    runs: RwLock<HashMap<String, MobRun>>,
+    runs: RwLock<HashMap<RunId, MobRun>>,
 }
 
 #[async_trait]
@@ -81,8 +86,9 @@ impl MobRunStore for InMemoryMobRunStore {
         next: MobRunStatus,
     ) -> MobResult<bool> {
         let mut runs = self.runs.write().await;
+        let run_key = RunId::from(run_id);
         let run = runs
-            .get_mut(run_id)
+            .get_mut(&run_key)
             .ok_or_else(|| MobError::RunNotFound {
                 run_id: run_id.to_string(),
             })?;
@@ -101,8 +107,9 @@ impl MobRunStore for InMemoryMobRunStore {
 
     async fn append_step_entry(&self, run_id: &str, entry: StepLedgerEntry) -> MobResult<()> {
         let mut runs = self.runs.write().await;
+        let run_key = RunId::from(run_id);
         let run = runs
-            .get_mut(run_id)
+            .get_mut(&run_key)
             .ok_or_else(|| MobError::RunNotFound {
                 run_id: run_id.to_string(),
             })?;
@@ -118,8 +125,9 @@ impl MobRunStore for InMemoryMobRunStore {
         entry: StepLedgerEntry,
     ) -> MobResult<bool> {
         let mut runs = self.runs.write().await;
+        let run_key = RunId::from(run_id);
         let run = runs
-            .get_mut(run_id)
+            .get_mut(&run_key)
             .ok_or_else(|| MobError::RunNotFound {
                 run_id: run_id.to_string(),
             })?;
@@ -141,8 +149,9 @@ impl MobRunStore for InMemoryMobRunStore {
         entry: FailureLedgerEntry,
     ) -> MobResult<()> {
         let mut runs = self.runs.write().await;
+        let run_key = RunId::from(run_id);
         let run = runs
-            .get_mut(run_id)
+            .get_mut(&run_key)
             .ok_or_else(|| MobError::RunNotFound {
                 run_id: run_id.to_string(),
             })?;
@@ -158,18 +167,19 @@ impl MobRunStore for InMemoryMobRunStore {
         output: serde_json::Value,
     ) -> MobResult<()> {
         let mut runs = self.runs.write().await;
+        let run_key = RunId::from(run_id);
         let run = runs
-            .get_mut(run_id)
+            .get_mut(&run_key)
             .ok_or_else(|| MobError::RunNotFound {
                 run_id: run_id.to_string(),
             })?;
-        run.step_outputs.insert(step_id.to_string(), output);
+        run.step_outputs.insert(StepId::from(step_id), output);
         run.updated_at = Utc::now();
         Ok(())
     }
 
     async fn get_run(&self, run_id: &str) -> MobResult<Option<MobRun>> {
-        Ok(self.runs.read().await.get(run_id).cloned())
+        Ok(self.runs.read().await.get(&RunId::from(run_id)).cloned())
     }
 
     async fn list_runs(&self, filter: MobRunFilter) -> MobResult<Vec<MobRun>> {
@@ -289,9 +299,9 @@ mod tests {
 
     fn sample_run(run_id: &str) -> MobRun {
         MobRun::new(
-            run_id.to_string(),
-            "invoice".to_string(),
-            "triage".to_string(),
+            run_id.into(),
+            "invoice".into(),
+            "triage".into(),
             1,
             json!({}),
         )
@@ -440,7 +450,7 @@ mod tests {
                     mob_id: "invoice".into(),
                     run_id: Some("r1".into()),
                     flow_id: Some("triage".into()),
-                    step_id: Some(format!("s{i}")),
+                    step_id: Some(format!("s{i}").into()),
                     meerkat_id: None,
                     kind: MobEventKind::StepCompleted,
                     payload: json!({"i": i}),

@@ -67,7 +67,7 @@ impl MobSpecStore for RedbMobSpecStore {
 
                     if current.as_ref().map(|s| s.revision) != Some(expected) {
                         return Err(MobError::SpecRevisionConflict {
-                            mob_id: spec.mob_id,
+                            mob_id: spec.mob_id.to_string(),
                             expected: Some(expected),
                             current: current.map(|s| s.revision),
                         });
@@ -348,7 +348,7 @@ impl MobRunStore for RedbMobRunStore {
                     .value()
                     .to_vec();
                 let mut run = parse_json::<MobRun>(&current_bytes)?;
-                run.step_outputs.insert(step_id, output);
+                run.step_outputs.insert(step_id.into(), output);
                 run.updated_at = Utc::now();
                 let payload = encode_json(&run)?;
                 table

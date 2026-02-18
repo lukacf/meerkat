@@ -76,43 +76,43 @@ impl MobRuntimeService {
             while let Some(cmd) = rx.recv().await {
                 match cmd {
                     MobCommand::ApplySpec { request, tx } => {
-                        let _ = tx.send(MobService::apply_spec(&*runtime, request).await);
+                        let _ = tx.send(runtime.apply_spec(request).await);
                     }
                     MobCommand::GetSpec { mob_id, tx } => {
-                        let _ = tx.send(MobService::get_spec(&*runtime, &mob_id).await);
+                        let _ = tx.send(runtime.get_spec(&mob_id).await);
                     }
                     MobCommand::ListSpecs { tx } => {
-                        let _ = tx.send(MobService::list_specs(&*runtime).await);
+                        let _ = tx.send(runtime.list_specs().await);
                     }
                     MobCommand::DeleteSpec { mob_id, tx } => {
-                        let _ = tx.send(MobService::delete_spec(&*runtime, &mob_id).await);
+                        let _ = tx.send(runtime.delete_spec(&mob_id).await);
                     }
                     MobCommand::Activate { request, tx } => {
-                        let _ = tx.send(MobService::activate(&*runtime, request).await);
+                        let _ = tx.send(runtime.activate(request).await);
                     }
                     MobCommand::GetRun { run_id, tx } => {
-                        let _ = tx.send(MobService::get_run(&*runtime, &run_id).await);
+                        let _ = tx.send(runtime.get_run(&run_id).await);
                     }
                     MobCommand::ListRuns { filter, tx } => {
-                        let _ = tx.send(MobService::list_runs(&*runtime, filter).await);
+                        let _ = tx.send(runtime.list_runs(filter).await);
                     }
                     MobCommand::CancelRun { run_id, tx } => {
-                        let _ = tx.send(MobService::cancel_run(&*runtime, &run_id).await);
+                        let _ = tx.send(runtime.cancel_run(&run_id).await);
                     }
                     MobCommand::ListMeerkats { mob_id, tx } => {
-                        let _ = tx.send(MobService::list_meerkats(&*runtime, &mob_id).await);
+                        let _ = tx.send(runtime.list_meerkats(&mob_id).await);
                     }
                     MobCommand::Reconcile { request, tx } => {
-                        let _ = tx.send(MobService::reconcile(&*runtime, request).await);
+                        let _ = tx.send(runtime.reconcile(request).await);
                     }
                     MobCommand::PollEvents { cursor, limit, tx } => {
-                        let _ = tx.send(MobService::poll_events(&*runtime, cursor, limit).await);
+                        let _ = tx.send(runtime.poll_events(cursor, limit).await);
                     }
                     MobCommand::Capabilities { tx } => {
-                        let _ = tx.send(MobService::capabilities(&*runtime).await);
+                        let _ = tx.send(runtime.capabilities().await);
                     }
                     MobCommand::EmitEvent { event, tx } => {
-                        let _ = tx.send(MobService::emit_event(&*runtime, event).await);
+                        let _ = tx.send(runtime.emit_event(event).await);
                     }
                 }
             }

@@ -1,7 +1,7 @@
 use crate::error::{MobError, MobResult};
 use crate::model::{
-    CollectionPolicy, DispatchMode, MobSpec, MobSpecBody, MobSpecDocument, MobSpecRevision,
-    SpecUpdateMode,
+    CollectionPolicy, DispatchMode, MobId, MobSpec, MobSpecBody, MobSpecDocument,
+    MobSpecRevision, SpecUpdateMode, StepId,
 };
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
@@ -60,7 +60,7 @@ impl SpecValidator {
             self.validate_spec_body(&mob_id, &mut body, &request.context)
                 .await?;
             let spec = MobSpec {
-                mob_id,
+                mob_id: MobId::from(mob_id),
                 revision: body.revision.unwrap_or(1),
                 roles: body.roles,
                 topology: body.topology,
@@ -231,7 +231,7 @@ impl SpecValidator {
                 ));
             }
 
-            let mut step_ids: IndexMap<String, usize> = IndexMap::new();
+            let mut step_ids: IndexMap<StepId, usize> = IndexMap::new();
             for (index, step) in flow.steps.iter().enumerate() {
                 if step.step_id.trim().is_empty() {
                     return Err(MobError::validation(
@@ -253,7 +253,7 @@ impl SpecValidator {
                     ));
                 }
 
-                if !body.roles.contains_key(&step.targets.role) {
+                if !body.roles.contains_key(step.targets.role.as_ref()) {
                     return Err(MobError::validation(
                         &format!("flows.{flow_id}.steps[{index}].targets.role"),
                         &format!("unknown role '{}'", step.targets.role),
@@ -286,10 +286,9 @@ impl SpecValidator {
                 }
             }
 
-            let step_set: HashSet<&str> = step_ids.keys().map(String::as_str).collect();
             for step in &flow.steps {
                 for dep in &step.depends_on {
-                    if !step_set.contains(dep.as_str()) {
+                    if !step_ids.contains_key(dep) {
                         return Err(MobError::validation(
                             &format!("flows.{flow_id}.steps.{}.depends_on", step.step_id),
                             &format!("depends_on references unknown step '{dep}'"),
@@ -304,7 +303,12 @@ impl SpecValidator {
                 }
             }
 
-            validate_dag(flow_id, flow.steps.iter().map(|s| (&s.step_id, &s.depends_on)))?;
+            validate_dag(
+                flow_id,
+                flow.steps
+                    .iter()
+                    .map(|step| (step.step_id.as_ref(), &step.depends_on)),
+            )?;
             let depth = compute_dag_depth(&flow.steps);
             if depth > body.limits.max_flow_depth {
                 return Err(MobError::validation(
@@ -340,13 +344,13 @@ fn compute_dag_depth(steps: &[crate::model::FlowStepSpec]) -> u32 {
                 let max_parent = step
                     .depends_on
                     .iter()
-                    .map(|dep| depth.get(dep).copied().unwrap_or(1))
+                    .map(|dep| depth.get(dep.as_ref()).copied().unwrap_or(1))
                     .max()
                     .unwrap_or(1);
                 max_parent + 1
             };
-            if depth.get(&step.step_id).copied().unwrap_or(0) != next_depth {
-                depth.insert(step.step_id.clone(), next_depth);
+            if depth.get(step.step_id.as_ref()).copied().unwrap_or(0) != next_depth {
+                depth.insert(step.step_id.to_string(), next_depth);
                 changed = true;
             }
         }
@@ -357,17 +361,20 @@ fn compute_dag_depth(steps: &[crate::model::FlowStepSpec]) -> u32 {
 
 fn validate_dag<'a, I>(flow_id: &str, steps: I) -> MobResult<()>
 where
-    I: IntoIterator<Item = (&'a String, &'a Vec<String>)>,
+    I: IntoIterator<Item = (&'a str, &'a Vec<StepId>)>,
 {
     let mut indegree: HashMap<String, usize> = HashMap::new();
     let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
 
     for (id, deps) in steps {
-        indegree.entry(id.clone()).or_insert(0);
+        indegree.entry(id.to_string()).or_insert(0);
         for dep in deps {
-            adjacency.entry(dep.clone()).or_default().push(id.clone());
-            *indegree.entry(id.clone()).or_insert(0) += 1;
-            indegree.entry(dep.clone()).or_insert(0);
+            adjacency
+                .entry(dep.to_string())
+                .or_default()
+                .push(id.to_string());
+            *indegree.entry(id.to_string()).or_insert(0) += 1;
+            indegree.entry(dep.to_string()).or_insert(0);
         }
     }
 
@@ -722,6 +729,6 @@ role = "coordinator"
         let validator = SpecValidator::new();
         let specs = validator.validate_toml(&apply_request(toml)).await.unwrap();
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].mob_id, "invoice");
+        assert_eq!(specs[0].mob_id, "invoice".into());
     }
 }

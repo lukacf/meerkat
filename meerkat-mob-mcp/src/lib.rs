@@ -1,9 +1,9 @@
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder, SessionService};
 use meerkat_core::{ConfigStore, FileConfigStore, RealmSelection, RuntimeBootstrap};
 use meerkat_mob::{
-    ApplyContext, ApplySpecRequest, MobActivationRequest, MobReconcileRequest, MobRunFilter,
-    MobRuntimeBuilder, MobRuntimeService, MobService, RedbMobEventStore, RedbMobRunStore,
-    RedbMobSpecStore,
+    ApplyContext, ApplySpecRequest, FlowId, MobActivationRequest, MobId, MobReconcileRequest,
+    MobRunFilter, MobRuntimeBuilder, MobRuntimeService, MobService, RedbMobEventStore,
+    RedbMobRunStore, RedbMobSpecStore,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -299,8 +299,8 @@ pub async fn handle_tools_call(
             let response = state
                 .mob
                 .activate(MobActivationRequest {
-                    mob_id: input.mob_id,
-                    flow_id: input.flow_id,
+                    mob_id: input.mob_id.into(),
+                    flow_id: input.flow_id.into(),
                     payload: input.payload.unwrap_or(Value::Null),
                     dry_run: input.dry_run.unwrap_or(false),
                 })
@@ -332,8 +332,8 @@ pub async fn handle_tools_call(
                 .mob
                 .list_runs(MobRunFilter {
                     status,
-                    mob_id: input.mob_id,
-                    flow_id: input.flow_id,
+                    mob_id: input.mob_id.map(MobId::from),
+                    flow_id: input.flow_id.map(FlowId::from),
                     limit: input.limit,
                     offset: input.offset,
                 })
@@ -377,7 +377,7 @@ pub async fn handle_tools_call(
             let result = state
                 .mob
                 .reconcile(MobReconcileRequest {
-                    mob_id: input.mob_id,
+                    mob_id: input.mob_id.into(),
                     mode,
                 })
                 .await
@@ -583,7 +583,7 @@ mod tests {
             request: MobActivationRequest,
         ) -> meerkat_mob::MobResult<meerkat_mob::MobActivationResponse> {
             Ok(meerkat_mob::MobActivationResponse {
-                run_id: format!("run-{}", request.flow_id),
+                run_id: format!("run-{}", request.flow_id).into(),
                 status: MobRunStatus::Pending,
                 spec_revision: 1,
             })
@@ -591,9 +591,9 @@ mod tests {
 
         async fn get_run(&self, run_id: &str) -> meerkat_mob::MobResult<Option<MobRun>> {
             Ok(Some(MobRun::new(
-                run_id.to_string(),
-                "invoice".to_string(),
-                "triage".to_string(),
+                run_id.into(),
+                "invoice".into(),
+                "triage".into(),
                 1,
                 Value::Null,
             )))
@@ -604,9 +604,9 @@ mod tests {
             _filter: MobRunFilter,
         ) -> meerkat_mob::MobResult<Vec<MobRun>> {
             Ok(vec![MobRun::new(
-                "run-1".to_string(),
-                "invoice".to_string(),
-                "triage".to_string(),
+                "run-1".into(),
+                "invoice".into(),
+                "triage".into(),
                 1,
                 Value::Null,
             )])
@@ -645,9 +645,9 @@ mod tests {
                     cursor: 1,
                     timestamp: Utc::now(),
                     category: meerkat_mob::MobEventCategory::Flow,
-                    mob_id: "invoice".to_string(),
-                    run_id: Some("run-1".to_string()),
-                    flow_id: Some("triage".to_string()),
+                    mob_id: "invoice".into(),
+                    run_id: Some("run-1".into()),
+                    flow_id: Some("triage".into()),
                     step_id: None,
                     meerkat_id: None,
                     kind: meerkat_mob::MobEventKind::RunActivated,
@@ -667,7 +667,7 @@ mod tests {
 
     fn sample_spec(mob_id: &str) -> MobSpec {
         MobSpec {
-            mob_id: mob_id.to_string(),
+            mob_id: mob_id.into(),
             revision: 1,
             roles: BTreeMap::new(),
             topology: meerkat_mob::TopologySpec::default(),

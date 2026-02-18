@@ -2,7 +2,8 @@ use meerkat::{AgentFactory, Config, FactoryAgentBuilder, SessionService};
 use meerkat_core::{ConfigStore, FileConfigStore, RealmSelection, RuntimeBootstrap};
 use meerkat_mob::{
     ApplyContext, ApplySpecRequest, MobActivationRequest, MobReconcileRequest, MobRunFilter,
-    MobService, MobRuntimeBuilder, RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore,
+    MobRuntimeBuilder, MobRuntimeService, MobService, RedbMobEventStore, RedbMobRunStore,
+    RedbMobSpecStore,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -133,7 +134,7 @@ impl MobMcpState {
         if let Some(user_root) = bootstrap.context.user_config_root.clone() {
             mob_builder = mob_builder.user_config_root(user_root);
         }
-        let mob_runtime = mob_builder.build()?;
+        let mob_runtime: MobRuntimeService = mob_builder.build_service()?;
 
         Ok(Self {
             mob: Arc::new(mob_runtime),

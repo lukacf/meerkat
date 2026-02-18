@@ -9,6 +9,7 @@ use crate::model::{
     UnavailablePolicy,
 };
 use crate::resolver::{ResolverContext, ResolverRegistry};
+use crate::runtime_service::MobRuntimeService;
 use crate::service::MobService;
 use crate::spec::{ApplySpecRequest, SpecValidator};
 use crate::store::{MobEventStore, MobRunStore, MobSpecStore};
@@ -34,9 +35,11 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 mod conditions;
+mod events;
 mod topology;
 
 use conditions::evaluate_condition;
+use events::MobEventBuilder;
 use topology::{evaluate_topology, role_pair_allowed};
 
 #[derive(Default, Clone)]
@@ -193,6 +196,10 @@ impl MobRuntimeBuilder {
             reset_epochs: Arc::new(RwLock::new(HashMap::new())),
         })
     }
+
+    pub fn build_service(self) -> MobResult<MobRuntimeService> {
+        Ok(MobRuntimeService::new(self.build()?))
+    }
 }
 
 #[async_trait]
@@ -223,38 +230,26 @@ impl MobService for MobRuntime {
             .put_spec(spec.clone(), request.expected_revision)
             .await?;
 
-        self.emit_event(NewMobEvent {
-            timestamp: Utc::now(),
-            category: MobEventCategory::Lifecycle,
-            mob_id: spec.mob_id.clone(),
-            run_id: None,
-            flow_id: None,
-            step_id: None,
-            meerkat_id: None,
-            kind: MobEventKind::SpecApplied,
-            payload: json!({
-                "revision": spec.revision,
-                "update_mode": update_mode,
-            }),
-        })
+        self.emit_event(
+            self.event(&spec.mob_id, MobEventCategory::Lifecycle, MobEventKind::SpecApplied)
+                .payload(json!({
+                    "revision": spec.revision,
+                    "update_mode": update_mode,
+                }))
+                .build(),
+        )
         .await?;
 
         match update_mode {
             SpecUpdateMode::DrainReplace => {}
             SpecUpdateMode::HotReload => {
-                self.emit_event(NewMobEvent {
-                    timestamp: Utc::now(),
-                    category: MobEventCategory::Supervisor,
-                    mob_id: spec.mob_id.clone(),
-                    run_id: None,
-                    flow_id: None,
-                    step_id: None,
-                    meerkat_id: None,
-                    kind: MobEventKind::Warning,
-                    payload: json!({
-                        "warning": "hot_reload requested; v1 behavior is drain_replace",
-                    }),
-                })
+                self.emit_event(
+                    self.event(&spec.mob_id, MobEventCategory::Supervisor, MobEventKind::Warning)
+                        .payload(json!({
+                            "warning": "hot_reload requested; v1 behavior is drain_replace",
+                        }))
+                        .build(),
+                )
                 .await?;
             }
             SpecUpdateMode::ForceReset => {
@@ -275,17 +270,11 @@ impl MobService for MobRuntime {
 
     async fn delete_spec(&self, mob_id: &str) -> MobResult<()> {
         self.spec_store.delete_spec(mob_id).await?;
-        self.emit_event(NewMobEvent {
-            timestamp: Utc::now(),
-            category: MobEventCategory::Lifecycle,
-            mob_id: mob_id.to_string(),
-            run_id: None,
-            flow_id: None,
-            step_id: None,
-            meerkat_id: None,
-            kind: MobEventKind::SpecDeleted,
-            payload: json!({}),
-        })
+        self.emit_event(
+            self.event(mob_id, MobEventCategory::Lifecycle, MobEventKind::SpecDeleted)
+                .payload(json!({}))
+                .build(),
+        )
         .await?;
         Ok(())
     }
@@ -315,17 +304,13 @@ impl MobService for MobRuntime {
         );
         self.run_store.create_run(run).await?;
 
-        self.emit_event(NewMobEvent {
-            timestamp: Utc::now(),
-            category: MobEventCategory::Flow,
-            mob_id: request.mob_id.clone(),
-            run_id: Some(run_id.clone()),
-            flow_id: Some(request.flow_id.clone()),
-            step_id: None,
-            meerkat_id: None,
-            kind: MobEventKind::RunActivated,
-            payload: json!({"dry_run": request.dry_run}),
-        })
+        self.emit_event(
+            self.event(&request.mob_id, MobEventCategory::Flow, MobEventKind::RunActivated)
+                .run_id(run_id.clone())
+                .flow_id(request.flow_id.clone())
+                .payload(json!({"dry_run": request.dry_run}))
+                .build(),
+        )
         .await?;
 
         let run_id_for_task = run_id.clone();
@@ -558,9 +543,14 @@ impl MobService for MobRuntime {
         let _ = self.event_store.append_event(event).await?;
         Ok(())
     }
+
 }
 
 impl MobRuntime {
+    fn event(&self, mob_id: &str, category: MobEventCategory, kind: MobEventKind) -> MobEventBuilder {
+        MobEventBuilder::new(mob_id.to_string(), category, kind)
+    }
+
     async fn execute_run(
         &self,
         run_id: String,
@@ -1076,17 +1066,14 @@ impl MobRuntime {
             };
             let condition_true = evaluate_condition(condition, &condition_ctx);
             if !condition_true {
-                self.emit_event(NewMobEvent {
-                    timestamp: Utc::now(),
-                    category: MobEventCategory::Flow,
-                    mob_id: spec.mob_id.clone(),
-                    run_id: Some(run_id.to_string()),
-                    flow_id: Some(flow_id.to_string()),
-                    step_id: Some(step.step_id.clone()),
-                    meerkat_id: None,
-                    kind: MobEventKind::StepPartial,
-                    payload: json!({"skipped": true}),
-                })
+                self.emit_event(
+                    self.event(&spec.mob_id, MobEventCategory::Flow, MobEventKind::StepPartial)
+                        .run_id(run_id.to_string())
+                        .flow_id(flow_id.to_string())
+                        .step_id(step.step_id.clone())
+                        .payload(json!({"skipped": true}))
+                        .build(),
+                )
                 .await?;
 
                 return Ok(StepExecutionResult {
@@ -1508,20 +1495,18 @@ impl MobRuntime {
                             }),
                         );
                     }
-                    self.emit_event(NewMobEvent {
-                        timestamp: Utc::now(),
-                        category: MobEventCategory::Dispatch,
-                        mob_id: spec.mob_id.clone(),
-                        run_id: Some(run_id.to_string()),
-                        flow_id: Some(flow_id.to_string()),
-                        step_id: Some(step.step_id.clone()),
-                        meerkat_id: Some(target.meerkat_id.clone()),
-                        kind: MobEventKind::StepCompleted,
-                        payload: json!({
-                            "attempt": attempt,
-                            "response": value.clone(),
-                        }),
-                    })
+                    self.emit_event(
+                        self.event(&spec.mob_id, MobEventCategory::Dispatch, MobEventKind::StepCompleted)
+                            .run_id(run_id.to_string())
+                            .flow_id(flow_id.to_string())
+                            .step_id(step.step_id.clone())
+                            .meerkat_id(target.meerkat_id.clone())
+                            .payload(json!({
+                                "attempt": attempt,
+                                "response": value.clone(),
+                            }))
+                            .build(),
+                    )
                     .await?;
                     let result_payload = value.get("result").cloned().unwrap_or(Value::Null);
                     let interaction_id = value.get("interaction_id").cloned();

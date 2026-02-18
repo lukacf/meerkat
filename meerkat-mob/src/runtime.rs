@@ -2446,7 +2446,7 @@ mod tests {
     async fn builder_creates_runtime() {
         let runtime = MobRuntimeBuilder::new(
             "realm-a",
-            Arc::new(MockSessionService::default()),
+            Arc::new(MockSessionService),
             AgentFactory::new("/tmp"),
             Arc::new(InMemoryMobSpecStore::default()),
             Arc::new(InMemoryMobRunStore::default()),

@@ -5,6 +5,46 @@ use std::collections::BTreeMap;
 
 pub type MobSpecRevision = u64;
 
+macro_rules! id_newtype {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(pub String);
+
+        impl $name {
+            #[must_use]
+            pub fn into_inner(self) -> String {
+                self.0
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_string())
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}
+
+id_newtype!(MobId);
+id_newtype!(RunId);
+id_newtype!(FlowId);
+id_newtype!(StepId);
+id_newtype!(MeerkatId);
+id_newtype!(RoleId);
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecUpdateMode {
@@ -454,9 +494,10 @@ pub enum MobRunStatus {
     Canceled,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StepRunStatus {
+    #[default]
     Pending,
     Running,
     Completed,
@@ -516,6 +557,20 @@ impl Default for MobRunFilter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobEvent {
     pub cursor: u64,
+    pub timestamp: DateTime<Utc>,
+    pub category: MobEventCategory,
+    pub mob_id: String,
+    pub run_id: Option<String>,
+    pub flow_id: Option<String>,
+    pub step_id: Option<String>,
+    pub meerkat_id: Option<String>,
+    pub kind: MobEventKind,
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewMobEvent {
     pub timestamp: DateTime<Utc>,
     pub category: MobEventCategory,
     pub mob_id: String,
@@ -612,6 +667,33 @@ pub struct MeerkatInstance {
     pub status: MeerkatInstanceStatus,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StepOutput {
+    pub status: StepRunStatus,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub output: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConditionContext {
+    #[serde(default)]
+    pub activation: Value,
+    #[serde(default)]
+    pub steps: BTreeMap<String, StepOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowContext {
+    pub run_id: String,
+    pub mob_id: String,
+    pub flow_id: String,
+    pub spec_revision: MobSpecRevision,
+    #[serde(default)]
+    pub activation_payload: Value,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MeerkatInstanceStatus {
@@ -646,5 +728,29 @@ impl MobRun {
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_newtypes_serde_roundtrip() {
+        let ids = [
+            serde_json::to_string(&MobId::from("mob-1")).unwrap(),
+            serde_json::to_string(&RunId::from("run-1")).unwrap(),
+            serde_json::to_string(&FlowId::from("flow-1")).unwrap(),
+            serde_json::to_string(&StepId::from("step-1")).unwrap(),
+            serde_json::to_string(&MeerkatId::from("meerkat-1")).unwrap(),
+            serde_json::to_string(&RoleId::from("role-1")).unwrap(),
+        ];
+        assert_eq!(ids[0], "\"mob-1\"");
+        assert_eq!(ids[1], "\"run-1\"");
+        assert_eq!(ids[2], "\"flow-1\"");
+        assert_eq!(ids[3], "\"step-1\"");
+        assert_eq!(ids[4], "\"meerkat-1\"");
+        assert_eq!(ids[5], "\"role-1\"");
     }
 }

@@ -2,7 +2,7 @@ use super::{MobEventStore, MobRunStore, MobSpecStore};
 use crate::error::{MobError, MobResult};
 use crate::model::{
     FailureLedgerEntry, MobEvent, MobRun, MobRunFilter, MobRunStatus, MobSpec, MobSpecRevision,
-    StepLedgerEntry,
+    NewMobEvent, StepLedgerEntry,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -450,7 +450,7 @@ impl RedbMobEventStore {
 
 #[async_trait]
 impl MobEventStore for RedbMobEventStore {
-    async fn append_event(&self, mut event: MobEvent) -> MobResult<u64> {
+    async fn append_event(&self, event: NewMobEvent) -> MobResult<u64> {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
             let write = db.begin_write().map_err(map_db_err)?;
@@ -463,8 +463,18 @@ impl MobEventStore for RedbMobEventStore {
                     .map_err(map_db_err)?
                     .map(|v| v.value())
                     .unwrap_or(1);
-                event.cursor = cursor;
-                let payload = encode_json(&event)?;
+                let payload = encode_json(&MobEvent {
+                    cursor,
+                    timestamp: event.timestamp,
+                    category: event.category,
+                    mob_id: event.mob_id,
+                    run_id: event.run_id,
+                    flow_id: event.flow_id,
+                    step_id: event.step_id,
+                    meerkat_id: event.meerkat_id,
+                    kind: event.kind,
+                    payload: event.payload,
+                })?;
                 events.insert(cursor, payload.as_slice()).map_err(map_db_err)?;
                 meta.insert(META_CURSOR_KEY, cursor + 1).map_err(map_db_err)?;
             }
@@ -553,7 +563,7 @@ impl MobEventStore for RedbMobEventStore {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::model::{MobEventCategory, MobEventKind, RetentionSpec, TopologySpec};
+    use crate::model::{MobEventCategory, MobEventKind, NewMobEvent, RetentionSpec, TopologySpec};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -620,8 +630,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let c1 = store
-                .append_event(MobEvent {
-                    cursor: 0,
+                .append_event(NewMobEvent {
                     timestamp: Utc::now(),
                     category: MobEventCategory::Flow,
                     mob_id: "invoice".into(),
@@ -635,8 +644,7 @@ mod tests {
                 .await
                 .unwrap();
             let c2 = store
-                .append_event(MobEvent {
-                    cursor: 0,
+                .append_event(NewMobEvent {
                     timestamp: Utc::now(),
                     category: MobEventCategory::Flow,
                     mob_id: "invoice".into(),

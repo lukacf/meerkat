@@ -7,7 +7,7 @@ pub use redb::{RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore};
 use crate::error::MobResult;
 use crate::model::{
     FailureLedgerEntry, MobEvent, MobRun, MobRunFilter, MobRunStatus, MobSpec, MobSpecRevision,
-    StepLedgerEntry,
+    NewMobEvent, StepLedgerEntry,
 };
 use async_trait::async_trait;
 
@@ -68,7 +68,7 @@ pub trait MobRunStore: Send + Sync {
 
 #[async_trait]
 pub trait MobEventStore: Send + Sync {
-    async fn append_event(&self, event: MobEvent) -> MobResult<u64>;
+    async fn append_event(&self, event: NewMobEvent) -> MobResult<u64>;
 
     async fn poll_events(&self, cursor: Option<u64>, limit: Option<usize>)
         -> MobResult<(u64, Vec<MobEvent>)>;

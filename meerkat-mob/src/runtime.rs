@@ -3,9 +3,9 @@ use crate::model::{
     CollectionPolicy, ConditionExpr, FailureLedgerEntry, FlowSpec, FlowStepSpec, MeerkatIdentity,
     MeerkatInstance, MeerkatInstanceStatus, MobActivationRequest, MobActivationResponse, MobEvent,
     MobEventCategory, MobEventKind, MobReconcileRequest, MobReconcileResult, MobRun,
-    MobRunFilter, MobRunStatus, MobSpec, PolicyMode, PollEventsResponse, RoleSpec, SchemaPolicy,
-    SpecUpdateMode, StepLedgerEntry, StepRunStatus, TimeoutPolicy, TopologyDomainSpec,
-    UnavailablePolicy,
+    MobRunFilter, MobRunStatus, MobSpec, NewMobEvent, PolicyMode, PollEventsResponse, RoleSpec,
+    SchemaPolicy, SpecUpdateMode, StepLedgerEntry, StepRunStatus, TimeoutPolicy,
+    TopologyDomainSpec, UnavailablePolicy,
 };
 use crate::resolver::{ResolverContext, ResolverRegistry};
 use crate::service::MobService;
@@ -534,7 +534,20 @@ impl MobService for MobRuntime {
     }
 
     async fn emit_event(&self, event: MobEvent) -> MobResult<()> {
-        let _ = self.event_store.append_event(event).await?;
+        let _ = self
+            .event_store
+            .append_event(NewMobEvent {
+                timestamp: event.timestamp,
+                category: event.category,
+                mob_id: event.mob_id,
+                run_id: event.run_id,
+                flow_id: event.flow_id,
+                step_id: event.step_id,
+                meerkat_id: event.meerkat_id,
+                kind: event.kind,
+                payload: event.payload,
+            })
+            .await?;
         Ok(())
     }
 }

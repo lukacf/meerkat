@@ -2,7 +2,7 @@ use super::{MobEventStore, MobRunStore, MobSpecStore};
 use crate::error::{MobError, MobResult};
 use crate::model::{
     FailureLedgerEntry, MobEvent, MobRun, MobRunFilter, MobRunStatus, MobSpec, MobSpecRevision,
-    StepLedgerEntry,
+    NewMobEvent, StepLedgerEntry,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -209,10 +209,20 @@ pub struct InMemoryMobEventStore {
 
 #[async_trait]
 impl MobEventStore for InMemoryMobEventStore {
-    async fn append_event(&self, mut event: MobEvent) -> MobResult<u64> {
+    async fn append_event(&self, event: NewMobEvent) -> MobResult<u64> {
         let cursor = self.cursor.fetch_add(1, Ordering::SeqCst) + 1;
-        event.cursor = cursor;
-        self.events.write().await.push(event);
+        self.events.write().await.push(MobEvent {
+            cursor,
+            timestamp: event.timestamp,
+            category: event.category,
+            mob_id: event.mob_id,
+            run_id: event.run_id,
+            flow_id: event.flow_id,
+            step_id: event.step_id,
+            meerkat_id: event.meerkat_id,
+            kind: event.kind,
+            payload: event.payload,
+        });
         Ok(cursor)
     }
 
@@ -272,7 +282,8 @@ impl MobEventStore for InMemoryMobEventStore {
 mod tests {
     use super::*;
     use crate::model::{
-        MobEventCategory, MobEventKind, MobRun, MobRunStatus, RetentionSpec, StepRunStatus,
+        MobEventCategory, MobEventKind, MobRun, MobRunStatus, NewMobEvent, RetentionSpec,
+        StepRunStatus,
     };
     use serde_json::json;
 
@@ -423,8 +434,7 @@ mod tests {
 
         for i in 0..3 {
             store
-                .append_event(MobEvent {
-                    cursor: 0,
+                .append_event(NewMobEvent {
                     timestamp: Utc::now(),
                     category: MobEventCategory::Flow,
                     mob_id: "invoice".into(),

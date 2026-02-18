@@ -201,6 +201,16 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Remove a trusted peer for future peer sends.
+    ///
+    /// Runtimes that manage trust dynamically should remove peers by peer-id and
+    /// return `SendError::Unsupported` if not available.
+    async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+        Err(SendError::Unsupported(
+            "remove_trusted_peer not supported for this CommsRuntime".to_string(),
+        ))
+    }
+
     /// Dispatch a canonical comms command.
     async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
         Err(SendError::Unsupported(
@@ -376,6 +386,12 @@ mod tests {
             address: "inproc://peer-a".to_string(),
         };
         let result = <NoopCommsRuntime as CommsRuntime>::add_trusted_peer(&runtime, peer).await;
+        assert!(matches!(result, Err(SendError::Unsupported(_))));
+        let result = <NoopCommsRuntime as CommsRuntime>::remove_trusted_peer(
+            &runtime,
+            "ed25519:test",
+        )
+        .await;
         assert!(matches!(result, Err(SendError::Unsupported(_))));
     }
 }

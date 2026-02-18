@@ -1,0 +1,27 @@
+[package]
+name = "meerkat-mob-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89.0"
+description = "MCP server for meerkat-mob"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+meerkat-mob = { path = "../meerkat-mob", version = "0.1.0" }
+meerkat-core = { path = "../meerkat-core", version = "0.3.4" }
+meerkat-memory = { path = "../meerkat-memory", version = "0.3.4" }
+meerkat-session = { path = "../meerkat-session", version = "0.3.4" }
+meerkat-store = { path = "../meerkat-store", version = "0.3.4" }
+
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "meerkat_mob_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rkat-mob-mcp"
+path = "src/main.rs"

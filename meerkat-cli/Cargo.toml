@@ -43,6 +43,8 @@ meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
+meerkat-mob = { path = "../meerkat-mob", version = "0.1.0" }
+meerkat-mob-mcp = { path = "../meerkat-mob-mcp", version = "0.1.0" }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 serde = { workspace = true }

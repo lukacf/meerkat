@@ -201,6 +201,12 @@ impl CoreCommsRuntime for CommsRuntime {
         Ok(())
     }
 
+    async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
+        let public_key = PubKey::from_peer_id(peer_id)
+            .map_err(|err| SendError::Validation(err.to_string()))?;
+        Ok(self.router.remove_trusted_peer(&public_key).await)
+    }
+
     fn dismiss_received(&self) -> bool {
         self.dismiss_flag.swap(false, Ordering::SeqCst)
     }
@@ -1944,6 +1950,33 @@ mod tests {
 
         let result = CoreCommsRuntime::add_trusted_peer(&sender, invalid_peer_spec).await;
         assert!(matches!(result, Err(SendError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn test_remove_trusted_peer_updates_trust_set() {
+        let sender_name = "trust-remove-sender";
+        let receiver_name = "trust-remove-receiver";
+        let sender = CommsRuntime::inproc_only(sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(receiver_name).unwrap();
+
+        let peer_id = receiver.public_key().to_peer_id();
+        let peer_spec = meerkat_core::comms::TrustedPeerSpec::new(
+            receiver_name,
+            &peer_id,
+            format!("inproc://{receiver_name}"),
+        )
+        .expect("peer spec");
+        CoreCommsRuntime::add_trusted_peer(&sender, peer_spec)
+            .await
+            .expect("add trusted");
+
+        let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_id)
+            .await
+            .expect("remove trusted");
+        assert!(removed);
+
+        let peers = CoreCommsRuntime::peers(&sender).await;
+        assert!(!peers.iter().any(|entry| entry.peer_id == peer_id));
     }
 
     #[test]

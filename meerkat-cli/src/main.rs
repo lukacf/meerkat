@@ -33,6 +33,7 @@ use meerkat_store::{RealmBackend, RealmOrigin, SessionFilter};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Exit codes as per DESIGN.md §12
@@ -339,6 +340,12 @@ enum Commands {
         command: McpCommands,
     },
 
+    /// Mob orchestration management
+    Mob {
+        #[command(subcommand)]
+        command: MobCommands,
+    },
+
     /// Config management
     Config {
         #[command(subcommand)]
@@ -552,6 +559,55 @@ enum McpCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum MobCommands {
+    /// List available built-in mob prefabs
+    Prefabs,
+    /// Create a mob from prefab or definition file
+    Create {
+        /// Mob ID
+        mob_id: String,
+        /// Prefab name (e.g. coding-swarm)
+        #[arg(long)]
+        prefab: Option<String>,
+        /// Path to mob definition TOML file
+        #[arg(long)]
+        definition: Option<PathBuf>,
+    },
+    /// List active mobs
+    List,
+    /// Show mob status
+    Status { mob_id: String },
+    /// Spawn a meerkat
+    Spawn {
+        mob_id: String,
+        profile: String,
+        key: String,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    /// Retire a meerkat
+    Retire { mob_id: String, meerkat_id: String },
+    /// Wire peers
+    Wire { mob_id: String, a: String, b: String },
+    /// Unwire peers
+    Unwire { mob_id: String, a: String, b: String },
+    /// Send an external turn to a meerkat
+    Turn {
+        mob_id: String,
+        meerkat_id: String,
+        message: String,
+    },
+    /// Stop a mob
+    Stop { mob_id: String },
+    /// Resume a mob
+    Resume { mob_id: String },
+    /// Complete a mob
+    Complete { mob_id: String },
+    /// Destroy a mob
+    Destroy { mob_id: String },
+}
+
 /// CLI-side scope enum (maps to McpScope)
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliMcpScope {
@@ -723,6 +779,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         },
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
         Commands::Mcp { command } => handle_mcp_command(command).await,
+        Commands::Mob { command } => handle_mob_command(command, &cli_scope).await,
         Commands::Config { command } => match command {
             ConfigCommands::Get { format } => handle_config_get(format, &cli_scope).await,
             ConfigCommands::Set { file, json, toml } => {
@@ -2339,6 +2396,115 @@ async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
     }
 }
 
+fn mob_state() -> &'static meerkat_mob_mcp::MobMcpState {
+    static STATE: OnceLock<meerkat_mob_mcp::MobMcpState> = OnceLock::new();
+    STATE.get_or_init(|| {
+        let root = std::env::temp_dir().join("rkat-mob-state");
+        meerkat_mob_mcp::MobMcpState::new(root)
+    })
+}
+
+async fn call_mob_tool(method: &str, params: Option<serde_json::Value>) -> anyhow::Result<serde_json::Value> {
+    let result = meerkat_mob_mcp::handle_tool_call(mob_state(), method, params).await;
+    if let Some(error) = result.get("error") {
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown mob error");
+        return Err(anyhow::anyhow!(message.to_string()));
+    }
+    Ok(result)
+}
+
+async fn handle_mob_command(command: MobCommands, _scope: &RuntimeScope) -> anyhow::Result<()> {
+    let result = match command {
+        MobCommands::Prefabs => call_mob_tool("mob_prefabs", None).await?,
+        MobCommands::Create {
+            mob_id,
+            prefab,
+            definition,
+        } => {
+            if prefab.is_none() && definition.is_none() {
+                return Err(anyhow::anyhow!(
+                    "mob create requires --prefab or --definition"
+                ));
+            }
+            let mut params = serde_json::Map::new();
+            params.insert("mob_id".to_string(), serde_json::Value::String(mob_id));
+            if let Some(prefab) = prefab {
+                params.insert("prefab".to_string(), serde_json::Value::String(prefab));
+            }
+            if let Some(definition) = definition {
+                params.insert(
+                    "definition_file".to_string(),
+                    serde_json::Value::String(definition.display().to_string()),
+                );
+            }
+            call_mob_tool("mob_create", Some(serde_json::Value::Object(params))).await?
+        }
+        MobCommands::List => call_mob_tool("mob_list", None).await?,
+        MobCommands::Status { mob_id } => {
+            call_mob_tool("mob_status", Some(serde_json::json!({ "mob_id": mob_id }))).await?
+        }
+        MobCommands::Spawn {
+            mob_id,
+            profile,
+            key,
+            message,
+        } => {
+            call_mob_tool(
+                "mob_spawn",
+                Some(serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": profile,
+                    "key": key,
+                    "message": message
+                })),
+            )
+            .await?
+        }
+        MobCommands::Retire { mob_id, meerkat_id } => {
+            call_mob_tool(
+                "mob_retire",
+                Some(serde_json::json!({ "mob_id": mob_id, "meerkat_id": meerkat_id, "message": "" })),
+            )
+            .await?
+        }
+        MobCommands::Wire { mob_id, a, b } => {
+            call_mob_tool("mob_wire", Some(serde_json::json!({ "mob_id": mob_id, "a": a, "b": b }))).await?
+        }
+        MobCommands::Unwire { mob_id, a, b } => {
+            call_mob_tool("mob_unwire", Some(serde_json::json!({ "mob_id": mob_id, "a": a, "b": b }))).await?
+        }
+        MobCommands::Turn {
+            mob_id,
+            meerkat_id,
+            message,
+        } => {
+            call_mob_tool(
+                "mob_turn",
+                Some(serde_json::json!({ "mob_id": mob_id, "meerkat_id": meerkat_id, "message": message })),
+            )
+            .await?
+        }
+        MobCommands::Stop { mob_id } => {
+            call_mob_tool("mob_stop", Some(serde_json::json!({ "mob_id": mob_id }))).await?
+        }
+        MobCommands::Resume { mob_id } => {
+            call_mob_tool("mob_resume", Some(serde_json::json!({ "mob_id": mob_id }))).await?
+        }
+        MobCommands::Complete { mob_id } => {
+            call_mob_tool("mob_complete", Some(serde_json::json!({ "mob_id": mob_id }))).await?
+        }
+        MobCommands::Destroy { mob_id } => {
+            call_mob_tool("mob_destroy", Some(serde_json::json!({ "mob_id": mob_id }))).await?
+        }
+    };
+
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
 /// LLM Provider selection
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default)]
 pub enum Provider {
@@ -3024,5 +3190,36 @@ mod tests {
         assert_eq!(matches[1].state_root, state_root);
         assert_eq!(matches[0].session_id, sid);
         assert_eq!(matches[1].session_id, sid);
+    }
+
+    #[test]
+    fn test_cli_mob_prefabs_subcommand_parses() {
+        let cli = Cli::parse_from(["rkat", "mob", "prefabs"]);
+        match cli.command {
+            Commands::Mob {
+                command: MobCommands::Prefabs,
+            } => {}
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_mob_create_prefab_flag_parses() {
+        let cli = Cli::parse_from(["rkat", "mob", "create", "mob-a", "--prefab", "coding-swarm"]);
+        match cli.command {
+            Commands::Mob {
+                command:
+                    MobCommands::Create {
+                        mob_id,
+                        prefab,
+                        definition,
+                    },
+            } => {
+                assert_eq!(mob_id, "mob-a");
+                assert_eq!(prefab.as_deref(), Some("coding-swarm"));
+                assert!(definition.is_none());
+            }
+            _ => panic!("unexpected command"),
+        }
     }
 }

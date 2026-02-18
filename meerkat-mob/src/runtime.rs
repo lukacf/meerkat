@@ -2,7 +2,7 @@ use crate::error::{MobError, MobResult};
 use crate::model::{
     CollectionPolicy, ConditionContext, FailureLedgerEntry, FlowContext, FlowSpec, FlowStepSpec,
     MeerkatIdentity, MeerkatInstance, MeerkatInstanceStatus, MobActivationRequest,
-    MobActivationResponse, MobEvent, MobEventCategory, MobEventKind, MobReconcileRequest,
+    MobActivationResponse, MobEventCategory, MobEventKind, MobReconcileRequest,
     MobReconcileResult, MobRun,
     MobRunFilter, MobRunStatus, MobSpec, NewMobEvent, PolicyMode, PollEventsResponse, RoleSpec,
     SchemaPolicy, SpecUpdateMode, StepLedgerEntry, StepOutput, StepRunStatus, TimeoutPolicy,
@@ -221,8 +221,7 @@ impl MobService for MobRuntime {
             .put_spec(spec.clone(), request.expected_revision)
             .await?;
 
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Lifecycle,
             mob_id: spec.mob_id.clone(),
@@ -241,8 +240,7 @@ impl MobService for MobRuntime {
         match update_mode {
             SpecUpdateMode::DrainReplace => {}
             SpecUpdateMode::HotReload => {
-                self.emit_event(MobEvent {
-                    cursor: 0,
+                self.emit_event(NewMobEvent {
                     timestamp: Utc::now(),
                     category: MobEventCategory::Supervisor,
                     mob_id: spec.mob_id.clone(),
@@ -275,8 +273,7 @@ impl MobService for MobRuntime {
 
     async fn delete_spec(&self, mob_id: &str) -> MobResult<()> {
         self.spec_store.delete_spec(mob_id).await?;
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Lifecycle,
             mob_id: mob_id.to_string(),
@@ -316,8 +313,7 @@ impl MobService for MobRuntime {
         );
         self.run_store.create_run(run).await?;
 
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Flow,
             mob_id: request.mob_id.clone(),
@@ -397,8 +393,7 @@ impl MobService for MobRuntime {
             return Ok(());
         }
 
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Flow,
             mob_id: run.mob_id,
@@ -513,8 +508,7 @@ impl MobService for MobRuntime {
             }
         }
 
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Lifecycle,
             mob_id: request.mob_id,
@@ -558,21 +552,8 @@ impl MobService for MobRuntime {
         }))
     }
 
-    async fn emit_event(&self, event: MobEvent) -> MobResult<()> {
-        let _ = self
-            .event_store
-            .append_event(NewMobEvent {
-                timestamp: event.timestamp,
-                category: event.category,
-                mob_id: event.mob_id,
-                run_id: event.run_id,
-                flow_id: event.flow_id,
-                step_id: event.step_id,
-                meerkat_id: event.meerkat_id,
-                kind: event.kind,
-                payload: event.payload,
-            })
-            .await?;
+    async fn emit_event(&self, event: NewMobEvent) -> MobResult<()> {
+        let _ = self.event_store.append_event(event).await?;
         Ok(())
     }
 }
@@ -603,8 +584,7 @@ impl MobRuntime {
                 .run_store
                 .cas_run_status(&run_id, MobRunStatus::Running, MobRunStatus::Completed)
                 .await?;
-            self.emit_event(MobEvent {
-                cursor: 0,
+            self.emit_event(NewMobEvent {
                 timestamp: Utc::now(),
                 category: MobEventCategory::Flow,
                 mob_id: spec.mob_id.clone(),
@@ -656,8 +636,7 @@ impl MobRuntime {
                     .cas_run_status(&run_id, MobRunStatus::Running, target_status)
                     .await?;
 
-                self.emit_event(MobEvent {
-                    cursor: 0,
+                self.emit_event(NewMobEvent {
                     timestamp: Utc::now(),
                     category: MobEventCategory::Flow,
                     mob_id: spec.mob_id.clone(),
@@ -712,8 +691,7 @@ impl MobRuntime {
                     )
                     .await?;
 
-                self.emit_event(MobEvent {
-                    cursor: 0,
+                self.emit_event(NewMobEvent {
                     timestamp: Utc::now(),
                     category: MobEventCategory::Flow,
                     mob_id: spec.mob_id.clone(),
@@ -748,8 +726,7 @@ impl MobRuntime {
         reason: &str,
         details: Value,
     ) -> MobResult<()> {
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Supervisor,
             mob_id: spec.mob_id.clone(),
@@ -854,8 +831,7 @@ impl MobRuntime {
     async fn force_reset_mob(&self, mob_id: &str) -> MobResult<()> {
         let epoch = self.bump_reset_epoch(mob_id).await;
 
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Supervisor,
             mob_id: mob_id.to_string(),
@@ -868,8 +844,7 @@ impl MobRuntime {
         })
         .await?;
 
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Supervisor,
             mob_id: mob_id.to_string(),
@@ -896,8 +871,7 @@ impl MobRuntime {
             }
         }
 
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Supervisor,
             mob_id: mob_id.to_string(),
@@ -928,8 +902,7 @@ impl MobRuntime {
             })
             .await?;
 
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Supervisor,
             mob_id: mob_id.to_string(),
@@ -1099,8 +1072,7 @@ impl MobRuntime {
             };
             let condition_true = evaluate_condition(condition, &condition_ctx);
             if !condition_true {
-                self.emit_event(MobEvent {
-                    cursor: 0,
+                self.emit_event(NewMobEvent {
                     timestamp: Utc::now(),
                     category: MobEventCategory::Flow,
                     mob_id: spec.mob_id.clone(),
@@ -1170,8 +1142,7 @@ impl MobRuntime {
                     "intent": intent,
                     "target": target.comms_name,
                 });
-                self.emit_event(MobEvent {
-                    cursor: 0,
+                self.emit_event(NewMobEvent {
                     timestamp: Utc::now(),
                     category: MobEventCategory::Topology,
                     mob_id: spec.mob_id.clone(),
@@ -1330,8 +1301,7 @@ impl MobRuntime {
                     }
 
                     if !mismatches.is_empty() {
-                        self.emit_event(MobEvent {
-                            cursor: 0,
+                        self.emit_event(NewMobEvent {
                             timestamp: Utc::now(),
                             category: MobEventCategory::Supervisor,
                             mob_id: spec.mob_id.clone(),
@@ -1405,8 +1375,7 @@ impl MobRuntime {
         for attempt in 1..=max_attempts {
             self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
                 .await?;
-            self.emit_event(MobEvent {
-                cursor: 0,
+            self.emit_event(NewMobEvent {
                 timestamp: Utc::now(),
                 category: MobEventCategory::Dispatch,
                 mob_id: spec.mob_id.clone(),
@@ -1533,8 +1502,7 @@ impl MobRuntime {
                             }),
                         );
                     }
-                    self.emit_event(MobEvent {
-                        cursor: 0,
+                    self.emit_event(NewMobEvent {
                         timestamp: Utc::now(),
                         category: MobEventCategory::Dispatch,
                         mob_id: spec.mob_id.clone(),
@@ -1584,8 +1552,7 @@ impl MobRuntime {
                         )
                         .await?;
 
-                    self.emit_event(MobEvent {
-                        cursor: 0,
+                    self.emit_event(NewMobEvent {
                         timestamp: Utc::now(),
                         category: MobEventCategory::Dispatch,
                         mob_id: spec.mob_id.clone(),
@@ -1792,8 +1759,7 @@ impl MobRuntime {
         }
         self.refresh_peer_trust(spec).await?;
 
-        self.emit_event(MobEvent {
-            cursor: 0,
+        self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Lifecycle,
             mob_id: spec.mob_id.clone(),
@@ -1891,8 +1857,7 @@ impl MobRuntime {
                 if matches!(spec.topology.ad_hoc.mode, PolicyMode::Strict)
                     && !role_pair_allowed(&spec.topology.ad_hoc, &source.role, &target.role)
                 {
-                    self.emit_event(MobEvent {
-                        cursor: 0,
+                    self.emit_event(NewMobEvent {
                         timestamp: Utc::now(),
                         category: MobEventCategory::Topology,
                         mob_id: spec.mob_id.clone(),
@@ -1954,8 +1919,7 @@ impl MobRuntime {
                 self.refresh_peer_trust(&spec).await?;
             }
 
-            self.emit_event(MobEvent {
-                cursor: 0,
+            self.emit_event(NewMobEvent {
                 timestamp: Utc::now(),
                 category: MobEventCategory::Lifecycle,
                 mob_id: mob_id.to_string(),
@@ -2142,8 +2106,7 @@ impl MobRuntime {
                             if matches!(unavailable, UnavailablePolicy::FailActivation) {
                                 return Err(err);
                             }
-                            self.emit_event(MobEvent {
-                                cursor: 0,
+                            self.emit_event(NewMobEvent {
                                 timestamp: Utc::now(),
                                 category: MobEventCategory::Supervisor,
                                 mob_id: spec.mob_id.clone(),
@@ -2169,8 +2132,7 @@ impl MobRuntime {
                                 "missing rust tool bundle '{bundle_id}'"
                             )));
                         }
-                        self.emit_event(MobEvent {
-                            cursor: 0,
+                        self.emit_event(NewMobEvent {
                             timestamp: Utc::now(),
                             category: MobEventCategory::Supervisor,
                             mob_id: spec.mob_id.clone(),

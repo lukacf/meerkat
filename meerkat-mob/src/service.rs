@@ -1,7 +1,7 @@
 use crate::error::MobResult;
 use crate::model::{
-    MeerkatInstance, MobActivationRequest, MobActivationResponse, MobEvent, MobReconcileRequest,
-    MobReconcileResult, MobRun, MobRunFilter, MobSpec, PollEventsResponse,
+    MeerkatInstance, MobActivationRequest, MobActivationResponse, MobReconcileRequest,
+    MobReconcileResult, MobRun, MobRunFilter, MobSpec, NewMobEvent, PollEventsResponse,
 };
 use crate::spec::ApplySpecRequest;
 use async_trait::async_trait;
@@ -26,5 +26,5 @@ pub trait MobService: Send + Sync {
 
     async fn capabilities(&self) -> MobResult<serde_json::Value>;
 
-    async fn emit_event(&self, event: MobEvent) -> MobResult<()>;
+    async fn emit_event(&self, event: NewMobEvent) -> MobResult<()>;
 }

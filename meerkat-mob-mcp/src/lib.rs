@@ -553,7 +553,7 @@ mod tests {
     use chrono::Utc;
     use meerkat_mob::{
         MeerkatInstance, MobEvent, MobReconcileResult, MobRun, MobRunStatus, MobSpec,
-        PollEventsResponse, ReconcileMode,
+        NewMobEvent, PollEventsResponse, ReconcileMode,
     };
     use std::collections::BTreeMap;
 
@@ -659,7 +659,7 @@ mod tests {
             Ok(json!({"flow_model": "parallel_dag"}))
         }
 
-        async fn emit_event(&self, _event: MobEvent) -> meerkat_mob::MobResult<()> {
+        async fn emit_event(&self, _event: NewMobEvent) -> meerkat_mob::MobResult<()> {
             Ok(())
         }
     }

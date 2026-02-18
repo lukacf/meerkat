@@ -457,6 +457,7 @@ pub struct MobActivationRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct MobActivationResponse {
     pub run_id: String,
     pub status: MobRunStatus,
@@ -632,6 +633,7 @@ pub enum ReconcileMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[must_use]
 pub struct MobReconcileResult {
     #[serde(default)]
     pub spawned: Vec<String>,
@@ -650,6 +652,7 @@ pub struct PollEventsRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct PollEventsResponse {
     pub next_cursor: u64,
     pub events: Vec<MobEvent>,

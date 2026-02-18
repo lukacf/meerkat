@@ -2288,6 +2288,7 @@ fn should_spawn_on_reconcile(role: &RoleSpec) -> bool {
     }
 }
 
+#[must_use]
 fn should_stop_collection(
     policy: &CollectionPolicy,
     target_count: usize,
@@ -2314,6 +2315,7 @@ fn should_stop_collection(
     }
 }
 
+#[must_use]
 fn classify_step_status(
     policy: &CollectionPolicy,
     on_timeout: TimeoutPolicy,

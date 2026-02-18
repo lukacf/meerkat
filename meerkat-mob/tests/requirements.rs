@@ -1,17 +1,21 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use meerkat_mob::definition::WiringRules;
 use meerkat_mob::profile::{Profile, ToolConfig};
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobId, MobStorage, MobState, ProfileName, TaskStatus,
+    MeerkatId, MobBuilder, MobDefinition, MobId, MobState, MobStorage, ProfileName, TaskStatus,
 };
+
+mod support;
+use support::{TestCommsRuntime, TestSessionService};
 
 fn base_definition() -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("worker"),
         Profile {
-            model: "gpt-4o-mini".to_string(),
+            model: "gpt-5.2".to_string(),
             skills: Vec::new(),
             tools: ToolConfig {
                 builtins: true,
@@ -40,7 +44,15 @@ fn base_definition() -> MobDefinition {
 
 #[tokio::test]
 async fn req_mob_102_blocked_by_prevents_claiming() {
-    let handle = MobBuilder::new(base_definition(), MobStorage::in_memory_with_id(MobId::from("mob-102")))
+    let storage = MobStorage::in_memory_with_id(MobId::from("mob-102"));
+    let comms = Arc::new(TestCommsRuntime::default());
+    let sessions = Arc::new(TestSessionService::new(
+        storage.sessions.clone(),
+        comms.clone(),
+    ));
+    let handle = MobBuilder::new(base_definition(), storage)
+        .with_session_service(sessions)
+        .with_comms_runtime(comms)
         .create()
         .await
         .expect("mob created");
@@ -67,14 +79,25 @@ async fn req_mob_102_blocked_by_prevents_claiming() {
         .await
         .expect_err("claim should fail while blocker incomplete");
     let message = err.to_string();
-    assert!(message.contains("is blocked by"), "unexpected error: {message}");
+    assert!(
+        message.contains("is blocked by"),
+        "unexpected error: {message}"
+    );
 
     handle
-        .task_update(blocker, Some(TaskStatus::Done), Some(MeerkatId::from("worker-1")))
+        .task_update(
+            blocker,
+            Some(TaskStatus::Done),
+            Some(MeerkatId::from("worker-1")),
+        )
         .await
         .expect("blocker marked done");
     handle
-        .task_update(blocked, Some(TaskStatus::InProgress), Some(MeerkatId::from("worker-2")))
+        .task_update(
+            blocked,
+            Some(TaskStatus::InProgress),
+            Some(MeerkatId::from("worker-2")),
+        )
         .await
         .expect("claim succeeds after blocker done");
 }
@@ -85,7 +108,15 @@ async fn req_mob_110_missing_rust_bundle_fails_spawn() {
     if let Some(profile) = definition.profiles.get_mut(&ProfileName::from("worker")) {
         profile.tools.rust_bundles = vec!["missing_bundle".to_string()];
     }
-    let handle = MobBuilder::new(definition, MobStorage::in_memory_with_id(MobId::from("mob-110")))
+    let storage = MobStorage::in_memory_with_id(MobId::from("mob-110"));
+    let comms = Arc::new(TestCommsRuntime::default());
+    let sessions = Arc::new(TestSessionService::new(
+        storage.sessions.clone(),
+        comms.clone(),
+    ));
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(sessions)
+        .with_comms_runtime(comms)
         .create()
         .await
         .expect("mob created");
@@ -102,7 +133,15 @@ async fn req_mob_110_missing_rust_bundle_fails_spawn() {
 
 #[tokio::test]
 async fn complete_archives_sessions_and_destroy_sets_state() {
-    let handle = MobBuilder::new(base_definition(), MobStorage::in_memory_with_id(MobId::from("mob-lifecycle")))
+    let storage = MobStorage::in_memory_with_id(MobId::from("mob-lifecycle"));
+    let comms = Arc::new(TestCommsRuntime::default());
+    let sessions = Arc::new(TestSessionService::new(
+        storage.sessions.clone(),
+        comms.clone(),
+    ));
+    let handle = MobBuilder::new(base_definition(), storage)
+        .with_session_service(sessions)
+        .with_comms_runtime(comms)
         .create()
         .await
         .expect("mob created");

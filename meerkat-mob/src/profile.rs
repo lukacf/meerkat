@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Profile {
     pub model: String,
     pub skills: Vec<String>,
@@ -12,7 +13,7 @@ pub struct Profile {
 impl Default for Profile {
     fn default() -> Self {
         Self {
-            model: "gpt-4o-mini".to_string(),
+            model: "gpt-5.2".to_string(),
             skills: Vec::new(),
             tools: ToolConfig::default(),
             peer_description: String::new(),
@@ -21,7 +22,8 @@ impl Default for Profile {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ToolConfig {
     pub builtins: bool,
     pub shell: bool,

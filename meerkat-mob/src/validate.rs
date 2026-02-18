@@ -8,7 +8,8 @@ use crate::error::{Diagnostic, MobError};
 pub fn validate(definition: &MobDefinition) -> Result<(), MobError> {
     let mut diagnostics = Vec::new();
 
-    let ident = Regex::new(r"^[A-Za-z_][A-Za-z0-9_\-]{0,127}$").expect("valid regex");
+    let ident = Regex::new(r"^[A-Za-z_][A-Za-z0-9_\-]{0,127}$")
+        .map_err(|err| MobError::Internal(format!("invalid identifier regex: {err}")))?;
     for profile_name in definition.profiles.keys() {
         if !ident.is_match(profile_name.as_str()) {
             diagnostics.push(Diagnostic {
@@ -24,7 +25,10 @@ pub fn validate(definition: &MobDefinition) -> Result<(), MobError> {
     {
         diagnostics.push(Diagnostic {
             code: "orchestrator-profile-missing".to_string(),
-            message: format!("orchestrator profile '{}' does not exist", orchestrator.profile),
+            message: format!(
+                "orchestrator profile '{}' does not exist",
+                orchestrator.profile
+            ),
             location: Some("orchestrator.profile".to_string()),
         });
     }
@@ -34,7 +38,10 @@ pub fn validate(definition: &MobDefinition) -> Result<(), MobError> {
         if !known_profiles.contains(&pair.a) || !known_profiles.contains(&pair.b) {
             diagnostics.push(Diagnostic {
                 code: "wiring-profile-missing".to_string(),
-                message: format!("wire pair '{}' <-> '{}' references unknown profile", pair.a, pair.b),
+                message: format!(
+                    "wire pair '{}' <-> '{}' references unknown profile",
+                    pair.a, pair.b
+                ),
                 location: Some("wiring.role_wiring".to_string()),
             });
         }
@@ -64,7 +71,9 @@ pub fn validate(definition: &MobDefinition) -> Result<(), MobError> {
             if !definition.mcp_servers.contains_key(server) {
                 diagnostics.push(Diagnostic {
                     code: "missing-mcp-server".to_string(),
-                    message: format!("profile '{profile_name}' references missing mcp server '{server}'"),
+                    message: format!(
+                        "profile '{profile_name}' references missing mcp server '{server}'"
+                    ),
                     location: Some(format!("profiles.{profile_name}.tools.mcp")),
                 });
             }

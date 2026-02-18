@@ -2614,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.1.0"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2624,7 +2624,6 @@ dependencies = [
  "meerkat-session",
  "meerkat-store",
  "meerkat-tools",
- "rand 0.9.2",
  "regex",
  "serde",
  "serde_json",
@@ -2637,9 +2636,10 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.1.0"
+version = "0.3.4"
 dependencies = [
  "async-trait",
+ "chrono",
  "meerkat-core",
  "meerkat-memory",
  "meerkat-mob",
@@ -2647,6 +2647,7 @@ dependencies = [
  "meerkat-store",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

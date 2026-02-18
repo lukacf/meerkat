@@ -40,17 +40,14 @@ impl Roster {
         if !self.entries.contains_key(a) || !self.entries.contains_key(b) {
             return false;
         }
-        self.entries
-            .get_mut(a)
-            .expect("entry exists")
-            .wired_to
-            .insert(b.clone());
-        self.entries
-            .get_mut(b)
-            .expect("entry exists")
-            .wired_to
-            .insert(a.clone());
-        true
+        let mut changed = false;
+        if let Some(a_entry) = self.entries.get_mut(a) {
+            changed = a_entry.wired_to.insert(b.clone());
+        }
+        if let Some(b_entry) = self.entries.get_mut(b) {
+            changed = b_entry.wired_to.insert(a.clone()) || changed;
+        }
+        changed
     }
 
     pub fn unwire(&mut self, a: &MeerkatId, b: &MeerkatId) -> bool {
@@ -99,6 +96,9 @@ impl Roster {
     }
 
     pub fn session_ids(&self) -> Vec<SessionId> {
-        self.entries.values().map(|entry| entry.session_id.clone()).collect()
+        self.entries
+            .values()
+            .map(|entry| entry.session_id.clone())
+            .collect()
     }
 }

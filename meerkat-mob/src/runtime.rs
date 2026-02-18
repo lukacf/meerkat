@@ -1,24 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet, TryReserveError};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::RwLock as StdRwLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use tokio::sync::{mpsc, oneshot, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime};
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::error::ToolError;
-use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionUsage, SessionView, StartTurnRequest,
-};
-use meerkat_core::types::{Message, RunResult, SessionId, ToolCallView, ToolDef, ToolResult, UserMessage};
-use meerkat_core::Session;
-use meerkat_store::SessionFilter;
+use meerkat_core::service::{SessionQuery, SessionService, StartTurnRequest};
+use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 
 use crate::build::{build_agent_config, hydrate_skills_content, to_create_session_request};
 use crate::definition::{MobDefinition, OrchestratorConfig};
@@ -30,158 +25,6 @@ use crate::storage::MobStorage;
 use crate::tasks::{MobTask, TaskBoard, TaskStatus};
 use crate::tools::{MobTaskToolDispatcher, MobToolDispatcher};
 use crate::validate::validate;
-
-#[derive(Clone)]
-struct MockSessionService {
-    sessions: Arc<dyn meerkat_store::SessionStore>,
-    lock: Arc<Mutex<()>>,
-}
-
-impl MockSessionService {
-    fn new(sessions: Arc<dyn meerkat_store::SessionStore>) -> Self {
-        Self {
-            sessions,
-            lock: Arc::new(Mutex::new(())),
-        }
-    }
-}
-
-impl MockSessionService {
-    async fn append_prompt(
-        session: &mut Session,
-        prompt: String,
-        system_prompt: Option<String>,
-    ) {
-        if let Some(prompt) = system_prompt {
-            session.set_system_prompt(prompt);
-        }
-        if !prompt.is_empty() {
-            session.push(Message::User(UserMessage { content: prompt }));
-        }
-    }
-
-    fn mock_run_result(session: &Session, text: impl Into<String>) -> RunResult {
-        RunResult {
-            text: text.into(),
-            session_id: session.id().clone(),
-            usage: session.total_usage(),
-            turns: 1,
-            tool_calls: 0,
-            structured_output: None,
-            schema_warnings: None,
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct NoopCommsRuntime {
-    notify: Arc<Notify>,
-}
-
-#[async_trait::async_trait]
-impl CommsRuntime for NoopCommsRuntime {
-    async fn drain_messages(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn inbox_notify(&self) -> Arc<Notify> {
-        self.notify.clone()
-    }
-}
-
-#[async_trait]
-impl meerkat_core::service::SessionService for MockSessionService {
-    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        let _guard = self.lock.lock().await;
-        let mut session = Session::new();
-        Self::append_prompt(&mut session, req.prompt.clone(), req.system_prompt).await;
-        let _session_id = session.id().clone();
-        let result = Self::mock_run_result(&session, req.prompt);
-        self.sessions
-            .save(&session)
-            .await
-            .map_err(|err| SessionError::Store(Box::new(err)))?;
-        Ok(result)
-    }
-
-    async fn start_turn(
-        &self,
-        id: &SessionId,
-        req: StartTurnRequest,
-    ) -> Result<RunResult, SessionError> {
-        let _guard = self.lock.lock().await;
-        let mut session = self
-            .sessions
-            .load(id)
-            .await
-            .map_err(|err| SessionError::Store(Box::new(err)))?
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        session.push(Message::User(UserMessage {
-            content: req.prompt.clone(),
-        }));
-        session.touch();
-        let result = Self::mock_run_result(&session, format!("{} [mocked]", req.prompt));
-        self.sessions
-            .save(&session)
-            .await
-            .map_err(|err| SessionError::Store(Box::new(err)))?;
-        Ok(result)
-    }
-
-    async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
-        Ok(())
-    }
-
-    async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
-        let session = self
-            .sessions
-            .load(id)
-            .await
-            .map_err(|err| SessionError::Store(Box::new(err)))?
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        Ok(SessionView {
-            state: SessionInfo {
-                session_id: session.id().clone(),
-                created_at: session.created_at(),
-                updated_at: session.updated_at(),
-                message_count: session.messages().len(),
-                is_active: false,
-                last_assistant_text: session.last_assistant_text(),
-            },
-            billing: SessionUsage {
-                total_tokens: session.total_tokens(),
-                usage: session.total_usage(),
-            },
-        })
-    }
-
-    async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
-        let mut sessions = self
-            .sessions
-            .list(SessionFilter::default())
-            .await
-            .map_err(|err| SessionError::Store(Box::new(err)))?
-            .into_iter()
-            .map(|meta| SessionSummary {
-                session_id: meta.id,
-                created_at: meta.created_at,
-                updated_at: meta.updated_at,
-                message_count: meta.message_count,
-                total_tokens: meta.total_tokens,
-                is_active: false,
-            })
-            .collect::<Vec<_>>();
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        Ok(sessions)
-    }
-
-    async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        self.sessions
-            .delete(id)
-            .await
-            .map_err(|err| SessionError::Store(Box::new(err)))
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -228,7 +71,7 @@ impl TryFrom<u8> for MobState {
             _ => {
                 return Err(MobError::Internal(format!(
                     "invalid mob state value: {value}"
-                )))
+                )));
             }
         })
     }
@@ -299,7 +142,7 @@ pub struct MobBuilder {
     storage: MobStorage,
     session_service: Option<Arc<dyn SessionService>>,
     comms: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
-    _rust_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
+    rust_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
 }
 
 impl MobBuilder {
@@ -309,7 +152,7 @@ impl MobBuilder {
             storage,
             session_service: None,
             comms: None,
-            _rust_bundles: BTreeMap::new(),
+            rust_bundles: BTreeMap::new(),
         }
     }
 
@@ -319,7 +162,7 @@ impl MobBuilder {
             storage,
             session_service: None,
             comms: None,
-            _rust_bundles: BTreeMap::new(),
+            rust_bundles: BTreeMap::new(),
         }
     }
 
@@ -338,22 +181,25 @@ impl MobBuilder {
         name: String,
         dispatcher: Arc<dyn AgentToolDispatcher>,
     ) -> Self {
-        self._rust_bundles.insert(name, dispatcher);
+        self.rust_bundles.insert(name, dispatcher);
         self
     }
 
-    fn resolve_session_service(&self) -> Arc<dyn SessionService> {
-        self.session_service
-            .clone()
-            .unwrap_or_else(|| Arc::new(MockSessionService::new(self.storage.sessions.clone())))
+    fn resolve_session_service(&self) -> Result<Arc<dyn SessionService>, MobError> {
+        self.session_service.clone().ok_or_else(|| {
+            MobError::Internal(
+                "session service is required; call MobBuilder::with_session_service(...)"
+                    .to_string(),
+            )
+        })
     }
 
-    fn resolve_comms_runtime(
-        &self,
-    ) -> Arc<dyn CommsRuntime> {
-        self.comms
-            .clone()
-            .unwrap_or_else(|| Arc::new(NoopCommsRuntime::default()))
+    fn resolve_comms_runtime(&self) -> Result<Arc<dyn CommsRuntime>, MobError> {
+        self.comms.clone().ok_or_else(|| {
+            MobError::Internal(
+                "comms runtime is required; call MobBuilder::with_comms_runtime(...)".to_string(),
+            )
+        })
     }
 
     fn parse_definition_from_events(&self, events: &[MobEvent]) -> Option<MobDefinition> {
@@ -379,13 +225,13 @@ impl MobBuilder {
         })?;
         validate(&definition)?;
 
-        let skills_content = hydrate_skills_content(&definition).map_err(|err| {
-            MobError::Internal(format!("failed to load skills: {err}"))
-        })?;
+        let skills_content = hydrate_skills_content(&definition)
+            .await
+            .map_err(|err| MobError::Internal(format!("failed to load skills: {err}")))?;
         let definition = Arc::new(definition);
         let storage = self.storage.clone();
-        let session_service = self.resolve_session_service();
-        let comms = self.resolve_comms_runtime();
+        let session_service = self.resolve_session_service()?;
+        let comms = self.resolve_comms_runtime()?;
 
         let _ = storage
             .events
@@ -416,7 +262,7 @@ impl MobBuilder {
                 state: state.clone(),
                 storage: storage.clone(),
             }),
-            _rust_bundles: self._rust_bundles,
+            rust_bundles: self.rust_bundles,
             skills_content,
             restore_wiring: Vec::new(),
             rx,
@@ -448,34 +294,25 @@ impl MobBuilder {
         }
         validate(&definition)?;
         let mut roster = project_roster_from_events(&events);
-        let skills_content = hydrate_skills_content(&definition).map_err(|err| {
-            MobError::Internal(format!("failed to load skills: {err}"))
-        })?;
+        let skills_content = hydrate_skills_content(&definition)
+            .await
+            .map_err(|err| MobError::Internal(format!("failed to load skills: {err}")))?;
 
         let definition = Arc::new(definition);
         let storage = self.storage.clone();
-        let session_service = self.resolve_session_service();
-        let comms = self.resolve_comms_runtime();
+        let session_service = self.resolve_session_service()?;
+        let comms = self.resolve_comms_runtime()?;
 
-        // Orphan reconciliation: session exists but no longer in mob history.
+        // Crash-before-effect reconciliation: mob roster references sessions
+        // that no longer exist in the injected SessionService backend.
         let stored_summaries = session_service
             .list(SessionQuery::default())
             .await
             .map_err(MobError::from)?;
-        let stored_session_ids = stored_summaries.into_iter().map(|summary| summary.session_id).collect::<HashSet<_>>();
-        let known_session_ids = roster
-            .session_ids()
+        let stored_session_ids = stored_summaries
             .into_iter()
+            .map(|summary| summary.session_id)
             .collect::<HashSet<_>>();
-        for session_id in stored_session_ids
-            .difference(&known_session_ids)
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            let _ = session_service.archive(&session_id).await;
-        }
-
-        // Crash-before-effect: roster contains entries that no longer exist.
         let missing_sessions = {
             roster
                 .list()
@@ -486,12 +323,11 @@ impl MobBuilder {
                 .collect::<Vec<_>>()
         };
         for missing in missing_sessions {
-            let profile = definition
-                .profiles
-                .get(&missing.profile)
-                .ok_or_else(|| MobError::ProfileNotFound {
+            let profile = definition.profiles.get(&missing.profile).ok_or_else(|| {
+                MobError::ProfileNotFound {
                     profile: missing.profile.clone(),
-                })?;
+                }
+            })?;
             let cfg = build_agent_config(
                 &definition.id,
                 &missing.profile,
@@ -499,17 +335,17 @@ impl MobBuilder {
                 &missing.meerkat_id,
                 &skills_content,
                 "Peer communication is automatic through mob wiring.",
-                resolve_rust_bundle_dispatcher(&self._rust_bundles, &profile.tools.rust_bundles)?,
+                resolve_rust_bundle_dispatcher(&self.rust_bundles, &profile.tools.rust_bundles)?,
             );
-            let request =
-                to_create_session_request(cfg, String::new());
+            let request = to_create_session_request(cfg, String::new());
             let run_result = session_service.create_session(request).await?;
             let new_session_id = run_result.session_id;
-            let mut entry = roster.remove(&missing.meerkat_id).ok_or_else(|| {
-                MobError::MeerkatNotFound {
-                    meerkat_id: missing.meerkat_id.clone(),
-                }
-            })?;
+            let mut entry =
+                roster
+                    .remove(&missing.meerkat_id)
+                    .ok_or_else(|| MobError::MeerkatNotFound {
+                        meerkat_id: missing.meerkat_id.clone(),
+                    })?;
             entry.session_id = new_session_id.clone();
             let _ = roster.add(entry);
             storage
@@ -551,7 +387,7 @@ impl MobBuilder {
                 state: state.clone(),
                 storage: storage.clone(),
             }),
-            _rust_bundles: self._rust_bundles,
+            rust_bundles: self.rust_bundles,
             skills_content,
             restore_wiring: wired_pairs,
             rx,
@@ -724,6 +560,11 @@ impl MobHandle {
         Ok(TaskBoard::project(&events).list())
     }
 
+    pub async fn task_get(&self, task_id: &str) -> Result<Option<MobTask>, MobError> {
+        let events = self.storage.events.replay_all().await?;
+        Ok(TaskBoard::project(&events).get(task_id))
+    }
+
     pub async fn poll_events(
         &self,
         after_cursor: Option<u64>,
@@ -752,14 +593,10 @@ impl MobHandle {
 
     pub async fn destroy(&self) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx.send(MobCommand::Destroy { reply: reply_tx }).await?;
+        self.tx
+            .send(MobCommand::Destroy { reply: reply_tx })
+            .await?;
         reply_rx.await?
-    }
-}
-
-impl From<TryReserveError> for MobError {
-    fn from(value: TryReserveError) -> Self {
-        MobError::Internal(format!("hash reserve failed: {value}"))
     }
 }
 
@@ -771,7 +608,7 @@ struct MobActor {
     state: Arc<AtomicU8>,
     comms: Arc<dyn meerkat_core::agent::CommsRuntime>,
     handle: Arc<MobHandle>,
-    _rust_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
+    rust_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     skills_content: BTreeMap<String, String>,
     restore_wiring: Vec<(MeerkatId, MeerkatId)>,
     rx: mpsc::Receiver<MobCommand>,
@@ -852,11 +689,10 @@ impl MobActor {
             dispatchers.push(Arc::new(MobTaskToolDispatcher::new(self.handle.clone())));
         }
         for bundle in &profile.tools.rust_bundles {
-            let dispatcher = self
-                ._rust_bundles
-                .get(bundle)
-                .cloned()
-                .ok_or_else(|| MobError::Internal(format!("missing rust tool bundle: {bundle}")))?;
+            let dispatcher =
+                self.rust_bundles.get(bundle).cloned().ok_or_else(|| {
+                    MobError::Internal(format!("missing rust tool bundle: {bundle}"))
+                })?;
             dispatchers.push(dispatcher);
         }
 
@@ -953,12 +789,25 @@ impl MobActor {
     }
 
     fn transition(&self, target: MobState) -> Result<(), MobError> {
-        let current = MobState::try_from(self.state.load(Ordering::Acquire))?;
-        if !current.can_transition(target) {
-            return Err(MobError::InvalidTransition { from: current, to: target });
+        loop {
+            let current_raw = self.state.load(Ordering::Acquire);
+            let current = MobState::try_from(current_raw)?;
+            if !current.can_transition(target) {
+                return Err(MobError::InvalidTransition {
+                    from: current,
+                    to: target,
+                });
+            }
+            match self.state.compare_exchange(
+                current_raw,
+                u8::from(target),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
+            }
         }
-        self.state.store(target as u8, Ordering::Release);
-        Ok(())
     }
 
     fn comms_name_for(&self, meerkat_id: &MeerkatId) -> String {
@@ -984,20 +833,40 @@ impl MobActor {
             .await
             .into_iter()
             .find(|entry| entry.name.as_str() == comms_name.as_str())
-            .map(|entry| entry.peer_id.clone())
+            .map(|entry| entry.peer_id)
     }
 
     async fn ensure_trust_pair(&self, a: &MeerkatId, b: &MeerkatId) -> Result<(), MobError> {
-        let a_id = self.resolve_peer_id(a).await;
-        let b_id = self.resolve_peer_id(b).await;
-        if let (Some(a_peer), Some(b_peer)) = (a_id, b_id) {
-            let a_spec = TrustedPeerSpec::new(self.comms_name_for(a), b_peer, format!("inproc://{}", self.comms_name_for(b)))
-                .map_err(|err| MobError::CommsError(meerkat_core::comms::SendError::Validation(err)))?;
-            let b_spec = TrustedPeerSpec::new(self.comms_name_for(b), a_peer, format!("inproc://{}", self.comms_name_for(a)))
-                .map_err(|err| MobError::CommsError(meerkat_core::comms::SendError::Validation(err)))?;
-            let _ = self.comms.add_trusted_peer(a_spec).await;
-            let _ = self.comms.add_trusted_peer(b_spec).await;
-        }
+        let a_name = self.comms_name_for(a);
+        let b_name = self.comms_name_for(b);
+        let a_peer = self
+            .resolve_peer_id(a)
+            .await
+            .ok_or_else(|| MobError::WiringError {
+                a: a.clone(),
+                b: b.clone(),
+                reason: format!("comms peer not discoverable for {a_name}"),
+            })?;
+        let b_peer = self
+            .resolve_peer_id(b)
+            .await
+            .ok_or_else(|| MobError::WiringError {
+                a: a.clone(),
+                b: b.clone(),
+                reason: format!("comms peer not discoverable for {b_name}"),
+            })?;
+
+        let a_spec = TrustedPeerSpec::new(b_name.clone(), b_peer, format!("inproc://{}", b_name))
+            .map_err(|err| {
+            MobError::CommsError(meerkat_core::comms::SendError::Validation(err))
+        })?;
+        let b_spec = TrustedPeerSpec::new(a_name.clone(), a_peer, format!("inproc://{}", a_name))
+            .map_err(|err| {
+            MobError::CommsError(meerkat_core::comms::SendError::Validation(err))
+        })?;
+
+        self.comms.add_trusted_peer(a_spec).await?;
+        self.comms.add_trusted_peer(b_spec).await?;
         Ok(())
     }
 
@@ -1034,7 +903,9 @@ impl MobActor {
             .profiles
             .get(&profile)
             .cloned()
-            .ok_or_else(|| MobError::ProfileNotFound { profile: profile.clone() })?;
+            .ok_or_else(|| MobError::ProfileNotFound {
+                profile: profile.clone(),
+            })?;
 
         let meerkat_exists = {
             let roster = self.roster.write().unwrap_or_else(|err| err.into_inner());
@@ -1087,12 +958,32 @@ impl MobActor {
 
     async fn retire_meerkat(&self, meerkat_id: &MeerkatId) -> Result<(), MobError> {
         self.assert_mutable()?;
-        let entry = {
-            let mut roster = self.roster.write().unwrap_or_else(|err| err.into_inner());
-            roster.remove(meerkat_id).ok_or_else(|| MobError::MeerkatNotFound {
-                meerkat_id: meerkat_id.clone(),
-            })?
+        let (entry_profile, entry_session, wired_peers) = {
+            let roster = self.roster.read().unwrap_or_else(|err| err.into_inner());
+            let entry = roster
+                .get(meerkat_id)
+                .ok_or_else(|| MobError::MeerkatNotFound {
+                    meerkat_id: meerkat_id.clone(),
+                })?;
+            (
+                entry.profile.clone(),
+                entry.session_id.clone(),
+                entry.wired_to.iter().cloned().collect::<Vec<_>>(),
+            )
         };
+
+        for peer_id in &wired_peers {
+            self.unwire_pair(meerkat_id, peer_id).await?;
+        }
+
+        {
+            let mut roster = self.roster.write().unwrap_or_else(|err| err.into_inner());
+            let _ = roster
+                .remove(meerkat_id)
+                .ok_or_else(|| MobError::MeerkatNotFound {
+                    meerkat_id: meerkat_id.clone(),
+                })?;
+        }
 
         self.storage
             .events
@@ -1100,17 +991,14 @@ impl MobActor {
                 mob_id: self.definition.id.clone(),
                 kind: MobEventKind::MeerkatRetired {
                     meerkat_id: meerkat_id.clone(),
-                    role: entry.profile,
-                    session_id: entry.session_id.clone(),
+                    role: entry_profile,
+                    session_id: entry_session.clone(),
                 },
                 timestamp: Some(Utc::now()),
             })
             .await?;
 
-        for peer_id in entry.wired_to.iter() {
-            let _ = self.unwire_pair(meerkat_id, peer_id).await;
-        }
-        self.session_service.archive(&entry.session_id).await.ok();
+        self.session_service.archive(&entry_session).await.ok();
         Ok(())
     }
 
@@ -1128,7 +1016,11 @@ impl MobActor {
             let mut roster = self.roster.write().unwrap_or_else(|err| err.into_inner());
             if !roster.contains(a) || !roster.contains(b) {
                 return Err(MobError::MeerkatNotFound {
-                    meerkat_id: if !roster.contains(a) { a.clone() } else { b.clone() },
+                    meerkat_id: if !roster.contains(a) {
+                        a.clone()
+                    } else {
+                        b.clone()
+                    },
                 });
             }
             roster.wire(a, b)
@@ -1158,8 +1050,8 @@ impl MobActor {
             roster.unwire(a, b)
         };
 
-        let _ = self.remove_trust_pair(a, b).await;
         if changed {
+            let _ = self.remove_trust_pair(a, b).await;
             self.storage
                 .events
                 .append(NewMobEvent {
@@ -1260,12 +1152,17 @@ impl MobActor {
         owner: Option<MeerkatId>,
     ) -> Result<(), MobError> {
         self.assert_mutable()?;
+        if status.is_none() && owner.is_none() {
+            return Ok(());
+        }
+
+        let events = self.storage.events.replay_all().await?;
+        let board = TaskBoard::project(&events);
+        let task = board
+            .get(task_id)
+            .ok_or_else(|| MobError::Internal(format!("task not found: {task_id}")))?;
+
         if owner.is_some() {
-            let events = self.storage.events.replay_all().await?;
-            let board = TaskBoard::project(&events);
-            let task = board
-                .get(task_id)
-                .ok_or_else(|| MobError::Internal(format!("task not found: {task_id}")))?;
             let blocking = task
                 .blocked_by
                 .iter()
@@ -1284,7 +1181,6 @@ impl MobActor {
                 )));
             }
         }
-        let status = status.unwrap_or(TaskStatus::Open);
         self.storage
             .events
             .append(NewMobEvent {
@@ -1301,9 +1197,16 @@ impl MobActor {
     }
 
     async fn archive_all_active_sessions(&self) -> Result<(), MobError> {
-        let sessions = self.session_service.list(SessionQuery::default()).await?;
-        for session in sessions {
-            let _ = self.session_service.archive(&session.session_id).await;
+        let session_ids = self
+            .roster
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .list()
+            .into_iter()
+            .map(|entry| entry.session_id)
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            let _ = self.session_service.archive(&session_id).await;
         }
         Ok(())
     }
@@ -1315,7 +1218,11 @@ impl MobActor {
             && self.definition.wiring.auto_wire_orchestrator
             && *role == *profile
         {
-            let peers = self.roster.read().unwrap_or_else(|err| err.into_inner()).list();
+            let peers = self
+                .roster
+                .read()
+                .unwrap_or_else(|err| err.into_inner())
+                .list();
             for peer in peers {
                 if &peer.meerkat_id != new_meerkat {
                     targets.insert(peer.meerkat_id);

@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
-use meerkat_core::agent::{AgentToolDispatcher};
+use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolResult};
 
 use crate::ids::MeerkatId;
 use crate::runtime::MobHandle;
 use crate::tasks::TaskStatus;
-use crate::tools::empty_object_schema;
 
 pub const TOOL_TASK_CREATE: &str = "mob_task_create";
 pub const TOOL_TASK_LIST: &str = "mob_task_list";
@@ -30,22 +30,22 @@ impl MobTaskToolDispatcher {
                 Arc::new(meerkat_core::types::ToolDef {
                     name: TOOL_TASK_CREATE.to_string(),
                     description: "Create a task".to_string(),
-                    input_schema: empty_object_schema(),
+                    input_schema: task_create_schema(),
                 }),
                 Arc::new(meerkat_core::types::ToolDef {
                     name: TOOL_TASK_LIST.to_string(),
                     description: "List tasks".to_string(),
-                    input_schema: empty_object_schema(),
+                    input_schema: task_list_schema(),
                 }),
                 Arc::new(meerkat_core::types::ToolDef {
                     name: TOOL_TASK_UPDATE.to_string(),
                     description: "Update task status/owner".to_string(),
-                    input_schema: empty_object_schema(),
+                    input_schema: task_update_schema(),
                 }),
                 Arc::new(meerkat_core::types::ToolDef {
                     name: TOOL_TASK_GET.to_string(),
                     description: "Get a task".to_string(),
-                    input_schema: empty_object_schema(),
+                    input_schema: task_get_schema(),
                 }),
             ]
             .into(),
@@ -73,13 +73,67 @@ struct TaskCreateArgs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskUpdateArgs {
     task_id: String,
-    status: Option<String>,
+    #[serde(default)]
+    status: Option<TaskStatus>,
+    #[serde(default)]
     owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskGetArgs {
     task_id: String,
+}
+
+fn task_create_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "subject": { "type": "string" },
+            "description": { "type": "string" },
+            "blocked_by": {
+                "type": "array",
+                "items": { "type": "string" }
+            }
+        },
+        "required": ["subject", "description"],
+        "additionalProperties": false
+    })
+}
+
+fn task_list_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+    })
+}
+
+fn task_update_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "task_id": { "type": "string" },
+            "status": {
+                "type": "string",
+                "enum": ["Planned", "Open", "InProgress", "Blocked", "Done", "Failed", "Cancelled"]
+            },
+            "owner": { "type": "string" }
+        },
+        "required": ["task_id"],
+        "additionalProperties": false
+    })
+}
+
+fn task_get_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "task_id": { "type": "string" }
+        },
+        "required": ["task_id"],
+        "additionalProperties": false
+    })
 }
 
 #[async_trait::async_trait]
@@ -92,9 +146,8 @@ impl AgentToolDispatcher for MobTaskToolDispatcher {
         let handle = self.handle()?;
         match call.name {
             TOOL_TASK_CREATE => {
-                let args: TaskCreateArgs = call
-                    .parse_args()
-                    .map_err(|e| ToolError::InvalidArguments {
+                let args: TaskCreateArgs =
+                    call.parse_args().map_err(|e| ToolError::InvalidArguments {
                         name: call.name.to_string(),
                         reason: e.to_string(),
                     })?;
@@ -136,24 +189,13 @@ impl AgentToolDispatcher for MobTaskToolDispatcher {
                 ))
             }
             TOOL_TASK_UPDATE => {
-                let args: TaskUpdateArgs = call
-                    .parse_args()
-                    .map_err(|e| ToolError::InvalidArguments {
+                let args: TaskUpdateArgs =
+                    call.parse_args().map_err(|e| ToolError::InvalidArguments {
                         name: call.name.to_string(),
                         reason: e.to_string(),
                     })?;
-                let status = args.status.and_then(|status| match status.as_str() {
-                    "Planned" => Some(TaskStatus::Planned),
-                    "Open" => Some(TaskStatus::Open),
-                    "InProgress" => Some(TaskStatus::InProgress),
-                    "Blocked" => Some(TaskStatus::Blocked),
-                    "Done" => Some(TaskStatus::Done),
-                    "Failed" => Some(TaskStatus::Failed),
-                    "Cancelled" => Some(TaskStatus::Cancelled),
-                    _ => None,
-                });
                 handle
-                    .task_update(args.task_id, status, args.owner.map(MeerkatId::from))
+                    .task_update(args.task_id, args.status, args.owner.map(MeerkatId::from))
                     .await
                     .map_err(|err| ToolError::ExecutionFailed {
                         message: err.to_string(),
@@ -169,19 +211,16 @@ impl AgentToolDispatcher for MobTaskToolDispatcher {
                 ))
             }
             TOOL_TASK_GET => {
-                let args: TaskGetArgs = call
-                    .parse_args()
-                    .map_err(|e| ToolError::InvalidArguments {
+                let args: TaskGetArgs =
+                    call.parse_args().map_err(|e| ToolError::InvalidArguments {
                         name: call.name.to_string(),
                         reason: e.to_string(),
                     })?;
-                let tasks = handle
-                    .task_list()
-                    .await
-                    .map_err(|err| ToolError::ExecutionFailed {
+                let task = handle.task_get(&args.task_id).await.map_err(|err| {
+                    ToolError::ExecutionFailed {
                         message: err.to_string(),
-                    })?;
-                let task = tasks.into_iter().find(|task| task.id == args.task_id);
+                    }
+                })?;
                 Ok(ToolResult::from_tool_call(
                     &meerkat_core::types::ToolCall {
                         id: call.id.to_string(),

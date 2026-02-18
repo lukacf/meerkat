@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::sync::Arc;
 
 use crate::definition::{MobDefinition, SkillSource};
 use crate::ids::{MeerkatId, MobId, ProfileName};
 use crate::profile::Profile;
+use meerkat_core::PeerMeta;
 use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 use meerkat_core::skills::SkillId;
-use meerkat_core::PeerMeta;
+use tokio::fs;
 
 pub struct MobAgentSessionConfig {
     pub model: String,
@@ -140,7 +140,7 @@ pub fn to_create_session_request(
     }
 }
 
-pub fn hydrate_skills_content(
+pub async fn hydrate_skills_content(
     definition: &MobDefinition,
 ) -> Result<BTreeMap<String, String>, std::io::Error> {
     let mut skills = BTreeMap::new();
@@ -150,7 +150,7 @@ pub fn hydrate_skills_content(
                 skills.insert(name.clone(), body.clone());
             }
             SkillSource::File { file } => {
-                skills.insert(name.clone(), fs::read_to_string(file)?);
+                skills.insert(name.clone(), fs::read_to_string(file).await?);
             }
         }
     }
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn build_agent_config_sets_comms_name_and_external_tools() {
         let profile = Profile {
-            model: "gpt-4o-mini".to_string(),
+            model: "gpt-5.2".to_string(),
             skills: Vec::new(),
             tools: ToolConfig::default(),
             peer_description: "worker".to_string(),

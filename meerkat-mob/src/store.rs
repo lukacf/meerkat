@@ -37,7 +37,9 @@ impl InMemoryMobEventStore {
 impl MobEventStore for InMemoryMobEventStore {
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobError> {
         let mut events = self.events.write().await;
-        let cursor = events.last().map_or(0, |last| last.cursor.saturating_add(1));
+        let cursor = events
+            .last()
+            .map_or(0, |last| last.cursor.saturating_add(1));
         let mob_event = MobEvent {
             cursor,
             timestamp: event.timestamp.unwrap_or_else(Utc::now),

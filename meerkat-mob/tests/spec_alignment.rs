@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use meerkat_mob::definition::{OrchestratorConfig, RolePair, WiringRules};
 use meerkat_mob::event::MobEventKind;
@@ -7,9 +8,12 @@ use meerkat_mob::{
     MeerkatId, MobBuilder, MobDefinition, MobId, MobStorage, ProfileName, TaskStatus,
 };
 
+mod support;
+use support::{TestCommsRuntime, TestSessionService};
+
 fn profile_with_tools() -> Profile {
     Profile {
-        model: "gpt-4o-mini".to_string(),
+        model: "gpt-5.2".to_string(),
         skills: Vec::new(),
         tools: ToolConfig {
             builtins: true,
@@ -24,6 +28,28 @@ fn profile_with_tools() -> Profile {
         peer_description: "worker".to_string(),
         external_addressable: true,
     }
+}
+
+fn new_builder(definition: MobDefinition, storage: MobStorage) -> MobBuilder {
+    let comms = Arc::new(TestCommsRuntime::default());
+    let sessions = Arc::new(TestSessionService::new(
+        storage.sessions.clone(),
+        comms.clone(),
+    ));
+    MobBuilder::new(definition, storage)
+        .with_session_service(sessions)
+        .with_comms_runtime(comms)
+}
+
+fn resume_builder(storage: MobStorage) -> MobBuilder {
+    let comms = Arc::new(TestCommsRuntime::default());
+    let sessions = Arc::new(TestSessionService::new(
+        storage.sessions.clone(),
+        comms.clone(),
+    ));
+    MobBuilder::for_resume(storage)
+        .with_session_service(sessions)
+        .with_comms_runtime(comms)
 }
 
 fn base_definition(mob_id: &str) -> MobDefinition {
@@ -51,7 +77,7 @@ fn base_definition(mob_id: &str) -> MobDefinition {
 
 #[tokio::test]
 async fn choke_mob_002_and_004_events_and_roster_projection() {
-    let handle = MobBuilder::new(
+    let handle = new_builder(
         base_definition("choke-2-4"),
         MobStorage::in_memory_with_id(MobId::from("choke-2-4")),
     )
@@ -60,11 +86,19 @@ async fn choke_mob_002_and_004_events_and_roster_projection() {
     .expect("mob created");
 
     let a = handle
-        .spawn(&ProfileName::from("coordinator"), MeerkatId::from("coord"), None)
+        .spawn(
+            &ProfileName::from("coordinator"),
+            MeerkatId::from("coord"),
+            None,
+        )
         .await
         .expect("coordinator spawned");
     let b = handle
-        .spawn(&ProfileName::from("worker"), MeerkatId::from("worker"), None)
+        .spawn(
+            &ProfileName::from("worker"),
+            MeerkatId::from("worker"),
+            None,
+        )
         .await
         .expect("worker spawned");
 
@@ -79,14 +113,26 @@ async fn choke_mob_002_and_004_events_and_roster_projection() {
     assert_eq!(ids, vec!["coord".to_string()]);
 
     let events = handle.poll_events(None, None).await.expect("events");
-    assert!(events.iter().any(|event| matches!(event.kind, MobEventKind::MeerkatSpawned { .. })));
-    assert!(events.iter().any(|event| matches!(event.kind, MobEventKind::PeersWired { .. })));
-    assert!(events.iter().any(|event| matches!(event.kind, MobEventKind::MeerkatRetired { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MeerkatSpawned { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::PeersWired { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MeerkatRetired { .. }))
+    );
 }
 
 #[tokio::test]
 async fn choke_mob_003_taskboard_projection() {
-    let handle = MobBuilder::new(
+    let handle = new_builder(
         base_definition("choke-3"),
         MobStorage::in_memory_with_id(MobId::from("choke-3")),
     )
@@ -99,7 +145,11 @@ async fn choke_mob_003_taskboard_projection() {
         .await
         .expect("task created");
     handle
-        .task_update(task.clone(), Some(TaskStatus::InProgress), Some(MeerkatId::from("coord")))
+        .task_update(
+            task.clone(),
+            Some(TaskStatus::InProgress),
+            Some(MeerkatId::from("coord")),
+        )
         .await
         .expect("task updated");
 
@@ -114,7 +164,7 @@ async fn choke_mob_003_taskboard_projection() {
 
 #[tokio::test]
 async fn choke_mob_005_concurrent_handle_commands_are_serialized() {
-    let handle = MobBuilder::new(
+    let handle = new_builder(
         base_definition("choke-5"),
         MobStorage::in_memory_with_id(MobId::from("choke-5")),
     )
@@ -143,13 +193,17 @@ async fn choke_mob_005_concurrent_handle_commands_are_serialized() {
 async fn choke_mob_006_and_e2e_mob_003_resume_roundtrip() {
     let storage = MobStorage::in_memory_with_id(MobId::from("resume-3"));
     let definition = base_definition("resume-3");
-    let handle = MobBuilder::new(definition.clone(), storage.clone())
+    let handle = new_builder(definition.clone(), storage.clone())
         .create()
         .await
         .expect("mob created");
 
     let coord = handle
-        .spawn(&ProfileName::from("coordinator"), MeerkatId::from("coord"), None)
+        .spawn(
+            &ProfileName::from("coordinator"),
+            MeerkatId::from("coord"),
+            None,
+        )
         .await
         .expect("coord spawned");
     let w1 = handle
@@ -159,7 +213,7 @@ async fn choke_mob_006_and_e2e_mob_003_resume_roundtrip() {
     handle.wire(&coord, &w1).await.expect("wired");
     handle.stop().await.expect("stopped");
 
-    let resumed = MobBuilder::for_resume(storage.clone())
+    let resumed = resume_builder(storage.clone())
         .resume()
         .await
         .expect("resumed");
@@ -169,7 +223,12 @@ async fn choke_mob_006_and_e2e_mob_003_resume_roundtrip() {
         .iter()
         .find(|entry| entry.meerkat_id.as_str() == "coord")
         .expect("coord entry");
-    assert!(coord_entry.wired_to.iter().any(|peer| peer.as_str() == "w1"));
+    assert!(
+        coord_entry
+            .wired_to
+            .iter()
+            .any(|peer| peer.as_str() == "w1")
+    );
 }
 
 #[tokio::test]
@@ -182,7 +241,7 @@ async fn e2e_mob_001_and_004_spawn_wire_and_external_addressability() {
             ..profile_with_tools()
         },
     );
-    let handle = MobBuilder::new(
+    let handle = new_builder(
         definition,
         MobStorage::in_memory_with_id(MobId::from("e2e-1-4")),
     )
@@ -191,15 +250,27 @@ async fn e2e_mob_001_and_004_spawn_wire_and_external_addressability() {
     .expect("mob created");
 
     let coord = handle
-        .spawn(&ProfileName::from("coordinator"), MeerkatId::from("coord"), None)
+        .spawn(
+            &ProfileName::from("coordinator"),
+            MeerkatId::from("coord"),
+            None,
+        )
         .await
         .expect("coord spawned");
     let worker = handle
-        .spawn(&ProfileName::from("worker"), MeerkatId::from("worker"), None)
+        .spawn(
+            &ProfileName::from("worker"),
+            MeerkatId::from("worker"),
+            None,
+        )
         .await
         .expect("worker spawned");
     let hidden = handle
-        .spawn(&ProfileName::from("hidden"), MeerkatId::from("hidden"), None)
+        .spawn(
+            &ProfileName::from("hidden"),
+            MeerkatId::from("hidden"),
+            None,
+        )
         .await
         .expect("hidden spawned");
 
@@ -221,13 +292,17 @@ async fn e2e_mob_001_and_004_spawn_wire_and_external_addressability() {
 async fn e2e_mob_002_and_005_retire_complete_destroy() {
     let storage = MobStorage::in_memory_with_id(MobId::from("e2e-2-5"));
     let definition = base_definition("e2e-2-5");
-    let handle = MobBuilder::new(definition, storage.clone())
+    let handle = new_builder(definition, storage.clone())
         .create()
         .await
         .expect("mob created");
 
     let a = handle
-        .spawn(&ProfileName::from("coordinator"), MeerkatId::from("a"), None)
+        .spawn(
+            &ProfileName::from("coordinator"),
+            MeerkatId::from("a"),
+            None,
+        )
         .await
         .expect("a");
     let b = handle
@@ -239,7 +314,7 @@ async fn e2e_mob_002_and_005_retire_complete_destroy() {
     assert_eq!(handle.list_meerkats(None).len(), 1);
 
     handle.complete().await.expect("complete");
-    let resume_err = match MobBuilder::for_resume(storage.clone()).resume().await {
+    let resume_err = match resume_builder(storage.clone()).resume().await {
         Ok(_) => panic!("resume completed should fail"),
         Err(err) => err,
     };

@@ -3,11 +3,12 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::MeerkatId;
 use crate::event::MobEvent;
 use crate::event::MobEventKind;
+use crate::ids::MeerkatId;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum TaskStatus {
     Planned,
     Open,
@@ -67,8 +68,12 @@ impl TaskBoard {
                     owner,
                 } => {
                     if let Some(task) = board.tasks.get_mut(task_id) {
-                        task.status = status.clone();
-                        task.owner = owner.clone();
+                        if let Some(status) = status.clone() {
+                            task.status = status;
+                        }
+                        if let Some(owner) = owner.clone() {
+                            task.owner = Some(owner);
+                        }
                         task.updated_at = event.timestamp;
                     }
                 }
@@ -86,7 +91,13 @@ impl TaskBoard {
         self.tasks.get(task_id).cloned()
     }
 
-    pub fn create(&mut self, task_id: String, subject: String, description: String, blocked_by: Vec<String>) -> &mut MobTask {
+    pub fn create(
+        &mut self,
+        task_id: String,
+        subject: String,
+        description: String,
+        blocked_by: Vec<String>,
+    ) -> &mut MobTask {
         let now = Utc::now();
         let entry = MobTask {
             id: task_id.clone(),
@@ -101,10 +112,14 @@ impl TaskBoard {
         self.tasks.entry(task_id).or_insert(entry)
     }
 
-    pub fn update(&mut self, task_id: &str, status: TaskStatus, owner: Option<MeerkatId>) {
+    pub fn update(&mut self, task_id: &str, status: Option<TaskStatus>, owner: Option<MeerkatId>) {
         if let Some(task) = self.tasks.get_mut(task_id) {
-            task.status = status;
-            task.owner = owner;
+            if let Some(status) = status {
+                task.status = status;
+            }
+            if let Some(owner) = owner {
+                task.owner = Some(owner);
+            }
             task.updated_at = Utc::now();
         }
     }

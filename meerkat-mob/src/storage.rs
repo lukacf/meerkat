@@ -3,8 +3,8 @@ use std::sync::Arc;
 use meerkat_store::MemoryStore;
 use meerkat_store::SessionStore;
 
-use crate::store::MobEventStore;
 use crate::InMemoryMobEventStore;
+use crate::store::MobEventStore;
 
 #[derive(Clone)]
 pub struct MobStorage {

@@ -24,7 +24,9 @@ pub struct NewMobEvent {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MobEventKind {
-    MobCreated { definition: crate::definition::MobDefinition },
+    MobCreated {
+        definition: crate::definition::MobDefinition,
+    },
     MobCompleted,
 
     MeerkatSpawned {
@@ -55,7 +57,7 @@ pub enum MobEventKind {
     },
     TaskUpdated {
         task_id: String,
-        status: TaskStatus,
+        status: Option<TaskStatus>,
         owner: Option<MeerkatId>,
     },
     DefinitionDiagnostic(Diagnostic),

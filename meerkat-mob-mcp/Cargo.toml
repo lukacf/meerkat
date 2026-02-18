@@ -1,22 +1,32 @@
 [package]
 name = "meerkat-mob-mcp"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.89.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "MCP server for meerkat-mob"
-license = "MIT OR Apache-2.0"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-meerkat-mob = { path = "../meerkat-mob", version = "0.1.0" }
-meerkat-core = { path = "../meerkat-core", version = "0.3.4" }
-meerkat-memory = { path = "../meerkat-memory", version = "0.3.4" }
-meerkat-session = { path = "../meerkat-session", version = "0.3.4" }
-meerkat-store = { path = "../meerkat-store", version = "0.3.4" }
+meerkat-mob = { workspace = true }
+meerkat-core = { workspace = true }
+meerkat-memory = { workspace = true }
+meerkat-session = { workspace = true }
+meerkat-store = { workspace = true, features = ["jsonl"] }
 
-async-trait = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs", "sync", "time"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+async-trait = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lib]
 name = "meerkat_mob_mcp"
@@ -25,3 +35,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "rkat-mob-mcp"
 path = "src/main.rs"
+
+[lints]
+workspace = true

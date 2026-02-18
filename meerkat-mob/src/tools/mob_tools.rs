@@ -3,13 +3,12 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use meerkat_core::agent::{AgentToolDispatcher};
+use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolResult};
 
 use crate::ids::MeerkatId;
 use crate::runtime::MobHandle;
-use crate::tools::empty_object_schema;
 
 pub const TOOL_SPAWN_MEERKAT: &str = "spawn_meerkat";
 pub const TOOL_RETIRE_MEERKAT: &str = "retire_meerkat";
@@ -31,27 +30,27 @@ impl MobToolDispatcher {
                 Arc::new(meerkat_core::types::ToolDef {
                     name: TOOL_SPAWN_MEERKAT.to_string(),
                     description: "Spawn a new meerkat by profile".to_string(),
-                    input_schema: empty_object_schema(),
+                    input_schema: spawn_schema(),
                 }),
                 Arc::new(meerkat_core::types::ToolDef {
                     name: TOOL_RETIRE_MEERKAT.to_string(),
                     description: "Retire an existing meerkat".to_string(),
-                    input_schema: empty_object_schema(),
+                    input_schema: retire_schema(),
                 }),
                 Arc::new(meerkat_core::types::ToolDef {
                     name: TOOL_WIRE_PEERS.to_string(),
                     description: "Wire two meerkats together".to_string(),
-                    input_schema: empty_object_schema(),
+                    input_schema: wire_schema(),
                 }),
                 Arc::new(meerkat_core::types::ToolDef {
                     name: TOOL_UNWIRE_PEERS.to_string(),
                     description: "Unwire two meerkats".to_string(),
-                    input_schema: empty_object_schema(),
+                    input_schema: wire_schema(),
                 }),
                 Arc::new(meerkat_core::types::ToolDef {
                     name: TOOL_LIST_MEERKATS.to_string(),
                     description: "List active meerkats".to_string(),
-                    input_schema: empty_object_schema(),
+                    input_schema: list_schema(),
                 }),
             ]
             .into(),
@@ -77,13 +76,20 @@ struct SpawnArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PeerArgs {
+struct PairArgs {
     a: String,
     b: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct RetireArgs {
+    #[serde(alias = "a", alias = "key")]
+    meerkat_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ListArgs {
+    #[serde(default)]
     role: Option<String>,
 }
 
@@ -91,6 +97,53 @@ struct ListArgs {
 struct PeerInfo {
     meerkat_id: String,
     profile: String,
+}
+
+fn spawn_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "profile": { "type": "string" },
+            "key": { "type": "string" },
+            "initial_message": { "type": "string" }
+        },
+        "required": ["profile", "key"],
+        "additionalProperties": false
+    })
+}
+
+fn retire_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "meerkat_id": { "type": "string" }
+        },
+        "required": ["meerkat_id"],
+        "additionalProperties": true
+    })
+}
+
+fn wire_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "a": { "type": "string" },
+            "b": { "type": "string" }
+        },
+        "required": ["a", "b"],
+        "additionalProperties": false
+    })
+}
+
+fn list_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "role": { "type": "string" }
+        },
+        "required": [],
+        "additionalProperties": false
+    })
 }
 
 #[async_trait::async_trait]
@@ -103,9 +156,11 @@ impl AgentToolDispatcher for MobToolDispatcher {
         let handle = self.handle()?;
         match call.name {
             TOOL_SPAWN_MEERKAT => {
-                let args: SpawnArgs = call
-                    .parse_args()
-                    .map_err(|e| ToolError::InvalidArguments { name: call.name.to_string(), reason: e.to_string() })?;
+                let args: SpawnArgs =
+                    call.parse_args().map_err(|e| ToolError::InvalidArguments {
+                        name: call.name.to_string(),
+                        reason: e.to_string(),
+                    })?;
                 let id = handle
                     .spawn(
                         &args.profile.into(),
@@ -113,75 +168,95 @@ impl AgentToolDispatcher for MobToolDispatcher {
                         args.initial_message,
                     )
                     .await
-                    .map_err(|e| ToolError::ExecutionFailed { message: e.to_string() })?;
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        message: e.to_string(),
+                    })?;
                 Ok(ToolResult::from_tool_call(
                     &meerkat_core::types::ToolCall {
                         id: call.id.to_string(),
                         name: call.name.to_string(),
                         args: serde_json::Value::Null,
                     },
-                    serde_json::to_string(&json!({"meerkat_id": id.as_str()})).unwrap_or_else(|_| "{}".to_string()),
+                    serde_json::to_string(&json!({"meerkat_id": id.as_str()}))
+                        .unwrap_or_else(|_| "{}".to_string()),
                     false,
                 ))
             }
             TOOL_RETIRE_MEERKAT => {
-                let args: PeerArgs = call
-                    .parse_args()
-                    .map_err(|e| ToolError::InvalidArguments { name: call.name.to_string(), reason: e.to_string() })?;
+                let args: RetireArgs =
+                    call.parse_args().map_err(|e| ToolError::InvalidArguments {
+                        name: call.name.to_string(),
+                        reason: e.to_string(),
+                    })?;
                 handle
-                    .retire(&MeerkatId::from(args.a))
+                    .retire(&MeerkatId::from(args.meerkat_id))
                     .await
-                    .map_err(|e| ToolError::ExecutionFailed { message: e.to_string() })?;
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        message: e.to_string(),
+                    })?;
                 Ok(ToolResult::from_tool_call(
                     &meerkat_core::types::ToolCall {
                         id: call.id.to_string(),
                         name: call.name.to_string(),
                         args: serde_json::Value::Null,
                     },
-                    serde_json::to_string(&json!({"ok": true})).unwrap_or_else(|_| "{}".to_string()),
+                    serde_json::to_string(&json!({"ok": true}))
+                        .unwrap_or_else(|_| "{}".to_string()),
                     false,
                 ))
             }
             TOOL_WIRE_PEERS => {
-                let args: PeerArgs = call
-                    .parse_args()
-                    .map_err(|e| ToolError::InvalidArguments { name: call.name.to_string(), reason: e.to_string() })?;
+                let args: PairArgs =
+                    call.parse_args().map_err(|e| ToolError::InvalidArguments {
+                        name: call.name.to_string(),
+                        reason: e.to_string(),
+                    })?;
                 handle
                     .wire(&MeerkatId::from(args.a), &MeerkatId::from(args.b))
                     .await
-                    .map_err(|e| ToolError::ExecutionFailed { message: e.to_string() })?;
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        message: e.to_string(),
+                    })?;
                 Ok(ToolResult::from_tool_call(
                     &meerkat_core::types::ToolCall {
                         id: call.id.to_string(),
                         name: call.name.to_string(),
                         args: serde_json::Value::Null,
                     },
-                    serde_json::to_string(&json!({"ok": true})).unwrap_or_else(|_| "{}".to_string()),
+                    serde_json::to_string(&json!({"ok": true}))
+                        .unwrap_or_else(|_| "{}".to_string()),
                     false,
                 ))
             }
             TOOL_UNWIRE_PEERS => {
-                let args: PeerArgs = call
-                    .parse_args()
-                    .map_err(|e| ToolError::InvalidArguments { name: call.name.to_string(), reason: e.to_string() })?;
+                let args: PairArgs =
+                    call.parse_args().map_err(|e| ToolError::InvalidArguments {
+                        name: call.name.to_string(),
+                        reason: e.to_string(),
+                    })?;
                 handle
                     .unwire(&MeerkatId::from(args.a), &MeerkatId::from(args.b))
                     .await
-                    .map_err(|e| ToolError::ExecutionFailed { message: e.to_string() })?;
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        message: e.to_string(),
+                    })?;
                 Ok(ToolResult::from_tool_call(
                     &meerkat_core::types::ToolCall {
                         id: call.id.to_string(),
                         name: call.name.to_string(),
                         args: serde_json::Value::Null,
                     },
-                    serde_json::to_string(&json!({"ok": true})).unwrap_or_else(|_| "{}".to_string()),
+                    serde_json::to_string(&json!({"ok": true}))
+                        .unwrap_or_else(|_| "{}".to_string()),
                     false,
                 ))
             }
             TOOL_LIST_MEERKATS => {
-                let args: ListArgs = call
-                    .parse_args()
-                    .map_err(|e| ToolError::InvalidArguments { name: call.name.to_string(), reason: e.to_string() })?;
+                let args: ListArgs =
+                    call.parse_args().map_err(|e| ToolError::InvalidArguments {
+                        name: call.name.to_string(),
+                        reason: e.to_string(),
+                    })?;
                 let role = args.role.as_deref().map(crate::ids::ProfileName::from);
                 let peers = handle
                     .list_meerkats(role.as_ref())

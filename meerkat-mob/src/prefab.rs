@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::definition::{MobDefinition, OrchestratorConfig, WiringRules, SkillSource};
+use crate::definition::{MobDefinition, OrchestratorConfig, SkillSource, WiringRules};
 use crate::ids::{MobId, ProfileName};
 use crate::profile::{Profile, ToolConfig};
 
@@ -54,7 +54,7 @@ fn coding_swarm() -> MobDefinition {
     profiles.insert(
         orchestrator_profile.clone(),
         Profile {
-            model: "gpt-4o-mini".to_string(),
+            model: "gpt-5.2".to_string(),
             skills: vec!["swarm_leader".to_string()],
             tools: ToolConfig {
                 builtins: true,
@@ -73,7 +73,7 @@ fn coding_swarm() -> MobDefinition {
     profiles.insert(
         ProfileName::from("developer"),
         Profile {
-            model: "gpt-4o-mini".to_string(),
+            model: "gpt-5.2".to_string(),
             skills: vec!["developer".to_string()],
             tools: ToolConfig {
                 builtins: true,
@@ -125,7 +125,7 @@ fn code_review() -> MobDefinition {
     profiles.insert(
         orchestrator_profile.clone(),
         Profile {
-            model: "gpt-4o-mini".to_string(),
+            model: "gpt-5.2".to_string(),
             skills: vec!["review_lead".to_string()],
             tools: ToolConfig {
                 builtins: true,
@@ -145,7 +145,7 @@ fn code_review() -> MobDefinition {
     profiles.insert(
         ProfileName::from("reviewer"),
         Profile {
-            model: "gpt-4o-mini".to_string(),
+            model: "gpt-5.2".to_string(),
             skills: vec!["reviewer".to_string()],
             tools: ToolConfig {
                 builtins: true,
@@ -200,7 +200,7 @@ fn research_team() -> MobDefinition {
     profiles.insert(
         orchestrator_profile.clone(),
         Profile {
-            model: "gpt-4o-mini".to_string(),
+            model: "gpt-5.2".to_string(),
             skills: vec!["research_lead".to_string()],
             tools: ToolConfig {
                 builtins: true,
@@ -257,7 +257,7 @@ fn pipeline() -> MobDefinition {
     profiles.insert(
         orchestrator_profile.clone(),
         Profile {
-            model: "gpt-4o-mini".to_string(),
+            model: "gpt-5.2".to_string(),
             skills: vec!["pipeline".to_string()],
             tools: ToolConfig {
                 builtins: true,

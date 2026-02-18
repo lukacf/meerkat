@@ -33,7 +33,6 @@ use meerkat_store::{RealmBackend, RealmOrigin, SessionFilter};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Exit codes as per DESIGN.md §12
@@ -589,9 +588,17 @@ enum MobCommands {
     /// Retire a meerkat
     Retire { mob_id: String, meerkat_id: String },
     /// Wire peers
-    Wire { mob_id: String, a: String, b: String },
+    Wire {
+        mob_id: String,
+        a: String,
+        b: String,
+    },
     /// Unwire peers
-    Unwire { mob_id: String, a: String, b: String },
+    Unwire {
+        mob_id: String,
+        a: String,
+        b: String,
+    },
     /// Send an external turn to a meerkat
     Turn {
         mob_id: String,
@@ -2396,16 +2403,19 @@ async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
     }
 }
 
-fn mob_state() -> &'static meerkat_mob_mcp::MobMcpState {
-    static STATE: OnceLock<meerkat_mob_mcp::MobMcpState> = OnceLock::new();
-    STATE.get_or_init(|| {
-        let root = std::env::temp_dir().join("rkat-mob-state");
-        meerkat_mob_mcp::MobMcpState::new(root)
-    })
+fn mob_state_root(scope: &RuntimeScope) -> PathBuf {
+    let realm_paths =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
+    realm_paths.root.join("mob")
 }
 
-async fn call_mob_tool(method: &str, params: Option<serde_json::Value>) -> anyhow::Result<serde_json::Value> {
-    let result = meerkat_mob_mcp::handle_tool_call(mob_state(), method, params).await;
+async fn call_mob_tool(
+    scope: &RuntimeScope,
+    method: &str,
+    params: Option<serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
+    let state = meerkat_mob_mcp::MobMcpState::new(mob_state_root(scope)).await;
+    let result = meerkat_mob_mcp::handle_tool_call(&state, method, params).await;
     if let Some(error) = result.get("error") {
         let message = error
             .get("message")
@@ -2416,9 +2426,9 @@ async fn call_mob_tool(method: &str, params: Option<serde_json::Value>) -> anyho
     Ok(result)
 }
 
-async fn handle_mob_command(command: MobCommands, _scope: &RuntimeScope) -> anyhow::Result<()> {
+async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
     let result = match command {
-        MobCommands::Prefabs => call_mob_tool("mob_prefabs", None).await?,
+        MobCommands::Prefabs => call_mob_tool(scope, "mob_prefabs", None).await?,
         MobCommands::Create {
             mob_id,
             prefab,
@@ -2440,11 +2450,16 @@ async fn handle_mob_command(command: MobCommands, _scope: &RuntimeScope) -> anyh
                     serde_json::Value::String(definition.display().to_string()),
                 );
             }
-            call_mob_tool("mob_create", Some(serde_json::Value::Object(params))).await?
+            call_mob_tool(scope, "mob_create", Some(serde_json::Value::Object(params))).await?
         }
-        MobCommands::List => call_mob_tool("mob_list", None).await?,
+        MobCommands::List => call_mob_tool(scope, "mob_list", None).await?,
         MobCommands::Status { mob_id } => {
-            call_mob_tool("mob_status", Some(serde_json::json!({ "mob_id": mob_id }))).await?
+            call_mob_tool(
+                scope,
+                "mob_status",
+                Some(serde_json::json!({ "mob_id": mob_id })),
+            )
+            .await?
         }
         MobCommands::Spawn {
             mob_id,
@@ -2453,6 +2468,7 @@ async fn handle_mob_command(command: MobCommands, _scope: &RuntimeScope) -> anyh
             message,
         } => {
             call_mob_tool(
+                scope,
                 "mob_spawn",
                 Some(serde_json::json!({
                     "mob_id": mob_id,
@@ -2465,16 +2481,27 @@ async fn handle_mob_command(command: MobCommands, _scope: &RuntimeScope) -> anyh
         }
         MobCommands::Retire { mob_id, meerkat_id } => {
             call_mob_tool(
+                scope,
                 "mob_retire",
-                Some(serde_json::json!({ "mob_id": mob_id, "meerkat_id": meerkat_id, "message": "" })),
+                Some(serde_json::json!({ "mob_id": mob_id, "meerkat_id": meerkat_id })),
             )
             .await?
         }
         MobCommands::Wire { mob_id, a, b } => {
-            call_mob_tool("mob_wire", Some(serde_json::json!({ "mob_id": mob_id, "a": a, "b": b }))).await?
+            call_mob_tool(
+                scope,
+                "mob_wire",
+                Some(serde_json::json!({ "mob_id": mob_id, "a": a, "b": b })),
+            )
+            .await?
         }
         MobCommands::Unwire { mob_id, a, b } => {
-            call_mob_tool("mob_unwire", Some(serde_json::json!({ "mob_id": mob_id, "a": a, "b": b }))).await?
+            call_mob_tool(
+                scope,
+                "mob_unwire",
+                Some(serde_json::json!({ "mob_id": mob_id, "a": a, "b": b })),
+            )
+            .await?
         }
         MobCommands::Turn {
             mob_id,
@@ -2482,22 +2509,28 @@ async fn handle_mob_command(command: MobCommands, _scope: &RuntimeScope) -> anyh
             message,
         } => {
             call_mob_tool(
+                scope,
                 "mob_turn",
                 Some(serde_json::json!({ "mob_id": mob_id, "meerkat_id": meerkat_id, "message": message })),
             )
             .await?
         }
         MobCommands::Stop { mob_id } => {
-            call_mob_tool("mob_stop", Some(serde_json::json!({ "mob_id": mob_id }))).await?
+            call_mob_tool(scope, "mob_stop", Some(serde_json::json!({ "mob_id": mob_id }))).await?
         }
         MobCommands::Resume { mob_id } => {
-            call_mob_tool("mob_resume", Some(serde_json::json!({ "mob_id": mob_id }))).await?
+            call_mob_tool(scope, "mob_resume", Some(serde_json::json!({ "mob_id": mob_id }))).await?
         }
         MobCommands::Complete { mob_id } => {
-            call_mob_tool("mob_complete", Some(serde_json::json!({ "mob_id": mob_id }))).await?
+            call_mob_tool(
+                scope,
+                "mob_complete",
+                Some(serde_json::json!({ "mob_id": mob_id })),
+            )
+            .await?
         }
         MobCommands::Destroy { mob_id } => {
-            call_mob_tool("mob_destroy", Some(serde_json::json!({ "mob_id": mob_id }))).await?
+            call_mob_tool(scope, "mob_destroy", Some(serde_json::json!({ "mob_id": mob_id }))).await?
         }
     };
 

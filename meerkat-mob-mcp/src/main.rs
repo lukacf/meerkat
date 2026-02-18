@@ -1,12 +1,21 @@
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
-use meerkat_mob_mcp::handle_rpc_line;
 use meerkat_mob_mcp::MobMcpState;
+use meerkat_mob_mcp::handle_rpc_line;
 use std::sync::Arc;
+
+fn default_storage_root() -> PathBuf {
+    if let Ok(path) = std::env::var("RKAT_MOB_STATE_ROOT") {
+        return PathBuf::from(path);
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    cwd.join(".rkat").join("mob")
+}
 
 #[tokio::main]
 async fn main() {
-    let state = Arc::new(MobMcpState::new(std::env::temp_dir()));
+    let state = Arc::new(MobMcpState::new(default_storage_root()).await);
 
     let stdin = io::stdin();
     let stdout = io::stdout();

@@ -1748,54 +1748,22 @@ impl MobRuntime {
 
         let session = Session::new();
         let session_id = session.id().clone();
-
-        let role_tools = self.resolve_role_tooling(spec, role).await?;
-
         let mut labels = identity.labels.clone();
         labels.insert("mob_id".to_string(), spec.mob_id.clone());
         labels.insert("role".to_string(), role_name.to_string());
         labels.insert("meerkat_id".to_string(), identity.meerkat_id.clone());
 
-        let peer_meta = labels
-            .iter()
-            .fold(PeerMeta::default(), |meta, (key, value)| {
-                meta.with_label(key.clone(), value.clone())
+        let request = self
+            .compile_role_session_request(CompileRoleSessionInput {
+                spec,
+                role_name,
+                role,
+                labels: &labels,
+                comms_name: &comms_name,
+                namespace,
+                session,
             })
-            .with_description(format!(
-                "Mob meerkat '{}' role '{}'",
-                identity.meerkat_id, role_name
-            ));
-
-        let request = CreateSessionRequest {
-            model: role
-                .model
-                .clone()
-                .unwrap_or_else(|| self.default_model.clone()),
-            prompt: String::new(),
-            system_prompt: Some(role.prompt.clone()),
-            max_tokens: None,
-            event_tx: None,
-            host_mode: true,
-            skill_references: None,
-            build: Some(SessionBuildOptions {
-                comms_name: Some(comms_name.clone()),
-                peer_meta: Some(peer_meta),
-                resume_session: Some(session),
-                external_tools: role_tools.external_tools,
-                override_builtins: Some(role_tools.enable_builtins),
-                override_shell: Some(role_tools.enable_shell),
-                override_subagents: Some(role_tools.enable_subagents),
-                override_memory: Some(role_tools.enable_memory),
-                preload_skills: Some(
-                    role.preload_skills
-                        .iter()
-                        .map(|value| meerkat_core::skills::SkillId(value.clone()))
-                        .collect(),
-                ),
-                realm_id: Some(namespace),
-                ..SessionBuildOptions::default()
-            }),
-        };
+            .await?;
 
         let session_service = self.session_service.clone();
         tokio::spawn(async move {
@@ -2074,6 +2042,67 @@ impl MobRuntime {
         self.run_tasks.read().await.len()
     }
 
+    async fn compile_role_session_request(
+        &self,
+        input: CompileRoleSessionInput<'_>,
+    ) -> MobResult<CreateSessionRequest> {
+        let CompileRoleSessionInput {
+            spec,
+            role_name,
+            role,
+            labels,
+            comms_name,
+            namespace,
+            session,
+        } = input;
+
+        let role_tools = self.resolve_role_tooling(spec, role).await?;
+        let peer_meta = labels
+            .iter()
+            .fold(PeerMeta::default(), |meta, (key, value)| {
+                meta.with_label(key.clone(), value.clone())
+            })
+            .with_description(format!(
+                "Mob meerkat '{}' role '{}'",
+                labels
+                    .get("meerkat_id")
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                role_name
+            ));
+
+        Ok(CreateSessionRequest {
+            model: role
+                .model
+                .clone()
+                .unwrap_or_else(|| self.default_model.clone()),
+            prompt: String::new(),
+            system_prompt: Some(role.prompt.clone()),
+            max_tokens: None,
+            event_tx: None,
+            host_mode: true,
+            skill_references: None,
+            build: Some(SessionBuildOptions {
+                comms_name: Some(comms_name.to_string()),
+                peer_meta: Some(peer_meta),
+                resume_session: Some(session),
+                external_tools: role_tools.external_tools,
+                override_builtins: Some(role_tools.enable_builtins),
+                override_shell: Some(role_tools.enable_shell),
+                override_subagents: Some(role_tools.enable_subagents),
+                override_memory: Some(role_tools.enable_memory),
+                preload_skills: Some(
+                    role.preload_skills
+                        .iter()
+                        .map(|value| meerkat_core::skills::SkillId(value.clone()))
+                        .collect(),
+                ),
+                realm_id: Some(namespace),
+                ..SessionBuildOptions::default()
+            }),
+        })
+    }
+
     async fn resolve_role_tooling(
         &self,
         spec: &MobSpec,
@@ -2242,6 +2271,16 @@ struct DispatchTargetInput<'a> {
     payload: Value,
     spec: &'a MobSpec,
     expected_epoch: u64,
+}
+
+struct CompileRoleSessionInput<'a> {
+    spec: &'a MobSpec,
+    role_name: &'a str,
+    role: &'a RoleSpec,
+    labels: &'a BTreeMap<String, String>,
+    comms_name: &'a str,
+    namespace: String,
+    session: Session,
 }
 
 #[derive(Default)]

@@ -3,6 +3,7 @@
 use crate::error::LlmError;
 use std::net::IpAddr;
 
+#[allow(dead_code)]
 pub fn build_http_client_for_base_url(
     builder: reqwest::ClientBuilder,
     base_url: &str,
@@ -19,6 +20,7 @@ pub fn build_http_client_for_base_url(
     })
 }
 
+#[allow(dead_code)]
 fn is_loopback_base_url(base_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base_url) else {
         return false;

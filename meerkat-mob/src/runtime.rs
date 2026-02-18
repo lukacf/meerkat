@@ -87,6 +87,7 @@ pub struct MobRuntime {
     managed_meerkats: Arc<RwLock<HashMap<String, HashMap<String, ManagedMeerkat>>>>,
     spawn_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
     run_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
+    inflight_dispatches: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
     supervisors: Arc<RwLock<HashMap<String, Arc<CommsRuntime>>>>,
     reset_epochs: Arc<RwLock<HashMap<String, u64>>>,
 }
@@ -187,6 +188,7 @@ impl MobRuntimeBuilder {
             managed_meerkats: Arc::new(RwLock::new(HashMap::new())),
             spawn_locks: Arc::new(RwLock::new(HashMap::new())),
             run_tasks: Arc::new(RwLock::new(HashMap::new())),
+            inflight_dispatches: Arc::new(RwLock::new(HashMap::new())),
             supervisors: Arc::new(RwLock::new(HashMap::new())),
             reset_epochs: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -726,6 +728,7 @@ impl MobRuntime {
         reason: &str,
         details: Value,
     ) -> MobResult<()> {
+        let inflight_dispatches = self.inflight_dispatch_count().await;
         self.emit_event(NewMobEvent {
             timestamp: Utc::now(),
             category: MobEventCategory::Supervisor,
@@ -738,6 +741,7 @@ impl MobRuntime {
             payload: json!({
                 "reason": reason,
                 "details": details.clone(),
+                "inflight_dispatches": inflight_dispatches,
             }),
         })
         .await?;
@@ -1372,7 +1376,9 @@ impl MobRuntime {
 
         let timeout_ms = step.timeout_ms.unwrap_or(spec.limits.default_step_timeout_ms);
         let max_attempts = 2u32;
+        let logical_key = format!("{}:{}:{}", run_id, step.step_id, target.meerkat_id);
         for attempt in 1..=max_attempts {
+            self.record_dispatch_start(&logical_key).await;
             self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
                 .await?;
             self.emit_event(NewMobEvent {
@@ -1473,7 +1479,6 @@ impl MobRuntime {
                 Ok(value) => {
                     self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
                         .await?;
-                    let logical_key = format!("{}:{}:{}", run_id, step.step_id, target.meerkat_id);
                     let inserted = self
                         .run_store
                         .append_step_entry_if_absent(
@@ -1491,6 +1496,7 @@ impl MobRuntime {
                         )
                         .await?;
                     if !inserted {
+                        self.record_dispatch_finish(&logical_key).await;
                         return Ok(
                             json!({
                                 "attempt": attempt,
@@ -1519,6 +1525,7 @@ impl MobRuntime {
                     .await?;
                     let result_payload = value.get("result").cloned().unwrap_or(Value::Null);
                     let interaction_id = value.get("interaction_id").cloned();
+                    self.record_dispatch_finish(&logical_key).await;
                     return Ok(
                         json!({
                             "attempt": attempt,
@@ -1533,6 +1540,7 @@ impl MobRuntime {
                     let retryable =
                         matches!(err, MobError::DispatchTimeout { .. } | MobError::Comms(_));
                     if attempt < max_attempts && retryable {
+                        self.record_dispatch_finish(&logical_key).await;
                         tokio::time::sleep(std::time::Duration::from_millis(
                             spec.supervisor.retry_backoff_ms,
                         ))
@@ -1565,6 +1573,7 @@ impl MobRuntime {
                     })
                     .await?;
 
+                    self.record_dispatch_finish(&logical_key).await;
                     return Err(err);
                 }
             }
@@ -2004,6 +2013,21 @@ impl MobRuntime {
     #[cfg(test)]
     async fn active_run_task_count(&self) -> usize {
         self.run_tasks.read().await.len()
+    }
+
+    async fn record_dispatch_start(&self, logical_key: &str) {
+        self.inflight_dispatches
+            .write()
+            .await
+            .insert(logical_key.to_string(), Utc::now());
+    }
+
+    async fn record_dispatch_finish(&self, logical_key: &str) {
+        self.inflight_dispatches.write().await.remove(logical_key);
+    }
+
+    async fn inflight_dispatch_count(&self) -> usize {
+        self.inflight_dispatches.read().await.len()
     }
 
     async fn compile_role_session_request(
@@ -2453,6 +2477,26 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         assert_eq!(runtime.active_run_task_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn inflight_dispatch_registry_tracks_start_finish() {
+        let runtime = MobRuntimeBuilder::new(
+            "realm-a",
+            Arc::new(MockSessionService),
+            AgentFactory::new("/tmp"),
+            Arc::new(InMemoryMobSpecStore::default()),
+            Arc::new(InMemoryMobRunStore::default()),
+            Arc::new(InMemoryMobEventStore::default()),
+        )
+        .runtime_root(PathBuf::from("/tmp"))
+        .build()
+        .unwrap();
+
+        runtime.record_dispatch_start("run:s1:m1").await;
+        assert_eq!(runtime.inflight_dispatch_count().await, 1);
+        runtime.record_dispatch_finish("run:s1:m1").await;
+        assert_eq!(runtime.inflight_dispatch_count().await, 0);
     }
 
     #[derive(Default)]

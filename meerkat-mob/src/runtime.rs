@@ -12,7 +12,7 @@ use crate::spec::{ApplySpecRequest, SpecValidator};
 use crate::store::{MobEventStore, MobRunStore, MobSpecStore};
 use async_trait::async_trait;
 use chrono::Utc;
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use meerkat::{
     AgentFactory, AgentToolDispatcher, CommsCommand, CommsRuntime, CreateSessionRequest,
@@ -23,9 +23,12 @@ use meerkat_core::agent::CommsRuntime as CoreCommsRuntimeTrait;
 use meerkat_core::comms::TrustedPeerSpec;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::path::PathBuf;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 mod conditions;
@@ -81,6 +84,7 @@ pub struct MobRuntime {
     rust_bundles: RustToolBundleRegistry,
     managed_meerkats: Arc<RwLock<HashMap<String, HashMap<String, ManagedMeerkat>>>>,
     spawn_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
+    run_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     supervisors: Arc<RwLock<HashMap<String, Arc<CommsRuntime>>>>,
     reset_epochs: Arc<RwLock<HashMap<String, u64>>>,
 }
@@ -180,6 +184,7 @@ impl MobRuntimeBuilder {
             rust_bundles: self.rust_bundles,
             managed_meerkats: Arc::new(RwLock::new(HashMap::new())),
             spawn_locks: Arc::new(RwLock::new(HashMap::new())),
+            run_tasks: Arc::new(RwLock::new(HashMap::new())),
             supervisors: Arc::new(RwLock::new(HashMap::new())),
             reset_epochs: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -323,18 +328,31 @@ impl MobService for MobRuntime {
         })
         .await?;
 
-        let runtime = self.clone();
         let run_id_for_task = run_id.clone();
         let expected_epoch = self.current_reset_epoch(&request.mob_id).await;
         let pinned_spec = spec.clone();
-        tokio::spawn(async move {
-            if let Err(err) = runtime
-                .execute_run(run_id_for_task.clone(), request, pinned_spec, expected_epoch)
-                .await
-            {
-                tracing::error!(run_id = %run_id_for_task, "mob run execution failed: {err}");
+        let runtime = self.clone();
+        self.spawn_tracked_run_task(run_id.clone(), async move {
+            let outcome = AssertUnwindSafe(runtime.execute_run(
+                run_id_for_task.clone(),
+                request,
+                pinned_spec,
+                expected_epoch,
+            ))
+            .catch_unwind()
+            .await;
+
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::error!(run_id = %run_id_for_task, "mob run execution failed: {err}");
+                }
+                Err(_) => {
+                    tracing::error!(run_id = %run_id_for_task, "mob run panicked");
+                }
             }
-        });
+        })
+        .await;
 
         Ok(MobActivationResponse {
             run_id,
@@ -2021,6 +2039,24 @@ impl MobRuntime {
             .clone()
     }
 
+    async fn spawn_tracked_run_task<F>(&self, run_id: String, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let run_tasks = self.run_tasks.clone();
+        let run_id_for_cleanup = run_id.clone();
+        let handle = tokio::spawn(async move {
+            future.await;
+            run_tasks.write().await.remove(&run_id_for_cleanup);
+        });
+        self.run_tasks.write().await.insert(run_id, handle);
+    }
+
+    #[cfg(test)]
+    async fn active_run_task_count(&self) -> usize {
+        self.run_tasks.read().await.len()
+    }
+
     async fn resolve_role_tooling(
         &self,
         spec: &MobSpec,
@@ -2346,6 +2382,31 @@ mod tests {
         .build();
 
         assert!(runtime.is_ok());
+    }
+
+    #[tokio::test]
+    async fn tracked_run_task_registers_and_cleans_up() {
+        let runtime = MobRuntimeBuilder::new(
+            "realm-a",
+            Arc::new(MockSessionService),
+            AgentFactory::new("/tmp"),
+            Arc::new(InMemoryMobSpecStore::default()),
+            Arc::new(InMemoryMobRunStore::default()),
+            Arc::new(InMemoryMobEventStore::default()),
+        )
+        .runtime_root(PathBuf::from("/tmp"))
+        .build()
+        .unwrap();
+
+        runtime
+            .spawn_tracked_run_task("run-test".to_string(), async {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            })
+            .await;
+        assert_eq!(runtime.active_run_task_count().await, 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(runtime.active_run_task_count().await, 0);
     }
 
     #[derive(Default)]

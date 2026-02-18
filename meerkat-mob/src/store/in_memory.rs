@@ -111,6 +111,30 @@ impl MobRunStore for InMemoryMobRunStore {
         Ok(())
     }
 
+    async fn append_step_entry_if_absent(
+        &self,
+        run_id: &str,
+        logical_key: &str,
+        entry: StepLedgerEntry,
+    ) -> MobResult<bool> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobError::RunNotFound {
+                run_id: run_id.to_string(),
+            })?;
+        let exists = run
+            .step_ledger
+            .iter()
+            .any(|item| item.logical_key == logical_key && !item.logical_key.is_empty());
+        if exists {
+            return Ok(false);
+        }
+        run.step_ledger.push(entry);
+        run.updated_at = Utc::now();
+        Ok(true)
+    }
+
     async fn append_failure_entry(
         &self,
         run_id: &str,
@@ -323,6 +347,7 @@ mod tests {
                     timestamp: Utc::now(),
                     step_id: "s1".into(),
                     target_meerkat: "reviewer/1".into(),
+                    logical_key: "r2:s1:reviewer/1".into(),
                     attempt: 1,
                     status: StepRunStatus::Completed,
                     detail: json!({"result":"ok"}),
@@ -347,6 +372,49 @@ mod tests {
         let run = store.get_run("r2").await.unwrap().unwrap();
         assert_eq!(run.step_ledger.len(), 1);
         assert_eq!(run.failure_ledger.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_store_append_if_absent_dedupes() {
+        let store = InMemoryMobRunStore::default();
+        store.create_run(sample_run("r3")).await.unwrap();
+        let first = store
+            .append_step_entry_if_absent(
+                "r3",
+                "r3:s1:m1",
+                StepLedgerEntry {
+                    timestamp: Utc::now(),
+                    step_id: "s1".into(),
+                    target_meerkat: "m1".into(),
+                    logical_key: "r3:s1:m1".into(),
+                    attempt: 1,
+                    status: StepRunStatus::Completed,
+                    detail: json!({"ok": true}),
+                },
+            )
+            .await
+            .unwrap();
+        let second = store
+            .append_step_entry_if_absent(
+                "r3",
+                "r3:s1:m1",
+                StepLedgerEntry {
+                    timestamp: Utc::now(),
+                    step_id: "s1".into(),
+                    target_meerkat: "m1".into(),
+                    logical_key: "r3:s1:m1".into(),
+                    attempt: 2,
+                    status: StepRunStatus::Completed,
+                    detail: json!({"ok": true}),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(first);
+        assert!(!second);
+        let run = store.get_run("r3").await.unwrap().unwrap();
+        assert_eq!(run.step_ledger.len(), 1);
     }
 
     #[tokio::test]

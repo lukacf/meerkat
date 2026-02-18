@@ -39,6 +39,16 @@ pub trait MobRunStore: Send + Sync {
 
     async fn append_step_entry(&self, run_id: &str, entry: StepLedgerEntry) -> MobResult<()>;
 
+    /// Atomically appends a step entry when `logical_key` has not been committed yet.
+    ///
+    /// Returns `true` when appended, `false` when the key already exists.
+    async fn append_step_entry_if_absent(
+        &self,
+        run_id: &str,
+        logical_key: &str,
+        entry: StepLedgerEntry,
+    ) -> MobResult<bool>;
+
     async fn append_failure_entry(&self, run_id: &str, entry: FailureLedgerEntry)
         -> MobResult<()>;
 

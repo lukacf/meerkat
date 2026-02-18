@@ -201,6 +201,30 @@ impl CoreCommsRuntime for CommsRuntime {
         Ok(())
     }
 
+    async fn remove_trusted_peer(&self, name: &str) -> Result<(), SendError> {
+        let mut trusted = self.trusted_peers.write().await;
+        if let Some(pubkey) = trusted.get_by_name(name).map(|peer| peer.pubkey) {
+            let _ = trusted.remove(&pubkey);
+        }
+        Ok(())
+    }
+
+    async fn replace_trusted_peers(&self, peers: Vec<TrustedPeerSpec>) -> Result<(), SendError> {
+        let mut next = TrustedPeers::new();
+        for peer in peers {
+            let public_key = PubKey::from_peer_id(&peer.peer_id)
+                .map_err(|err| SendError::Validation(err.to_string()))?;
+            next.upsert(TrustedPeer {
+                name: peer.name,
+                pubkey: public_key,
+                addr: peer.address,
+                meta: crate::PeerMeta::default(),
+            });
+        }
+        *self.trusted_peers.write().await = next;
+        Ok(())
+    }
+
     fn dismiss_received(&self) -> bool {
         self.dismiss_flag.swap(false, Ordering::SeqCst)
     }

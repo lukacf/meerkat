@@ -201,6 +201,20 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Remove a trusted peer by name.
+    async fn remove_trusted_peer(&self, _name: &str) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "remove_trusted_peer not supported for this CommsRuntime".to_string(),
+        ))
+    }
+
+    /// Replace the trusted peer set with the provided peers.
+    async fn replace_trusted_peers(&self, _peers: Vec<TrustedPeerSpec>) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "replace_trusted_peers not supported for this CommsRuntime".to_string(),
+        ))
+    }
+
     /// Dispatch a canonical comms command.
     async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
         Err(SendError::Unsupported(

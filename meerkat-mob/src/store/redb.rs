@@ -248,6 +248,50 @@ impl MobRunStore for RedbMobRunStore {
         .map_err(|err| MobError::Store(err.to_string()))?
     }
 
+    async fn append_step_entry_if_absent(
+        &self,
+        run_id: &str,
+        logical_key: &str,
+        entry: StepLedgerEntry,
+    ) -> MobResult<bool> {
+        let db = self.db.clone();
+        let run_id = run_id.to_string();
+        let logical_key = logical_key.to_string();
+        tokio::task::spawn_blocking(move || {
+            let write = db.begin_write().map_err(map_db_err)?;
+            let mut appended = false;
+            {
+                let mut table = write.open_table(RUNS_TABLE).map_err(map_db_err)?;
+                let current_bytes = table
+                    .get(run_id.as_str())
+                    .map_err(map_db_err)?
+                    .ok_or_else(|| MobError::RunNotFound {
+                        run_id: run_id.clone(),
+                    })?
+                    .value()
+                    .to_vec();
+                let mut run = parse_json::<MobRun>(&current_bytes)?;
+                let exists = run
+                    .step_ledger
+                    .iter()
+                    .any(|item| item.logical_key == logical_key && !item.logical_key.is_empty());
+                if !exists {
+                    run.step_ledger.push(entry);
+                    run.updated_at = Utc::now();
+                    let payload = encode_json(&run)?;
+                    table
+                        .insert(run_id.as_str(), payload.as_slice())
+                        .map_err(map_db_err)?;
+                    appended = true;
+                }
+            }
+            write.commit().map_err(map_db_err)?;
+            Ok(appended)
+        })
+        .await
+        .map_err(|err| MobError::Store(err.to_string()))?
+    }
+
     async fn append_failure_entry(
         &self,
         run_id: &str,

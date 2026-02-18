@@ -13,7 +13,7 @@ use crate::spec::{ApplySpecRequest, SpecValidator};
 use crate::store::{MobEventStore, MobRunStore, MobSpecStore};
 use async_trait::async_trait;
 use chrono::Utc;
-use futures::{StreamExt, future, stream::FuturesUnordered};
+use futures::{StreamExt, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use meerkat::{
     AgentFactory, AgentToolDispatcher, CommsCommand, CommsRuntime, CreateSessionRequest,
@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 #[derive(Default, Clone)]
@@ -75,6 +75,7 @@ pub struct MobRuntime {
     resolver_registry: ResolverRegistry,
     rust_bundles: RustToolBundleRegistry,
     managed_meerkats: Arc<RwLock<HashMap<String, HashMap<String, ManagedMeerkat>>>>,
+    spawn_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
     supervisors: Arc<RwLock<HashMap<String, Arc<CommsRuntime>>>>,
     reset_epochs: Arc<RwLock<HashMap<String, u64>>>,
 }
@@ -173,6 +174,7 @@ impl MobRuntimeBuilder {
             resolver_registry: self.resolver_registry,
             rust_bundles: self.rust_bundles,
             managed_meerkats: Arc::new(RwLock::new(HashMap::new())),
+            spawn_locks: Arc::new(RwLock::new(HashMap::new())),
             supervisors: Arc::new(RwLock::new(HashMap::new())),
             reset_epochs: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -462,8 +464,21 @@ impl MobService for MobRuntime {
                         ))
                     })?;
                     if should_spawn_on_reconcile(role) {
-                        self.spawn_meerkat(&spec, role_name.as_str(), &identity).await?;
-                        result.spawned.push(key);
+                        let spawn_lock = self.spawn_lock(&spec.mob_id).await;
+                        let _spawn_guard = spawn_lock.lock().await;
+                        let already_exists = {
+                            let managed = self.managed_meerkats.read().await;
+                            managed
+                                .get(&spec.mob_id)
+                                .and_then(|m| m.get(&key))
+                                .is_some()
+                        };
+                        if !already_exists {
+                            self.spawn_meerkat(&spec, role_name.as_str(), &identity).await?;
+                            result.spawned.push(key);
+                        } else {
+                            result.unchanged.push(key);
+                        }
                     } else {
                         result.unchanged.push(key);
                     }
@@ -913,12 +928,14 @@ impl MobRuntime {
             .map(|step| (step.step_id.clone(), step.clone()))
             .collect();
 
-        let declaration_order: Vec<String> = flow.steps.iter().map(|step| step.step_id.clone()).collect();
+        let declaration_order: Vec<String> =
+            flow.steps.iter().map(|step| step.step_id.clone()).collect();
         let mut completed = HashSet::<String>::new();
         let mut queued = HashSet::<String>::new();
         let mut ready = VecDeque::<String>::new();
         let mut outputs = HashMap::<String, Value>::new();
         let mut has_failures = false;
+        let mut running = FuturesUnordered::new();
 
         for step in &flow.steps {
             if step.depends_on.is_empty() {
@@ -927,64 +944,67 @@ impl MobRuntime {
             }
         }
 
-        while !ready.is_empty() {
+        while completed.len() < flow.steps.len() {
             self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
                 .await?;
 
-            let mut batch = Vec::new();
-            while batch.len() < spec.limits.max_concurrent_ready_steps && !ready.is_empty() {
+            while running.len() < spec.limits.max_concurrent_ready_steps && !ready.is_empty() {
                 if let Some(step_id) = ready.pop_front() {
-                    batch.push(step_id);
+                    let step = step_by_id
+                        .get(&step_id)
+                        .ok_or_else(|| MobError::Internal(format!("missing step '{step_id}'")))?
+                        .clone();
+                    let mut dependency_outputs = HashMap::new();
+                    for dep in &step.depends_on {
+                        if let Some(value) = outputs.get(dep) {
+                            dependency_outputs.insert(dep.clone(), value.clone());
+                        }
+                    }
+                    let activation_payload = activation_payload.clone();
+                    let step_id_for_task = step_id.clone();
+                    running.push(async move {
+                        let result = self
+                            .execute_step(
+                                spec,
+                                flow_id,
+                                run_id,
+                                step,
+                                dependency_outputs,
+                                activation_payload,
+                                expected_epoch,
+                            )
+                            .await;
+                        (step_id_for_task, result)
+                    });
                 }
             }
 
-            let mut futures = Vec::with_capacity(batch.len());
-            for step_id in &batch {
-                let step = step_by_id
-                    .get(step_id)
-                    .ok_or_else(|| MobError::Internal(format!("missing step '{step_id}'")))?
-                    .clone();
-                let dependency_outputs = outputs.clone();
-                let activation_payload = activation_payload.clone();
-                futures.push(self.execute_step(
-                    spec,
-                    flow_id,
-                    run_id,
-                    step,
-                    dependency_outputs,
-                    activation_payload,
-                    expected_epoch,
-                ));
+            let Some((step_id, step_result)) = running.next().await else {
+                break;
+            };
+            let step_result = step_result?;
+
+            outputs.insert(step_id.clone(), step_result.output.clone());
+            self.run_store
+                .put_step_output(run_id, &step_id, step_result.output)
+                .await?;
+
+            let status = step_result.status;
+            if matches!(status, StepRunStatus::Failed) {
+                has_failures = true;
             }
 
-            let results = future::join_all(futures).await;
+            let mut run = self
+                .run_store
+                .get_run(run_id)
+                .await?
+                .ok_or_else(|| MobError::RunNotFound {
+                    run_id: run_id.to_string(),
+                })?;
+            run.step_statuses.insert(step_id.clone(), status);
+            self.run_store.put_run(run).await?;
 
-            for (index, result) in results.into_iter().enumerate() {
-                let step_id = batch[index].clone();
-                let step_result = result?;
-
-                outputs.insert(step_id.clone(), step_result.output.clone());
-                self.run_store
-                    .put_step_output(run_id, &step_id, step_result.output)
-                    .await?;
-
-                let status = step_result.status;
-                if matches!(status, StepRunStatus::Failed) {
-                    has_failures = true;
-                }
-
-                let mut run = self
-                    .run_store
-                    .get_run(run_id)
-                    .await?
-                    .ok_or_else(|| MobError::RunNotFound {
-                        run_id: run_id.to_string(),
-                    })?;
-                run.step_statuses.insert(step_id.clone(), status);
-                self.run_store.put_run(run).await?;
-
-                completed.insert(step_id);
-            }
+            completed.insert(step_id);
 
             for step_id in &declaration_order {
                 if completed.contains(step_id) || queued.contains(step_id) {
@@ -1000,6 +1020,12 @@ impl MobRuntime {
                     queued.insert(step_id.clone());
                 }
             }
+        }
+
+        if completed.len() != flow.steps.len() {
+            return Err(MobError::Internal(
+                "flow execution ended with incomplete steps".to_string(),
+            ));
         }
 
         Ok(has_failures)
@@ -1150,6 +1176,7 @@ impl MobRuntime {
                         intent,
                         payload,
                         spec,
+                        expected_epoch,
                     )
                     .await;
                 (target_meerkat_id, target_comms_name, result)
@@ -1318,10 +1345,13 @@ impl MobRuntime {
         intent: String,
         payload: Value,
         spec: &MobSpec,
+        expected_epoch: u64,
     ) -> MobResult<Value> {
         let timeout_ms = step.timeout_ms.unwrap_or(spec.limits.default_step_timeout_ms);
         let max_attempts = 2u32;
         for attempt in 1..=max_attempts {
+            self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
+                .await?;
             self.emit_event(MobEvent {
                 cursor: 0,
                 timestamp: Utc::now(),
@@ -1419,10 +1449,26 @@ impl MobRuntime {
 
             match result {
                 Ok(value) => {
-                    if self
-                        .logical_op_already_committed(run_id, &step.step_id, &target.meerkat_id)
-                        .await?
-                    {
+                    self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
+                        .await?;
+                    let logical_key = format!("{}:{}:{}", run_id, step.step_id, target.meerkat_id);
+                    let inserted = self
+                        .run_store
+                        .append_step_entry_if_absent(
+                            run_id,
+                            &logical_key,
+                            StepLedgerEntry {
+                                timestamp: Utc::now(),
+                                step_id: step.step_id.clone(),
+                                target_meerkat: target.meerkat_id.clone(),
+                                logical_key: logical_key.clone(),
+                                attempt,
+                                status: StepRunStatus::Completed,
+                                detail: value.clone(),
+                            },
+                        )
+                        .await?;
+                    if !inserted {
                         return Ok(
                             json!({
                                 "attempt": attempt,
@@ -1434,19 +1480,6 @@ impl MobRuntime {
                             }),
                         );
                     }
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                timestamp: Utc::now(),
-                                step_id: step.step_id.clone(),
-                                target_meerkat: target.meerkat_id.clone(),
-                                attempt,
-                                status: StepRunStatus::Completed,
-                                detail: value.clone(),
-                            },
-                        )
-                        .await?;
                     self.emit_event(MobEvent {
                         cursor: 0,
                         timestamp: Utc::now(),
@@ -1561,6 +1594,8 @@ impl MobRuntime {
         let identities = self
             .resolve_role_meerkats(spec, role, role_spec, activation_payload)
             .await?;
+        let spawn_lock = self.spawn_lock(&spec.mob_id).await;
+        let _spawn_guard = spawn_lock.lock().await;
         for identity in identities {
             if meerkat_selector != "*" && identity.meerkat_id != meerkat_selector {
                 continue;
@@ -1716,6 +1751,7 @@ impl MobRuntime {
             }
         });
 
+        self.wait_for_session_comms(&session_id).await?;
         {
             let mut managed = self.managed_meerkats.write().await;
             let mob_map = managed.entry(spec.mob_id.clone()).or_default();
@@ -1733,7 +1769,6 @@ impl MobRuntime {
                 },
             );
         }
-        self.wait_for_session_comms(&session_id).await?;
         self.refresh_peer_trust(spec).await?;
 
         self.emit_event(MobEvent {
@@ -1782,6 +1817,7 @@ impl MobRuntime {
                 .unwrap_or_default()
         };
 
+        let mut live = Vec::with_capacity(entries.len());
         for instance in &entries {
             let runtime = self
                 .session_service
@@ -1793,48 +1829,40 @@ impl MobRuntime {
                         instance.session_id
                     ))
                 })?;
-
-            runtime
-                .add_trusted_peer(
-                    TrustedPeerSpec::new(
-                        supervisor_name.clone(),
-                        supervisor_peer_id.clone(),
-                        format!("inproc://{supervisor_name}"),
-                    )
-                    .map_err(MobError::Comms)?,
-                )
-                .await
-                .map_err(|err| MobError::Comms(err.to_string()))?;
-
             let peer_id = CoreCommsRuntimeTrait::public_key(&*runtime)
                 .ok_or_else(|| MobError::Comms("peer public key unavailable".to_string()))?;
-
-            supervisor
-                .add_trusted_peer(
-                    TrustedPeerSpec::new(
-                        instance.comms_name.clone(),
-                        peer_id,
-                        format!("inproc://{}", instance.comms_name),
-                    )
-                    .map_err(MobError::Comms)?,
-                )
-                .await
-                .map_err(|err| MobError::Comms(err.to_string()))?;
+            live.push((instance.clone(), runtime, peer_id));
         }
 
-        // Peer trust between managed meerkats is controlled by the ad_hoc policy domain.
-        for source in &entries {
-            let source_runtime = self
-                .session_service
-                .comms_runtime(&source.session_id)
-                .await
-                .ok_or_else(|| {
-                    MobError::Comms(format!(
-                        "missing comms runtime for session {}",
-                        source.session_id
-                    ))
-                })?;
-            for target in &entries {
+        // Supervisor trusts all currently live managed meerkats (convergent replace).
+        let mut supervisor_peers = Vec::with_capacity(live.len());
+        for (instance, _, peer_id) in &live {
+            supervisor_peers.push(
+                TrustedPeerSpec::new(
+                    instance.comms_name.clone(),
+                    peer_id.clone(),
+                    format!("inproc://{}", instance.comms_name),
+                )
+                .map_err(MobError::Comms)?,
+            );
+        }
+        supervisor
+            .replace_trusted_peers(supervisor_peers)
+            .await
+            .map_err(|err| MobError::Comms(err.to_string()))?;
+
+        // Each managed meerkat trusts supervisor and ad_hoc-allowed peers.
+        for (source, source_runtime, _) in &live {
+            let mut desired = vec![
+                TrustedPeerSpec::new(
+                    supervisor_name.clone(),
+                    supervisor_peer_id.clone(),
+                    format!("inproc://{supervisor_name}"),
+                )
+                .map_err(MobError::Comms)?,
+            ];
+
+            for (target, _, target_peer_id) in &live {
                 if source.comms_name == target.comms_name {
                     continue;
                 }
@@ -1865,48 +1893,45 @@ impl MobRuntime {
                     continue;
                 }
 
-                let target_runtime = self
-                    .session_service
-                    .comms_runtime(&target.session_id)
-                    .await
-                    .ok_or_else(|| {
-                        MobError::Comms(format!(
-                            "missing comms runtime for session {}",
-                            target.session_id
-                        ))
-                    })?;
-
-                let target_peer_id = CoreCommsRuntimeTrait::public_key(&*target_runtime)
-                    .ok_or_else(|| MobError::Comms("peer public key unavailable".to_string()))?;
-
-                source_runtime
-                    .add_trusted_peer(
-                        TrustedPeerSpec::new(
-                            target.comms_name.clone(),
-                            target_peer_id,
-                            format!("inproc://{}", target.comms_name),
-                        )
-                        .map_err(MobError::Comms)?,
+                desired.push(
+                    TrustedPeerSpec::new(
+                        target.comms_name.clone(),
+                        target_peer_id.clone(),
+                        format!("inproc://{}", target.comms_name),
                     )
-                    .await
-                    .map_err(|err| MobError::Comms(err.to_string()))?;
+                    .map_err(MobError::Comms)?,
+                );
             }
+
+            source_runtime
+                .replace_trusted_peers(desired)
+                .await
+                .map_err(|err| MobError::Comms(err.to_string()))?;
         }
 
         Ok(())
     }
 
     async fn retire_meerkat(&self, mob_id: &str, key: &str) -> MobResult<()> {
-        let removed = {
-            let mut managed = self.managed_meerkats.write().await;
-            let Some(map) = managed.get_mut(mob_id) else {
+        let instance = {
+            let managed = self.managed_meerkats.read().await;
+            let Some(map) = managed.get(mob_id) else {
                 return Ok(());
             };
-            map.remove(key)
+            map.get(key).cloned()
         };
 
-        if let Some(instance) = removed {
+        if let Some(instance) = instance {
             self.session_service.archive(&instance.session_id).await?;
+            {
+                let mut managed = self.managed_meerkats.write().await;
+                if let Some(map) = managed.get_mut(mob_id) {
+                    map.remove(key);
+                }
+            }
+            if let Some(spec) = self.spec_store.get_spec(mob_id).await? {
+                self.refresh_peer_trust(&spec).await?;
+            }
 
             self.emit_event(MobEvent {
                 cursor: 0,
@@ -1965,6 +1990,17 @@ impl MobRuntime {
 
     fn supervisor_name_from_mob(&self, mob_id: &str) -> String {
         format!("{}/{}/supervisor", self.realm_id, mob_id)
+    }
+
+    async fn spawn_lock(&self, mob_id: &str) -> Arc<Mutex<()>> {
+        if let Some(lock) = self.spawn_locks.read().await.get(mob_id).cloned() {
+            return lock;
+        }
+        let mut locks = self.spawn_locks.write().await;
+        locks
+            .entry(mob_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     async fn resolve_role_tooling(
@@ -2107,22 +2143,6 @@ impl MobRuntime {
 }
 
 impl MobRuntime {
-    async fn logical_op_already_committed(
-        &self,
-        run_id: &str,
-        step_id: &str,
-        target_meerkat_id: &str,
-    ) -> MobResult<bool> {
-        let Some(run) = self.run_store.get_run(run_id).await? else {
-            return Ok(false);
-        };
-
-        Ok(run.step_ledger.iter().any(|entry| {
-            entry.step_id == step_id
-                && entry.target_meerkat == target_meerkat_id
-                && matches!(entry.status, StepRunStatus::Completed)
-        }))
-    }
 }
 
 #[derive(Debug)]

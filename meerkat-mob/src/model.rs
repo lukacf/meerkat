@@ -471,6 +471,8 @@ pub struct StepLedgerEntry {
     pub timestamp: DateTime<Utc>,
     pub step_id: String,
     pub target_meerkat: String,
+    #[serde(default)]
+    pub logical_key: String,
     pub attempt: u32,
     pub status: StepRunStatus,
     #[serde(default)]

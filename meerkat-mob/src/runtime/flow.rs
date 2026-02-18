@@ -17,20 +17,34 @@ impl MobRuntime {
                 flow_id: request.flow_id.to_string(),
             })?;
 
-        let _ = self
+        let transitioned_to_running = self
             .run_store
             .cas_run_status(run_id.as_ref(), MobRunStatus::Pending, MobRunStatus::Running)
             .await?;
-        self.cache_run_status(run_id.clone(), MobRunStatus::Running)
-            .await;
+        if transitioned_to_running {
+            self.cache_run_status(run_id.clone(), MobRunStatus::Running)
+                .await;
+        } else {
+            let status = self.refresh_run_status_from_store(&run_id).await?;
+            if !matches!(status, MobRunStatus::Pending | MobRunStatus::Running) {
+                return Ok(());
+            }
+        }
 
         if request.dry_run {
-            let _ = self
+            let transitioned_to_completed = self
                 .run_store
                 .cas_run_status(run_id.as_ref(), MobRunStatus::Running, MobRunStatus::Completed)
                 .await?;
-            self.cache_run_status(run_id.clone(), MobRunStatus::Completed)
-                .await;
+            if transitioned_to_completed {
+                self.cache_run_status(run_id.clone(), MobRunStatus::Completed)
+                    .await;
+            } else {
+                let status = self.refresh_run_status_from_store(&run_id).await?;
+                if status != MobRunStatus::Completed {
+                    return Ok(());
+                }
+            }
             self.emit_event(
                 self.event(mob_id.clone(), MobEventCategory::Flow, MobEventKind::RunCompleted)
                     .run_id(run_id.clone())
@@ -74,11 +88,18 @@ impl MobRuntime {
                     MobRunStatus::Completed
                 };
 
-                let _ = self
+                let transitioned = self
                     .run_store
                     .cas_run_status(run_id.as_ref(), MobRunStatus::Running, target_status)
                     .await?;
-                self.cache_run_status(run_id.clone(), target_status).await;
+                if transitioned {
+                    self.cache_run_status(run_id.clone(), target_status).await;
+                } else {
+                    let status = self.refresh_run_status_from_store(&run_id).await?;
+                    if status != target_status {
+                        return Ok(());
+                    }
+                }
 
                 self.emit_event(
                     self.event(
@@ -110,24 +131,35 @@ impl MobRuntime {
                 }
             }
             Err(MobError::RunCanceled { .. } | MobError::ResetBarrier { .. }) => {
-                let _ = self
+                let transitioned = self
                     .run_store
                     .cas_run_status(run_id.as_ref(), MobRunStatus::Running, MobRunStatus::Canceled)
                     .await?;
-                self.cache_run_status(run_id.clone(), MobRunStatus::Canceled)
-                    .await;
+                if transitioned {
+                    self.cache_run_status(run_id.clone(), MobRunStatus::Canceled)
+                        .await;
+                } else {
+                    let _ = self.refresh_run_status_from_store(&run_id).await?;
+                }
             }
             Err(err) => {
                 if self.is_run_canceled(&run_id).await? {
                     return Ok(());
                 }
 
-                let _ = self
+                let transitioned = self
                     .run_store
                     .cas_run_status(run_id.as_ref(), MobRunStatus::Running, MobRunStatus::Failed)
                     .await?;
-                self.cache_run_status(run_id.clone(), MobRunStatus::Failed)
-                    .await;
+                if transitioned {
+                    self.cache_run_status(run_id.clone(), MobRunStatus::Failed)
+                        .await;
+                } else {
+                    let status = self.refresh_run_status_from_store(&run_id).await?;
+                    if status != MobRunStatus::Failed {
+                        return Ok(());
+                    }
+                }
                 self.run_store
                     .append_failure_entry(
                         run_id.as_ref(),

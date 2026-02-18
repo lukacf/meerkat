@@ -646,6 +646,18 @@ impl MobRuntime {
         self.run_status_cache.read().await.get(run_id).copied()
     }
 
+    async fn refresh_run_status_from_store(&self, run_id: &RunId) -> MobResult<MobRunStatus> {
+        let run = self
+            .run_store
+            .get_run(run_id.as_ref())
+            .await?
+            .ok_or_else(|| MobError::RunNotFound {
+                run_id: run_id.to_string(),
+            })?;
+        self.cache_run_status(run_id.clone(), run.status).await;
+        Ok(run.status)
+    }
+
     async fn record_dispatch_start(&self, logical_key: &str) {
         self.inflight_dispatches
             .write()

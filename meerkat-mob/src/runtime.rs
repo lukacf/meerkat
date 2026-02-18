@@ -1,11 +1,10 @@
 use crate::error::{MobError, MobResult};
 use crate::model::{
-    CollectionPolicy, ConditionExpr, FailureLedgerEntry, FlowSpec, FlowStepSpec, MeerkatIdentity,
+    CollectionPolicy, FailureLedgerEntry, FlowSpec, FlowStepSpec, MeerkatIdentity,
     MeerkatInstance, MeerkatInstanceStatus, MobActivationRequest, MobActivationResponse, MobEvent,
     MobEventCategory, MobEventKind, MobReconcileRequest, MobReconcileResult, MobRun,
     MobRunFilter, MobRunStatus, MobSpec, NewMobEvent, PolicyMode, PollEventsResponse, RoleSpec,
-    SchemaPolicy, SpecUpdateMode, StepLedgerEntry, StepRunStatus, TimeoutPolicy,
-    TopologyDomainSpec, UnavailablePolicy,
+    SchemaPolicy, SpecUpdateMode, StepLedgerEntry, StepRunStatus, TimeoutPolicy, UnavailablePolicy,
 };
 use crate::resolver::{ResolverContext, ResolverRegistry};
 use crate::service::MobService;
@@ -28,6 +27,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
+
+mod conditions;
+mod topology;
+
+use conditions::evaluate_condition;
+use topology::{evaluate_topology, role_pair_allowed};
 
 #[derive(Default, Clone)]
 pub struct RustToolBundleRegistry {
@@ -2264,139 +2269,11 @@ fn classify_step_status(
     }
 }
 
-fn evaluate_topology(
-    domain: &TopologyDomainSpec,
-    from_role: &str,
-    to_role: &str,
-    kind: &str,
-    intent: &str,
-) -> bool {
-    if domain.rules.is_empty() {
-        return true;
-    }
-
-    for rule in &domain.rules {
-        let from_ok = rule.from_roles.is_empty()
-            || rule.from_roles.iter().any(|value| value == "*" || value == from_role);
-        let to_ok = rule.to_roles.is_empty()
-            || rule.to_roles.iter().any(|value| value == "*" || value == to_role);
-        let kind_ok = rule.kinds.is_empty()
-            || rule
-                .kinds
-                .iter()
-                .any(|value| value == "*" || value == kind);
-        let intent_ok = rule.intents.is_empty()
-            || rule
-                .intents
-                .iter()
-                .any(|value| value == "*" || value == intent);
-
-        if from_ok && to_ok && kind_ok && intent_ok {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn role_pair_allowed(domain: &TopologyDomainSpec, from_role: &str, to_role: &str) -> bool {
-    if domain.rules.is_empty() {
-        return true;
-    }
-
-    domain.rules.iter().any(|rule| {
-        let from_ok = rule.from_roles.is_empty()
-            || rule.from_roles.iter().any(|value| value == "*" || value == from_role);
-        let to_ok = rule.to_roles.is_empty()
-            || rule.to_roles.iter().any(|value| value == "*" || value == to_role);
-        from_ok && to_ok
-    })
-}
-
-fn evaluate_condition(
-    expr: &ConditionExpr,
-    step_outputs: &HashMap<String, Value>,
-    activation_payload: &Value,
-) -> bool {
-    match expr {
-        ConditionExpr::Eq { left, right } => {
-            resolve_path(left, step_outputs, activation_payload).is_some_and(|value| value == *right)
-        }
-        ConditionExpr::In { left, right } => resolve_path(left, step_outputs, activation_payload)
-            .is_some_and(|value| right.contains(&value)),
-        ConditionExpr::Gt { left, right } => compare_numeric(left, right, step_outputs, activation_payload, |a, b| a > b),
-        ConditionExpr::Lt { left, right } => compare_numeric(left, right, step_outputs, activation_payload, |a, b| a < b),
-        ConditionExpr::And { all } => all
-            .iter()
-            .all(|item| evaluate_condition(item, step_outputs, activation_payload)),
-        ConditionExpr::Or { any } => any
-            .iter()
-            .any(|item| evaluate_condition(item, step_outputs, activation_payload)),
-        ConditionExpr::Not { expr } => !evaluate_condition(expr, step_outputs, activation_payload),
-    }
-}
-
-fn compare_numeric<F>(
-    left: &str,
-    right: &Value,
-    step_outputs: &HashMap<String, Value>,
-    activation_payload: &Value,
-    op: F,
-) -> bool
-where
-    F: Fn(f64, f64) -> bool,
-{
-    let Some(left_value) = resolve_path(left, step_outputs, activation_payload) else {
-        return false;
-    };
-    let Some(left_num) = left_value.as_f64() else {
-        return false;
-    };
-    let Some(right_num) = right.as_f64() else {
-        return false;
-    };
-    op(left_num, right_num)
-}
-
-fn resolve_path(
-    path: &str,
-    step_outputs: &HashMap<String, Value>,
-    activation_payload: &Value,
-) -> Option<Value> {
-    if let Some(rem) = path.strip_prefix("activation") {
-        return resolve_json_path(activation_payload, rem);
-    }
-
-    if let Some(rem) = path.strip_prefix("step.") {
-        let mut parts = rem.splitn(2, '.');
-        let step_id = parts.next()?;
-        let rest = parts.next().unwrap_or("");
-        let base = step_outputs.get(step_id)?;
-        if rest.is_empty() {
-            return Some(base.clone());
-        }
-        return resolve_json_path(base, &format!(".{rest}"));
-    }
-
-    None
-}
-
-fn resolve_json_path(value: &Value, suffix: &str) -> Option<Value> {
-    let mut current = value;
-    for segment in suffix.trim_start_matches('.').split('.') {
-        if segment.is_empty() {
-            continue;
-        }
-        current = current.get(segment)?;
-    }
-    Some(current.clone())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::model::TopologyRule;
+    use crate::model::{ConditionExpr, TopologyDomainSpec, TopologyRule};
     use crate::store::{InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore};
     use serde_json::json;
 

@@ -1,7 +1,7 @@
 use crate::error::{MobError, MobResult};
 use crate::model::{
     MeerkatInstance, MobActivationRequest, MobActivationResponse, MobReconcileRequest,
-    MobReconcileResult, MobRun, MobRunFilter, MobSpec, NewMobEvent, PollEventsResponse,
+    MobReconcileResult, MobRun, MobRunFilter, MobSpecRecord, NewMobEvent, PollEventsResponse,
 };
 use crate::runtime::MobRuntime;
 use crate::service::MobService;
@@ -13,14 +13,14 @@ use tokio::sync::{mpsc, oneshot};
 enum MobCommand {
     ApplySpec {
         request: ApplySpecRequest,
-        tx: oneshot::Sender<MobResult<MobSpec>>,
+        tx: oneshot::Sender<MobResult<MobSpecRecord>>,
     },
     GetSpec {
         mob_id: String,
-        tx: oneshot::Sender<MobResult<Option<MobSpec>>>,
+        tx: oneshot::Sender<MobResult<Option<MobSpecRecord>>>,
     },
     ListSpecs {
-        tx: oneshot::Sender<MobResult<Vec<MobSpec>>>,
+        tx: oneshot::Sender<MobResult<Vec<MobSpecRecord>>>,
     },
     DeleteSpec {
         mob_id: String,
@@ -138,12 +138,12 @@ impl MobRuntimeService {
 
 #[async_trait]
 impl MobService for MobRuntimeService {
-    async fn apply_spec(&self, request: ApplySpecRequest) -> MobResult<MobSpec> {
+    async fn apply_spec(&self, request: ApplySpecRequest) -> MobResult<MobSpecRecord> {
         let (tx, rx) = oneshot::channel();
         self.call(MobCommand::ApplySpec { request, tx }, rx).await
     }
 
-    async fn get_spec(&self, mob_id: &str) -> MobResult<Option<MobSpec>> {
+    async fn get_spec(&self, mob_id: &str) -> MobResult<Option<MobSpecRecord>> {
         let (tx, rx) = oneshot::channel();
         self.call(
             MobCommand::GetSpec {
@@ -155,7 +155,7 @@ impl MobService for MobRuntimeService {
         .await
     }
 
-    async fn list_specs(&self) -> MobResult<Vec<MobSpec>> {
+    async fn list_specs(&self) -> MobResult<Vec<MobSpecRecord>> {
         let (tx, rx) = oneshot::channel();
         self.call(MobCommand::ListSpecs { tx }, rx).await
     }

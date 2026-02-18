@@ -2,7 +2,7 @@ use super::{MobEventStore, MobRunStore, MobSpecStore};
 use crate::error::{MobError, MobResult};
 use crate::model::{
     FailureLedgerEntry, MobEvent, MobId, MobRun, MobRunFilter, MobRunStatus, MobSpec,
-    MobSpecRevision, NewMobEvent, RunId, StepId, StepLedgerEntry,
+    MobSpecRecord, MobSpecRevision, NewMobEvent, RunId, StepId, StepLedgerEntry,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -19,23 +19,24 @@ pub struct InMemoryMobSpecStore {
 impl MobSpecStore for InMemoryMobSpecStore {
     async fn put_spec(
         &self,
+        mob_id: &MobId,
         spec: MobSpec,
         expected_revision: Option<MobSpecRevision>,
     ) -> MobResult<()> {
         let mut specs = self.specs.write().await;
-        let current = specs.get(&spec.mob_id).map(|existing| existing.revision);
+        let current = specs.get(mob_id).map(|existing| existing.revision);
 
         if let Some(expected) = expected_revision
             && current != Some(expected)
         {
             return Err(MobError::SpecRevisionConflict {
-                mob_id: spec.mob_id.to_string(),
+                mob_id: mob_id.to_string(),
                 expected: Some(expected),
                 current,
             });
         }
 
-        specs.insert(spec.mob_id.clone(), spec);
+        specs.insert(mob_id.clone(), spec);
         Ok(())
     }
 
@@ -48,8 +49,17 @@ impl MobSpecStore for InMemoryMobSpecStore {
             .cloned())
     }
 
-    async fn list_specs(&self) -> MobResult<Vec<MobSpec>> {
-        let mut specs: Vec<MobSpec> = self.specs.read().await.values().cloned().collect();
+    async fn list_specs(&self) -> MobResult<Vec<MobSpecRecord>> {
+        let mut specs: Vec<MobSpecRecord> = self
+            .specs
+            .read()
+            .await
+            .iter()
+            .map(|(mob_id, spec)| MobSpecRecord {
+                mob_id: mob_id.clone(),
+                spec: spec.clone(),
+            })
+            .collect();
         specs.sort_by(|a, b| a.mob_id.cmp(&b.mob_id));
         Ok(specs)
     }
@@ -310,8 +320,8 @@ mod tests {
     #[tokio::test]
     async fn spec_store_cas_revision() {
         let store = InMemoryMobSpecStore::default();
+        let mob_id: MobId = "invoice".into();
         let spec = MobSpec {
-            mob_id: "invoice".into(),
             revision: 1,
             roles: BTreeMap::new(),
             topology: crate::model::TopologySpec::default(),
@@ -325,14 +335,17 @@ mod tests {
             retention: RetentionSpec::default(),
             applied_at: Utc::now(),
         };
-        store.put_spec(spec.clone(), None).await.unwrap();
+        store.put_spec(&mob_id, spec.clone(), None).await.unwrap();
 
         let mut v2 = spec;
         v2.revision = 2;
-        let err = store.put_spec(v2.clone(), Some(2)).await.unwrap_err();
+        let err = store
+            .put_spec(&mob_id, v2.clone(), Some(2))
+            .await
+            .unwrap_err();
         assert!(matches!(err, MobError::SpecRevisionConflict { .. }));
 
-        store.put_spec(v2, Some(1)).await.unwrap();
+        store.put_spec(&mob_id, v2, Some(1)).await.unwrap();
     }
 
     #[tokio::test]

@@ -552,7 +552,8 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use meerkat_mob::{
-        MeerkatInstance, MobEvent, MobReconcileResult, MobRun, MobRunStatus, MobSpec,
+        MeerkatInstance, MobEvent, MobId, MobReconcileResult, MobRun, MobRunStatus, MobSpec,
+        MobSpecRecord,
         NewMobEvent, PollEventsResponse, ReconcileMode,
     };
     use std::collections::BTreeMap;
@@ -561,16 +562,21 @@ mod tests {
 
     #[async_trait]
     impl MobService for FakeMob {
-        async fn apply_spec(&self, request: ApplySpecRequest) -> meerkat_mob::MobResult<MobSpec> {
-            Ok(sample_spec(request.requested_mob_id.as_deref().unwrap_or("invoice")))
+        async fn apply_spec(
+            &self,
+            request: ApplySpecRequest,
+        ) -> meerkat_mob::MobResult<MobSpecRecord> {
+            Ok(sample_spec_record(
+                MobId::from(request.requested_mob_id.as_deref().unwrap_or("invoice")),
+            ))
         }
 
-        async fn get_spec(&self, mob_id: &str) -> meerkat_mob::MobResult<Option<MobSpec>> {
-            Ok(Some(sample_spec(mob_id)))
+        async fn get_spec(&self, mob_id: &str) -> meerkat_mob::MobResult<Option<MobSpecRecord>> {
+            Ok(Some(sample_spec_record(MobId::from(mob_id))))
         }
 
-        async fn list_specs(&self) -> meerkat_mob::MobResult<Vec<MobSpec>> {
-            Ok(vec![sample_spec("invoice")])
+        async fn list_specs(&self) -> meerkat_mob::MobResult<Vec<MobSpecRecord>> {
+            Ok(vec![sample_spec_record(MobId::from("invoice"))])
         }
 
         async fn delete_spec(&self, _mob_id: &str) -> meerkat_mob::MobResult<()> {
@@ -668,9 +674,8 @@ mod tests {
         }
     }
 
-    fn sample_spec(mob_id: &str) -> MobSpec {
+    fn sample_spec() -> MobSpec {
         MobSpec {
-            mob_id: mob_id.into(),
             revision: 1,
             roles: BTreeMap::new(),
             topology: meerkat_mob::TopologySpec::default(),
@@ -683,6 +688,13 @@ mod tests {
             limits: meerkat_mob::LimitsSpec::default(),
             retention: meerkat_mob::RetentionSpec::default(),
             applied_at: Utc::now(),
+        }
+    }
+
+    fn sample_spec_record(mob_id: MobId) -> MobSpecRecord {
+        MobSpecRecord {
+            mob_id,
+            spec: sample_spec(),
         }
     }
 

@@ -6,8 +6,8 @@ pub use redb::{RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore};
 
 use crate::error::MobResult;
 use crate::model::{
-    FailureLedgerEntry, MobEvent, MobRun, MobRunFilter, MobRunStatus, MobSpec, MobSpecRevision,
-    NewMobEvent, StepLedgerEntry,
+    FailureLedgerEntry, MobEvent, MobId, MobRun, MobRunFilter, MobRunStatus, MobSpec,
+    MobSpecRecord, MobSpecRevision, NewMobEvent, StepLedgerEntry,
 };
 use async_trait::async_trait;
 
@@ -15,13 +15,14 @@ use async_trait::async_trait;
 pub trait MobSpecStore: Send + Sync {
     async fn put_spec(
         &self,
+        mob_id: &MobId,
         spec: MobSpec,
         expected_revision: Option<MobSpecRevision>,
     ) -> MobResult<()>;
 
     async fn get_spec(&self, mob_id: &str) -> MobResult<Option<MobSpec>>;
 
-    async fn list_specs(&self) -> MobResult<Vec<MobSpec>>;
+    async fn list_specs(&self) -> MobResult<Vec<MobSpecRecord>>;
 
     async fn delete_spec(&self, mob_id: &str) -> MobResult<()>;
 }

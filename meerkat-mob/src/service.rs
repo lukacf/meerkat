@@ -1,16 +1,16 @@
 use crate::error::MobResult;
 use crate::model::{
     MeerkatInstance, MobActivationRequest, MobActivationResponse, MobReconcileRequest,
-    MobReconcileResult, MobRun, MobRunFilter, MobSpec, NewMobEvent, PollEventsResponse,
+    MobReconcileResult, MobRun, MobRunFilter, MobSpecRecord, NewMobEvent, PollEventsResponse,
 };
 use crate::spec::ApplySpecRequest;
 use async_trait::async_trait;
 
 #[async_trait]
 pub trait MobService: Send + Sync {
-    async fn apply_spec(&self, request: ApplySpecRequest) -> MobResult<MobSpec>;
-    async fn get_spec(&self, mob_id: &str) -> MobResult<Option<MobSpec>>;
-    async fn list_specs(&self) -> MobResult<Vec<MobSpec>>;
+    async fn apply_spec(&self, request: ApplySpecRequest) -> MobResult<MobSpecRecord>;
+    async fn get_spec(&self, mob_id: &str) -> MobResult<Option<MobSpecRecord>>;
+    async fn list_specs(&self) -> MobResult<Vec<MobSpecRecord>>;
     async fn delete_spec(&self, mob_id: &str) -> MobResult<()>;
 
     async fn activate(&self, request: MobActivationRequest) -> MobResult<MobActivationResponse>;

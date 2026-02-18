@@ -5,9 +5,10 @@ impl MobRuntime {
         &self,
         run_id: RunId,
         request: MobActivationRequest,
-        spec: MobSpec,
+        spec: Arc<MobSpec>,
         expected_epoch: u64,
     ) -> MobResult<()> {
+        let mob_id = request.mob_id.clone();
         let flow = spec
             .flows
             .get(request.flow_id.as_ref())
@@ -20,14 +21,18 @@ impl MobRuntime {
             .run_store
             .cas_run_status(run_id.as_ref(), MobRunStatus::Pending, MobRunStatus::Running)
             .await?;
+        self.cache_run_status(run_id.clone(), MobRunStatus::Running)
+            .await;
 
         if request.dry_run {
             let _ = self
                 .run_store
                 .cas_run_status(run_id.as_ref(), MobRunStatus::Running, MobRunStatus::Completed)
                 .await?;
+            self.cache_run_status(run_id.clone(), MobRunStatus::Completed)
+                .await;
             self.emit_event(
-                self.event(spec.mob_id.clone(), MobEventCategory::Flow, MobEventKind::RunCompleted)
+                self.event(mob_id.clone(), MobEventCategory::Flow, MobEventKind::RunCompleted)
                     .run_id(run_id.clone())
                     .flow_id(request.flow_id.clone())
                     .payload(json!({
@@ -49,13 +54,13 @@ impl MobRuntime {
 
         let flow_ctx = FlowContext {
             run_id: run_id.clone(),
-            mob_id: spec.mob_id.clone(),
+            mob_id: mob_id.clone(),
             flow_id: request.flow_id.clone(),
             spec_revision: spec.revision,
             activation_payload: request.payload.clone(),
         };
 
-        let run_result = self.execute_flow(&spec, &flow_ctx, &flow, expected_epoch).await;
+        let run_result = self.execute_flow(spec.as_ref(), &flow_ctx, &flow, expected_epoch).await;
 
         match run_result {
             Ok(has_failures) => {
@@ -73,10 +78,11 @@ impl MobRuntime {
                     .run_store
                     .cas_run_status(run_id.as_ref(), MobRunStatus::Running, target_status)
                     .await?;
+                self.cache_run_status(run_id.clone(), target_status).await;
 
                 self.emit_event(
                     self.event(
-                        spec.mob_id.clone(),
+                        mob_id.clone(),
                         MobEventCategory::Flow,
                         if target_status == MobRunStatus::Completed {
                             MobEventKind::RunCompleted
@@ -93,7 +99,8 @@ impl MobRuntime {
 
                 if target_status == MobRunStatus::Failed {
                     self.supervisor_escalate(
-                        &spec,
+                        &mob_id,
+                        spec.as_ref(),
                         run_id.as_ref(),
                         request.flow_id.as_ref(),
                         "run finished with failed steps",
@@ -107,6 +114,8 @@ impl MobRuntime {
                     .run_store
                     .cas_run_status(run_id.as_ref(), MobRunStatus::Running, MobRunStatus::Canceled)
                     .await?;
+                self.cache_run_status(run_id.clone(), MobRunStatus::Canceled)
+                    .await;
             }
             Err(err) => {
                 if self.is_run_canceled(&run_id).await? {
@@ -117,6 +126,8 @@ impl MobRuntime {
                     .run_store
                     .cas_run_status(run_id.as_ref(), MobRunStatus::Running, MobRunStatus::Failed)
                     .await?;
+                self.cache_run_status(run_id.clone(), MobRunStatus::Failed)
+                    .await;
                 self.run_store
                     .append_failure_entry(
                         run_id.as_ref(),
@@ -130,7 +141,7 @@ impl MobRuntime {
                     .await?;
 
                 self.emit_event(
-                    self.event(spec.mob_id.clone(), MobEventCategory::Flow, MobEventKind::RunFailed)
+                    self.event(mob_id.clone(), MobEventCategory::Flow, MobEventKind::RunFailed)
                         .run_id(run_id.clone())
                         .flow_id(request.flow_id.clone())
                         .payload(json!({"error": err.to_string()}))
@@ -139,7 +150,8 @@ impl MobRuntime {
                 .await?;
 
                 self.supervisor_escalate(
-                    &spec,
+                    &mob_id,
+                    spec.as_ref(),
                     run_id.as_ref(),
                     request.flow_id.as_ref(),
                     "run execution error",
@@ -182,7 +194,7 @@ impl MobRuntime {
         }
 
         while completed.len() < flow.steps.len() {
-            self.ensure_run_active(&flow_ctx.run_id, &spec.mob_id, expected_epoch)
+            self.ensure_run_active(&flow_ctx.run_id, &flow_ctx.mob_id, expected_epoch)
                 .await?;
 
             while running.len() < spec.limits.max_concurrent_ready_steps && !ready.is_empty() {
@@ -202,6 +214,7 @@ impl MobRuntime {
                     running.push(async move {
                         let result = self
                             .execute_step(StepExecutionInput {
+                                mob_id: flow_ctx.mob_id.clone(),
                                 spec,
                                 flow_id: &flow_ctx.flow_id,
                                 run_id: &flow_ctx.run_id,
@@ -277,6 +290,7 @@ impl MobRuntime {
         input: StepExecutionInput<'_>,
     ) -> MobResult<StepExecutionResult> {
         let StepExecutionInput {
+            mob_id,
             spec,
             flow_id,
             run_id,
@@ -308,7 +322,7 @@ impl MobRuntime {
             };
             if !evaluate_condition(condition, &condition_ctx) {
                 self.emit_event(
-                    self.event(spec.mob_id.clone(), MobEventCategory::Flow, MobEventKind::StepPartial)
+                    self.event(mob_id.clone(), MobEventCategory::Flow, MobEventKind::StepPartial)
                         .run_id(run_id.clone())
                         .flow_id(flow_id.clone())
                         .step_id(step.step_id.clone())
@@ -324,11 +338,12 @@ impl MobRuntime {
             }
         }
 
-        self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
+        self.ensure_run_active(run_id, &mob_id, expected_epoch)
             .await?;
 
         let mut targets = self
             .resolve_step_targets(
+                &mob_id,
                 spec,
                 &step.targets.role,
                 &step.targets.meerkat_id,
@@ -348,7 +363,7 @@ impl MobRuntime {
             });
         }
 
-        let supervisor = self.supervisor_runtime(&spec.mob_id).await?;
+        let supervisor = self.supervisor_runtime(&mob_id).await?;
         let policy = &spec.topology.flow_dispatched;
         let mut dispatch_futures = FuturesUnordered::new();
         let mut dispatched_targets = 0usize;
@@ -360,7 +375,7 @@ impl MobRuntime {
             if !allowed {
                 self.emit_event(
                     self.event(
-                        spec.mob_id.clone(),
+                        mob_id.clone(),
                         MobEventCategory::Topology,
                         MobEventKind::TopologyViolation,
                     )
@@ -400,8 +415,9 @@ impl MobRuntime {
             let target_comms_name = target.comms_name.clone();
             let step_for_dispatch = step.clone();
             let supervisor_for_dispatch = supervisor.clone();
+            let mob_id_for_dispatch = mob_id.clone();
             let payload = json!({
-                "mob_id": spec.mob_id,
+                "mob_id": mob_id.clone(),
                 "run_id": run_id,
                 "flow_id": flow_id,
                 "step_id": step.step_id.clone(),
@@ -415,6 +431,7 @@ impl MobRuntime {
             dispatch_futures.push(async move {
                 let result = self
                     .dispatch_to_target(DispatchTargetInput {
+                        mob_id: mob_id_for_dispatch,
                         run_id,
                         flow_id,
                         step: &step_for_dispatch,
@@ -461,7 +478,7 @@ impl MobRuntime {
                 }
             }
 
-            self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
+            self.ensure_run_active(run_id, &mob_id, expected_epoch)
                 .await?;
 
             if should_stop_collection(
@@ -526,7 +543,7 @@ impl MobRuntime {
                     if !mismatches.is_empty() {
                         self.emit_event(
                             self.event(
-                                spec.mob_id.clone(),
+                                mob_id.clone(),
                                 MobEventCategory::Supervisor,
                                 MobEventKind::Warning,
                             )
@@ -583,6 +600,7 @@ impl MobRuntime {
 
     pub(super) async fn dispatch_to_target(&self, input: DispatchTargetInput<'_>) -> MobResult<Value> {
         let DispatchTargetInput {
+            mob_id,
             run_id,
             flow_id,
             step,
@@ -599,10 +617,10 @@ impl MobRuntime {
         let logical_key = format!("{}:{}:{}", run_id, step.step_id, target.meerkat_id);
         for attempt in 1..=max_attempts {
             self.record_dispatch_start(&logical_key).await;
-            self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
+            self.ensure_run_active(run_id, &mob_id, expected_epoch)
                 .await?;
             self.emit_event(
-                self.event(spec.mob_id.clone(), MobEventCategory::Dispatch, MobEventKind::StepStarted)
+                self.event(mob_id.clone(), MobEventCategory::Dispatch, MobEventKind::StepStarted)
                     .run_id(run_id.clone())
                     .flow_id(flow_id.clone())
                     .step_id(step.step_id.clone())
@@ -694,7 +712,7 @@ impl MobRuntime {
 
             match result {
                 Ok(value) => {
-                    self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
+                    self.ensure_run_active(run_id, &mob_id, expected_epoch)
                         .await?;
                     let inserted = self
                         .run_store
@@ -725,7 +743,7 @@ impl MobRuntime {
                     }
 
                     self.emit_event(
-                        self.event(spec.mob_id.clone(), MobEventCategory::Dispatch, MobEventKind::StepCompleted)
+                        self.event(mob_id.clone(), MobEventCategory::Dispatch, MobEventKind::StepCompleted)
                             .run_id(run_id.clone())
                             .flow_id(flow_id.clone())
                             .step_id(step.step_id.clone())
@@ -772,7 +790,7 @@ impl MobRuntime {
                         .await?;
 
                     self.emit_event(
-                        self.event(spec.mob_id.clone(), MobEventCategory::Dispatch, MobEventKind::StepFailed)
+                        self.event(mob_id.clone(), MobEventCategory::Dispatch, MobEventKind::StepFailed)
                             .run_id(run_id.clone())
                             .flow_id(flow_id.clone())
                             .step_id(step.step_id.clone())

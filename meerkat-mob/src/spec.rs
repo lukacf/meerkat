@@ -1,6 +1,6 @@
 use crate::error::{MobError, MobResult};
 use crate::model::{
-    CollectionPolicy, DispatchMode, MobId, MobSpec, MobSpecBody, MobSpecDocument,
+    CollectionPolicy, DispatchMode, MobId, MobSpec, MobSpecBody, MobSpecDocument, MobSpecRecord,
     MobSpecRevision, SpecUpdateMode, StepId,
 };
 use chrono::{DateTime, Utc};
@@ -41,8 +41,12 @@ impl SpecValidator {
         Self
     }
 
-    pub async fn validate_toml(&self, request: &ApplySpecRequest) -> MobResult<Vec<MobSpec>> {
-        let mut doc: MobSpecDocument = toml::from_str(&request.spec_toml)
+    pub async fn validate_toml(&self, request: &ApplySpecRequest) -> MobResult<Vec<MobSpecRecord>> {
+        let raw_doc: toml::Value = toml::from_str(&request.spec_toml)
+            .map_err(|err| MobError::SpecParse(err.to_string()))?;
+        reject_namespace_overrides(&raw_doc)?;
+        let mut doc: MobSpecDocument = raw_doc
+            .try_into()
             .map_err(|err| MobError::SpecParse(err.to_string()))?;
 
         if doc.mob.specs.is_empty() {
@@ -60,7 +64,6 @@ impl SpecValidator {
             self.validate_spec_body(&mob_id, &mut body, &request.context)
                 .await?;
             let spec = MobSpec {
-                mob_id: MobId::from(mob_id),
                 revision: body.revision.unwrap_or(1),
                 roles: body.roles,
                 topology: body.topology,
@@ -74,7 +77,10 @@ impl SpecValidator {
                 retention: body.retention,
                 applied_at: request.context.now,
             };
-            validated.push(spec);
+            validated.push(MobSpecRecord {
+                mob_id: MobId::from(mob_id),
+                spec,
+            });
         }
 
         if validated.is_empty() {
@@ -93,13 +99,6 @@ impl SpecValidator {
         body: &mut MobSpecBody,
         context: &ApplyContext,
     ) -> MobResult<()> {
-        if body.namespace.is_some() {
-            return Err(MobError::validation(
-                "namespace",
-                "namespace override is not allowed in v1; namespace is computed as {realm_id}/{mob_id}",
-            ));
-        }
-
         if body.roles.is_empty() {
             return Err(MobError::validation("roles", "must not be empty"));
         }
@@ -331,6 +330,31 @@ impl Default for SpecValidator {
     }
 }
 
+fn reject_namespace_overrides(raw_doc: &toml::Value) -> MobResult<()> {
+    let Some(specs) = raw_doc
+        .get("mob")
+        .and_then(|mob| mob.get("specs"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(());
+    };
+
+    for (mob_id, spec_value) in specs {
+        if spec_value
+            .as_table()
+            .and_then(|table| table.get("namespace"))
+            .is_some()
+        {
+            return Err(MobError::validation(
+                &format!("mob.specs.{mob_id}.namespace"),
+                "namespace override is not allowed in v1; namespace is computed as {realm_id}/{mob_id}",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn compute_dag_depth(steps: &[crate::model::FlowStepSpec]) -> u32 {
     let mut depth: HashMap<String, u32> = HashMap::new();
     let mut changed = true;
@@ -558,7 +582,7 @@ role = "coordinator"
         let validator = SpecValidator::new();
         let specs = validator.validate_toml(&apply_request(toml)).await.unwrap();
         assert_eq!(specs.len(), 1);
-        let role = specs[0].roles.get("coordinator").unwrap();
+        let role = specs[0].spec.roles.get("coordinator").unwrap();
         assert_eq!(role.prompt, "You coordinate invoices");
     }
 

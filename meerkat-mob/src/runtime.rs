@@ -4,7 +4,8 @@ use crate::model::{
     FlowId, MeerkatId, MeerkatIdentity, MeerkatInstance, MeerkatInstanceStatus, MobActivationRequest,
     MobActivationResponse, MobEventCategory, MobEventKind, MobReconcileRequest,
     MobId, MobReconcileResult, MobRun, MobRunFilter, MobRunStatus, MobSpec, NewMobEvent,
-    PolicyMode, PollEventsResponse, RoleId, RoleSpec, RunId, SchemaPolicy, SpecUpdateMode,
+    MobSpecRecord, PolicyMode, PollEventsResponse, RoleId, RoleSpec, RunId, SchemaPolicy,
+    SpecUpdateMode,
     StepId, StepLedgerEntry, StepOutput, StepRunStatus, TimeoutPolicy, UnavailablePolicy,
 };
 use crate::resolver::{ResolverContext, ResolverRegistry};
@@ -16,7 +17,7 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use meerkat::{
     AgentToolDispatcher, CommsCommand, CommsRuntime, CreateSessionRequest, InputStreamMode,
-    PeerMeta, SendReceipt, Session, SessionBuildOptions, SessionId, SessionService,
+    PeerMeta, SendReceipt, SessionBuildOptions, SessionId, SessionService,
     ToolGatewayBuilder,
 };
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntimeTrait;
@@ -68,9 +69,15 @@ struct ManagedMeerkat {
     pub meerkat_id: MeerkatId,
     pub session_id: SessionId,
     pub comms_name: String,
-    pub labels: BTreeMap<String, String>,
     pub last_activity_at: chrono::DateTime<Utc>,
     pub status: MeerkatInstanceStatus,
+}
+
+#[derive(Clone)]
+struct DispatchTarget {
+    pub role: RoleId,
+    pub meerkat_id: MeerkatId,
+    pub comms_name: String,
 }
 
 #[derive(Clone)]
@@ -90,6 +97,7 @@ pub struct MobRuntime {
     managed_meerkats: Arc<RwLock<HashMap<MobId, HashMap<String, ManagedMeerkat>>>>,
     spawn_locks: Arc<RwLock<HashMap<MobId, Arc<Mutex<()>>>>>,
     run_tasks: Arc<RwLock<HashMap<RunId, JoinHandle<()>>>>,
+    run_status_cache: Arc<RwLock<HashMap<RunId, MobRunStatus>>>,
     inflight_dispatches: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
     supervisors: Arc<RwLock<HashMap<MobId, Arc<CommsRuntime>>>>,
     reset_epochs: Arc<RwLock<HashMap<MobId, u64>>>,
@@ -187,6 +195,7 @@ impl MobRuntimeBuilder {
             managed_meerkats: Arc::new(RwLock::new(HashMap::new())),
             spawn_locks: Arc::new(RwLock::new(HashMap::new())),
             run_tasks: Arc::new(RwLock::new(HashMap::new())),
+            run_status_cache: Arc::new(RwLock::new(HashMap::new())),
             inflight_dispatches: Arc::new(RwLock::new(HashMap::new())),
             supervisors: Arc::new(RwLock::new(HashMap::new())),
             reset_epochs: Arc::new(RwLock::new(HashMap::new())),
@@ -199,7 +208,7 @@ impl MobRuntimeBuilder {
 }
 
 impl MobRuntime {
-    pub(crate) async fn apply_spec(&self, request: ApplySpecRequest) -> MobResult<MobSpec> {
+    pub(crate) async fn apply_spec(&self, request: ApplySpecRequest) -> MobResult<MobSpecRecord> {
         let mut request = request;
         let update_mode = request.update_mode;
         if request.context.context_root.is_none() {
@@ -213,22 +222,26 @@ impl MobRuntime {
             ));
         }
 
-        let mut spec = specs.remove(0);
-        let existing = self.spec_store.get_spec(&spec.mob_id).await?;
+        let mut record = specs.remove(0);
+        let existing = self.spec_store.get_spec(record.mob_id.as_ref()).await?;
         if let Some(current) = existing
             && request.expected_revision.is_none()
         {
-            spec.revision = current.revision + 1;
+            record.spec.revision = current.revision + 1;
         }
 
         self.spec_store
-            .put_spec(spec.clone(), request.expected_revision)
+            .put_spec(&record.mob_id, record.spec.clone(), request.expected_revision)
             .await?;
 
         self.emit_event(
-            self.event(spec.mob_id.clone(), MobEventCategory::Lifecycle, MobEventKind::SpecApplied)
+            self.event(
+                record.mob_id.clone(),
+                MobEventCategory::Lifecycle,
+                MobEventKind::SpecApplied,
+            )
                 .payload(json!({
-                    "revision": spec.revision,
+                    "revision": record.spec.revision,
                     "update_mode": update_mode,
                 }))
                 .build(),
@@ -239,7 +252,11 @@ impl MobRuntime {
             SpecUpdateMode::DrainReplace => {}
             SpecUpdateMode::HotReload => {
                 self.emit_event(
-                    self.event(spec.mob_id.clone(), MobEventCategory::Supervisor, MobEventKind::Warning)
+                    self.event(
+                        record.mob_id.clone(),
+                        MobEventCategory::Supervisor,
+                        MobEventKind::Warning,
+                    )
                         .payload(json!({
                             "warning": "hot_reload requested; v1 behavior is drain_replace",
                         }))
@@ -248,18 +265,20 @@ impl MobRuntime {
                 .await?;
             }
             SpecUpdateMode::ForceReset => {
-                self.force_reset_mob(&spec.mob_id).await?;
+                self.force_reset_mob(&record.mob_id).await?;
             }
         }
 
-        Ok(spec)
+        Ok(record)
     }
 
-    pub(crate) async fn get_spec(&self, mob_id: &str) -> MobResult<Option<MobSpec>> {
-        self.spec_store.get_spec(mob_id).await
+    pub(crate) async fn get_spec(&self, mob_id: &str) -> MobResult<Option<MobSpecRecord>> {
+        let mob_id = MobId::from(mob_id);
+        let spec = self.spec_store.get_spec(mob_id.as_ref()).await?;
+        Ok(spec.map(|spec| MobSpecRecord { mob_id, spec }))
     }
 
-    pub(crate) async fn list_specs(&self) -> MobResult<Vec<MobSpec>> {
+    pub(crate) async fn list_specs(&self) -> MobResult<Vec<MobSpecRecord>> {
         self.spec_store.list_specs().await
     }
 
@@ -302,6 +321,7 @@ impl MobRuntime {
             request.payload.clone(),
         );
         self.run_store.create_run(run).await?;
+        self.cache_run_status(run_id.clone(), MobRunStatus::Pending).await;
 
         self.emit_event(
             self.event(request.mob_id.clone(), MobEventCategory::Flow, MobEventKind::RunActivated)
@@ -313,8 +333,9 @@ impl MobRuntime {
         .await?;
 
         let run_id_for_task = run_id.clone();
+        let spec_revision = spec.revision;
         let expected_epoch = self.current_reset_epoch(&request.mob_id).await;
-        let pinned_spec = spec.clone();
+        let pinned_spec = Arc::new(spec);
         let runtime = self.clone();
         self.spawn_tracked_run_task(run_id.clone(), async move {
             let outcome = AssertUnwindSafe(runtime.execute_run(
@@ -341,7 +362,7 @@ impl MobRuntime {
         Ok(MobActivationResponse {
             run_id,
             status: MobRunStatus::Pending,
-            spec_revision: spec.revision,
+            spec_revision,
         })
     }
 
@@ -378,6 +399,8 @@ impl MobRuntime {
         if !changed_running && !changed_pending && run.status != MobRunStatus::Canceled {
             return Ok(());
         }
+        self.cache_run_status(RunId::from(run_id), MobRunStatus::Canceled)
+            .await;
 
         self.emit_event(
             self.event(run.mob_id, MobEventCategory::Flow, MobEventKind::RunCanceled)
@@ -392,22 +415,48 @@ impl MobRuntime {
     }
 
     pub(crate) async fn list_meerkats(&self, mob_id: &str) -> MobResult<Vec<MeerkatInstance>> {
-        let managed = self.managed_meerkats.read().await;
-        let Some(map) = managed.get(&MobId::from(mob_id)) else {
+        let mob_id = MobId::from(mob_id);
+        if self.spec_store.get_spec(mob_id.as_ref()).await?.is_none() {
             return Ok(Vec::new());
-        };
+        }
+
+        let supervisor = self.supervisor_runtime(&mob_id).await?;
+        let peers = supervisor.peers().await;
+        let supervisor_name = self.supervisor_name_from_mob(&mob_id);
+        let managed = self.managed_meerkats.read().await;
+        let managed_map = managed.get(&mob_id);
 
         let mut out = Vec::new();
-        for instance in map.values() {
+        for peer in peers {
+            if peer.name.as_ref() == supervisor_name {
+                continue;
+            }
+            if peer.meta.labels.get("mob_id") != Some(&mob_id.to_string()) {
+                continue;
+            }
+            let Some(role) = peer.meta.labels.get("role") else {
+                continue;
+            };
+            let Some(meerkat_id) = peer.meta.labels.get("meerkat_id") else {
+                continue;
+            };
+            let key = format!("{role}/{meerkat_id}");
+            let managed_instance = managed_map.and_then(|map| map.get(&key));
             out.push(MeerkatInstance {
-                mob_id: MobId::from(mob_id),
-                role: instance.role.clone(),
-                meerkat_id: instance.meerkat_id.clone(),
-                session_id: instance.session_id.to_string(),
-                comms_name: instance.comms_name.clone(),
-                labels: instance.labels.clone(),
-                last_activity_at: instance.last_activity_at,
-                status: instance.status,
+                mob_id: mob_id.clone(),
+                role: RoleId::from(role.as_str()),
+                meerkat_id: MeerkatId::from(meerkat_id.as_str()),
+                session_id: managed_instance
+                    .map(|instance| instance.session_id.to_string())
+                    .unwrap_or_default(),
+                comms_name: peer.name.to_string(),
+                labels: peer.meta.labels.clone().into_iter().collect(),
+                last_activity_at: managed_instance
+                    .map(|instance| instance.last_activity_at)
+                    .unwrap_or_else(Utc::now),
+                status: managed_instance
+                    .map(|instance| instance.status)
+                    .unwrap_or(MeerkatInstanceStatus::Running),
             });
         }
         out.sort_by(|a, b| a.comms_name.cmp(&b.comms_name));
@@ -427,7 +476,7 @@ impl MobRuntime {
 
         for (role_name, role) in &spec.roles {
             let identities = self
-                .resolve_role_meerkats(&spec, role_name, role, Value::Null)
+                .resolve_role_meerkats(&request.mob_id, &spec, role_name, role, Value::Null)
                 .await?;
             for identity in identities {
                 let key = format!("{}/{}", identity.role, identity.meerkat_id);
@@ -466,17 +515,18 @@ impl MobRuntime {
                         ))
                     })?;
                     if should_spawn_on_reconcile(role) {
-                        let spawn_lock = self.spawn_lock(&spec.mob_id).await;
+                        let spawn_lock = self.spawn_lock(&request.mob_id).await;
                         let _spawn_guard = spawn_lock.lock().await;
                         let already_exists = {
                             let managed = self.managed_meerkats.read().await;
                             managed
-                                .get(&spec.mob_id)
+                                .get(&request.mob_id)
                                 .and_then(|m| m.get(&key))
                                 .is_some()
                         };
                         if !already_exists {
-                            self.spawn_meerkat(&spec, role_name.as_str(), &identity).await?;
+                            self.spawn_meerkat(&request.mob_id, &spec, role_name.as_str(), &identity)
+                                .await?;
                             result.spawned.push(key);
                         } else {
                             result.unchanged.push(key);
@@ -560,6 +610,7 @@ impl MobRuntime {
         }
 
         self.supervisors.write().await.clear();
+        self.run_status_cache.write().await.clear();
         Ok(())
     }
 }
@@ -587,6 +638,14 @@ impl MobRuntime {
         self.run_tasks.read().await.len()
     }
 
+    async fn cache_run_status(&self, run_id: RunId, status: MobRunStatus) {
+        self.run_status_cache.write().await.insert(run_id, status);
+    }
+
+    async fn cached_run_status(&self, run_id: &RunId) -> Option<MobRunStatus> {
+        self.run_status_cache.read().await.get(run_id).copied()
+    }
+
     async fn record_dispatch_start(&self, logical_key: &str) {
         self.inflight_dispatches
             .write()
@@ -611,6 +670,7 @@ struct StepExecutionResult {
 }
 
 struct StepExecutionInput<'a> {
+    mob_id: MobId,
     spec: &'a MobSpec,
     flow_id: &'a FlowId,
     run_id: &'a RunId,
@@ -621,11 +681,12 @@ struct StepExecutionInput<'a> {
 }
 
 struct DispatchTargetInput<'a> {
+    mob_id: MobId,
     run_id: &'a RunId,
     flow_id: &'a FlowId,
     step: &'a FlowStepSpec,
     supervisor: Arc<CommsRuntime>,
-    target: ManagedMeerkat,
+    target: DispatchTarget,
     intent: String,
     payload: Value,
     spec: &'a MobSpec,
@@ -633,13 +694,13 @@ struct DispatchTargetInput<'a> {
 }
 
 struct CompileRoleSessionInput<'a> {
+    mob_id: &'a MobId,
     spec: &'a MobSpec,
     role_name: &'a str,
     role: &'a RoleSpec,
     labels: &'a BTreeMap<String, String>,
     comms_name: &'a str,
     namespace: String,
-    session: Session,
 }
 
 #[derive(Default)]
@@ -751,6 +812,7 @@ mod tests {
     use async_trait::async_trait;
     use crate::model::{ConditionContext, ConditionExpr, TopologyDomainSpec, TopologyRule};
     use crate::store::{InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore};
+    use meerkat::Session;
     use serde_json::json;
 
     #[tokio::test]

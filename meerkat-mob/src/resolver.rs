@@ -11,7 +11,7 @@ pub struct ResolverContext {
     pub role: String,
     pub resolver_id: String,
     pub resolver_spec: Option<ResolverSpec>,
-    pub spec: Option<MobSpec>,
+    pub spec: Option<Arc<MobSpec>>,
     pub activation_payload: Value,
 }
 

@@ -1,8 +1,8 @@
 use super::{MobEventStore, MobRunStore, MobSpecStore};
 use crate::error::{MobError, MobResult};
 use crate::model::{
-    FailureLedgerEntry, MobEvent, MobRun, MobRunFilter, MobRunStatus, MobSpec, MobSpecRevision,
-    NewMobEvent, StepLedgerEntry,
+    FailureLedgerEntry, MobEvent, MobId, MobRun, MobRunFilter, MobRunStatus, MobSpec,
+    MobSpecRecord, MobSpecRevision, NewMobEvent, StepLedgerEntry,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -49,10 +49,12 @@ impl RedbMobSpecStore {
 impl MobSpecStore for RedbMobSpecStore {
     async fn put_spec(
         &self,
+        mob_id: &MobId,
         spec: MobSpec,
         expected_revision: Option<MobSpecRevision>,
     ) -> MobResult<()> {
         let db = self.db.clone();
+        let mob_id = mob_id.clone();
         tokio::task::spawn_blocking(move || {
             let write = db.begin_write().map_err(map_db_err)?;
             {
@@ -60,14 +62,14 @@ impl MobSpecStore for RedbMobSpecStore {
 
                 if let Some(expected) = expected_revision {
                     let current = table
-                        .get(spec.mob_id.as_str())
+                        .get(mob_id.as_str())
                         .map_err(map_db_err)?
                         .map(|raw| parse_json::<MobSpec>(raw.value()))
                         .transpose()?;
 
                     if current.as_ref().map(|s| s.revision) != Some(expected) {
                         return Err(MobError::SpecRevisionConflict {
-                            mob_id: spec.mob_id.to_string(),
+                            mob_id: mob_id.to_string(),
                             expected: Some(expected),
                             current: current.map(|s| s.revision),
                         });
@@ -76,7 +78,7 @@ impl MobSpecStore for RedbMobSpecStore {
 
                 let payload = encode_json(&spec)?;
                 table
-                    .insert(spec.mob_id.as_str(), payload.as_slice())
+                    .insert(mob_id.as_str(), payload.as_slice())
                     .map_err(map_db_err)?;
             }
             write.commit().map_err(map_db_err)?;
@@ -101,7 +103,7 @@ impl MobSpecStore for RedbMobSpecStore {
         .map_err(|err| MobError::store(err.to_string()))?
     }
 
-    async fn list_specs(&self) -> MobResult<Vec<MobSpec>> {
+    async fn list_specs(&self) -> MobResult<Vec<MobSpecRecord>> {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
             let read = db.begin_read().map_err(map_db_err)?;
@@ -110,8 +112,11 @@ impl MobSpecStore for RedbMobSpecStore {
 
             let mut specs = Vec::new();
             for row in iter {
-                let (_, value) = row.map_err(map_db_err)?;
-                specs.push(parse_json::<MobSpec>(value.value())?);
+                let (key, value) = row.map_err(map_db_err)?;
+                specs.push(MobSpecRecord {
+                    mob_id: MobId::from(key.value()),
+                    spec: parse_json::<MobSpec>(value.value())?,
+                });
             }
             specs.sort_by(|a, b| a.mob_id.cmp(&b.mob_id));
             Ok(specs)
@@ -571,9 +576,9 @@ mod tests {
     fn spec_store_roundtrip() {
         let dir = TempDir::new().unwrap();
         let store = RedbMobSpecStore::open(dir.path().join("specs.redb")).unwrap();
+        let mob_id: MobId = "invoice".into();
 
         let spec = MobSpec {
-            mob_id: "invoice".into(),
             revision: 1,
             roles: BTreeMap::new(),
             topology: TopologySpec::default(),
@@ -590,9 +595,9 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            store.put_spec(spec.clone(), None).await.unwrap();
+            store.put_spec(&mob_id, spec.clone(), None).await.unwrap();
             let loaded = store.get_spec("invoice").await.unwrap().unwrap();
-            assert_eq!(loaded.mob_id, spec.mob_id);
+            assert_eq!(loaded.revision, spec.revision);
             assert_eq!(loaded.revision, 1);
         });
     }

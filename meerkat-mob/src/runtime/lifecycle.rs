@@ -1,39 +1,23 @@
 use super::*;
-use tokio::time::{Duration, timeout};
 
 impl MobRuntime {
     pub(super) async fn resolve_step_targets(
         &self,
+        mob_id: &MobId,
         spec: &MobSpec,
         role: &str,
         meerkat_selector: &str,
         activation_payload: Value,
-    ) -> MobResult<Vec<ManagedMeerkat>> {
+    ) -> MobResult<Vec<DispatchTarget>> {
         let role_id = RoleId::from(role);
         let selector = if meerkat_selector == "*" {
             None
         } else {
             Some(MeerkatId::from(meerkat_selector))
         };
-        let collect = |map: &HashMap<String, ManagedMeerkat>| -> Vec<ManagedMeerkat> {
-            map.values()
-                .filter(|instance| instance.role == role_id)
-                .filter(|instance| {
-                    selector
-                        .as_ref()
-                        .is_none_or(|selected| instance.meerkat_id == *selected)
-                })
-                .cloned()
-                .collect()
-        };
-
-        let mut out = {
-            let managed = self.managed_meerkats.read().await;
-            managed
-                .get(&spec.mob_id)
-                .map(collect)
-                .unwrap_or_default()
-        };
+        let mut out = self
+            .discover_dispatch_targets(mob_id, &role_id, selector.as_ref())
+            .await?;
 
         if !out.is_empty() {
             return Ok(out);
@@ -47,9 +31,9 @@ impl MobRuntime {
         }
 
         let identities = self
-            .resolve_role_meerkats(spec, role, role_spec, activation_payload)
+            .resolve_role_meerkats(mob_id, spec, role, role_spec, activation_payload)
             .await?;
-        let spawn_lock = self.spawn_lock(&spec.mob_id).await;
+        let spawn_lock = self.spawn_lock(mob_id).await;
         let _spawn_guard = spawn_lock.lock().await;
         for identity in identities {
             if selector
@@ -62,28 +46,70 @@ impl MobRuntime {
             let already_exists = {
                 let managed = self.managed_meerkats.read().await;
                 managed
-                    .get(&spec.mob_id)
+                    .get(mob_id)
                     .and_then(|map| map.get(&key))
                     .is_some()
             };
             if already_exists {
                 continue;
             }
-            self.spawn_meerkat(spec, role, &identity).await?;
+            self.spawn_meerkat(mob_id, spec, role, &identity).await?;
         }
 
-        out = {
-            let managed = self.managed_meerkats.read().await;
-            managed
-                .get(&spec.mob_id)
-                .map(collect)
-                .unwrap_or_default()
-        };
+        out = self
+            .discover_dispatch_targets(mob_id, &role_id, selector.as_ref())
+            .await?;
         Ok(out)
+    }
+
+    async fn discover_dispatch_targets(
+        &self,
+        mob_id: &MobId,
+        role_id: &RoleId,
+        selector: Option<&MeerkatId>,
+    ) -> MobResult<Vec<DispatchTarget>> {
+        let supervisor = self.supervisor_runtime(mob_id).await?;
+        let supervisor_name = self.supervisor_name_from_mob(mob_id);
+        let peers = supervisor.peers().await;
+
+        let mut dedup = BTreeMap::<String, DispatchTarget>::new();
+        for peer in peers {
+            if peer.name.as_ref() == supervisor_name {
+                continue;
+            }
+            if peer.meta.labels.get("mob_id") != Some(&mob_id.to_string()) {
+                continue;
+            }
+            let Some(peer_role) = peer.meta.labels.get("role") else {
+                continue;
+            };
+            if peer_role != role_id.as_ref() {
+                continue;
+            }
+            let Some(peer_meerkat_id) = peer.meta.labels.get("meerkat_id") else {
+                continue;
+            };
+            let resolved_meerkat_id = MeerkatId::from(peer_meerkat_id.as_str());
+            if selector.is_some_and(|selected| resolved_meerkat_id != *selected) {
+                continue;
+            }
+
+            dedup.insert(
+                peer.name.to_string(),
+                DispatchTarget {
+                    role: RoleId::from(peer_role.as_str()),
+                    meerkat_id: resolved_meerkat_id,
+                    comms_name: peer.name.to_string(),
+                },
+            );
+        }
+
+        Ok(dedup.into_values().collect())
     }
 
     pub(super) async fn resolve_role_meerkats(
         &self,
+        mob_id: &MobId,
         spec: &MobSpec,
         role_name: &str,
         role: &RoleSpec,
@@ -112,11 +138,11 @@ impl MobRuntime {
 
                 let resolver_spec = spec.resolvers.get(resolver_id).cloned();
                 let context = ResolverContext {
-                    mob_id: spec.mob_id.to_string(),
+                    mob_id: mob_id.to_string(),
                     role: role_name.to_string(),
                     resolver_id: resolver_id.clone(),
                     resolver_spec,
-                    spec: Some(spec.clone()),
+                    spec: Some(Arc::new(spec.clone())),
                     activation_payload,
                 };
 
@@ -136,6 +162,7 @@ impl MobRuntime {
 
     pub(super) async fn spawn_meerkat(
         &self,
+        mob_id: &MobId,
         spec: &MobSpec,
         role_name: &str,
         identity: &MeerkatIdentity,
@@ -145,42 +172,41 @@ impl MobRuntime {
             .get(role_name)
             .ok_or_else(|| MobError::SpecValidation(format!("unknown role '{role_name}'")))?;
 
-        let namespace = self.namespace_for(spec);
+        let namespace = self.namespace_for_mob(mob_id);
         let comms_name = format!(
             "{}/{}/{}/{}",
-            self.realm_id, spec.mob_id, role_name, identity.meerkat_id
+            self.realm_id, mob_id, role_name, identity.meerkat_id
         );
 
-        let session = Session::new();
-        let session_id = session.id().clone();
         let mut labels = identity.labels.clone();
-        labels.insert("mob_id".to_string(), spec.mob_id.to_string());
+        labels.insert("mob_id".to_string(), mob_id.to_string());
         labels.insert("role".to_string(), role_name.to_string());
         labels.insert("meerkat_id".to_string(), identity.meerkat_id.to_string());
 
         let request = self
             .compile_role_session_request(CompileRoleSessionInput {
+                mob_id,
                 spec,
                 role_name,
                 role,
                 labels: &labels,
                 comms_name: &comms_name,
                 namespace,
-                session,
             })
             .await?;
 
-        let session_service = self.session_service.clone();
-        tokio::spawn(async move {
-            if let Err(err) = session_service.create_session(request).await {
-                tracing::error!("failed to start mob meerkat session: {err}");
-            }
-        });
-
-        self.wait_for_session_comms(&session_id).await?;
+        let created = self.session_service.create_session(request).await?;
+        let session_id = created.session_id;
+        let Some(runtime) = self.session_service.comms_runtime(&session_id).await else {
+            return Err(MobError::Comms(format!(
+                "session '{}' comms runtime unavailable",
+                session_id
+            )));
+        };
+        let _ = runtime.inbox_notify();
         {
             let mut managed = self.managed_meerkats.write().await;
-            let mob_map = managed.entry(spec.mob_id.clone()).or_default();
+            let mob_map = managed.entry(mob_id.clone()).or_default();
             let key = format!("{role_name}/{}", identity.meerkat_id);
             mob_map.insert(
                 key,
@@ -189,17 +215,16 @@ impl MobRuntime {
                     meerkat_id: identity.meerkat_id.clone(),
                     session_id: session_id.clone(),
                     comms_name: comms_name.clone(),
-                    labels,
                     last_activity_at: Utc::now(),
                     status: MeerkatInstanceStatus::Running,
                 },
             );
         }
-        self.refresh_peer_trust(spec).await?;
+        self.refresh_peer_trust(mob_id, spec).await?;
 
         self.emit_event(
             self.event(
-                spec.mob_id.clone(),
+                mob_id.clone(),
                 MobEventCategory::Lifecycle,
                 MobEventKind::MeerkatSpawned,
             )
@@ -212,34 +237,16 @@ impl MobRuntime {
         Ok(())
     }
 
-    pub(super) async fn wait_for_session_comms(&self, session_id: &SessionId) -> MobResult<()> {
-        let ready = async {
-            loop {
-                if let Some(runtime) = self.session_service.comms_runtime(session_id).await {
-                    // Non-busy wait: if runtime exists but inbox is currently empty, wait on notify.
-                    // We still return immediately once discovered to avoid gating spawn on traffic.
-                    let _ = runtime.inbox_notify();
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        };
-
-        timeout(Duration::from_secs(5), ready)
-            .await
-            .map_err(|_| MobError::Comms(format!("session '{session_id}' comms runtime unavailable")))
-    }
-
-    pub(super) async fn refresh_peer_trust(&self, spec: &MobSpec) -> MobResult<()> {
-        let supervisor = self.supervisor_runtime(&spec.mob_id).await?;
-        let supervisor_name = self.supervisor_name(spec);
+    pub(super) async fn refresh_peer_trust(&self, mob_id: &MobId, spec: &MobSpec) -> MobResult<()> {
+        let supervisor = self.supervisor_runtime(mob_id).await?;
+        let supervisor_name = self.supervisor_name_from_mob(mob_id);
         let supervisor_peer_id = CoreCommsRuntimeTrait::public_key(&*supervisor)
             .ok_or_else(|| MobError::Comms("supervisor public key unavailable".to_string()))?;
 
         let entries: Vec<ManagedMeerkat> = {
             let managed = self.managed_meerkats.read().await;
             managed
-                .get(&spec.mob_id)
+                .get(mob_id)
                 .map(|map| map.values().cloned().collect())
                 .unwrap_or_default()
         };
@@ -297,7 +304,7 @@ impl MobRuntime {
                 {
                     self.emit_event(
                         self.event(
-                            spec.mob_id.clone(),
+                            mob_id.clone(),
                             MobEventCategory::Topology,
                             MobEventKind::TopologyViolation,
                         )
@@ -353,7 +360,7 @@ impl MobRuntime {
                 }
             }
             if let Some(spec) = self.spec_store.get_spec(mob_id.as_ref()).await? {
-                self.refresh_peer_trust(&spec).await?;
+                self.refresh_peer_trust(mob_id, &spec).await?;
             }
 
             self.emit_event(
@@ -397,16 +404,8 @@ impl MobRuntime {
         Ok(runtime)
     }
 
-    pub(super) fn namespace_for(&self, spec: &MobSpec) -> String {
-        format!("{}/{}", self.realm_id, spec.mob_id)
-    }
-
     pub(super) fn namespace_for_mob(&self, mob_id: &MobId) -> String {
         format!("{}/{}", self.realm_id, mob_id)
-    }
-
-    pub(super) fn supervisor_name(&self, spec: &MobSpec) -> String {
-        self.supervisor_name_from_mob(&spec.mob_id)
     }
 
     pub(super) fn supervisor_name_from_mob(&self, mob_id: &MobId) -> String {

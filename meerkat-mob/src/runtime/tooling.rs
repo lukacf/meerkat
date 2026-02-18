@@ -6,16 +6,16 @@ impl MobRuntime {
         input: CompileRoleSessionInput<'_>,
     ) -> MobResult<CreateSessionRequest> {
         let CompileRoleSessionInput {
+            mob_id,
             spec,
             role_name,
             role,
             labels,
             comms_name,
             namespace,
-            session,
         } = input;
 
-        let role_tools = self.resolve_role_tooling(spec, role).await?;
+        let role_tools = self.resolve_role_tooling(mob_id, spec, role).await?;
         let peer_meta = labels
             .iter()
             .fold(PeerMeta::default(), |meta, (key, value)| {
@@ -44,7 +44,6 @@ impl MobRuntime {
             build: Some(SessionBuildOptions {
                 comms_name: Some(comms_name.to_string()),
                 peer_meta: Some(peer_meta),
-                resume_session: Some(session),
                 external_tools: role_tools.external_tools,
                 override_builtins: Some(role_tools.enable_builtins),
                 override_shell: Some(role_tools.enable_shell),
@@ -64,6 +63,7 @@ impl MobRuntime {
 
     pub(super) async fn resolve_role_tooling(
         &self,
+        mob_id: &MobId,
         spec: &MobSpec,
         role: &RoleSpec,
     ) -> MobResult<RoleTooling> {
@@ -102,7 +102,7 @@ impl MobRuntime {
                         }
                         self.emit_event(
                             self.event(
-                                spec.mob_id.clone(),
+                                mob_id.clone(),
                                 MobEventCategory::Supervisor,
                                 MobEventKind::Warning,
                             )
@@ -125,7 +125,7 @@ impl MobRuntime {
                         }
                         self.emit_event(
                             self.event(
-                                spec.mob_id.clone(),
+                                mob_id.clone(),
                                 MobEventCategory::Supervisor,
                                 MobEventKind::Warning,
                             )

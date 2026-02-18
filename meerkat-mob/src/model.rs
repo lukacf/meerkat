@@ -125,13 +125,10 @@ pub struct MobSpecBody {
     pub limits: LimitsSpec,
     #[serde(default)]
     pub retention: RetentionSpec,
-    #[serde(default)]
-    pub namespace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobSpec {
-    pub mob_id: MobId,
     pub revision: MobSpecRevision,
     pub roles: BTreeMap<String, RoleSpec>,
     pub topology: TopologySpec,
@@ -144,6 +141,13 @@ pub struct MobSpec {
     pub limits: LimitsSpec,
     pub retention: RetentionSpec,
     pub applied_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MobSpecRecord {
+    pub mob_id: MobId,
+    #[serde(flatten)]
+    pub spec: MobSpec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

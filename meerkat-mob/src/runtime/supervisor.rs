@@ -3,6 +3,7 @@ use super::*;
 impl MobRuntime {
     pub(super) async fn supervisor_escalate(
         &self,
+        mob_id: &MobId,
         spec: &MobSpec,
         run_id: &str,
         flow_id: &str,
@@ -12,7 +13,7 @@ impl MobRuntime {
         let inflight_dispatches = self.inflight_dispatch_count().await;
         self.emit_event(
             self.event(
-                spec.mob_id.clone(),
+                mob_id.clone(),
                 MobEventCategory::Supervisor,
                 MobEventKind::SupervisorEscalation,
             )
@@ -32,15 +33,15 @@ impl MobRuntime {
         };
 
         let targets = self
-            .resolve_step_targets(spec, notify_role, "*", Value::Null)
+            .resolve_step_targets(mob_id, spec, notify_role, "*", Value::Null)
             .await?;
         if targets.is_empty() {
             return Ok(());
         }
 
-        let supervisor = self.supervisor_runtime(&spec.mob_id).await?;
+        let supervisor = self.supervisor_runtime(mob_id).await?;
         let params = json!({
-            "mob_id": spec.mob_id.clone(),
+            "mob_id": mob_id.clone(),
             "run_id": run_id,
             "flow_id": flow_id,
             "reason": reason,
@@ -76,10 +77,15 @@ impl MobRuntime {
         next
     }
 
-    pub(super) async fn is_run_canceled(&self, run_id: &str) -> MobResult<bool> {
-        let Some(run) = self.run_store.get_run(run_id).await? else {
+    pub(super) async fn is_run_canceled(&self, run_id: &RunId) -> MobResult<bool> {
+        if let Some(status) = self.cached_run_status(run_id).await {
+            return Ok(status == MobRunStatus::Canceled);
+        }
+
+        let Some(run) = self.run_store.get_run(run_id.as_ref()).await? else {
             return Ok(false);
         };
+        self.cache_run_status(run_id.clone(), run.status).await;
         Ok(run.status == MobRunStatus::Canceled)
     }
 
@@ -98,6 +104,15 @@ impl MobRuntime {
             });
         }
 
+        if let Some(status) = self.cached_run_status(run_id).await {
+            if !matches!(status, MobRunStatus::Pending | MobRunStatus::Running) {
+                return Err(MobError::RunCanceled {
+                    run_id: run_id.to_string(),
+                });
+            }
+            return Ok(());
+        }
+
         let run = self
             .run_store
             .get_run(run_id.as_ref())
@@ -105,7 +120,8 @@ impl MobRuntime {
             .ok_or_else(|| MobError::RunNotFound {
                 run_id: run_id.to_string(),
             })?;
-        if run.status == MobRunStatus::Canceled {
+        self.cache_run_status(run_id.clone(), run.status).await;
+        if !matches!(run.status, MobRunStatus::Pending | MobRunStatus::Running) {
             return Err(MobError::RunCanceled {
                 run_id: run_id.to_string(),
             });

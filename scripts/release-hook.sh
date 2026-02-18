@@ -33,11 +33,12 @@ echo "==> Release hook: syncing SDK versions to $VERSION"
 VERSION_RS="$ROOT/meerkat-contracts/src/version.rs"
 IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "$VERSION"
 # Replace only the CURRENT const block (lines between "pub const CURRENT" and "};")
-sed -i '' "/pub const CURRENT/,/};/{
+# Use temp file for portability (BSD sed -i '' vs GNU sed -i differ)
+sed "/pub const CURRENT/,/};/{
     s/major: [0-9]*/major: $V_MAJOR/
     s/minor: [0-9]*/minor: $V_MINOR/
     s/patch: [0-9]*/patch: $V_PATCH/
-}" "$VERSION_RS"
+}" "$VERSION_RS" > "${VERSION_RS}.tmp" && mv "${VERSION_RS}.tmp" "$VERSION_RS"
 echo "  Updated ContractVersion::CURRENT to $VERSION"
 
 # 3. Regenerate schemas + SDK types

@@ -70,7 +70,7 @@ impl MobRunStore for InMemoryMobRunStore {
     async fn create_run(&self, run: MobRun) -> MobResult<()> {
         let mut runs = self.runs.write().await;
         if runs.contains_key(&run.run_id) {
-            return Err(MobError::Store(format!(
+            return Err(MobError::store(format!(
                 "run '{}' already exists",
                 run.run_id
             )));

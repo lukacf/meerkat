@@ -62,6 +62,9 @@ enum MobCommand {
         event: NewMobEvent,
         tx: oneshot::Sender<MobResult<()>>,
     },
+    Shutdown {
+        tx: oneshot::Sender<MobResult<()>>,
+    },
 }
 
 pub struct MobRuntimeService {
@@ -113,6 +116,9 @@ impl MobRuntimeService {
                     }
                     MobCommand::EmitEvent { event, tx } => {
                         let _ = tx.send(runtime.emit_event(event).await);
+                    }
+                    MobCommand::Shutdown { tx } => {
+                        let _ = tx.send(runtime.shutdown().await);
                     }
                 }
             }
@@ -236,6 +242,11 @@ impl MobService for MobRuntimeService {
         let (tx, rx) = oneshot::channel();
         self.call(MobCommand::EmitEvent { event, tx }, rx).await
     }
+
+    async fn shutdown(&self) -> MobResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.call(MobCommand::Shutdown { tx }, rx).await
+    }
 }
 
 #[cfg(test)]
@@ -311,7 +322,6 @@ mod tests {
         let runtime = MobRuntimeBuilder::new(
             "realm-a",
             Arc::new(MockSessionService),
-            meerkat::AgentFactory::new("/tmp"),
             Arc::new(InMemoryMobSpecStore::default()),
             Arc::new(InMemoryMobRunStore::default()),
             Arc::new(InMemoryMobEventStore::default()),
@@ -322,5 +332,6 @@ mod tests {
         let svc = MobRuntimeService::new(runtime);
         let caps = svc.capabilities().await.unwrap();
         assert!(caps.get("flow_model").is_some());
+        svc.shutdown().await.unwrap();
     }
 }

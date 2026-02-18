@@ -123,7 +123,6 @@ impl MobMcpState {
         let mut mob_builder = MobRuntimeBuilder::new(
             realm_id.clone(),
             session_service,
-            factory,
             spec_store,
             run_store,
             event_store,
@@ -661,6 +660,10 @@ mod tests {
         }
 
         async fn emit_event(&self, _event: NewMobEvent) -> meerkat_mob::MobResult<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> meerkat_mob::MobResult<()> {
             Ok(())
         }
     }

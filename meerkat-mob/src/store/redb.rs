@@ -18,15 +18,15 @@ const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("mob_meta");
 const META_CURSOR_KEY: &str = "next_cursor";
 
 fn map_db_err(err: impl std::fmt::Display) -> MobError {
-    MobError::Store(err.to_string())
+    MobError::store(err.to_string())
 }
 
 fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> MobResult<T> {
-    serde_json::from_slice(bytes).map_err(|err| MobError::Store(err.to_string()))
+    serde_json::from_slice(bytes).map_err(|err| MobError::store(err.to_string()))
 }
 
 fn encode_json<T: serde::Serialize>(value: &T) -> MobResult<Vec<u8>> {
-    serde_json::to_vec(value).map_err(|err| MobError::Store(err.to_string()))
+    serde_json::to_vec(value).map_err(|err| MobError::store(err.to_string()))
 }
 
 pub struct RedbMobSpecStore {
@@ -83,7 +83,7 @@ impl MobSpecStore for RedbMobSpecStore {
             Ok(())
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn get_spec(&self, mob_id: &str) -> MobResult<Option<MobSpec>> {
@@ -98,7 +98,7 @@ impl MobSpecStore for RedbMobSpecStore {
                 .transpose()
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn list_specs(&self) -> MobResult<Vec<MobSpec>> {
@@ -117,7 +117,7 @@ impl MobSpecStore for RedbMobSpecStore {
             Ok(specs)
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn delete_spec(&self, mob_id: &str) -> MobResult<()> {
@@ -133,7 +133,7 @@ impl MobSpecStore for RedbMobSpecStore {
             Ok(())
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 }
 
@@ -162,7 +162,7 @@ impl MobRunStore for RedbMobRunStore {
             {
                 let mut table = write.open_table(RUNS_TABLE).map_err(map_db_err)?;
                 if table.get(run.run_id.as_str()).map_err(map_db_err)?.is_some() {
-                    return Err(MobError::Store(format!("run '{}' already exists", run.run_id)));
+                    return Err(MobError::store(format!("run '{}' already exists", run.run_id)));
                 }
                 let payload = encode_json(&run)?;
                 table
@@ -173,7 +173,7 @@ impl MobRunStore for RedbMobRunStore {
             Ok(())
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn cas_run_status(
@@ -215,7 +215,7 @@ impl MobRunStore for RedbMobRunStore {
             Ok(changed)
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn append_step_entry(&self, run_id: &str, entry: StepLedgerEntry) -> MobResult<()> {
@@ -245,7 +245,7 @@ impl MobRunStore for RedbMobRunStore {
             Ok(())
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn append_step_entry_if_absent(
@@ -289,7 +289,7 @@ impl MobRunStore for RedbMobRunStore {
             Ok(appended)
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn append_failure_entry(
@@ -323,7 +323,7 @@ impl MobRunStore for RedbMobRunStore {
             Ok(())
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn put_step_output(
@@ -359,7 +359,7 @@ impl MobRunStore for RedbMobRunStore {
             Ok(())
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn get_run(&self, run_id: &str) -> MobResult<Option<MobRun>> {
@@ -374,7 +374,7 @@ impl MobRunStore for RedbMobRunStore {
                 .transpose()
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn list_runs(&self, filter: MobRunFilter) -> MobResult<Vec<MobRun>> {
@@ -406,7 +406,7 @@ impl MobRunStore for RedbMobRunStore {
             Ok(runs.into_iter().skip(offset).take(limit).collect())
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn put_run(&self, run: MobRun) -> MobResult<()> {
@@ -424,7 +424,7 @@ impl MobRunStore for RedbMobRunStore {
             Ok(())
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 }
 
@@ -482,7 +482,7 @@ impl MobEventStore for RedbMobEventStore {
             Ok(cursor)
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn poll_events(
@@ -514,7 +514,7 @@ impl MobEventStore for RedbMobEventStore {
             Ok((next_cursor, out))
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 
     async fn prune_events(&self, ttl_secs_by_category: &BTreeMap<String, u64>) -> MobResult<usize> {
@@ -536,7 +536,7 @@ impl MobEventStore for RedbMobEventStore {
                     let (key, value) = row.map_err(map_db_err)?;
                     let event = parse_json::<MobEvent>(value.value())?;
                     let category = serde_json::to_string(&event.category)
-                        .map_err(|err| MobError::Store(err.to_string()))?;
+                        .map_err(|err| MobError::store(err.to_string()))?;
                     let normalized = category.trim_matches('"').to_string();
                     if let Some(ttl_secs) = ttl.get(&normalized) {
                         let age = now.signed_duration_since(event.timestamp).num_seconds();
@@ -555,7 +555,7 @@ impl MobEventStore for RedbMobEventStore {
             Ok(removed)
         })
         .await
-        .map_err(|err| MobError::Store(err.to_string()))?
+        .map_err(|err| MobError::store(err.to_string()))?
     }
 }
 

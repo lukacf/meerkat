@@ -1,6 +1,7 @@
 use crate::model::{MobRunStatus, MobSpecRevision};
 use meerkat::SessionError;
 use serde_json::Value;
+use std::io;
 
 pub type MobResult<T> = Result<T, MobError>;
 
@@ -48,7 +49,7 @@ pub enum MobError {
     },
 
     #[error("store error: {0}")]
-    Store(String),
+    Store(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     #[error("session error: {0}")]
     Session(#[from] SessionError),
@@ -88,5 +89,9 @@ impl MobError {
 
     pub fn with_data(self, data: Value) -> Self {
         Self::Internal(format!("{} | data={}", self, data))
+    }
+
+    pub fn store(message: impl Into<String>) -> Self {
+        Self::Store(Box::new(io::Error::other(message.into())))
     }
 }

@@ -27,4 +27,6 @@ pub trait MobService: Send + Sync {
     async fn capabilities(&self) -> MobResult<serde_json::Value>;
 
     async fn emit_event(&self, event: NewMobEvent) -> MobResult<()>;
+
+    async fn shutdown(&self) -> MobResult<()>;
 }

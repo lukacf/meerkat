@@ -82,6 +82,12 @@ if [ -n "$TS_CONTRACT" ] && [ "$RUST_CONTRACT" != "$TS_CONTRACT" ]; then
     CONTRACT_OK=false
     FAIL=1
 fi
+if [ "$RUST_CONTRACT" != "$CARGO_VER" ]; then
+    red "FAIL: contract version ($RUST_CONTRACT) != package version ($CARGO_VER)"
+    red "  Run: scripts/release-hook.sh or manually update meerkat-contracts/src/version.rs"
+    CONTRACT_OK=false
+    FAIL=1
+fi
 if $CONTRACT_OK; then
     green "  Contract versions: OK"
 fi

@@ -71,7 +71,9 @@ mod tests {
 
     #[test]
     fn test_display() {
-        assert_eq!(ContractVersion::CURRENT.to_string(), "0.3.3");
+        let v = ContractVersion::CURRENT;
+        let expected = format!("{}.{}.{}", v.major, v.minor, v.patch);
+        assert_eq!(v.to_string(), expected);
     }
 
     #[test]

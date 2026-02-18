@@ -29,7 +29,18 @@ echo "==> Release hook: syncing SDK versions to $VERSION"
 # 1. Bump SDK package versions
 "$ROOT/scripts/bump-sdk-versions.sh" "$VERSION"
 
-# 2. Regenerate schemas + SDK types
+# 2. Bump ContractVersion::CURRENT in version.rs to match package version
+VERSION_RS="$ROOT/meerkat-contracts/src/version.rs"
+IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "$VERSION"
+# Replace only the CURRENT const block (lines between "pub const CURRENT" and "};")
+sed -i '' "/pub const CURRENT/,/};/{
+    s/major: [0-9]*/major: $V_MAJOR/
+    s/minor: [0-9]*/minor: $V_MINOR/
+    s/patch: [0-9]*/patch: $V_PATCH/
+}" "$VERSION_RS"
+echo "  Updated ContractVersion::CURRENT to $VERSION"
+
+# 3. Regenerate schemas + SDK types
 echo "==> Emitting schemas..."
 cargo run -p meerkat-contracts --features schema --bin emit-schemas
 
@@ -42,6 +53,7 @@ echo "==> Verifying version parity..."
 
 # 4. Stage SDK and artifact files for the release commit
 git add \
+    "$ROOT/meerkat-contracts/src/version.rs" \
     "$ROOT/sdks/python/pyproject.toml" \
     "$ROOT/sdks/typescript/package.json" \
     "$ROOT/sdks/python/meerkat/generated/" \

@@ -1,6 +1,9 @@
 # Build artifacts
 /target/
 
+# Work-in-progress documentation
+.wip_docs/
+
 # IDE
 .idea/
 .vscode/

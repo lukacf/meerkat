@@ -134,7 +134,7 @@ steps = [{ step_id = "s1", targets = { role = "analyzer" } }]
     let role = &spec.roles[0];
 
     // Compile role to build config
-    let config = compile_role_config(role, &spec, "test-realm", "meerkat-001");
+    let config = compile_role_config(role, &spec, "test-realm", "meerkat-001", "claude-sonnet-4-5");
 
     // Verify model
     assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-5"));
@@ -185,7 +185,7 @@ steps = [{ step_id = "s1", targets = { role = "reviewer" } }]
     let spec = parse_mob_specs_from_toml(toml).unwrap().remove(0);
     let role = &spec.roles[0];
 
-    let config = compile_role_config(role, &spec, "realm", "mk-1");
+    let config = compile_role_config(role, &spec, "realm", "mk-1", "claude-sonnet-4-5");
 
     // Prompt ref should be resolved to the actual prompt content
     assert_eq!(
@@ -896,7 +896,7 @@ steps = [{ step_id = "s1", targets = { role = "hacker" } }]
     let spec = parse_mob_specs_from_toml(toml).unwrap().remove(0);
     let role = &spec.roles[0];
 
-    let config = compile_role_config(role, &spec, "realm", "mk-1");
+    let config = compile_role_config(role, &spec, "realm", "mk-1", "claude-sonnet-4-5");
 
     assert!(config.tools.enable_builtins, "Builtin bundle should enable builtins");
     assert!(config.tools.enable_shell, "Builtin bundle should enable shell");
@@ -924,7 +924,7 @@ steps = [{ step_id = "s1", targets = { role = "worker" } }]
     let spec = parse_mob_specs_from_toml(toml).unwrap().remove(0);
     let role = &spec.roles[0];
 
-    let config = compile_role_config(role, &spec, "realm", "mk-1");
+    let config = compile_role_config(role, &spec, "realm", "mk-1", "claude-sonnet-4-5");
 
     assert_eq!(config.tools.mcp_servers, vec!["github-tools"]);
     assert!(!config.tools.enable_builtins, "MCP bundle should not enable builtins");
@@ -949,7 +949,7 @@ steps = [{ step_id = "s1", targets = { role = "worker" } }]
     let spec = parse_mob_specs_from_toml(toml).unwrap().remove(0);
     let role = &spec.roles[0];
 
-    let config = compile_role_config(role, &spec, "realm", "mk-1");
+    let config = compile_role_config(role, &spec, "realm", "mk-1", "claude-sonnet-4-5");
 
     assert_eq!(config.tools.rust_bundles, vec!["my_custom_toolkit"]);
 }
@@ -970,7 +970,7 @@ steps = [{ step_id = "s1", targets = { role = "worker" } }]
     let spec = parse_mob_specs_from_toml(toml).unwrap().remove(0);
     let role = &spec.roles[0];
 
-    let config = compile_role_config(role, &spec, "realm", "mk-1");
+    let config = compile_role_config(role, &spec, "realm", "mk-1", "claude-sonnet-4-5");
 
     assert_eq!(config.tools.tool_allow, vec!["read_file", "search"]);
     assert_eq!(config.tools.tool_deny, vec!["execute_command"]);

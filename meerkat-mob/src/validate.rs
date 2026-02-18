@@ -416,11 +416,25 @@ fn check_target_roles(spec: &MobSpec, diags: &mut Vec<Diagnostic>) {
     }
 }
 
-/// Resolve a `config://prompts/<name>` reference to its content.
+/// Resolve a prompt reference to its content.
 ///
-/// Returns `None` if the reference format is not `config://prompts/` or the
-/// name is not found in the prompts map.
-pub fn resolve_prompt_ref(prompt_ref: &str, prompts: &BTreeMap<String, String>) -> Option<String> {
-    let name = prompt_ref.strip_prefix("config://prompts/")?;
-    prompts.get(name).cloned()
+/// Supports two schemes:
+/// - `config://prompts/<name>` — looks up in the provided prompts map.
+/// - `file://<path>` — reads from disk relative to `base_dir`.
+///
+/// Returns `None` if the reference cannot be resolved.
+pub fn resolve_prompt_ref(
+    prompt_ref: &str,
+    prompts: &BTreeMap<String, String>,
+    base_dir: Option<&std::path::Path>,
+) -> Option<String> {
+    if let Some(name) = prompt_ref.strip_prefix("config://prompts/") {
+        return prompts.get(name).cloned();
+    }
+    if let Some(path) = prompt_ref.strip_prefix("file://") {
+        let base = base_dir?;
+        let full_path = base.join(path);
+        return std::fs::read_to_string(full_path).ok();
+    }
+    None
 }

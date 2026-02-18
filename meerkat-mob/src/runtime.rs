@@ -154,11 +154,14 @@ pub struct CompiledToolConfig {
 }
 
 /// Compile a role spec into a build configuration for a specific meerkat instance.
+///
+/// When `role.model` is `None`, `default_model` is used as fallback.
 pub fn compile_role_config(
     role: &crate::spec::RoleSpec,
     spec: &MobSpec,
     realm_id: &str,
     meerkat_id: &str,
+    default_model: &str,
 ) -> CompiledRoleConfig {
     use crate::spec::{OnUnavailable, ToolBundleKind};
 
@@ -168,7 +171,7 @@ pub fn compile_role_config(
         .clone()
         .or_else(|| {
             role.prompt_ref.as_ref().and_then(|pr| {
-                crate::validate::resolve_prompt_ref(pr, &spec.prompts)
+                crate::validate::resolve_prompt_ref(pr, &spec.prompts, None)
             })
         });
 
@@ -235,7 +238,7 @@ pub fn compile_role_config(
     }
 
     CompiledRoleConfig {
-        model: role.model.clone(),
+        model: Some(role.model.clone().unwrap_or_else(|| default_model.to_string())),
         system_prompt,
         host_mode: true,
         comms_name,
@@ -243,6 +246,67 @@ pub fn compile_role_config(
         preload_skills: role.preload_skills.clone(),
         tools,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Condition evaluation (REQ-MOB-038)
+// ---------------------------------------------------------------------------
+
+/// Evaluate a condition against a JSON context.
+///
+/// The context is a JSON object with keys like `activation.*` and
+/// `step.<id>.*`. Returns `true` if the condition is satisfied.
+pub fn evaluate_condition(condition: &crate::spec::Condition, context: &serde_json::Value) -> bool {
+    use crate::spec::Condition;
+
+    match condition {
+        Condition::All(subs) => subs.iter().all(|c| evaluate_condition(c, context)),
+        Condition::Any(subs) => subs.iter().any(|c| evaluate_condition(c, context)),
+        Condition::Not(sub) => !evaluate_condition(sub, context),
+        Condition::Eq { path, value } => resolve_path(context, path)
+            .is_some_and(|v| v == value),
+        Condition::InSet { path, values } => resolve_path(context, path)
+            .is_some_and(|v| values.contains(v)),
+        Condition::Gt { path, value } => resolve_path(context, path)
+            .is_some_and(|v| {
+                match (v.as_f64(), value.as_f64()) {
+                    (Some(a), Some(b)) => a > b,
+                    _ => false,
+                }
+            }),
+    }
+}
+
+/// Resolve a dot-separated path in a JSON value.
+fn resolve_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for segment in path.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+/// Build the context object for condition evaluation.
+///
+/// Contains `activation.*` from activation params and `step.<id>.*` from
+/// completed step outputs.
+fn build_condition_context(
+    activation_params: &serde_json::Value,
+    step_outputs: &BTreeMap<String, serde_json::Value>,
+) -> serde_json::Value {
+    let mut ctx = serde_json::Map::new();
+    ctx.insert("activation".to_string(), activation_params.clone());
+
+    let mut steps = serde_json::Map::new();
+    for (step_id, output) in step_outputs {
+        let mut step_info = serde_json::Map::new();
+        step_info.insert("status".to_string(), serde_json::json!("completed"));
+        step_info.insert("output".to_string(), output.clone());
+        steps.insert(step_id.clone(), serde_json::Value::Object(step_info));
+    }
+    ctx.insert("step".to_string(), serde_json::Value::Object(steps));
+
+    serde_json::Value::Object(ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +600,7 @@ impl MobRuntime {
         spec: &MobSpec,
         flow: &FlowSpec,
         run_id: &str,
+        activation_params: &serde_json::Value,
     ) -> Result<(), MobError> {
         let mut completed: HashSet<String> = HashSet::new();
         let mut step_outputs: BTreeMap<String, serde_json::Value> = BTreeMap::new();
@@ -571,7 +636,7 @@ impl MobRuntime {
         });
 
         let result = self
-            .execute_flow_inner(spec, flow, run_id, &semaphore, &router, &mut completed, &mut step_outputs)
+            .execute_flow_inner(spec, flow, run_id, activation_params, &semaphore, &router, &mut completed, &mut step_outputs)
             .await;
 
         // Stop the drain loop
@@ -587,6 +652,7 @@ impl MobRuntime {
         spec: &MobSpec,
         flow: &FlowSpec,
         run_id: &str,
+        activation_params: &serde_json::Value,
         semaphore: &Arc<Semaphore>,
         router: &Arc<ResponseRouter>,
         completed: &mut HashSet<String>,
@@ -605,7 +671,7 @@ impl MobRuntime {
                 ));
             }
 
-            // Prepare step execution data
+            // Prepare step execution data, evaluating conditions
             let mut step_tasks = Vec::new();
             for step_id in ready {
                 let step = flow
@@ -617,6 +683,31 @@ impl MobRuntime {
                     })?
                     .clone();
 
+                // Evaluate condition (REQ-MOB-038)
+                if let Some(ref condition) = step.condition {
+                    let context = build_condition_context(activation_params, step_outputs);
+                    if !evaluate_condition(condition, &context) {
+                        // Condition false: skip step
+                        self.run_store
+                            .append_step_entry(
+                                run_id,
+                                StepLedgerEntry {
+                                    step_id: step.step_id.clone(),
+                                    target_meerkat_id: "".to_string(),
+                                    status: StepEntryStatus::Skipped,
+                                    attempt: 0,
+                                    dispatched_at: None,
+                                    completed_at: Some(Utc::now()),
+                                    result: None,
+                                    error: Some("condition evaluated to false".to_string()),
+                                },
+                            )
+                            .await?;
+                        completed.insert(step.step_id.clone());
+                        continue;
+                    }
+                }
+
                 // Build upstream payload
                 let mut upstream_payloads = BTreeMap::new();
                 for dep_id in &step.depends_on {
@@ -626,6 +717,11 @@ impl MobRuntime {
                 }
 
                 step_tasks.push((step, upstream_payloads));
+            }
+
+            // If all ready steps were skipped by conditions, loop again
+            if step_tasks.is_empty() && completed.len() < flow.steps.len() {
+                continue;
             }
 
             // Run ready steps concurrently
@@ -799,176 +895,263 @@ impl MobRuntime {
         })
         .await;
 
-        // Create a channel for this step's responses
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<CollectedResponse>(allowed_targets.len() + 1);
-        router.register_step_channel(step.step_id.clone(), tx).await;
+        // Retry loop (REQ-MOB-037)
+        let max_attempts = step.retry.attempts.max(1);
+        let mut attempt: u32 = 0;
+        let supervisor = crate::supervisor::MobSupervisor::new(&spec.supervisor);
 
-        // Dispatch (only to topology-allowed targets)
-        let dispatched = self
-            .dispatch_step(step, &allowed_targets, run_id, flow_id, &payload, 1)
-            .await?;
+        loop {
+            attempt += 1;
 
-        // Register dispatched requests with router
-        for req in &dispatched {
-            router.register_dispatch(req.clone()).await;
-        }
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<CollectedResponse>(allowed_targets.len() + 1);
+            router.register_step_channel(step.step_id.clone(), tx).await;
 
-        // Record dispatched ledger entries
-        for req in &dispatched {
-            self.run_store
-                .append_step_entry(
-                    run_id,
-                    StepLedgerEntry {
+            let dispatched = self
+                .dispatch_step(step, &allowed_targets, run_id, flow_id, &payload, attempt)
+                .await?;
+
+            for req in &dispatched {
+                router.register_dispatch(req.clone()).await;
+            }
+
+            // Record dispatched ledger entries
+            for req in &dispatched {
+                self.run_store
+                    .append_step_entry(run_id, StepLedgerEntry {
                         step_id: step.step_id.clone(),
                         target_meerkat_id: req.target_meerkat_id.clone(),
                         status: StepEntryStatus::Dispatched,
-                        attempt: 1,
+                        attempt,
                         dispatched_at: Some(req.dispatched_at),
                         completed_at: None,
                         result: None,
                         error: None,
+                    })
+                    .await?;
+
+                self.emit_event(MobEvent {
+                    cursor: 0,
+                    timestamp: Utc::now(),
+                    mob_id: self.config.mob_id.clone(),
+                    run_id: Some(run_id.to_string()),
+                    flow_id: Some(flow_id.to_string()),
+                    step_id: Some(step.step_id.clone()),
+                    retention: RetentionCategory::Debug,
+                    kind: MobEventKind::DispatchSent {
+                        target_meerkat_id: req.target_meerkat_id.clone(),
                     },
-                )
-                .await?;
-
-            self.emit_event(MobEvent {
-                cursor: 0,
-                timestamp: Utc::now(),
-                mob_id: self.config.mob_id.clone(),
-                run_id: Some(run_id.to_string()),
-                flow_id: Some(flow_id.to_string()),
-                step_id: Some(step.step_id.clone()),
-                retention: RetentionCategory::Debug,
-                kind: MobEventKind::DispatchSent {
-                    target_meerkat_id: req.target_meerkat_id.clone(),
-                },
-            })
-            .await;
-        }
-
-        // Collect responses via channel with timeout
-        let timeout = std::time::Duration::from_millis(step.timeout_ms);
-        let required = match step.collection_policy.mode {
-            CollectionMode::All => dispatched.len(),
-            CollectionMode::Quorum(n) => n as usize,
-            CollectionMode::Any => 1,
-        };
-
-        let mut responses = Vec::new();
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        while responses.len() < dispatched.len() && responses.len() < required || responses.len() < required {
-            let remaining = deadline - tokio::time::Instant::now();
-            if remaining.is_zero() {
-                break;
+                })
+                .await;
             }
-            match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Some(resp)) => {
-                    responses.push(resp);
+
+            // Collect responses with timeout + supervisor checks (REQ-MOB-060)
+            let timeout = std::time::Duration::from_millis(step.timeout_ms);
+            let required = match step.collection_policy.mode {
+                CollectionMode::All => dispatched.len(),
+                CollectionMode::Quorum(n) => n as usize,
+                CollectionMode::Any => 1,
+            };
+
+            let mut responses = Vec::new();
+            let deadline = tokio::time::Instant::now() + timeout;
+
+            while responses.len() < required {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
                 }
-                Ok(None) => break, // channel closed
-                Err(_) => break,   // timeout
+                // Check supervisor periodically during collection
+                let check_interval = std::time::Duration::from_millis(100);
+                let wait_time = remaining.min(check_interval);
+
+                match tokio::time::timeout(wait_time, rx.recv()).await {
+                    Ok(Some(resp)) => {
+                        responses.push(resp);
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        // Supervisor check on timeout tick
+                        if let Some(run) = self.run_store.get(run_id).await.ok().flatten() {
+                            let escalations = supervisor.check_run(&run, Utc::now());
+                            for event in supervisor.escalation_events(
+                                &escalations, &self.config.mob_id, run_id, Some(flow_id),
+                            ) {
+                                self.emit_event(event).await;
+                            }
+                        }
+                    }
+                }
             }
-        }
 
-        // Unregister step channel
-        router.remove_step_channel(&step.step_id).await;
+            router.remove_step_channel(&step.step_id).await;
 
-        // Update ledger with collected results
-        let mut step_results = BTreeMap::new();
-        for resp in &responses {
-            self.run_store
-                .append_step_entry(
-                    run_id,
-                    StepLedgerEntry {
+            // Process collected responses
+            let mut step_results = BTreeMap::new();
+            let mut has_failures = false;
+            for resp in &responses {
+                let entry_status = match resp.status {
+                    ResponseStatus::Completed => StepEntryStatus::Completed,
+                    ResponseStatus::Failed => {
+                        has_failures = true;
+                        StepEntryStatus::Failed
+                    }
+                    ResponseStatus::Accepted => StepEntryStatus::Dispatched,
+                };
+                self.run_store
+                    .append_step_entry(run_id, StepLedgerEntry {
                         step_id: step.step_id.clone(),
                         target_meerkat_id: resp.target_meerkat_id.clone(),
-                        status: match resp.status {
-                            ResponseStatus::Completed => StepEntryStatus::Completed,
-                            ResponseStatus::Failed => StepEntryStatus::Failed,
-                            ResponseStatus::Accepted => StepEntryStatus::Dispatched,
-                        },
-                        attempt: 1,
+                        status: entry_status,
+                        attempt,
                         dispatched_at: None,
                         completed_at: Some(Utc::now()),
                         result: Some(resp.result.clone()),
                         error: None,
+                    })
+                    .await?;
+
+                self.emit_event(MobEvent {
+                    cursor: 0,
+                    timestamp: Utc::now(),
+                    mob_id: self.config.mob_id.clone(),
+                    run_id: Some(run_id.to_string()),
+                    flow_id: Some(flow_id.to_string()),
+                    step_id: Some(step.step_id.clone()),
+                    retention: RetentionCategory::Debug,
+                    kind: MobEventKind::ResponseCollected {
+                        target_meerkat_id: resp.target_meerkat_id.clone(),
                     },
-                )
-                .await?;
+                })
+                .await;
 
-            self.emit_event(MobEvent {
-                cursor: 0,
-                timestamp: Utc::now(),
-                mob_id: self.config.mob_id.clone(),
-                run_id: Some(run_id.to_string()),
-                flow_id: Some(flow_id.to_string()),
-                step_id: Some(step.step_id.clone()),
-                retention: RetentionCategory::Debug,
-                kind: MobEventKind::ResponseCollected {
-                    target_meerkat_id: resp.target_meerkat_id.clone(),
-                },
-            })
-            .await;
+                step_results.insert(resp.target_meerkat_id.clone(), resp.result.clone());
+            }
 
-            step_results.insert(resp.target_meerkat_id.clone(), resp.result.clone());
-        }
+            // Schema validation on collected results (REQ-MOB-100)
+            if let Some(ref schema_ref) = step.expected_schema_ref
+                && let Some(schema_val) = spec.schemas.get(schema_ref)
+                && let Ok(validator) = jsonschema::Validator::new(schema_val)
+            {
+                    for (target_id, result_val) in &step_results {
+                        if let Err(error) = validator.validate(result_val) {
+                            let msg = format!(
+                                "schema validation failed for target {target_id}: {error}"
+                            );
+                            match step.schema_policy {
+                                crate::spec::SchemaPolicy::RetryThenFail
+                                | crate::spec::SchemaPolicy::RetryThenWarn => {
+                                    has_failures = true;
+                                }
+                                crate::spec::SchemaPolicy::WarnOnly => {}
+                            }
+                            self.emit_event(MobEvent {
+                                cursor: 0,
+                                timestamp: Utc::now(),
+                                mob_id: self.config.mob_id.clone(),
+                                run_id: Some(run_id.to_string()),
+                                flow_id: Some(flow_id.to_string()),
+                                step_id: Some(step.step_id.clone()),
+                                retention: RetentionCategory::Ops,
+                                kind: MobEventKind::DegradationWarning { message: msg },
+                            })
+                            .await;
+                        }
+                    }
+            }
 
-        // Record timeouts for dispatched but uncollected targets
-        let collected_ids: HashSet<&str> = responses
-            .iter()
-            .map(|r| r.target_meerkat_id.as_str())
-            .collect();
-        for req in &dispatched {
-            if !collected_ids.contains(req.target_meerkat_id.as_str()) {
-                self.run_store
-                    .append_step_entry(
-                        run_id,
-                        StepLedgerEntry {
+            // Record timeouts
+            let collected_ids: HashSet<&str> = responses
+                .iter()
+                .map(|r| r.target_meerkat_id.as_str())
+                .collect();
+            for req in &dispatched {
+                if !collected_ids.contains(req.target_meerkat_id.as_str()) {
+                    self.run_store
+                        .append_step_entry(run_id, StepLedgerEntry {
                             step_id: step.step_id.clone(),
                             target_meerkat_id: req.target_meerkat_id.clone(),
                             status: StepEntryStatus::TimedOut,
-                            attempt: 1,
+                            attempt,
                             dispatched_at: Some(req.dispatched_at),
                             completed_at: None,
                             result: None,
                             error: Some("collection timeout".to_string()),
-                        },
-                    )
-                    .await?;
+                        })
+                        .await?;
 
-                self.run_store
-                    .append_failure_entry(
-                        run_id,
-                        FailureLedgerEntry {
+                    self.run_store
+                        .append_failure_entry(run_id, FailureLedgerEntry {
                             step_id: step.step_id.clone(),
                             target_meerkat_id: req.target_meerkat_id.clone(),
-                            attempt: 1,
+                            attempt,
                             error: "collection timeout".to_string(),
                             failed_at: Utc::now(),
-                        },
-                    )
-                    .await?;
+                        })
+                        .await?;
+                }
             }
-        }
 
-        // Check collection policy
-        if responses.len() >= required {
-            self.emit_event(MobEvent {
-                cursor: 0,
-                timestamp: Utc::now(),
-                mob_id: self.config.mob_id.clone(),
-                run_id: Some(run_id.to_string()),
-                flow_id: Some(flow_id.to_string()),
-                step_id: Some(step.step_id.clone()),
-                retention: RetentionCategory::Ops,
-                kind: MobEventKind::StepCompleted {
-                    collected: responses.len(),
-                },
-            })
-            .await;
-            Ok(step_results)
-        } else {
+            // Check if collection policy is met
+            let policy_met = responses.len() >= required && !has_failures;
+
+            if policy_met {
+                self.emit_event(MobEvent {
+                    cursor: 0,
+                    timestamp: Utc::now(),
+                    mob_id: self.config.mob_id.clone(),
+                    run_id: Some(run_id.to_string()),
+                    flow_id: Some(flow_id.to_string()),
+                    step_id: Some(step.step_id.clone()),
+                    retention: RetentionCategory::Ops,
+                    kind: MobEventKind::StepCompleted { collected: responses.len() },
+                })
+                .await;
+                return Ok(step_results);
+            }
+
+            // Not met — can we retry?
+            if attempt < max_attempts {
+                // Record failure for this attempt
+                self.run_store
+                    .append_failure_entry(run_id, FailureLedgerEntry {
+                        step_id: step.step_id.clone(),
+                        target_meerkat_id: "".to_string(),
+                        attempt,
+                        error: format!(
+                            "attempt {attempt} failed: {}/{required} responses, has_failures={has_failures}",
+                            responses.len()
+                        ),
+                        failed_at: Utc::now(),
+                    })
+                    .await?;
+
+                // Exponential backoff
+                let backoff = std::cmp::min(
+                    (step.retry.backoff_ms as f64 * step.retry.multiplier.powi(attempt as i32 - 1)) as u64,
+                    step.retry.max_backoff_ms,
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                continue;
+            }
+
+            // Out of retries — apply timeout behavior
+            if responses.len() >= required {
+                // We have enough responses but had failures (schema etc.)
+                // For WarnOnly schema policy, accept the results
+                self.emit_event(MobEvent {
+                    cursor: 0,
+                    timestamp: Utc::now(),
+                    mob_id: self.config.mob_id.clone(),
+                    run_id: Some(run_id.to_string()),
+                    flow_id: Some(flow_id.to_string()),
+                    step_id: Some(step.step_id.clone()),
+                    retention: RetentionCategory::Ops,
+                    kind: MobEventKind::StepCompleted { collected: responses.len() },
+                })
+                .await;
+                return Ok(step_results);
+            }
+
             match step.collection_policy.timeout_behavior {
                 TimeoutBehavior::Partial => {
                     self.emit_event(MobEvent {
@@ -985,7 +1168,7 @@ impl MobRuntime {
                         },
                     })
                     .await;
-                    Ok(step_results)
+                    return Ok(step_results);
                 }
                 TimeoutBehavior::Fail => {
                     self.emit_event(MobEvent {
@@ -998,21 +1181,20 @@ impl MobRuntime {
                         retention: RetentionCategory::Ops,
                         kind: MobEventKind::StepFailed {
                             reason: format!(
-                                "collection timeout: {}/{} responses",
-                                responses.len(),
-                                required
+                                "collection timeout: {}/{required} responses",
+                                responses.len()
                             ),
                         },
                     })
                     .await;
-                    Err(MobError::CollectionTimeout {
+                    return Err(MobError::CollectionTimeout {
                         step_id: step.step_id.clone(),
                         collected: responses.len(),
                         expected: required,
-                    })
+                    });
                 }
             }
-        }
+        } // end retry loop
     }
 
     /// Emit a mob event to the event store.
@@ -1137,12 +1319,13 @@ impl MobService for MobRuntime {
         let mob_id_owned = req.mob_id.clone();
         let flow_id_owned = req.flow_id.clone();
         let spec_owned = spec.clone();
+        let activation_params = req.params.clone();
         let run_store = Arc::clone(&self.run_store);
         let event_store = Arc::clone(&self.event_store);
 
         tokio::spawn(async move {
             let flow_result = self_arc
-                .execute_flow(&spec_owned, &flow, &run_id_owned)
+                .execute_flow(&spec_owned, &flow, &run_id_owned, &activation_params)
                 .await;
 
             match flow_result {
@@ -1546,6 +1729,75 @@ pub fn spawn_silent_mock_meerkat(
             // Drain inbox but do NOT respond
             let _interactions =
                 CoreCommsRuntime::drain_inbox_interactions(&*responder).await;
+        }
+    });
+
+    (runtime_arc, handle)
+}
+
+/// Spawn a mock meerkat that fails the first N attempts, then succeeds.
+///
+/// Used for testing retry logic (REQ-MOB-037).
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn spawn_fail_then_succeed_mock(
+    namespace: &str,
+    name: &str,
+    role: &str,
+    meerkat_id: &str,
+    _supervisor: &CommsRuntime,
+    fail_count: u32,
+) -> (Arc<CommsRuntime>, tokio::task::JoinHandle<()>) {
+    let runtime = CommsRuntime::inproc_only_scoped(name, Some(namespace.to_string()))
+        .expect("create fail-then-succeed mock comms");
+
+    runtime.set_peer_meta(
+        PeerMeta::default()
+            .with_label("mob_id", namespace.rsplit('/').next().unwrap_or(""))
+            .with_label("role", role)
+            .with_label("meerkat_id", meerkat_id),
+    );
+
+    let runtime_arc = Arc::new(runtime);
+    let responder = Arc::clone(&runtime_arc);
+    let meerkat_id_owned = meerkat_id.to_string();
+    let fail_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(fail_count));
+
+    let handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+            let interactions =
+                CoreCommsRuntime::drain_inbox_interactions(&*responder).await;
+
+            for interaction in &interactions {
+                if let InteractionContent::Request { .. } = &interaction.content {
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+                    let remaining = fail_count.load(std::sync::atomic::Ordering::SeqCst);
+                    let (status, result) = if remaining > 0 {
+                        fail_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        (
+                            ResponseStatus::Failed,
+                            serde_json::json!({"error": "simulated failure", "meerkat_id": meerkat_id_owned}),
+                        )
+                    } else {
+                        (
+                            ResponseStatus::Completed,
+                            serde_json::json!({"mock": true, "meerkat_id": meerkat_id_owned, "retry_success": true}),
+                        )
+                    };
+
+                    let response_cmd = CommsCommand::PeerResponse {
+                        to: PeerName::new(interaction.from.clone())
+                            .expect("valid peer name"),
+                        in_reply_to: interaction.id,
+                        status,
+                        result,
+                    };
+
+                    let _ = CoreCommsRuntime::send(&*responder, response_cmd).await;
+                }
+            }
         }
     });
 

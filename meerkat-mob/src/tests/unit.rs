@@ -281,6 +281,7 @@ fn test_prompt_ref_resolution() {
     let resolved = crate::validate::resolve_prompt_ref(
         "config://prompts/review_prompt",
         &spec.prompts,
+        None,
     );
     assert_eq!(
         resolved.as_deref(),
@@ -289,7 +290,7 @@ fn test_prompt_ref_resolution() {
 
     // Missing ref
     let resolved_missing =
-        crate::validate::resolve_prompt_ref("config://prompts/nonexistent", &spec.prompts);
+        crate::validate::resolve_prompt_ref("config://prompts/nonexistent", &spec.prompts, None);
     assert!(resolved_missing.is_none());
 }
 
@@ -838,4 +839,188 @@ async fn test_event_store_prune() {
     // Verify empty
     let events = store.poll("mob-1", None, None).await.unwrap();
     assert!(events.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// REQ-MOB-046: Model defaulting
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_model_defaulting() {
+    // When RoleSpec.model is None, compile_role_config should use default_model.
+    let spec = MobSpec {
+        mob_id: "test_mob".to_string(),
+        spec_revision: 1,
+        apply_mode: ApplyMode::DrainReplace,
+        roles: vec![RoleSpec {
+            role: "worker".to_string(),
+            prompt_inline: Some("You work.".to_string()),
+            model: None, // <-- no model
+            ..default_role()
+        }],
+        topology: TopologySpec::default(),
+        flows: vec![],
+        prompts: std::collections::BTreeMap::new(),
+        schemas: std::collections::BTreeMap::new(),
+        tool_bundles: std::collections::BTreeMap::new(),
+        resolvers: std::collections::BTreeMap::new(),
+        supervisor: SupervisorSpec::default(),
+        limits: MobLimits::default(),
+        retention: RetentionSpec::default(),
+    };
+
+    let compiled = crate::runtime::compile_role_config(
+        &spec.roles[0],
+        &spec,
+        "test-realm",
+        "worker-1",
+        "claude-sonnet-4-5",
+    );
+
+    assert_eq!(
+        compiled.model.as_deref(),
+        Some("claude-sonnet-4-5"),
+        "None model should fall back to default_model"
+    );
+
+    // When model IS set, it should be preserved
+    let mut role_with_model = spec.roles[0].clone();
+    role_with_model.model = Some("gpt-5.2".to_string());
+    let compiled2 = crate::runtime::compile_role_config(
+        &role_with_model,
+        &spec,
+        "test-realm",
+        "worker-1",
+        "claude-sonnet-4-5",
+    );
+    assert_eq!(
+        compiled2.model.as_deref(),
+        Some("gpt-5.2"),
+        "Explicit model should be preserved"
+    );
+}
+
+fn default_role() -> RoleSpec {
+    RoleSpec {
+        role: String::new(),
+        prompt_ref: None,
+        prompt_inline: None,
+        preload_skills: Vec::new(),
+        cardinality: CardinalitySpec::Singleton,
+        spawn_strategy: SpawnStrategy::Eager,
+        tool_bundles: Vec::new(),
+        tool_policy: None,
+        model: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// REQ-MOB-011: file:// prompt resolution
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_file_prompt_ref_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("my_prompt.txt");
+    std::fs::write(&prompt_path, "You are a helpful reviewer.").unwrap();
+
+    let result = crate::validate::resolve_prompt_ref(
+        "file://my_prompt.txt",
+        &std::collections::BTreeMap::new(),
+        Some(dir.path()),
+    );
+    assert_eq!(
+        result,
+        Some("You are a helpful reviewer.".to_string()),
+        "file:// ref should resolve by reading the file"
+    );
+}
+
+#[test]
+fn test_file_prompt_ref_missing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let result = crate::validate::resolve_prompt_ref(
+        "file://nonexistent.txt",
+        &std::collections::BTreeMap::new(),
+        Some(dir.path()),
+    );
+    assert_eq!(result, None, "Missing file should return None");
+}
+
+#[test]
+fn test_file_prompt_ref_no_base_dir() {
+    let result = crate::validate::resolve_prompt_ref(
+        "file://prompt.txt",
+        &std::collections::BTreeMap::new(),
+        None,
+    );
+    assert_eq!(result, None, "file:// without base_dir should return None");
+}
+
+// ---------------------------------------------------------------------------
+// REQ-MOB-038: Condition evaluation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_condition_evaluation_eq() {
+    let ctx = serde_json::json!({
+        "activation": { "priority": "high" },
+    });
+    let cond = Condition::Eq {
+        path: "activation.priority".to_string(),
+        value: serde_json::json!("high"),
+    };
+    assert!(
+        crate::runtime::evaluate_condition(&cond, &ctx),
+        "Eq should match"
+    );
+
+    let cond_fail = Condition::Eq {
+        path: "activation.priority".to_string(),
+        value: serde_json::json!("low"),
+    };
+    assert!(
+        !crate::runtime::evaluate_condition(&cond_fail, &ctx),
+        "Eq should not match"
+    );
+}
+
+#[test]
+fn test_condition_evaluation_in_set() {
+    let ctx = serde_json::json!({
+        "activation": { "priority": "normal" },
+    });
+    let cond = Condition::InSet {
+        path: "activation.priority".to_string(),
+        values: vec![serde_json::json!("high"), serde_json::json!("normal")],
+    };
+    assert!(
+        crate::runtime::evaluate_condition(&cond, &ctx),
+        "InSet should match"
+    );
+}
+
+#[test]
+fn test_condition_evaluation_combinators() {
+    let ctx = serde_json::json!({
+        "activation": { "priority": "high", "count": 5 },
+    });
+
+    let cond = Condition::All(vec![
+        Condition::Eq {
+            path: "activation.priority".to_string(),
+            value: serde_json::json!("high"),
+        },
+        Condition::Gt {
+            path: "activation.count".to_string(),
+            value: serde_json::json!(3),
+        },
+    ]);
+    assert!(crate::runtime::evaluate_condition(&cond, &ctx));
+
+    let cond_not = Condition::Not(Box::new(Condition::Eq {
+        path: "activation.priority".to_string(),
+        value: serde_json::json!("low"),
+    }));
+    assert!(crate::runtime::evaluate_condition(&cond_not, &ctx));
 }

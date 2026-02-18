@@ -579,3 +579,316 @@ steps = [
     // Cleanup
     mock_handle.abort();
 }
+
+// ---------------------------------------------------------------------------
+// REQ-MOB-037: Retry with backoff on failure
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_retry_on_failure() {
+    // A mock meerkat that fails on first attempt, succeeds on second.
+    // RetrySpec.attempts = 3, so the step should succeed on retry.
+
+    let toml = r#"
+[mob.specs.retry_mob]
+roles = [
+    { role = "worker", prompt_inline = "You work." },
+]
+
+[[mob.specs.retry_mob.flows]]
+flow_id = "retry_flow"
+steps = [
+    { step_id = "do_work", targets = { role = "worker" }, dispatch_mode = "fan_out", timeout_ms = 3000, retry = { attempts = 3, backoff_ms = 50, multiplier = 2.0, max_backoff_ms = 200 } },
+]
+"#;
+
+    let spec = parse_mob_specs_from_toml(toml).unwrap().remove(0);
+    let (runtime, realm_id) = create_test_runtime("retry_mob");
+    let namespace = format!("{realm_id}/retry_mob");
+
+    runtime
+        .apply_spec(ApplySpecRequest { spec })
+        .await
+        .unwrap();
+
+    // Spawn a mock that fails first, then succeeds
+    let name = format!("worker-1-{}", Uuid::new_v4().simple());
+    let (mock_rt, mock_handle) = crate::runtime::spawn_fail_then_succeed_mock(
+        &namespace,
+        &name,
+        "worker",
+        "worker-1",
+        runtime.supervisor(),
+        1, // fail first 1 attempt
+    );
+    crate::runtime::establish_trust(runtime.supervisor(), &mock_rt).await;
+
+    let result = runtime
+        .activate(ActivateRequest {
+            mob_id: "retry_mob".to_string(),
+            flow_id: "retry_flow".to_string(),
+            params: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+    let run = wait_for_run_terminal(&runtime, &result.run_id, 10_000).await;
+    assert_eq!(run.status, RunStatus::Completed, "Should succeed on retry");
+
+    // Failure ledger should have 1 entry for the failed first attempt
+    assert!(
+        !run.failure_ledger.is_empty(),
+        "Should have failure ledger entry for first failed attempt"
+    );
+
+    // Step ledger should have a completed entry with attempt > 1
+    let completed = run
+        .step_ledger
+        .iter()
+        .find(|e| e.status == StepEntryStatus::Completed);
+    assert!(completed.is_some(), "Should have a completed entry");
+    assert!(
+        completed.unwrap().attempt > 1,
+        "Completed entry should be on attempt > 1"
+    );
+
+    mock_handle.abort();
+}
+
+// ---------------------------------------------------------------------------
+// REQ-MOB-038: Condition skips step
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_condition_skips_step() {
+    // Step B has condition activation.priority == "low".
+    // Activate with priority = "high". Step B should be skipped.
+
+    let toml = r#"
+[mob.specs.cond_mob]
+roles = [
+    { role = "worker", prompt_inline = "You work." },
+    { role = "optional", prompt_inline = "Maybe work." },
+]
+
+[[mob.specs.cond_mob.flows]]
+flow_id = "cond_flow"
+steps = [
+    { step_id = "always_run", targets = { role = "worker" }, timeout_ms = 3000 },
+    { step_id = "conditional", depends_on = ["always_run"], targets = { role = "optional" }, timeout_ms = 3000, condition = { eq = { path = "activation.priority", value = "low" } } },
+]
+"#;
+
+    let spec = parse_mob_specs_from_toml(toml).unwrap().remove(0);
+    let (runtime, realm_id) = create_test_runtime("cond_mob");
+    let namespace = format!("{realm_id}/cond_mob");
+
+    runtime
+        .apply_spec(ApplySpecRequest { spec })
+        .await
+        .unwrap();
+
+    // Spawn mock for "worker" role only (optional doesn't need one if skipped)
+    let name = format!("worker-1-{}", Uuid::new_v4().simple());
+    let (mock_rt, handle1) = crate::runtime::spawn_mock_meerkat(
+        &namespace, &name, "worker", "worker-1", runtime.supervisor(),
+    );
+    crate::runtime::establish_trust(runtime.supervisor(), &mock_rt).await;
+
+    // Also spawn optional mock (in case it runs despite condition)
+    let name2 = format!("optional-1-{}", Uuid::new_v4().simple());
+    let (mock_rt2, handle2) = crate::runtime::spawn_mock_meerkat(
+        &namespace, &name2, "optional", "optional-1", runtime.supervisor(),
+    );
+    crate::runtime::establish_trust(runtime.supervisor(), &mock_rt2).await;
+
+    let result = runtime
+        .activate(ActivateRequest {
+            mob_id: "cond_mob".to_string(),
+            flow_id: "cond_flow".to_string(),
+            params: serde_json::json!({"priority": "high"}),
+        })
+        .await
+        .unwrap();
+
+    let run = wait_for_run_terminal(&runtime, &result.run_id, 10_000).await;
+    assert_eq!(run.status, RunStatus::Completed);
+
+    // "always_run" should have completed
+    let always_completed = run
+        .step_ledger
+        .iter()
+        .any(|e| e.step_id == "always_run" && e.status == StepEntryStatus::Completed);
+    assert!(always_completed, "always_run should complete");
+
+    // "conditional" should be skipped
+    let conditional_skipped = run
+        .step_ledger
+        .iter()
+        .any(|e| e.step_id == "conditional" && e.status == StepEntryStatus::Skipped);
+    assert!(conditional_skipped, "conditional step should be skipped when condition is false");
+
+    handle1.abort();
+    handle2.abort();
+}
+
+// ---------------------------------------------------------------------------
+// REQ-MOB-100: Schema validation emits warning
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_schema_validation_warns_on_invalid() {
+    // Step has expected_schema_ref pointing to a schema requiring {"status": "string"}.
+    // Mock returns {"status": 123} (invalid). schema_policy = warn_only.
+    // Step should complete but a DegradationWarning event should be emitted.
+
+    let toml = r#"
+[mob.specs.schema_mob]
+roles = [
+    { role = "worker", prompt_inline = "You work." },
+]
+
+[mob.specs.schema_mob.schemas.result_schema]
+type = "object"
+required = ["status"]
+[mob.specs.schema_mob.schemas.result_schema.properties.status]
+type = "string"
+
+[[mob.specs.schema_mob.flows]]
+flow_id = "schema_flow"
+steps = [
+    { step_id = "validated_step", targets = { role = "worker" }, timeout_ms = 3000, expected_schema_ref = "result_schema", schema_policy = "warn_only" },
+]
+"#;
+
+    let spec = parse_mob_specs_from_toml(toml).unwrap().remove(0);
+    let (runtime, realm_id) = create_test_runtime("schema_mob");
+    let namespace = format!("{realm_id}/schema_mob");
+
+    runtime
+        .apply_spec(ApplySpecRequest { spec })
+        .await
+        .unwrap();
+
+    // Spawn mock that returns invalid schema (status is integer, not string)
+    let name = format!("worker-1-{}", Uuid::new_v4().simple());
+    let (mock_rt, mock_handle) = crate::runtime::spawn_mock_meerkat(
+        &namespace, &name, "worker", "worker-1", runtime.supervisor(),
+    );
+    crate::runtime::establish_trust(runtime.supervisor(), &mock_rt).await;
+
+    let result = runtime
+        .activate(ActivateRequest {
+            mob_id: "schema_mob".to_string(),
+            flow_id: "schema_flow".to_string(),
+            params: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+    let run = wait_for_run_terminal(&runtime, &result.run_id, 10_000).await;
+    // With warn_only, step should still complete
+    assert_eq!(run.status, RunStatus::Completed);
+
+    // Check for DegradationWarning event about schema validation
+    use crate::service::PollEventsRequest;
+    let events = runtime
+        .poll_events(PollEventsRequest {
+            mob_id: "schema_mob".to_string(),
+            after_cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+
+    let schema_warnings: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(&e.kind, crate::event::MobEventKind::DegradationWarning { message } if message.contains("schema")))
+        .collect();
+    assert!(
+        !schema_warnings.is_empty(),
+        "Should emit DegradationWarning for schema mismatch. Events: {:?}",
+        events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+    );
+
+    mock_handle.abort();
+}
+
+// ---------------------------------------------------------------------------
+// REQ-MOB-060: Supervisor fires during flow execution
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_supervisor_fires_during_flow() {
+    // Silent mock (never responds). Supervisor dispatch_timeout_ms = 200ms.
+    // Step timeout = 1000ms. Supervisor should fire before step times out.
+
+    let toml = r#"
+[mob.specs.sup_mob]
+roles = [
+    { role = "worker", prompt_inline = "You work." },
+]
+
+[mob.specs.sup_mob.supervisor]
+enabled = true
+dispatch_timeout_ms = 200
+
+[[mob.specs.sup_mob.flows]]
+flow_id = "sup_flow"
+steps = [
+    { step_id = "stuck_step", targets = { role = "worker" }, timeout_ms = 500, collection_policy = { mode = "all", timeout_behavior = "partial" }, retry = { attempts = 1, backoff_ms = 10, multiplier = 1.0, max_backoff_ms = 10 } },
+]
+"#;
+
+    let spec = parse_mob_specs_from_toml(toml).unwrap().remove(0);
+    let (runtime, realm_id) = create_test_runtime("sup_mob");
+    let namespace = format!("{realm_id}/sup_mob");
+
+    runtime
+        .apply_spec(ApplySpecRequest { spec })
+        .await
+        .unwrap();
+
+    // Spawn silent mock (never responds)
+    let name = format!("worker-1-{}", Uuid::new_v4().simple());
+    let (mock_rt, mock_handle) = crate::runtime::spawn_silent_mock_meerkat(
+        &namespace, &name, "worker", "worker-1", runtime.supervisor(),
+    );
+    crate::runtime::establish_trust(runtime.supervisor(), &mock_rt).await;
+
+    let result = runtime
+        .activate(ActivateRequest {
+            mob_id: "sup_mob".to_string(),
+            flow_id: "sup_flow".to_string(),
+            params: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+    let run = wait_for_run_terminal(&runtime, &result.run_id, 5_000).await;
+    // Should complete (partial timeout behavior)
+    assert_eq!(run.status, RunStatus::Completed);
+
+    // Check for SupervisorEscalation event
+    use crate::service::PollEventsRequest;
+    let events = runtime
+        .poll_events(PollEventsRequest {
+            mob_id: "sup_mob".to_string(),
+            after_cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+
+    let escalations: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(&e.kind, crate::event::MobEventKind::SupervisorEscalation { .. }))
+        .collect();
+    assert!(
+        !escalations.is_empty(),
+        "Supervisor should emit escalation event for stuck dispatch. Events: {:?}",
+        events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+    );
+
+    mock_handle.abort();
+}

@@ -745,6 +745,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_tool_roundtrip_activate_run_and_events() {
+        let st = state();
+
+        let activate = handle_tools_call(
+            &st,
+            "mob_activate",
+            &json!({"mob_id": "invoice", "flow_id": "triage", "payload": {"priority": "high"}}),
+        )
+        .await
+        .unwrap();
+        let run_id = activate
+            .get("payload")
+            .and_then(|p| p.get("run"))
+            .and_then(|r| r.get("run_id"))
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        assert_eq!(run_id, "run-triage");
+
+        let run = handle_tools_call(&st, "mob_run_get", &json!({"run_id": run_id}))
+            .await
+            .unwrap();
+        assert!(
+            run.get("payload")
+                .and_then(|p| p.get("run"))
+                .and_then(|r| r.get("flow_id"))
+                .is_some()
+        );
+
+        let events = handle_tools_call(&st, "mob_events_poll", &json!({"cursor": 0, "limit": 10}))
+            .await
+            .unwrap();
+        let event_len = events
+            .get("payload")
+            .and_then(|p| p.get("events"))
+            .and_then(Value::as_array)
+            .map_or(0, std::vec::Vec::len);
+        assert!(event_len >= 1);
+    }
+
+    #[tokio::test]
     async fn reconcile_mode_defaults_to_apply() {
         let value = handle_tools_call(
             &state(),

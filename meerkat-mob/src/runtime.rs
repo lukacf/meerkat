@@ -197,10 +197,10 @@ impl MobService for MobRuntime {
 
         let mut spec = specs.remove(0);
         let existing = self.spec_store.get_spec(&spec.mob_id).await?;
-        if let Some(current) = existing {
-            if request.expected_revision.is_none() {
-                spec.revision = current.revision + 1;
-            }
+        if let Some(current) = existing
+            && request.expected_revision.is_none()
+        {
+            spec.revision = current.revision + 1;
         }
 
         self.spec_store
@@ -736,7 +736,7 @@ impl MobRuntime {
         for target in targets {
             let command = CommsCommand::PeerRequest {
                 to: meerkat::PeerName::new(target.comms_name.clone())
-                    .map_err(|err| MobError::Comms(err.to_string()))?,
+                    .map_err(MobError::Comms)?,
                 intent: "mob.supervisor.escalation".to_string(),
                 params: params.clone(),
                 stream: InputStreamMode::None,
@@ -1005,6 +1005,7 @@ impl MobRuntime {
         Ok(has_failures)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_step(
         &self,
         spec: &MobSpec,
@@ -1346,7 +1347,7 @@ impl MobRuntime {
 
             let command = CommsCommand::PeerRequest {
                 to: meerkat::PeerName::new(target.comms_name.clone())
-                    .map_err(|err| MobError::Comms(err.to_string()))?,
+                    .map_err(MobError::Comms)?,
                 intent: intent.clone(),
                 params: attempt_payload,
                 stream: InputStreamMode::ReserveInteraction,
@@ -1800,7 +1801,7 @@ impl MobRuntime {
                         supervisor_peer_id.clone(),
                         format!("inproc://{supervisor_name}"),
                     )
-                    .map_err(|err| MobError::Comms(err.to_string()))?,
+                    .map_err(MobError::Comms)?,
                 )
                 .await
                 .map_err(|err| MobError::Comms(err.to_string()))?;
@@ -1815,7 +1816,7 @@ impl MobRuntime {
                         peer_id,
                         format!("inproc://{}", instance.comms_name),
                     )
-                    .map_err(|err| MobError::Comms(err.to_string()))?,
+                    .map_err(MobError::Comms)?,
                 )
                 .await
                 .map_err(|err| MobError::Comms(err.to_string()))?;
@@ -1885,7 +1886,7 @@ impl MobRuntime {
                             target_peer_id,
                             format!("inproc://{}", target.comms_name),
                         )
-                        .map_err(|err| MobError::Comms(err.to_string()))?,
+                        .map_err(MobError::Comms)?,
                     )
                     .await
                     .map_err(|err| MobError::Comms(err.to_string()))?;
@@ -2289,7 +2290,7 @@ fn evaluate_condition(
             resolve_path(left, step_outputs, activation_payload).is_some_and(|value| value == *right)
         }
         ConditionExpr::In { left, right } => resolve_path(left, step_outputs, activation_payload)
-            .is_some_and(|value| right.iter().any(|entry| *entry == value)),
+            .is_some_and(|value| right.contains(&value)),
         ConditionExpr::Gt { left, right } => compare_numeric(left, right, step_outputs, activation_payload, |a, b| a > b),
         ConditionExpr::Lt { left, right } => compare_numeric(left, right, step_outputs, activation_payload, |a, b| a < b),
         ConditionExpr::And { all } => all

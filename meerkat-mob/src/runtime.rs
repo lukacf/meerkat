@@ -1,10 +1,12 @@
 use crate::error::{MobError, MobResult};
 use crate::model::{
-    CollectionPolicy, FailureLedgerEntry, FlowSpec, FlowStepSpec, MeerkatIdentity,
-    MeerkatInstance, MeerkatInstanceStatus, MobActivationRequest, MobActivationResponse, MobEvent,
-    MobEventCategory, MobEventKind, MobReconcileRequest, MobReconcileResult, MobRun,
+    CollectionPolicy, ConditionContext, FailureLedgerEntry, FlowContext, FlowSpec, FlowStepSpec,
+    MeerkatIdentity, MeerkatInstance, MeerkatInstanceStatus, MobActivationRequest,
+    MobActivationResponse, MobEvent, MobEventCategory, MobEventKind, MobReconcileRequest,
+    MobReconcileResult, MobRun,
     MobRunFilter, MobRunStatus, MobSpec, NewMobEvent, PolicyMode, PollEventsResponse, RoleSpec,
-    SchemaPolicy, SpecUpdateMode, StepLedgerEntry, StepRunStatus, TimeoutPolicy, UnavailablePolicy,
+    SchemaPolicy, SpecUpdateMode, StepLedgerEntry, StepOutput, StepRunStatus, TimeoutPolicy,
+    UnavailablePolicy,
 };
 use crate::resolver::{ResolverContext, ResolverRegistry};
 use crate::service::MobService;
@@ -627,16 +629,15 @@ impl MobRuntime {
             })
             .await?;
 
-        let run_result = self
-            .execute_flow(
-                &spec,
-                request.flow_id.as_str(),
-                &flow,
-                &run_id,
-                request.payload.clone(),
-                expected_epoch,
-            )
-            .await;
+        let flow_ctx = FlowContext {
+            run_id: run_id.clone(),
+            mob_id: spec.mob_id.clone(),
+            flow_id: request.flow_id.clone(),
+            spec_revision: spec.revision,
+            activation_payload: request.payload.clone(),
+        };
+
+        let run_result = self.execute_flow(&spec, &flow_ctx, &flow, expected_epoch).await;
 
         match run_result {
             Ok(has_failures) => {
@@ -952,10 +953,8 @@ impl MobRuntime {
     async fn execute_flow(
         &self,
         spec: &MobSpec,
-        flow_id: &str,
+        flow_ctx: &FlowContext,
         flow: &FlowSpec,
-        run_id: &str,
-        activation_payload: Value,
         expected_epoch: u64,
     ) -> MobResult<bool> {
         let step_by_id: IndexMap<String, FlowStepSpec> = flow
@@ -981,7 +980,7 @@ impl MobRuntime {
         }
 
         while completed.len() < flow.steps.len() {
-            self.ensure_run_active(run_id, &spec.mob_id, expected_epoch)
+            self.ensure_run_active(&flow_ctx.run_id, &spec.mob_id, expected_epoch)
                 .await?;
 
             while running.len() < spec.limits.max_concurrent_ready_steps && !ready.is_empty() {
@@ -996,19 +995,19 @@ impl MobRuntime {
                             dependency_outputs.insert(dep.clone(), value.clone());
                         }
                     }
-                    let activation_payload = activation_payload.clone();
+                    let activation_payload = flow_ctx.activation_payload.clone();
                     let step_id_for_task = step_id.clone();
                     running.push(async move {
                         let result = self
-                            .execute_step(
+                            .execute_step(StepExecutionInput {
                                 spec,
-                                flow_id,
-                                run_id,
+                                flow_id: &flow_ctx.flow_id,
+                                run_id: &flow_ctx.run_id,
                                 step,
                                 dependency_outputs,
                                 activation_payload,
                                 expected_epoch,
-                            )
+                            })
                             .await;
                         (step_id_for_task, result)
                     });
@@ -1022,7 +1021,7 @@ impl MobRuntime {
 
             outputs.insert(step_id.clone(), step_result.output.clone());
             self.run_store
-                .put_step_output(run_id, &step_id, step_result.output)
+                .put_step_output(&flow_ctx.run_id, &step_id, step_result.output)
                 .await?;
 
             let status = step_result.status;
@@ -1032,10 +1031,10 @@ impl MobRuntime {
 
             let mut run = self
                 .run_store
-                .get_run(run_id)
+                .get_run(&flow_ctx.run_id)
                 .await?
                 .ok_or_else(|| MobError::RunNotFound {
-                    run_id: run_id.to_string(),
+                    run_id: flow_ctx.run_id.to_string(),
                 })?;
             run.step_statuses.insert(step_id.clone(), status);
             self.run_store.put_run(run).await?;
@@ -1067,20 +1066,38 @@ impl MobRuntime {
         Ok(has_failures)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn execute_step(
-        &self,
-        spec: &MobSpec,
-        flow_id: &str,
-        run_id: &str,
-        step: FlowStepSpec,
-        dependency_outputs: HashMap<String, Value>,
-        activation_payload: Value,
-        expected_epoch: u64,
-    ) -> MobResult<StepExecutionResult> {
+    async fn execute_step(&self, input: StepExecutionInput<'_>) -> MobResult<StepExecutionResult> {
+        let StepExecutionInput {
+            spec,
+            flow_id,
+            run_id,
+            step,
+            dependency_outputs,
+            activation_payload,
+            expected_epoch,
+        } = input;
+
         if let Some(condition) = &step.condition {
-            let condition_true =
-                evaluate_condition(condition, &dependency_outputs, &activation_payload);
+            let condition_ctx = ConditionContext {
+                activation: activation_payload.clone(),
+                steps: dependency_outputs
+                    .iter()
+                    .map(|(step_id, output)| {
+                        (
+                            step_id.clone(),
+                            StepOutput {
+                                status: StepRunStatus::Completed,
+                                count: output
+                                    .get("success_count")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0) as usize,
+                                output: output.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            };
+            let condition_true = evaluate_condition(condition, &condition_ctx);
             if !condition_true {
                 self.emit_event(MobEvent {
                     cursor: 0,
@@ -1203,17 +1220,17 @@ impl MobRuntime {
 
             dispatch_futures.push(async move {
                 let result = self
-                    .dispatch_to_target(
+                    .dispatch_to_target(DispatchTargetInput {
                         run_id,
                         flow_id,
-                        &step_for_dispatch,
-                        supervisor_for_dispatch,
+                        step: &step_for_dispatch,
+                        supervisor: supervisor_for_dispatch,
                         target,
                         intent,
                         payload,
                         spec,
                         expected_epoch,
-                    )
+                    })
                     .await;
                 (target_meerkat_id, target_comms_name, result)
             });
@@ -1370,19 +1387,19 @@ impl MobRuntime {
         Ok(StepExecutionResult { status, output })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn dispatch_to_target(
-        &self,
-        run_id: &str,
-        flow_id: &str,
-        step: &FlowStepSpec,
-        supervisor: Arc<CommsRuntime>,
-        target: ManagedMeerkat,
-        intent: String,
-        payload: Value,
-        spec: &MobSpec,
-        expected_epoch: u64,
-    ) -> MobResult<Value> {
+    async fn dispatch_to_target(&self, input: DispatchTargetInput<'_>) -> MobResult<Value> {
+        let DispatchTargetInput {
+            run_id,
+            flow_id,
+            step,
+            supervisor,
+            target,
+            intent,
+            payload,
+            spec,
+            expected_epoch,
+        } = input;
+
         let timeout_ms = step.timeout_ms.unwrap_or(spec.limits.default_step_timeout_ms);
         let max_attempts = 2u32;
         for attempt in 1..=max_attempts {
@@ -2205,6 +2222,28 @@ struct StepExecutionResult {
     output: Value,
 }
 
+struct StepExecutionInput<'a> {
+    spec: &'a MobSpec,
+    flow_id: &'a str,
+    run_id: &'a str,
+    step: FlowStepSpec,
+    dependency_outputs: HashMap<String, Value>,
+    activation_payload: Value,
+    expected_epoch: u64,
+}
+
+struct DispatchTargetInput<'a> {
+    run_id: &'a str,
+    flow_id: &'a str,
+    step: &'a FlowStepSpec,
+    supervisor: Arc<CommsRuntime>,
+    target: ManagedMeerkat,
+    intent: String,
+    payload: Value,
+    spec: &'a MobSpec,
+    expected_epoch: u64,
+}
+
 #[derive(Default)]
 struct RoleTooling {
     enable_builtins: bool,
@@ -2309,7 +2348,7 @@ fn classify_step_status(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::model::{ConditionExpr, TopologyDomainSpec, TopologyRule};
+    use crate::model::{ConditionContext, ConditionExpr, TopologyDomainSpec, TopologyRule};
     use crate::store::{InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore};
     use serde_json::json;
 
@@ -2344,18 +2383,25 @@ mod tests {
 
     #[tokio::test]
     async fn condition_dsl_evaluates_paths() {
-        let outputs = HashMap::from([(
+        let outputs = BTreeMap::from([(
             "dispatch".to_string(),
-            json!({"count": 3, "status": "partial"}),
+            crate::model::StepOutput {
+                status: StepRunStatus::Partial,
+                count: 3,
+                output: json!({"count": 3, "status": "partial"}),
+            },
         )]);
+        let context = ConditionContext {
+            activation: json!({"priority": "high"}),
+            steps: outputs,
+        };
 
         assert!(evaluate_condition(
             &ConditionExpr::Eq {
                 left: "step.dispatch.status".to_string(),
                 right: json!("partial"),
             },
-            &outputs,
-            &json!({"priority": "high"}),
+            &context,
         ));
 
         assert!(evaluate_condition(
@@ -2363,8 +2409,7 @@ mod tests {
                 left: "step.dispatch.count".to_string(),
                 right: json!(2),
             },
-            &outputs,
-            &json!({}),
+            &context,
         ));
     }
 

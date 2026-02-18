@@ -2613,6 +2613,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-mob"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "meerkat",
+ "meerkat-comms",
+ "meerkat-core",
+ "meerkat-session",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "meerkat-mob-mcp"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "meerkat-core",
+ "meerkat-mob",
+ "meerkat-tools",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "meerkat-rest"
 version = "0.3.4"
 dependencies = [

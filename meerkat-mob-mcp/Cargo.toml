@@ -1,0 +1,32 @@
+[package]
+name = "meerkat-mob-mcp"
+description = "MCP server exposing Meerkat Mob orchestration as tools"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rkat-mob-mcp"
+path = "src/main.rs"
+
+[dependencies]
+meerkat-mob = { path = "../meerkat-mob" }
+meerkat-core = { workspace = true }
+meerkat-tools = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+meerkat-mob = { path = "../meerkat-mob", features = ["test-helpers"] }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints]
+workspace = true

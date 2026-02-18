@@ -17,6 +17,8 @@ members = [
     "meerkat-memory",
     "meerkat-contracts",
     "meerkat-skills",
+    "meerkat-mob",
+    "meerkat-mob-mcp",
     "test-fixtures/mcp-test-server",
     "tests/integration",
 ]

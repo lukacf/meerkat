@@ -1,5 +1,7 @@
 use super::*;
-use crate::definition::{MobDefinition, OrchestratorConfig, RoleWiringRule, WiringRules};
+use crate::definition::{
+    BackendConfig, MobDefinition, OrchestratorConfig, RoleWiringRule, WiringRules,
+};
 use crate::event::MobEvent;
 use crate::profile::{Profile, ToolConfig};
 use crate::storage::MobStorage;
@@ -25,7 +27,7 @@ use meerkat_store::{MemoryStore, SessionStore};
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 // -----------------------------------------------------------------------
@@ -51,7 +53,7 @@ struct MockCommsRuntime {
     fail_send_peer_added: bool,
     fail_send_peer_retired: bool,
     fail_send_peer_unwired: bool,
-    trusted_peers: RwLock<HashMap<String, String>>,
+    trusted_peers: RwLock<HashMap<String, TrustedPeerSpec>>,
     sent_intents: RwLock<Vec<String>>,
     inbox_notify: Arc<tokio::sync::Notify>,
 }
@@ -94,10 +96,22 @@ impl MockCommsRuntime {
             .read()
             .await
             .values()
-            .cloned()
+            .map(|peer| peer.name.clone())
             .collect::<Vec<_>>();
         names.sort();
         names
+    }
+
+    async fn trusted_peer_addresses(&self) -> Vec<String> {
+        let mut addresses = self
+            .trusted_peers
+            .read()
+            .await
+            .values()
+            .map(|peer| peer.address.clone())
+            .collect::<Vec<_>>();
+        addresses.sort();
+        addresses
     }
 
     async fn sent_intents(&self) -> Vec<String> {
@@ -121,7 +135,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
             ));
         }
         let mut peers = self.trusted_peers.write().await;
-        peers.insert(peer.peer_id, peer.name);
+        peers.insert(peer.peer_id.clone(), peer);
         Ok(())
     }
 
@@ -164,7 +178,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 }
 
                 let trusted = self.trusted_peers.read().await;
-                if !trusted.values().any(|name| name == to.as_str()) {
+                if !trusted.values().any(|peer| peer.name == to.as_str()) {
                     return Err(SendError::PeerNotFound(to.as_string()));
                 }
                 drop(trusted);
@@ -187,12 +201,12 @@ impl CoreCommsRuntime for MockCommsRuntime {
         let trusted = self.trusted_peers.read().await;
         trusted
             .iter()
-            .filter_map(|(peer_id, peer_name)| {
-                let name = PeerName::new(peer_name.clone()).ok()?;
+            .filter_map(|(peer_id, peer)| {
+                let name = PeerName::new(peer.name.clone()).ok()?;
                 Some(PeerDirectoryEntry {
                     name,
                     peer_id: peer_id.clone(),
-                    address: format!("inproc://{peer_name}"),
+                    address: peer.address.clone(),
                     source: PeerDirectorySource::Trusted,
                     sendable_kinds: vec![
                         "peer_message".to_string(),
@@ -260,6 +274,7 @@ struct MockSessionService {
     archive_fail_comms_names: RwLock<HashSet<String>>,
     /// Sent intents for sessions that were archived and removed.
     archived_sent_intents: RwLock<HashMap<SessionId, Vec<String>>>,
+    fail_start_turn: std::sync::atomic::AtomicBool,
 }
 
 impl MockSessionService {
@@ -277,6 +292,7 @@ impl MockSessionService {
             archive_fail_sessions: RwLock::new(HashSet::new()),
             archive_fail_comms_names: RwLock::new(HashSet::new()),
             archived_sent_intents: RwLock::new(HashMap::new()),
+            fail_start_turn: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -371,6 +387,11 @@ impl MockSessionService {
         }
     }
 
+    fn set_fail_start_turn(&self, enabled: bool) {
+        self.fail_start_turn
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn trusted_peer_names(&self, session_id: &SessionId) -> Vec<String> {
         let runtime = {
             let sessions = self.sessions.read().await;
@@ -378,6 +399,17 @@ impl MockSessionService {
         };
         match runtime {
             Some(runtime) => runtime.trusted_peer_names().await,
+            None => Vec::new(),
+        }
+    }
+
+    async fn trusted_peer_addresses(&self, session_id: &SessionId) -> Vec<String> {
+        let runtime = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).cloned()
+        };
+        match runtime {
+            Some(runtime) => runtime.trusted_peer_addresses().await,
             None => Vec::new(),
         }
     }
@@ -503,6 +535,14 @@ impl SessionService for MockSessionService {
         id: &SessionId,
         _req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
+        if self
+            .fail_start_turn
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(SessionError::Store(Box::new(std::io::Error::other(
+                "mock start_turn failure",
+            ))));
+        }
         let sessions = self.sessions.read().await;
         if !sessions.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
@@ -677,6 +717,69 @@ impl MobEventStore for FaultInjectedMobEventStore {
     }
 }
 
+struct CompatFixtureEventStore {
+    rows: RwLock<Vec<serde_json::Value>>,
+}
+
+impl CompatFixtureEventStore {
+    fn from_rows(rows: Vec<serde_json::Value>) -> Self {
+        Self {
+            rows: RwLock::new(rows),
+        }
+    }
+}
+
+#[async_trait]
+impl MobEventStore for CompatFixtureEventStore {
+    async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobError> {
+        let mut rows = self.rows.write().await;
+        let cursor = rows.len() as u64 + 1;
+        let row = serde_json::json!({
+            "cursor": cursor,
+            "timestamp": Utc::now(),
+            "mob_id": event.mob_id,
+            "kind": event.kind,
+        });
+        rows.push(row.clone());
+        serde_json::from_value::<MobEvent>(row)
+            .map_err(|error| MobError::Internal(format!("compat fixture append decode: {error}")))
+    }
+
+    async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobError> {
+        let rows = self.rows.read().await;
+        let mut events = Vec::new();
+        for row in rows.iter() {
+            let event: MobEvent = serde_json::from_value(row.clone()).map_err(|error| {
+                MobError::Internal(format!("compat fixture poll decode: {error}"))
+            })?;
+            if event.cursor > after_cursor {
+                events.push(event);
+            }
+            if events.len() >= limit {
+                break;
+            }
+        }
+        Ok(events)
+    }
+
+    async fn replay_all(&self) -> Result<Vec<MobEvent>, MobError> {
+        let rows = self.rows.read().await;
+        rows.iter()
+            .cloned()
+            .map(|row| {
+                serde_json::from_value::<MobEvent>(row).map_err(|error| {
+                    MobError::Internal(format!("compat fixture replay decode: {error}"))
+                })
+            })
+            .collect()
+    }
+
+    async fn clear(&self) -> Result<(), MobError> {
+        self.rows.write().await.clear();
+        Ok(())
+    }
+}
+
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
@@ -700,6 +803,7 @@ fn sample_definition() -> MobDefinition {
             },
             peer_description: "The lead".into(),
             external_addressable: true,
+            backend: None,
         },
     );
     profiles.insert(
@@ -713,6 +817,7 @@ fn sample_definition() -> MobDefinition {
             },
             peer_description: "A worker".into(),
             external_addressable: false,
+            backend: None,
         },
     );
 
@@ -725,6 +830,7 @@ fn sample_definition() -> MobDefinition {
         mcp_servers: BTreeMap::new(),
         wiring: WiringRules::default(),
         skills: BTreeMap::new(),
+        backend: BackendConfig::default(),
     }
 }
 
@@ -771,6 +877,14 @@ fn sample_definition_with_mob_tools() -> MobDefinition {
     worker.tools.mob = true;
     worker.tools.mob_tasks = true;
     worker.tools.comms = true;
+    def
+}
+
+fn sample_definition_with_external_backend() -> MobDefinition {
+    let mut def = sample_definition();
+    def.backend.external = Some(crate::definition::ExternalBackendConfig {
+        address_base: "https://backend.example.invalid/mesh".to_string(),
+    });
     def
 }
 
@@ -1264,6 +1378,44 @@ async fn test_mob_management_tools_dispatch_to_handle() {
 }
 
 #[tokio::test]
+async fn test_spawn_meerkat_tool_dispatches_backend_selection() {
+    let mut definition = sample_definition_with_mob_tools();
+    definition.backend.external = Some(crate::definition::ExternalBackendConfig {
+        address_base: "https://backend.example.invalid/mesh".to_string(),
+    });
+    let (handle, service) = create_test_mob(definition).await;
+    let sid_1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+
+    let spawned = service
+        .dispatch_external_tool(
+            &sid_1,
+            "spawn_meerkat",
+            serde_json::json!({
+                "profile": "worker",
+                "meerkat_id": "w-ext",
+                "backend": "external"
+            }),
+        )
+        .await
+        .expect("spawn external via tool");
+    let payload: serde_json::Value =
+        serde_json::from_str(&spawned.content).expect("spawn payload json");
+    assert_eq!(payload["member_ref"]["kind"], "backend_peer");
+
+    let entry = handle
+        .get_meerkat(&MeerkatId::from("w-ext"))
+        .await
+        .expect("w-ext exists");
+    assert!(
+        matches!(entry.member_ref, MemberRef::BackendPeer { .. }),
+        "tool backend selection should flow into runtime provisioning"
+    );
+}
+
+#[tokio::test]
 async fn test_mob_task_tools_dispatch_and_blocked_by_enforcement() {
     let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
     let sid_1 = handle
@@ -1471,6 +1623,77 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
 }
 
 #[tokio::test]
+async fn test_resume_replays_legacy_fixture_events_via_compat_path() {
+    let service = Arc::new(MockSessionService::new());
+    let sid = SessionId::new();
+    let fixture = vec![
+        serde_json::json!({
+            "cursor": 1,
+            "timestamp": "2026-02-19T00:00:00Z",
+            "mob_id": "test-mob",
+            "kind": {
+                "type": "mob_created",
+                "definition": sample_definition(),
+            },
+        }),
+        serde_json::json!({
+            "cursor": 2,
+            "timestamp": "2026-02-19T00:00:01Z",
+            "mob_id": "test-mob",
+            "kind": {
+                "type": "meerkat_spawned",
+                "meerkat_id": "w-1",
+                "role": "worker",
+                "session_id": sid,
+            },
+        }),
+    ];
+    let events = Arc::new(CompatFixtureEventStore::from_rows(fixture));
+
+    let resumed = MobBuilder::for_resume(MobStorage { events })
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .resume()
+        .await
+        .expect("resume from legacy fixture");
+
+    let entry = resumed
+        .get_meerkat(&MeerkatId::from("w-1"))
+        .await
+        .expect("replayed roster entry");
+    assert_eq!(entry.profile.as_str(), "worker");
+    assert!(entry.session_id().is_some());
+}
+
+#[tokio::test]
+async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .await
+        .expect("spawn orchestrator");
+    handle.stop().await.expect("stop");
+    service.set_fail_start_turn(true);
+
+    let result = MobBuilder::for_resume(MobStorage { events })
+        .with_session_service(service)
+        .resume()
+        .await;
+
+    assert!(
+        matches!(result, Err(MobError::SessionError(SessionError::Store(_)))),
+        "resume must surface orchestrator start_turn failures"
+    );
+}
+
+#[tokio::test]
 async fn test_resume_reconciles_orphaned_sessions() {
     let service = Arc::new(MockSessionService::new());
     let storage = MobStorage::in_memory();
@@ -1535,7 +1758,9 @@ async fn test_resume_recreates_missing_sessions() {
         .get_meerkat(&MeerkatId::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id;
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
     service
         .archive(&old_sid)
         .await
@@ -1551,7 +1776,9 @@ async fn test_resume_recreates_missing_sessions() {
         .get_meerkat(&MeerkatId::from("w-1"))
         .await
         .expect("recreated entry")
-        .session_id;
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
     assert_ne!(new_sid, old_sid, "resume should recreate missing session");
     assert_eq!(service.active_session_count().await, 1);
 }
@@ -1584,7 +1811,9 @@ async fn test_resume_recreates_missing_sessions_with_tool_wiring() {
         .get_meerkat(&MeerkatId::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id;
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
     service
         .archive(&old_sid)
         .await
@@ -1601,7 +1830,9 @@ async fn test_resume_recreates_missing_sessions_with_tool_wiring() {
         .get_meerkat(&MeerkatId::from("w-1"))
         .await
         .expect("recreated entry")
-        .session_id;
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
     assert_ne!(new_sid, old_sid, "resume should recreate missing session");
 
     let names = service.external_tool_names(&new_sid).await;
@@ -1616,6 +1847,175 @@ async fn test_resume_recreates_missing_sessions_with_tool_wiring() {
     assert!(
         names.contains(&"bundle_echo".to_string()),
         "rust bundle tools must be wired on recreated sessions"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_recreates_missing_external_bridge_preserving_backend_identity() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition_with_external_backend(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn_member_ref_with_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            Some(MobBackendKind::External),
+        )
+        .await
+        .expect("spawn external");
+    handle.stop().await.expect("stop");
+
+    let old_entry = handle
+        .get_meerkat(&MeerkatId::from("w-ext"))
+        .await
+        .expect("external roster entry");
+    let (old_peer_id, old_address, old_sid) = match old_entry.member_ref {
+        MemberRef::BackendPeer {
+            ref peer_id,
+            ref address,
+            ref session_id,
+        } => (
+            peer_id.clone(),
+            address.clone(),
+            session_id.clone().expect("external bridge session id"),
+        ),
+        ref other => panic!("expected external backend member ref, got {other:?}"),
+    };
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive external bridge session");
+
+    let resumed = MobBuilder::for_resume(MobStorage { events })
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume");
+    let resumed_entry = resumed
+        .get_meerkat(&MeerkatId::from("w-ext"))
+        .await
+        .expect("resumed external entry");
+    match resumed_entry.member_ref {
+        MemberRef::BackendPeer {
+            peer_id,
+            address,
+            session_id,
+        } => {
+            let resumed_sid = session_id.expect("resumed external bridge session id");
+            assert_ne!(
+                resumed_sid, old_sid,
+                "resume should recreate missing external bridge session"
+            );
+            assert_eq!(peer_id, old_peer_id, "resume must preserve backend peer_id");
+            assert_eq!(address, old_address, "resume must preserve backend address");
+        }
+        other => panic!("expected backend peer after resume, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_resume_reconciles_mixed_topology_without_losing_external_member_refs() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition_with_external_backend(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let old_sub_sid = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-sub"), None)
+        .await
+        .expect("spawn subagent");
+    handle
+        .spawn_member_ref_with_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            Some(MobBackendKind::External),
+        )
+        .await
+        .expect("spawn external");
+    handle
+        .wire(MeerkatId::from("w-sub"), MeerkatId::from("w-ext"))
+        .await
+        .expect("wire mixed topology");
+    handle.stop().await.expect("stop");
+
+    let old_ext_entry = handle
+        .get_meerkat(&MeerkatId::from("w-ext"))
+        .await
+        .expect("external entry before resume");
+    let (old_ext_peer_id, old_ext_addr, old_ext_sid) = match old_ext_entry.member_ref {
+        MemberRef::BackendPeer {
+            ref peer_id,
+            ref address,
+            ref session_id,
+        } => (
+            peer_id.clone(),
+            address.clone(),
+            session_id.clone().expect("external bridge session"),
+        ),
+        ref other => panic!("expected external backend member ref, got {other:?}"),
+    };
+    service
+        .archive(&old_sub_sid)
+        .await
+        .expect("archive subagent session");
+    service
+        .archive(&old_ext_sid)
+        .await
+        .expect("archive external bridge session");
+
+    let resumed = MobBuilder::for_resume(MobStorage { events })
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume mixed topology");
+    let resumed_sub = resumed
+        .get_meerkat(&MeerkatId::from("w-sub"))
+        .await
+        .expect("resumed subagent entry");
+    let resumed_sub_sid = match resumed_sub.member_ref {
+        MemberRef::Session { ref session_id } => session_id.clone(),
+        ref other => panic!("expected subagent session member ref, got {other:?}"),
+    };
+    assert_ne!(
+        resumed_sub_sid, old_sub_sid,
+        "resume should recreate missing subagent session"
+    );
+
+    let resumed_ext = resumed
+        .get_meerkat(&MeerkatId::from("w-ext"))
+        .await
+        .expect("resumed external entry");
+    match resumed_ext.member_ref {
+        MemberRef::BackendPeer {
+            peer_id,
+            address,
+            session_id,
+        } => {
+            assert_eq!(peer_id, old_ext_peer_id, "external peer_id must be stable");
+            assert_eq!(address, old_ext_addr, "external address must be stable");
+            assert_ne!(
+                session_id.expect("resumed external bridge session"),
+                old_ext_sid,
+                "resume should recreate missing external bridge session"
+            );
+        }
+        other => panic!("expected backend peer member ref, got {other:?}"),
+    }
+
+    let trusted_sub = service.trusted_peer_addresses(&resumed_sub_sid).await;
+    assert!(
+        trusted_sub.iter().any(|addr| addr.starts_with("inproc://")),
+        "mixed resume should re-establish trust with a sendable transport address"
     );
 }
 
@@ -1655,12 +2055,16 @@ async fn test_resume_reestablishes_missing_trust() {
         .get_meerkat(&MeerkatId::from("w-1"))
         .await
         .expect("w-1")
-        .session_id;
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
     let resumed_sid_2 = resumed
         .get_meerkat(&MeerkatId::from("w-2"))
         .await
         .expect("w-2")
-        .session_id;
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
     let trusted_1 = service.trusted_peer_names(&resumed_sid_1).await;
     let trusted_2 = service.trusted_peer_names(&resumed_sid_2).await;
     assert!(
@@ -1829,11 +2233,11 @@ async fn test_spawn_creates_session() {
     assert_eq!(meerkats.len(), 1);
     assert_eq!(meerkats[0].meerkat_id.as_str(), "w-1");
     assert_eq!(meerkats[0].profile.as_str(), "worker");
-    assert_eq!(meerkats[0].session_id, session_id);
+    assert_eq!(meerkats[0].session_id(), Some(&session_id));
 }
 
 #[tokio::test]
-async fn test_spawn_create_session_request_sets_host_mode_and_peer_meta_labels() {
+async fn test_spawn_create_session_request_sets_non_host_mode_and_peer_meta_labels() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
@@ -1847,7 +2251,7 @@ async fn test_spawn_create_session_request_sets_host_mode_and_peer_meta_labels()
         "exactly one create_session expected"
     );
     let req = &create_requests[0];
-    assert!(req.host_mode, "spawn must create host_mode sessions");
+    assert!(!req.host_mode, "spawn must create non-host-mode sessions");
     assert_eq!(req.comms_name.as_deref(), Some("test-mob/worker/w-1"));
     assert_eq!(
         req.peer_meta_labels.get("mob_id").map(String::as_str),
@@ -1885,13 +2289,13 @@ async fn test_spawn_emits_meerkat_spawned_event() {
     if let MobEventKind::MeerkatSpawned {
         meerkat_id,
         role,
-        session_id: sid,
+        member_ref,
         ..
     } = &spawned.unwrap().kind
     {
         assert_eq!(meerkat_id.as_str(), "w-1");
         assert_eq!(role.as_str(), "worker");
-        assert_eq!(*sid, session_id);
+        assert_eq!(member_ref.session_id(), Some(&session_id));
     }
 }
 
@@ -1907,6 +2311,104 @@ async fn test_spawn_duplicate_meerkat_id_fails() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await;
     assert!(matches!(result, Err(MobError::MeerkatAlreadyExists(_))));
+}
+
+#[tokio::test]
+async fn test_spawn_supports_subagent_and_external_backends() {
+    let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
+
+    let subagent_ref = handle
+        .spawn_member_ref_with_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-sub"),
+            None,
+            Some(MobBackendKind::Subagent),
+        )
+        .await
+        .expect("spawn subagent backend");
+    assert!(
+        matches!(subagent_ref, MemberRef::Session { .. }),
+        "subagent backend should emit session member ref"
+    );
+
+    let external_ref = handle
+        .spawn_member_ref_with_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            Some(MobBackendKind::External),
+        )
+        .await
+        .expect("spawn external backend");
+    match external_ref {
+        MemberRef::BackendPeer {
+            address,
+            session_id,
+            ..
+        } => {
+            assert!(
+                address.starts_with("https://backend.example.invalid/mesh/"),
+                "external backend should use configured address base"
+            );
+            assert!(
+                session_id.is_some(),
+                "external backend should keep session bridge for lifecycle ops"
+            );
+        }
+        other => panic!("expected backend peer member ref, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_external_backend_wiring_uses_sendable_transport_addresses() {
+    let (handle, service) = create_test_mob(sample_definition_with_external_backend()).await;
+
+    let member_a = handle
+        .spawn_member_ref_with_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-a"),
+            None,
+            Some(MobBackendKind::External),
+        )
+        .await
+        .expect("spawn external w-a");
+    let member_b = handle
+        .spawn_member_ref_with_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-b"),
+            None,
+            Some(MobBackendKind::External),
+        )
+        .await
+        .expect("spawn external w-b");
+    let sid_a = member_a
+        .session_id()
+        .cloned()
+        .expect("external member bridge session id");
+    let sid_b = member_b
+        .session_id()
+        .cloned()
+        .expect("external member bridge session id");
+
+    handle
+        .wire(MeerkatId::from("w-a"), MeerkatId::from("w-b"))
+        .await
+        .expect("wire external peers");
+
+    let addresses_a = service.trusted_peer_addresses(&sid_a).await;
+    let addresses_b = service.trusted_peer_addresses(&sid_b).await;
+    assert!(
+        addresses_a
+            .iter()
+            .all(|address| address.starts_with("inproc://")),
+        "wiring must use transport-sendable addresses"
+    );
+    assert!(
+        addresses_b
+            .iter()
+            .all(|address| address.starts_with("inproc://")),
+        "wiring must use transport-sendable addresses"
+    );
 }
 
 #[tokio::test]
@@ -3536,6 +4038,61 @@ async fn test_internal_turn_unknown_meerkat_fails() {
         .internal_turn(MeerkatId::from("nonexistent"), "Hello".into())
         .await;
     assert!(matches!(result, Err(MobError::MeerkatNotFound(_))));
+}
+
+#[tokio::test]
+async fn test_external_backend_lifecycle_and_turn_policy() {
+    let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
+
+    handle
+        .spawn_member_ref_with_backend(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-ext"),
+            None,
+            Some(MobBackendKind::External),
+        )
+        .await
+        .expect("spawn external lead");
+    handle
+        .spawn_member_ref_with_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            Some(MobBackendKind::External),
+        )
+        .await
+        .expect("spawn external worker");
+
+    handle
+        .wire(MeerkatId::from("l-ext"), MeerkatId::from("w-ext"))
+        .await
+        .expect("wire external members");
+    handle
+        .unwire(MeerkatId::from("l-ext"), MeerkatId::from("w-ext"))
+        .await
+        .expect("unwire external members");
+
+    handle
+        .external_turn(MeerkatId::from("l-ext"), "outside hello".to_string())
+        .await
+        .expect("external lead should accept external turns");
+    let denied = handle
+        .external_turn(MeerkatId::from("w-ext"), "outside hello".to_string())
+        .await
+        .expect_err("worker external turn should be denied by profile policy");
+    assert!(matches!(denied, MobError::NotExternallyAddressable(_)));
+
+    handle
+        .retire(MeerkatId::from("w-ext"))
+        .await
+        .expect("retire external member");
+    assert!(
+        handle
+            .get_meerkat(&MeerkatId::from("w-ext"))
+            .await
+            .is_none(),
+        "retire should remove external backend member"
+    );
 }
 
 // -----------------------------------------------------------------------

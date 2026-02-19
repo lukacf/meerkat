@@ -43,6 +43,19 @@ rkat-mcp --realm team-alpha
 
 For full per-surface schemas and examples, load: `references/api_reference.md`.
 
+## Mob behavior (current contract)
+
+- CLI `run`/`resume` compose CLI-local `mob_*` tools into the agent tool list ("mob as tool").
+- CLI `mob ...` is the explicit lifecycle surface for persisted mob registry operations.
+- RPC/REST/MCP server/Python SDK/TypeScript SDK do not auto-inject `mob_*` tools today.
+
+Terminology:
+
+- **Mob runtime contract**: where `mob_*` tools and `rkat mob` lifecycle are exposed.
+- **Backend selection**: realm-level storage backend (`redb`/`jsonl`) pinned in `realm_manifest.json`.
+
+Do not conflate the two: mob tool availability is a surface behavior, backend is a realm storage choice.
+
 ## Quick start
 
 ### CLI
@@ -51,6 +64,9 @@ For full per-surface schemas and examples, load: `references/api_reference.md`.
 rkat run "What is Rust?"
 rkat --realm team-alpha run "Create a todo app" --enable-builtins --enable-shell --stream -v
 rkat --realm team-alpha resume sid_abc123 "Now add error handling"
+rkat mob prefabs
+rkat mob create --prefab coding_swarm
+rkat mob list
 ```
 
 ### Python SDK

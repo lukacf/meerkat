@@ -3,6 +3,7 @@
 //! A `Profile` defines the template for spawning a meerkat: which model to use,
 //! which skills to load, tool configuration, and communication settings.
 
+use crate::backend::MobBackendKind;
 use serde::{Deserialize, Serialize};
 
 /// Tool configuration for a meerkat profile.
@@ -61,6 +62,11 @@ pub struct Profile {
     /// Whether this meerkat can receive turns from external callers.
     #[serde(default)]
     pub external_addressable: bool,
+    /// Optional backend override for this profile.
+    ///
+    /// If unset, runtime uses `definition.backend.default`.
+    #[serde(default)]
+    pub backend: Option<MobBackendKind>,
 }
 
 #[cfg(test)]
@@ -118,6 +124,7 @@ mod tests {
             },
             peer_description: "Orchestrates worker agents".to_string(),
             external_addressable: true,
+            backend: None,
         };
         let json = serde_json::to_string(&profile).unwrap();
         let parsed: Profile = serde_json::from_str(&json).unwrap();
@@ -141,6 +148,7 @@ mod tests {
             },
             peer_description: "Writes code".to_string(),
             external_addressable: false,
+            backend: Some(MobBackendKind::External),
         };
         let toml_str = toml::to_string(&profile).unwrap();
         let parsed: Profile = toml::from_str(&toml_str).unwrap();
@@ -171,5 +179,6 @@ model = "claude-sonnet-4-5"
         assert_eq!(profile.tools, ToolConfig::default());
         assert_eq!(profile.peer_description, "");
         assert!(!profile.external_addressable);
+        assert_eq!(profile.backend, None);
     }
 }

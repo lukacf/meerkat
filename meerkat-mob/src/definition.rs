@@ -4,6 +4,7 @@
 //! MCP servers, wiring rules, and skill sources. Definitions are serializable
 //! so they can be stored in `MobCreated` events for resume recovery.
 
+use crate::MobBackendKind;
 use crate::ids::{MobId, ProfileName};
 use crate::profile::Profile;
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,24 @@ pub struct WiringRules {
     pub role_wiring: Vec<RoleWiringRule>,
 }
 
+/// External backend configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalBackendConfig {
+    /// Base address prefix used to publish external peer addresses.
+    pub address_base: String,
+}
+
+/// Backend selection and backend-specific settings for the mob.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BackendConfig {
+    /// Default backend used when a spawn call does not explicitly select one.
+    #[serde(default)]
+    pub default: MobBackendKind,
+    /// External backend settings; required when external backend is selected.
+    #[serde(default)]
+    pub external: Option<ExternalBackendConfig>,
+}
+
 /// Complete mob definition.
 ///
 /// Describes profiles, MCP servers, wiring rules, and skill sources.
@@ -91,6 +110,9 @@ pub struct MobDefinition {
     /// Named skill sources.
     #[serde(default)]
     pub skills: BTreeMap<String, SkillSource>,
+    /// Backend selection defaults and backend-specific config.
+    #[serde(default)]
+    pub backend: BackendConfig,
 }
 
 /// Helper struct for TOML deserialization of the `[mob]` section.
@@ -119,6 +141,8 @@ struct TomlDefinition {
     wiring: WiringRules,
     #[serde(default)]
     skills: BTreeMap<String, SkillSource>,
+    #[serde(default)]
+    backend: BackendConfig,
 }
 
 impl MobDefinition {
@@ -138,6 +162,7 @@ impl MobDefinition {
             mcp_servers: raw.mcp,
             wiring: raw.wiring,
             skills: raw.skills,
+            backend: raw.backend,
         })
     }
 }
@@ -284,6 +309,7 @@ path = "skills/reviewer.md"
                         tools: ToolConfig::default(),
                         peer_description: "The leader".to_string(),
                         external_addressable: true,
+                        backend: None,
                     },
                 );
                 m
@@ -291,6 +317,7 @@ path = "skills/reviewer.md"
             mcp_servers: BTreeMap::new(),
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
+            backend: BackendConfig::default(),
         };
         let json = serde_json::to_string_pretty(&def).unwrap();
         let parsed: MobDefinition = serde_json::from_str(&json).unwrap();
@@ -311,6 +338,8 @@ id = "minimal"
         assert!(!def.wiring.auto_wire_orchestrator);
         assert!(def.wiring.role_wiring.is_empty());
         assert!(def.skills.is_empty());
+        assert_eq!(def.backend.default, MobBackendKind::Subagent);
+        assert!(def.backend.external.is_none());
     }
 
     #[test]

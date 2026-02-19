@@ -1,6 +1,8 @@
 //! Built-in prefab mob definitions.
 
-use crate::definition::{MobDefinition, OrchestratorConfig, SkillSource, WiringRules};
+use crate::definition::{
+    BackendConfig, MobDefinition, OrchestratorConfig, SkillSource, WiringRules,
+};
 use crate::ids::{MobId, ProfileName};
 use crate::profile::{Profile, ToolConfig};
 use std::collections::BTreeMap;
@@ -63,6 +65,7 @@ impl Prefab {
                 },
                 peer_description: "Orchestrator".to_string(),
                 external_addressable: true,
+                backend: None,
             },
         );
         profiles.insert(
@@ -79,6 +82,7 @@ impl Prefab {
                 },
                 peer_description: "Worker".to_string(),
                 external_addressable: false,
+                backend: None,
             },
         );
 
@@ -108,6 +112,7 @@ impl Prefab {
                 role_wiring: Vec::new(),
             },
             skills,
+            backend: BackendConfig::default(),
         }
     }
 

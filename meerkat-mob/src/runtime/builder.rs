@@ -10,6 +10,7 @@ pub struct MobBuilder {
     storage: MobStorage,
     session_service: Option<Arc<dyn MobSessionService>>,
     allow_ephemeral_sessions: bool,
+    notify_orchestrator_on_resume: bool,
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
 }
@@ -37,6 +38,7 @@ impl MobBuilder {
             storage,
             session_service: None,
             allow_ephemeral_sessions: false,
+            notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
         }
@@ -49,6 +51,7 @@ impl MobBuilder {
             storage,
             session_service: None,
             allow_ephemeral_sessions: false,
+            notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
         }
@@ -68,6 +71,15 @@ impl MobBuilder {
     /// Default is `false`, which enforces the persistent-session contract.
     pub fn allow_ephemeral_sessions(mut self, allow: bool) -> Self {
         self.allow_ephemeral_sessions = allow;
+        self
+    }
+
+    /// Control whether `resume()` sends an informational turn to the orchestrator.
+    ///
+    /// Default is `true`. CLI command rehydration can set this to `false` to avoid
+    /// triggering extra orchestrator turns on every command invocation.
+    pub fn notify_orchestrator_on_resume(mut self, notify: bool) -> Self {
+        self.notify_orchestrator_on_resume = notify;
         self
     }
 
@@ -94,6 +106,7 @@ impl MobBuilder {
             storage,
             session_service,
             allow_ephemeral_sessions,
+            notify_orchestrator_on_resume: _,
             tool_bundles,
             default_llm_client,
         } = self;
@@ -157,6 +170,7 @@ impl MobBuilder {
             storage,
             session_service,
             allow_ephemeral_sessions,
+            notify_orchestrator_on_resume,
             tool_bundles,
             default_llm_client,
         } = self;
@@ -248,6 +262,7 @@ impl MobBuilder {
                 &definition,
                 &mut roster,
                 &session_service,
+                notify_orchestrator_on_resume,
                 default_llm_client.clone(),
                 &tool_bundles,
                 &preview_handle,
@@ -272,10 +287,15 @@ impl MobBuilder {
         definition: &Arc<MobDefinition>,
         roster: &mut Roster,
         session_service: &Arc<dyn MobSessionService>,
+        notify_orchestrator_on_resume: bool,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         tool_handle: &MobHandle,
     ) -> Result<(), MobError> {
+        let provisioner = MultiBackendProvisioner::new(
+            session_service.clone(),
+            definition.backend.external.clone(),
+        );
         let active_sessions = session_service
             .list(meerkat_core::service::SessionQuery::default())
             .await?;
@@ -287,7 +307,7 @@ impl MobBuilder {
         let roster_entries = roster.list().cloned().collect::<Vec<_>>();
         let roster_session_ids = roster_entries
             .iter()
-            .map(|entry| entry.session_id.clone())
+            .filter_map(|entry| entry.session_id().cloned())
             .collect::<std::collections::HashSet<_>>();
 
         // Archive orphan sessions that are active but not present in the event-projected roster.
@@ -304,37 +324,46 @@ impl MobBuilder {
 
         // Recreate missing sessions referenced by MeerkatSpawned events.
         for entry in &roster_entries {
-            if !active_ids.contains(&entry.session_id) {
-                let profile = definition
-                    .profiles
-                    .get(&entry.profile)
-                    .ok_or_else(|| MobError::ProfileNotFound(entry.profile.to_string()))?;
-                let mut config = build::build_agent_config(
-                    &definition.id,
-                    &entry.profile,
-                    &entry.meerkat_id,
-                    profile,
-                    definition,
-                    compose_external_tools_for_profile(profile, tool_bundles, tool_handle.clone())?,
-                )
-                .await?;
-                if let Some(ref client) = default_llm_client {
-                    config.llm_client_override = Some(client.clone());
-                }
-                let prompt = format!(
-                    "You have been spawned as '{}' (role: {}) in mob '{}'.",
-                    entry.meerkat_id, entry.profile, definition.id
-                );
-                let req = build::to_create_session_request(&config, prompt);
-                let created = session_service.create_session(req).await?;
-                let _ = roster.set_session_id(&entry.meerkat_id, created.session_id);
+            if entry
+                .session_id()
+                .is_some_and(|session_id| active_ids.contains(session_id))
+            {
+                continue;
             }
+            let profile = definition
+                .profiles
+                .get(&entry.profile)
+                .ok_or_else(|| MobError::ProfileNotFound(entry.profile.to_string()))?;
+            let mut config = build::build_agent_config(
+                &definition.id,
+                &entry.profile,
+                &entry.meerkat_id,
+                profile,
+                definition,
+                compose_external_tools_for_profile(profile, tool_bundles, tool_handle.clone())?,
+            )
+            .await?;
+            // Resume reconciliation needs live comms runtimes, but this path is
+            // infrastructure restoration and should not consume provider quota.
+            // If no explicit override is configured, use the local test client
+            // for deterministic, no-network bootstrap turns.
+            let reconcile_client: Arc<dyn LlmClient> = default_llm_client
+                .clone()
+                .unwrap_or_else(|| Arc::new(meerkat_client::TestClient::default()));
+            config.llm_client_override = Some(reconcile_client);
+            let prompt = format!(
+                "You have been spawned as '{}' (role: {}) in mob '{}'.",
+                entry.meerkat_id, entry.profile, definition.id
+            );
+            let req = build::to_create_session_request(&config, prompt);
+            let created = session_service.create_session(req).await?;
+            let _ = roster.set_session_id(&entry.meerkat_id, created.session_id);
         }
 
         // Re-establish trust from projected wiring (idempotent upsert).
         let entries = roster.list().cloned().collect::<Vec<_>>();
         for entry in &entries {
-            let comms_a = match session_service.comms_runtime(&entry.session_id).await {
+            let comms_a = match provisioner.comms_runtime(&entry.member_ref).await {
                 Some(comms) => comms,
                 None => continue,
             };
@@ -351,8 +380,7 @@ impl MobBuilder {
                 let Some(peer_entry) = roster.get(peer_id).cloned() else {
                     continue;
                 };
-                let Some(comms_b) = session_service.comms_runtime(&peer_entry.session_id).await
-                else {
+                let Some(comms_b) = provisioner.comms_runtime(&peer_entry.member_ref).await else {
                     continue;
                 };
                 let Some(key_b) = comms_b.public_key() else {
@@ -363,19 +391,20 @@ impl MobBuilder {
                     definition.id, peer_entry.profile, peer_entry.meerkat_id
                 );
 
-                let spec_b =
-                    TrustedPeerSpec::new(&name_b, key_b.clone(), format!("inproc://{name_b}"))
-                        .map_err(|e| MobError::WiringError(format!("invalid peer spec: {e}")))?;
-                let spec_a =
-                    TrustedPeerSpec::new(&name_a, key_a.clone(), format!("inproc://{name_a}"))
-                        .map_err(|e| MobError::WiringError(format!("invalid peer spec: {e}")))?;
+                let spec_b = provisioner
+                    .trusted_peer_spec(&peer_entry.member_ref, &name_b, &key_b)
+                    .await?;
+                let spec_a = provisioner
+                    .trusted_peer_spec(&entry.member_ref, &name_a, &key_a)
+                    .await?;
                 comms_a.add_trusted_peer(spec_b).await?;
                 comms_b.add_trusted_peer(spec_a).await?;
             }
         }
 
         // Notify orchestrator that the mob resumed.
-        if let Some(orchestrator) = &definition.orchestrator
+        if notify_orchestrator_on_resume
+            && let Some(orchestrator) = &definition.orchestrator
             && let Some(orchestrator_entry) = roster.by_profile(&orchestrator.profile).next()
         {
             let active_count = roster.len();
@@ -384,9 +413,15 @@ impl MobBuilder {
                 .map(|entry| entry.wired_to.len())
                 .sum::<usize>()
                 / 2;
-            let _ = session_service
+            session_service
                 .start_turn(
-                    &orchestrator_entry.session_id,
+                    orchestrator_entry
+                        .session_id()
+                        .ok_or_else(|| {
+                            MobError::Internal(
+                                "orchestrator entry missing session-backed member ref".to_string(),
+                            )
+                        })?,
                     meerkat_core::service::StartTurnRequest {
                         prompt: format!(
                             "Mob '{}' resumed with {} active meerkats and {} wiring links. Reconcile worker state and continue orchestration.",
@@ -397,7 +432,7 @@ impl MobBuilder {
                         skill_references: None,
                     },
                 )
-                .await;
+                .await?;
         }
 
         Ok(())
@@ -473,6 +508,7 @@ impl MobBuilder {
             events: events.clone(),
             mcp_running: mcp_running.clone(),
         };
+        let external_backend = definition.backend.external.clone();
 
         let actor = MobActor {
             definition,
@@ -480,7 +516,10 @@ impl MobBuilder {
             task_board,
             state,
             events,
-            session_service,
+            provisioner: Arc::new(MultiBackendProvisioner::new(
+                session_service,
+                external_backend,
+            )),
             mcp_running,
             mcp_processes,
             command_tx,

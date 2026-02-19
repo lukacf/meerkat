@@ -5,6 +5,8 @@
 //! for tests and ephemeral mobs.
 
 use crate::error::MobError;
+#[cfg(test)]
+use crate::event::MemberRef;
 use crate::event::{MobEvent, NewMobEvent};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -134,7 +136,7 @@ mod tests {
                 MobEventKind::MeerkatSpawned {
                     meerkat_id: MeerkatId::from("a"),
                     role: ProfileName::from("worker"),
-                    session_id: SessionId::from_uuid(Uuid::nil()),
+                    member_ref: MemberRef::from_session_id(SessionId::from_uuid(Uuid::nil())),
                 },
             ))
             .await
@@ -193,7 +195,7 @@ mod tests {
                 MobEventKind::MeerkatSpawned {
                     meerkat_id: MeerkatId::from("a"),
                     role: ProfileName::from("worker"),
-                    session_id: SessionId::from_uuid(Uuid::nil()),
+                    member_ref: MemberRef::from_session_id(SessionId::from_uuid(Uuid::nil())),
                 },
             ))
             .await

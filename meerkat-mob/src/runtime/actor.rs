@@ -14,7 +14,7 @@ pub(super) struct MobActor {
     pub(super) task_board: Arc<RwLock<TaskBoard>>,
     pub(super) state: Arc<AtomicU8>,
     pub(super) events: Arc<dyn MobEventStore>,
-    pub(super) session_service: Arc<dyn MobSessionService>,
+    pub(super) provisioner: Arc<dyn MobProvisioner>,
     pub(super) mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
     pub(super) mcp_processes: Arc<tokio::sync::Mutex<BTreeMap<String, Child>>>,
     pub(super) command_tx: mpsc::Sender<MobCommand>,
@@ -23,6 +23,22 @@ pub(super) struct MobActor {
 }
 
 impl MobActor {
+    fn mob_debug_enabled() -> bool {
+        std::env::var("RKAT_MOB_DEBUG")
+            .ok()
+            .map(|value| {
+                let value = value.to_ascii_lowercase();
+                matches!(value.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    }
+
+    fn mob_debug(message: impl AsRef<str>) {
+        if Self::mob_debug_enabled() {
+            eprintln!("[mob-debug] {}", message.as_ref());
+        }
+    }
+
     fn state(&self) -> MobState {
         MobState::from_u8(self.state.load(Ordering::Acquire))
     }
@@ -57,18 +73,21 @@ impl MobActor {
                 .next()
                 .cloned()
         {
-            let _ = self
-                .session_service
-                .start_turn(
-                    &orchestrator_entry.session_id,
-                    meerkat_core::service::StartTurnRequest {
-                        prompt: message,
-                        event_tx: None,
-                        host_mode: true,
-                        skill_references: None,
-                    },
-                )
-                .await;
+            let provisioner = self.provisioner.clone();
+            let member_ref = orchestrator_entry.member_ref;
+            tokio::spawn(async move {
+                let _ = provisioner
+                    .start_turn(
+                        &member_ref,
+                        meerkat_core::service::StartTurnRequest {
+                            prompt: message,
+                            event_tx: None,
+                            host_mode: false,
+                            skill_references: None,
+                        },
+                    )
+                    .await;
+            });
         }
     }
 
@@ -148,13 +167,14 @@ impl MobActor {
                     profile_name,
                     meerkat_id,
                     initial_message,
+                    backend,
                     reply_tx,
                 } => {
                     let result = match self
                         .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
                     {
                         Ok(()) => {
-                            self.handle_spawn(profile_name, meerkat_id, initial_message)
+                            self.handle_spawn(profile_name, meerkat_id, initial_message, backend)
                                 .await
                         }
                         Err(error) => Err(error),
@@ -318,7 +338,12 @@ impl MobActor {
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
-    ) -> Result<SessionId, MobError> {
+        backend: Option<MobBackendKind>,
+    ) -> Result<MemberRef, MobError> {
+        Self::mob_debug(format!(
+            "MobActor::handle_spawn start mob_id={} meerkat_id={} profile={}",
+            self.definition.id, meerkat_id, profile_name
+        ));
         // Check meerkat doesn't already exist
         {
             let roster = self.roster.read().await;
@@ -359,8 +384,25 @@ impl MobActor {
             )
         });
         let req = build::to_create_session_request(&config, prompt);
-        let result = self.session_service.create_session(req).await?;
-        let session_id = result.session_id;
+        let selected_backend = backend
+            .or(profile.backend)
+            .unwrap_or(self.definition.backend.default);
+        let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
+        Self::mob_debug(format!(
+            "MobActor::handle_spawn provisioning selected_backend={:?} peer_name={}",
+            selected_backend, peer_name
+        ));
+        let member_ref = self
+            .provisioner
+            .provision_member(ProvisionMemberRequest {
+                create_session: req,
+                backend: selected_backend,
+                peer_name,
+            })
+            .await?;
+        Self::mob_debug(format!(
+            "MobActor::handle_spawn provisioned member_ref={member_ref:?}"
+        ));
 
         // Emit MeerkatSpawned event
         if let Err(append_error) = self
@@ -371,14 +413,14 @@ impl MobActor {
                 kind: MobEventKind::MeerkatSpawned {
                     meerkat_id: meerkat_id.clone(),
                     role: profile_name.clone(),
-                    session_id: session_id.clone(),
+                    member_ref: member_ref.clone(),
                 },
             })
             .await
         {
-            if let Err(rollback_error) = self.session_service.archive(&session_id).await {
+            if let Err(rollback_error) = self.provisioner.retire_member(&member_ref).await {
                 return Err(MobError::Internal(format!(
-                    "spawn append failed for '{meerkat_id}': {append_error}; archive compensation failed for session '{session_id}': {rollback_error}"
+                    "spawn append failed for '{meerkat_id}': {append_error}; archive compensation failed for member '{member_ref:?}': {rollback_error}"
                 )));
             }
             return Err(append_error);
@@ -387,12 +429,16 @@ impl MobActor {
         // Update roster
         {
             let mut roster = self.roster.write().await;
-            let inserted = roster.add(meerkat_id.clone(), profile_name.clone(), session_id.clone());
+            let inserted = roster.add(meerkat_id.clone(), profile_name.clone(), member_ref.clone());
             debug_assert!(
                 inserted,
                 "duplicate meerkat insert should be prevented before add()"
             );
         }
+        Self::mob_debug(format!(
+            "MobActor::handle_spawn roster updated meerkat_id={}",
+            meerkat_id
+        ));
 
         let planned_wiring_targets = self.spawn_wiring_targets(&profile_name, &meerkat_id).await;
 
@@ -401,7 +447,7 @@ impl MobActor {
                 .rollback_failed_spawn(
                     &meerkat_id,
                     &profile_name,
-                    &session_id,
+                    &member_ref,
                     &planned_wiring_targets,
                 )
                 .await
@@ -413,7 +459,11 @@ impl MobActor {
             return Err(wiring_error);
         }
 
-        Ok(session_id)
+        Self::mob_debug(format!(
+            "MobActor::handle_spawn done meerkat_id={}",
+            meerkat_id
+        ));
+        Ok(member_ref)
     }
 
     async fn spawn_wiring_targets(
@@ -491,16 +541,16 @@ impl MobActor {
         };
 
         let retire_event_already_present = self
-            .retire_event_exists(&meerkat_id, &entry.session_id)
+            .retire_event_exists(&meerkat_id, &entry.member_ref)
             .await?;
         if !retire_event_already_present {
-            self.append_retire_event(&meerkat_id, &entry.profile, &entry.session_id)
+            self.append_retire_event(&meerkat_id, &entry.profile, &entry.member_ref)
                 .await?;
         }
 
         // Notify wired peers and remove trust.
         if !entry.wired_to.is_empty() {
-            let retiring_comms = self.session_service_comms(&entry.session_id).await;
+            let retiring_comms = self.provisioner_comms(&entry.member_ref).await;
             let retiring_key = retiring_comms.as_ref().and_then(|comms| comms.public_key());
 
             // If a retire event already exists, this can be a retry path after a
@@ -512,10 +562,15 @@ impl MobActor {
                         "retire requires comms runtime for '{meerkat_id}'"
                     )));
                 }
-                if let Err(error) = self.session_service.archive(&entry.session_id).await
-                    && !matches!(error, meerkat_core::service::SessionError::NotFound { .. })
+                if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
+                    && !matches!(
+                        error,
+                        MobError::SessionError(
+                            meerkat_core::service::SessionError::NotFound { .. }
+                        )
+                    )
                 {
-                    return Err(error.into());
+                    return Err(error);
                 }
                 let mut roster = self.roster.write().await;
                 roster.remove(&meerkat_id);
@@ -527,10 +582,15 @@ impl MobActor {
                         "retire requires public key for '{meerkat_id}'"
                     )));
                 }
-                if let Err(error) = self.session_service.archive(&entry.session_id).await
-                    && !matches!(error, meerkat_core::service::SessionError::NotFound { .. })
+                if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
+                    && !matches!(
+                        error,
+                        MobError::SessionError(
+                            meerkat_core::service::SessionError::NotFound { .. }
+                        )
+                    )
                 {
-                    return Err(error.into());
+                    return Err(error);
                 }
                 let mut roster = self.roster.write().await;
                 roster.remove(&meerkat_id);
@@ -554,7 +614,7 @@ impl MobActor {
                     })?
                 };
                 let peer_comms = self
-                    .session_service_comms(&peer_entry.session_id)
+                    .provisioner_comms(&peer_entry.member_ref)
                     .await
                     .ok_or_else(|| {
                         MobError::WiringError(format!(
@@ -566,10 +626,13 @@ impl MobActor {
         }
 
         // Archive session (required)
-        if let Err(error) = self.session_service.archive(&entry.session_id).await
-            && !matches!(error, meerkat_core::service::SessionError::NotFound { .. })
+        if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
+            && !matches!(
+                error,
+                MobError::SessionError(meerkat_core::service::SessionError::NotFound { .. })
+            )
         {
-            return Err(error.into());
+            return Err(error);
         }
 
         // Update roster
@@ -615,13 +678,13 @@ impl MobActor {
 
         // Get comms and keys for both sides (required for unwire).
         let comms_a = self
-            .session_service_comms(&entry_a.session_id)
+            .provisioner_comms(&entry_a.member_ref)
             .await
             .ok_or_else(|| {
                 MobError::WiringError(format!("unwire requires comms runtime for '{a}'"))
             })?;
         let comms_b = self
-            .session_service_comms(&entry_b.session_id)
+            .provisioner_comms(&entry_b.member_ref)
             .await
             .ok_or_else(|| {
                 MobError::WiringError(format!("unwire requires comms runtime for '{b}'"))
@@ -634,18 +697,14 @@ impl MobActor {
         })?;
         let comms_name_a = self.comms_name_for(&entry_a);
         let comms_name_b = self.comms_name_for(&entry_b);
-        let spec_a = TrustedPeerSpec::new(
-            &comms_name_a,
-            key_a.clone(),
-            format!("inproc://{comms_name_a}"),
-        )
-        .map_err(|e| MobError::WiringError(format!("invalid peer spec: {e}")))?;
-        let spec_b = TrustedPeerSpec::new(
-            &comms_name_b,
-            key_b.clone(),
-            format!("inproc://{comms_name_b}"),
-        )
-        .map_err(|e| MobError::WiringError(format!("invalid peer spec: {e}")))?;
+        let spec_a = self
+            .provisioner
+            .trusted_peer_spec(&entry_a.member_ref, &comms_name_a, &key_a)
+            .await?;
+        let spec_b = self
+            .provisioner
+            .trusted_peer_spec(&entry_b.member_ref, &comms_name_b, &key_b)
+            .await?;
 
         // Notify both peers BEFORE removing trust (need trust to send).
         // Send FROM a TO b: notify b that a is being unwired
@@ -939,9 +998,7 @@ impl MobActor {
             host_mode: false,
             skill_references: None,
         };
-        self.session_service
-            .start_turn(&entry.session_id, req)
-            .await?;
+        self.provisioner.start_turn(&entry.member_ref, req).await?;
 
         Ok(())
     }
@@ -966,9 +1023,7 @@ impl MobActor {
             host_mode: false,
             skill_references: None,
         };
-        self.session_service
-            .start_turn(&entry.session_id, req)
-            .await?;
+        self.provisioner.start_turn(&entry.member_ref, req).await?;
         Ok(())
     }
 
@@ -1042,12 +1097,12 @@ impl MobActor {
         &self,
         meerkat_id: &MeerkatId,
         profile_name: &ProfileName,
-        session_id: &SessionId,
+        member_ref: &MemberRef,
         planned_wiring_targets: &[MeerkatId],
     ) -> Result<(), MobError> {
-        let retire_event_already_present = self.retire_event_exists(meerkat_id, session_id).await?;
+        let retire_event_already_present = self.retire_event_exists(meerkat_id, member_ref).await?;
         if !retire_event_already_present {
-            self.append_retire_event(meerkat_id, profile_name, session_id)
+            self.append_retire_event(meerkat_id, profile_name, member_ref)
                 .await?;
         }
 
@@ -1068,7 +1123,7 @@ impl MobActor {
             let roster = self.roster.read().await;
             roster.get(meerkat_id).cloned()
         };
-        let spawned_comms = self.session_service_comms(session_id).await;
+        let spawned_comms = self.provisioner_comms(member_ref).await;
 
         if !wired_peers.is_empty() {
             let spawned_comms = spawned_comms.as_ref().ok_or_else(|| {
@@ -1104,7 +1159,7 @@ impl MobActor {
                     }
                     continue;
                 };
-                let peer_comms = self.session_service_comms(&peer_entry.session_id).await;
+                let peer_comms = self.provisioner_comms(&peer_entry.member_ref).await;
                 let Some(peer_comms) = peer_comms else {
                     if is_wired_peer {
                         cleanup_errors.push(format!(
@@ -1129,10 +1184,13 @@ impl MobActor {
             }
         }
 
-        if let Err(error) = self.session_service.archive(session_id).await
-            && !matches!(error, meerkat_core::service::SessionError::NotFound { .. })
+        if let Err(error) = self.provisioner.retire_member(member_ref).await
+            && !matches!(
+                error,
+                MobError::SessionError(meerkat_core::service::SessionError::NotFound { .. })
+            )
         {
-            return Err(error.into());
+            return Err(error);
         }
 
         {
@@ -1154,7 +1212,7 @@ impl MobActor {
     async fn retire_event_exists(
         &self,
         meerkat_id: &MeerkatId,
-        session_id: &SessionId,
+        member_ref: &MemberRef,
     ) -> Result<bool, MobError> {
         let events = self.events.replay_all().await?;
         Ok(events.iter().any(|event| {
@@ -1162,9 +1220,9 @@ impl MobActor {
                 &event.kind,
                 MobEventKind::MeerkatRetired {
                     meerkat_id: existing_meerkat,
-                    session_id: existing_session,
+                    member_ref: existing_member_ref,
                     ..
-                } if existing_meerkat == meerkat_id && existing_session == session_id
+                } if existing_meerkat == meerkat_id && existing_member_ref == member_ref
             )
         }))
     }
@@ -1173,7 +1231,7 @@ impl MobActor {
         &self,
         meerkat_id: &MeerkatId,
         profile_name: &ProfileName,
-        session_id: &SessionId,
+        member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         self.events
             .append(NewMobEvent {
@@ -1182,7 +1240,7 @@ impl MobActor {
                 kind: MobEventKind::MeerkatRetired {
                     meerkat_id: meerkat_id.clone(),
                     role: profile_name.clone(),
-                    session_id: session_id.clone(),
+                    member_ref: member_ref.clone(),
                 },
             })
             .await?;
@@ -1206,13 +1264,13 @@ impl MobActor {
 
         // Establish bidirectional trust via comms (required).
         let comms_a = self
-            .session_service_comms(&entry_a.session_id)
+            .provisioner_comms(&entry_a.member_ref)
             .await
             .ok_or_else(|| {
                 MobError::WiringError(format!("wire requires comms runtime for '{a}'"))
             })?;
         let comms_b = self
-            .session_service_comms(&entry_b.session_id)
+            .provisioner_comms(&entry_b.member_ref)
             .await
             .ok_or_else(|| {
                 MobError::WiringError(format!("wire requires comms runtime for '{b}'"))
@@ -1229,18 +1287,14 @@ impl MobActor {
         let comms_name_a = self.comms_name_for(&entry_a);
         let comms_name_b = self.comms_name_for(&entry_b);
 
-        let spec_b = TrustedPeerSpec::new(
-            &comms_name_b,
-            key_b.clone(),
-            format!("inproc://{comms_name_b}"),
-        )
-        .map_err(|e| MobError::WiringError(format!("invalid peer spec: {e}")))?;
-        let spec_a = TrustedPeerSpec::new(
-            &comms_name_a,
-            key_a.clone(),
-            format!("inproc://{comms_name_a}"),
-        )
-        .map_err(|e| MobError::WiringError(format!("invalid peer spec: {e}")))?;
+        let spec_b = self
+            .provisioner
+            .trusted_peer_spec(&entry_b.member_ref, &comms_name_b, &key_b)
+            .await?;
+        let spec_a = self
+            .provisioner
+            .trusted_peer_spec(&entry_a.member_ref, &comms_name_a, &key_a)
+            .await?;
 
         comms_a.add_trusted_peer(spec_b.clone()).await?;
         if let Err(error) = comms_b.add_trusted_peer(spec_a.clone()).await {
@@ -1366,11 +1420,8 @@ impl MobActor {
     }
 
     /// Get the comms runtime for a session, if available.
-    async fn session_service_comms(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<Arc<dyn CoreCommsRuntime>> {
-        self.session_service.comms_runtime(session_id).await
+    async fn provisioner_comms(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>> {
+        self.provisioner.comms_runtime(member_ref).await
     }
 
     /// Generate the comms name for a roster entry.

@@ -59,7 +59,8 @@ pub(super) enum MobCommand {
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
-        reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
+        backend: Option<MobBackendKind>,
+        reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
     },
     Retire {
         meerkat_id: MeerkatId,

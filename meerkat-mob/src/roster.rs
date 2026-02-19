@@ -3,7 +3,7 @@
 //! The `Roster` is a projection built from `MeerkatSpawned`, `MeerkatRetired`,
 //! `PeersWired`, and `PeersUnwired` events.
 
-use crate::event::{MobEvent, MobEventKind};
+use crate::event::{MemberRef, MobEvent, MobEventKind};
 use crate::ids::{MeerkatId, ProfileName};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
@@ -16,8 +16,8 @@ pub struct RosterEntry {
     pub meerkat_id: MeerkatId,
     /// Profile name this meerkat was spawned from.
     pub profile: ProfileName,
-    /// Session ID for this meerkat's agent session.
-    pub session_id: SessionId,
+    /// Backend-neutral identity for this meerkat.
+    pub member_ref: MemberRef,
     /// Set of peer meerkat IDs this meerkat is wired to.
     pub wired_to: BTreeSet<MeerkatId>,
 }
@@ -52,9 +52,9 @@ impl Roster {
             MobEventKind::MeerkatSpawned {
                 meerkat_id,
                 role,
-                session_id,
+                member_ref,
             } => {
-                self.add(meerkat_id.clone(), role.clone(), session_id.clone());
+                self.add(meerkat_id.clone(), role.clone(), member_ref.clone());
             }
             MobEventKind::MeerkatRetired { meerkat_id, .. } => {
                 self.remove(meerkat_id);
@@ -74,7 +74,7 @@ impl Roster {
         &mut self,
         meerkat_id: MeerkatId,
         profile: ProfileName,
-        session_id: SessionId,
+        member_ref: MemberRef,
     ) -> bool {
         self.entries
             .insert(
@@ -82,7 +82,7 @@ impl Roster {
                 RosterEntry {
                     meerkat_id,
                     profile,
-                    session_id,
+                    member_ref,
                     wired_to: BTreeSet::new(),
                 },
             )
@@ -124,10 +124,28 @@ impl Roster {
         self.entries.get(meerkat_id)
     }
 
-    /// Update the session ID for an existing meerkat.
+    /// Update the member reference for an existing meerkat.
+    pub fn set_member_ref(&mut self, meerkat_id: &MeerkatId, member_ref: MemberRef) -> bool {
+        if let Some(entry) = self.entries.get_mut(meerkat_id) {
+            entry.member_ref = member_ref;
+            return true;
+        }
+        false
+    }
+
+    /// Update the bridge session ID while preserving backend-specific identity.
     pub fn set_session_id(&mut self, meerkat_id: &MeerkatId, session_id: SessionId) -> bool {
         if let Some(entry) = self.entries.get_mut(meerkat_id) {
-            entry.session_id = session_id;
+            entry.member_ref = match &entry.member_ref {
+                MemberRef::Session { .. } => MemberRef::Session { session_id },
+                MemberRef::BackendPeer {
+                    peer_id, address, ..
+                } => MemberRef::BackendPeer {
+                    peer_id: peer_id.clone(),
+                    address: address.clone(),
+                    session_id: Some(session_id),
+                },
+            };
             return true;
         }
         false
@@ -159,6 +177,12 @@ impl Roster {
     }
 }
 
+impl RosterEntry {
+    pub fn session_id(&self) -> Option<&SessionId> {
+        self.member_ref.session_id()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,12 +210,12 @@ mod tests {
         roster.add(
             MeerkatId::from("agent-1"),
             ProfileName::from("worker"),
-            sid.clone(),
+            MemberRef::from_session_id(sid.clone()),
         );
         assert_eq!(roster.len(), 1);
         let entry = roster.get(&MeerkatId::from("agent-1")).unwrap();
         assert_eq!(entry.profile.as_str(), "worker");
-        assert_eq!(entry.session_id, sid);
+        assert_eq!(entry.session_id(), Some(&sid));
         assert!(entry.wired_to.is_empty());
     }
 
@@ -201,12 +225,12 @@ mod tests {
         roster.add(
             MeerkatId::from("agent-1"),
             ProfileName::from("worker"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("agent-2"),
             ProfileName::from("worker"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
         roster.wire(&MeerkatId::from("agent-1"), &MeerkatId::from("agent-2"));
         roster.remove(&MeerkatId::from("agent-1"));
@@ -226,17 +250,50 @@ mod tests {
     }
 
     #[test]
+    fn test_set_session_id_preserves_backend_member_ref_identity() {
+        let mut roster = Roster::new();
+        let old_sid = session_id();
+        roster.add(
+            MeerkatId::from("ext-1"),
+            ProfileName::from("worker"),
+            MemberRef::BackendPeer {
+                peer_id: "peer-ext-1".to_string(),
+                address: "https://backend.example.invalid/mesh/ext-1".to_string(),
+                session_id: Some(old_sid),
+            },
+        );
+
+        let new_sid = session_id();
+        assert!(roster.set_session_id(&MeerkatId::from("ext-1"), new_sid.clone()));
+        let entry = roster
+            .get(&MeerkatId::from("ext-1"))
+            .expect("entry should remain present");
+        match &entry.member_ref {
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                session_id,
+            } => {
+                assert_eq!(peer_id, "peer-ext-1");
+                assert_eq!(address, "https://backend.example.invalid/mesh/ext-1");
+                assert_eq!(session_id.as_ref(), Some(&new_sid));
+            }
+            other => panic!("expected backend peer member ref, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_roster_wire_and_unwire() {
         let mut roster = Roster::new();
         roster.add(
             MeerkatId::from("a"),
             ProfileName::from("worker"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("b"),
             ProfileName::from("worker"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
 
         roster.wire(&MeerkatId::from("a"), &MeerkatId::from("b"));
@@ -260,12 +317,12 @@ mod tests {
         roster.add(
             MeerkatId::from("a"),
             ProfileName::from("worker"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("b"),
             ProfileName::from("worker"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
 
         roster.wire(&MeerkatId::from("a"), &MeerkatId::from("b"));
@@ -281,17 +338,17 @@ mod tests {
         roster.add(
             MeerkatId::from("w1"),
             ProfileName::from("worker"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("w2"),
             ProfileName::from("worker"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("lead"),
             ProfileName::from("orchestrator"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
 
         let workers: Vec<_> = roster.by_profile(&ProfileName::from("worker")).collect();
@@ -309,12 +366,12 @@ mod tests {
         roster.add(
             MeerkatId::from("a"),
             ProfileName::from("worker"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("b"),
             ProfileName::from("lead"),
-            session_id(),
+            MemberRef::from_session_id(session_id()),
         );
 
         let all: Vec<_> = roster.list().collect();
@@ -331,7 +388,7 @@ mod tests {
                 MobEventKind::MeerkatSpawned {
                     meerkat_id: MeerkatId::from("a"),
                     role: ProfileName::from("worker"),
-                    session_id: sid1,
+                    member_ref: MemberRef::from_session_id(sid1),
                 },
             ),
             make_event(
@@ -339,7 +396,7 @@ mod tests {
                 MobEventKind::MeerkatSpawned {
                     meerkat_id: MeerkatId::from("b"),
                     role: ProfileName::from("worker"),
-                    session_id: sid2,
+                    member_ref: MemberRef::from_session_id(sid2),
                 },
             ),
             make_event(
@@ -366,7 +423,7 @@ mod tests {
                 MobEventKind::MeerkatSpawned {
                     meerkat_id: MeerkatId::from("a"),
                     role: ProfileName::from("worker"),
-                    session_id: sid1.clone(),
+                    member_ref: MemberRef::from_session_id(sid1.clone()),
                 },
             ),
             make_event(
@@ -374,7 +431,7 @@ mod tests {
                 MobEventKind::MeerkatSpawned {
                     meerkat_id: MeerkatId::from("b"),
                     role: ProfileName::from("worker"),
-                    session_id: sid2.clone(),
+                    member_ref: MemberRef::from_session_id(sid2.clone()),
                 },
             ),
             make_event(
@@ -389,7 +446,7 @@ mod tests {
                 MobEventKind::MeerkatRetired {
                     meerkat_id: MeerkatId::from("a"),
                     role: ProfileName::from("worker"),
-                    session_id: sid1,
+                    member_ref: MemberRef::from_session_id(sid1),
                 },
             ),
         ];
@@ -408,7 +465,7 @@ mod tests {
             MobEventKind::MeerkatSpawned {
                 meerkat_id: MeerkatId::from("a"),
                 role: ProfileName::from("worker"),
-                session_id: sid,
+                member_ref: MemberRef::from_session_id(sid),
             },
         )];
         let roster1 = Roster::project(&events);
@@ -425,7 +482,7 @@ mod tests {
         let entry = RosterEntry {
             meerkat_id: MeerkatId::from("test"),
             profile: ProfileName::from("worker"),
-            session_id: session_id(),
+            member_ref: MemberRef::from_session_id(session_id()),
             wired_to: {
                 let mut s = BTreeSet::new();
                 s.insert(MeerkatId::from("peer-1"));

@@ -4,6 +4,7 @@
 //! skill references resolve, MCP references exist, orchestrator profile exists,
 //! wiring rules reference valid profiles, and profile names are valid identifiers.
 
+use crate::MobBackendKind;
 use crate::definition::MobDefinition;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -24,6 +25,10 @@ pub enum DiagnosticCode {
     InvalidWiringProfile,
     /// Definition has no spawnable profiles.
     EmptyProfiles,
+    /// External backend selected but config missing.
+    MissingExternalBackendConfig,
+    /// External backend config is invalid.
+    InvalidExternalBackendConfig,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -35,6 +40,8 @@ impl fmt::Display for DiagnosticCode {
             Self::InvalidProfileName => "invalid_profile_name",
             Self::InvalidWiringProfile => "invalid_wiring_profile",
             Self::EmptyProfiles => "empty_profiles",
+            Self::MissingExternalBackendConfig => "missing_external_backend_config",
+            Self::InvalidExternalBackendConfig => "invalid_external_backend_config",
         };
         f.write_str(s)
     }
@@ -137,6 +144,30 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
         }
     }
 
+    let definition_uses_external_default = def.backend.default == MobBackendKind::External;
+    let profile_uses_external = def
+        .profiles
+        .iter()
+        .any(|(_, profile)| profile.backend == Some(MobBackendKind::External));
+    if definition_uses_external_default || profile_uses_external {
+        match &def.backend.external {
+            None => diagnostics.push(Diagnostic {
+                code: DiagnosticCode::MissingExternalBackendConfig,
+                message: "external backend selected but backend.external config is missing"
+                    .to_string(),
+                location: Some("backend.external".to_string()),
+            }),
+            Some(external) if external.address_base.trim().is_empty() => {
+                diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::InvalidExternalBackendConfig,
+                    message: "backend.external.address_base must not be empty".to_string(),
+                    location: Some("backend.external.address_base".to_string()),
+                })
+            }
+            Some(_) => {}
+        }
+    }
+
     diagnostics
 }
 
@@ -159,8 +190,8 @@ fn is_valid_identifier(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::definition::{
-        McpServerConfig, MobDefinition, OrchestratorConfig, RoleWiringRule, SkillSource,
-        WiringRules,
+        BackendConfig, McpServerConfig, MobDefinition, OrchestratorConfig, RoleWiringRule,
+        SkillSource, WiringRules,
     };
     use crate::ids::{MobId, ProfileName};
     use crate::profile::{Profile, ToolConfig};
@@ -173,6 +204,7 @@ mod tests {
             tools: ToolConfig::default(),
             peer_description: "test".to_string(),
             external_addressable: false,
+            backend: None,
         }
     }
 
@@ -219,6 +251,7 @@ mod tests {
                 }],
             },
             skills,
+            backend: BackendConfig::default(),
         }
     }
 
@@ -340,6 +373,57 @@ mod tests {
     }
 
     #[test]
+    fn test_external_backend_requires_external_config() {
+        let mut def = valid_definition();
+        def.backend.default = MobBackendKind::External;
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::MissingExternalBackendConfig)
+        );
+    }
+
+    #[test]
+    fn test_external_backend_rejects_empty_address_base() {
+        let mut def = valid_definition();
+        def.profiles
+            .get_mut(&ProfileName::from("worker"))
+            .expect("worker profile exists")
+            .backend = Some(MobBackendKind::External);
+        def.backend.external = Some(crate::definition::ExternalBackendConfig {
+            address_base: "   ".to_string(),
+        });
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::InvalidExternalBackendConfig)
+        );
+    }
+
+    #[test]
+    fn test_parse_and_validate_rejects_missing_external_backend_config() {
+        let toml = r#"
+[mob]
+id = "mob-ext"
+
+[backend]
+default = "external"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+"#;
+        let def = MobDefinition::from_toml(toml).expect("parse toml");
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::MissingExternalBackendConfig)
+        );
+    }
+
+    #[test]
     fn test_valid_identifier_patterns() {
         assert!(is_valid_identifier("worker"));
         assert!(is_valid_identifier("lead_agent"));
@@ -372,6 +456,7 @@ mod tests {
             mcp_servers: BTreeMap::new(),
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
+            backend: BackendConfig::default(),
         };
         let diagnostics = validate_definition(&def);
         assert!(

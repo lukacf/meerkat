@@ -298,6 +298,58 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
 }
 
 // ---------------------------------------------------------------------------
+// CONTRACT-MOBX-001: trust operations accept backend-provided addresses
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn contract_mobx_001_trust_accepts_non_inproc_addresses_and_preserves_peer_id() {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let runtime_name = format!("c0x1-runtime-{suffix}");
+    let peer_name = format!("c0x1-peer-{suffix}");
+
+    let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
+    let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+    let peer_id = peer.public_key().to_peer_id();
+    let backend_address = format!("https://backend.example.invalid/mesh/{peer_name}");
+
+    let spec = TrustedPeerSpec::new(&peer_name, peer_id.clone(), backend_address.clone())
+        .expect("valid trusted peer spec");
+    CoreCommsRuntime::add_trusted_peer(&runtime, spec)
+        .await
+        .expect("add trusted peer should accept backend-provided address");
+
+    let peers_after_add = CoreCommsRuntime::peers(&runtime).await;
+    let entry = peers_after_add
+        .iter()
+        .find(|entry| entry.name.as_str() == peer_name)
+        .expect("trusted peer should be listed");
+    assert_eq!(
+        entry.peer_id, peer_id,
+        "peer_id semantics must remain stable for remove operations"
+    );
+    assert_eq!(
+        entry.address, backend_address,
+        "runtime should preserve backend-provided address string"
+    );
+
+    let removed = CoreCommsRuntime::remove_trusted_peer(&runtime, &peer_id)
+        .await
+        .expect("remove_trusted_peer should succeed by peer_id");
+    assert!(
+        removed,
+        "remove_trusted_peer should return true for existing peer"
+    );
+
+    let peers_after_remove = CoreCommsRuntime::peers(&runtime).await;
+    assert!(
+        peers_after_remove
+            .iter()
+            .all(|entry| entry.name.as_str() != peer_name),
+        "peer should no longer appear after remove_trusted_peer"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // CONTRACT-MOB-006: PeerMeta labels discoverable via peers()
 // ---------------------------------------------------------------------------
 

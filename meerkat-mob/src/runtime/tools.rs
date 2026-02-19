@@ -62,7 +62,8 @@ impl MobToolDispatcher {
                     "properties": {
                         "profile": {"type": "string"},
                         "meerkat_id": {"type": "string"},
-                        "initial_message": {"type": "string"}
+                        "initial_message": {"type": "string"},
+                        "backend": {"type": "string", "enum": ["subagent", "external"]}
                     },
                     "required": ["profile", "meerkat_id"]
                 }),
@@ -96,7 +97,7 @@ impl MobToolDispatcher {
             ));
             defs.push(tool_def(
                 TOOL_LIST_MEERKATS,
-                "List all active meerkats. Response includes meerkat_id, profile, session_id, wired_to.",
+                "List all active meerkats. Response includes meerkat_id, profile, member_ref, session_id, wired_to.",
                 json!({
                     "type": "object",
                     "properties": {}
@@ -190,6 +191,8 @@ struct SpawnMeerkatArgs {
     meerkat_id: String,
     #[serde(default)]
     initial_message: Option<String>,
+    #[serde(default)]
+    backend: Option<MobBackendKind>,
 }
 
 #[derive(Deserialize)]
@@ -235,16 +238,23 @@ impl AgentToolDispatcher for MobToolDispatcher {
                 let args: SpawnMeerkatArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
-                let session_id = self
+                let member_ref = self
                     .handle
-                    .spawn(
+                    .spawn_member_ref_with_backend(
                         ProfileName::from(args.profile),
                         MeerkatId::from(args.meerkat_id),
                         args.initial_message,
+                        args.backend,
                     )
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
-                Self::encode_result(call, json!({ "session_id": session_id }))
+                Self::encode_result(
+                    call,
+                    json!({
+                        "member_ref": member_ref,
+                        "session_id": member_ref.session_id(),
+                    }),
+                )
             }
             TOOL_RETIRE_MEERKAT => {
                 let args: RetireMeerkatArgs = call
@@ -284,7 +294,8 @@ impl AgentToolDispatcher for MobToolDispatcher {
                         json!({
                             "meerkat_id": entry.meerkat_id,
                             "profile": entry.profile,
-                            "session_id": entry.session_id,
+                            "member_ref": entry.member_ref,
+                            "session_id": entry.session_id(),
                             "wired_to": entry.wired_to,
                         })
                     })

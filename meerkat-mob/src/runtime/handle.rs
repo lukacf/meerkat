@@ -91,19 +91,32 @@ impl MobHandle {
         self.mcp_running.read().await.clone()
     }
 
-    /// Spawn a new meerkat from a profile.
-    pub async fn spawn(
+    /// Spawn a new meerkat from a profile and return its member reference.
+    pub async fn spawn_member_ref(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
-    ) -> Result<SessionId, MobError> {
+    ) -> Result<MemberRef, MobError> {
+        self.spawn_member_ref_with_backend(profile_name, meerkat_id, initial_message, None)
+            .await
+    }
+
+    /// Spawn a new meerkat from a profile with explicit backend override.
+    pub async fn spawn_member_ref_with_backend(
+        &self,
+        profile_name: ProfileName,
+        meerkat_id: MeerkatId,
+        initial_message: Option<String>,
+        backend: Option<MobBackendKind>,
+    ) -> Result<MemberRef, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::Spawn {
                 profile_name,
                 meerkat_id,
                 initial_message,
+                backend,
                 reply_tx,
             })
             .await
@@ -111,6 +124,25 @@ impl MobHandle {
         reply_rx
             .await
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+    }
+
+    /// Spawn a new meerkat from a profile.
+    ///
+    /// Compatibility API: returns the bridged session ID for session-backed members.
+    pub async fn spawn(
+        &self,
+        profile_name: ProfileName,
+        meerkat_id: MeerkatId,
+        initial_message: Option<String>,
+    ) -> Result<SessionId, MobError> {
+        let member_ref = self
+            .spawn_member_ref(profile_name, meerkat_id, initial_message)
+            .await?;
+        member_ref.session_id().cloned().ok_or_else(|| {
+            MobError::Internal(format!(
+                "spawned member has no session bridge; use spawn_member_ref() instead: {member_ref:?}"
+            ))
+        })
     }
 
     /// Retire a meerkat, archiving its session and removing trust.

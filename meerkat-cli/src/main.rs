@@ -5,15 +5,15 @@ mod mcp;
 mod stdin_events;
 
 use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
-use meerkat_contracts::{format_session_ref, SessionLocator, SessionLocatorError};
-use meerkat_core::service::{
-    CreateSessionRequest, SessionBuildOptions, SessionQuery, SessionService,
-};
+use meerkat_contracts::{SessionLocator, SessionLocatorError, format_session_ref};
 use meerkat_core::AgentToolDispatcher;
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
+use meerkat_core::service::{
+    CreateSessionRequest, SessionBuildOptions, SessionQuery, SessionService,
+};
 use meerkat_core::{
-    format_verbose_event, AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat,
+    AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, format_verbose_event,
 };
 use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
 #[cfg(feature = "mcp")]
@@ -24,12 +24,12 @@ use meerkat_tools::find_project_root;
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use meerkat_core::HookRunOverrides;
+use meerkat_core::SessionId;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::types::OutputSchema;
-use meerkat_core::HookRunOverrides;
-use meerkat_core::SessionId;
 use meerkat_store::{RealmBackend, RealmOrigin, SessionFilter};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -321,6 +321,10 @@ enum Commands {
         /// Run-scoped hook overrides from a JSON file.
         #[arg(long = "hooks-override-file", value_name = "FILE")]
         hooks_override_file: Option<PathBuf>,
+
+        /// Verbose output: show each turn, tool calls, and results as they happen
+        #[arg(long, short = 'v')]
+        verbose: bool,
     },
 
     /// Session management
@@ -767,9 +771,10 @@ async fn main() -> anyhow::Result<ExitCode> {
             prompt,
             hooks_override_json,
             hooks_override_file,
+            verbose,
         } => {
             let overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json)?;
-            resume_session(&session_id, &prompt, overrides, &cli_scope).await
+            resume_session(&session_id, &prompt, overrides, &cli_scope, verbose).await
         }
         Commands::Sessions { command } => match command {
             SessionCommands::List { limit } => list_sessions(limit, &cli_scope).await,
@@ -1574,12 +1579,14 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
 /// Mob-facing session service wrapper used by CLI `run`/`resume` tool calls.
 ///
 /// Mob-managed meerkats are created through the same in-process session service as
-/// the parent CLI agent. We force non-host turns for compatibility with
-/// request/response tool calls.
+/// the parent CLI agent. Host-mode behavior is backend-driven by mob runtime
+/// requests and must not be overridden here.
+#[cfg(test)]
 struct RunMobSessionService {
     inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
 }
 
+#[cfg(test)]
 impl RunMobSessionService {
     fn new(inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>) -> Self {
         Self { inner }
@@ -1587,25 +1594,72 @@ impl RunMobSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(test)]
 impl SessionService for RunMobSessionService {
     async fn create_session(
         &self,
-        mut req: CreateSessionRequest,
+        req: CreateSessionRequest,
     ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
-        req.host_mode = false;
-        self.inner.create_session(req).await
+        let model = req.model.clone();
+        let host_mode = req.host_mode;
+        let started = std::time::Instant::now();
+        tracing::info!(
+            target: "mob_tools",
+            "RunMobSessionService::create_session start model={model} host_mode={host_mode}"
+        );
+        let out = self.inner.create_session(req).await;
+        match &out {
+            Ok(result) => tracing::info!(
+                target: "mob_tools",
+                "RunMobSessionService::create_session ok session_id={} turns={} elapsed_ms={}",
+                result.session_id,
+                result.turns,
+                started.elapsed().as_millis()
+            ),
+            Err(err) => tracing::warn!(
+                target: "mob_tools",
+                "RunMobSessionService::create_session err elapsed_ms={} err={}",
+                started.elapsed().as_millis(),
+                err
+            ),
+        }
+        out
     }
 
     async fn start_turn(
         &self,
         id: &SessionId,
-        mut req: meerkat_core::service::StartTurnRequest,
+        req: meerkat_core::service::StartTurnRequest,
     ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
-        req.host_mode = false;
-        self.inner.start_turn(id, req).await
+        let started = std::time::Instant::now();
+        tracing::info!(
+            target: "mob_tools",
+            "RunMobSessionService::start_turn start session_id={} prompt_len={}",
+            id,
+            req.prompt.len()
+        );
+        let out = self.inner.start_turn(id, req).await;
+        match &out {
+            Ok(result) => tracing::info!(
+                target: "mob_tools",
+                "RunMobSessionService::start_turn ok session_id={} turns={} elapsed_ms={}",
+                result.session_id,
+                result.turns,
+                started.elapsed().as_millis()
+            ),
+            Err(err) => tracing::warn!(
+                target: "mob_tools",
+                "RunMobSessionService::start_turn err session_id={} elapsed_ms={} err={}",
+                id,
+                started.elapsed().as_millis(),
+                err
+            ),
+        }
+        out
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
+        tracing::info!(target: "mob_tools", "RunMobSessionService::interrupt session_id={id}");
         self.inner.interrupt(id).await
     }
 
@@ -1630,6 +1684,7 @@ impl SessionService for RunMobSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(test)]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
     async fn comms_runtime(
         &self,
@@ -1653,6 +1708,7 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
     }
 }
 
+#[cfg(test)]
 fn create_run_mob_external_tools(
     session_service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
 ) -> Arc<dyn AgentToolDispatcher> {
@@ -1660,6 +1716,54 @@ fn create_run_mob_external_tools(
         Arc::new(RunMobSessionService::new(session_service));
     let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_service));
     Arc::new(meerkat_mob_mcp::MobMcpDispatcher::new(state))
+}
+
+struct RunMobToolsContext {
+    state: Arc<meerkat_mob_mcp::MobMcpState>,
+    registry: PersistedMobRegistry,
+    _lock: MobRegistryLock,
+}
+
+impl RunMobToolsContext {
+    fn dispatcher(&self) -> Arc<dyn AgentToolDispatcher> {
+        Arc::new(meerkat_mob_mcp::MobMcpDispatcher::new(self.state.clone()))
+    }
+
+    async fn persist(&mut self, scope: &RuntimeScope) -> anyhow::Result<()> {
+        let active = self.state.mob_list().await;
+        let active_ids: std::collections::BTreeSet<String> =
+            active.iter().map(|(id, _)| id.to_string()).collect();
+
+        for (mob_id, status) in active {
+            let mob_id = mob_id.to_string();
+            self.registry
+                .mobs
+                .entry(mob_id.clone())
+                .or_insert_with(|| PersistedMob {
+                    definition: None,
+                    status: Some(status.as_str().to_string()),
+                    events: Vec::new(),
+                });
+            sync_mob_events(self.state.as_ref(), &mut self.registry, &mob_id).await?;
+        }
+
+        self.registry.mobs.retain(|mob_id, _| active_ids.contains(mob_id));
+        save_mob_registry(scope, &self.registry).await?;
+        Ok(())
+    }
+}
+
+async fn prepare_run_mob_tools(
+    scope: &RuntimeScope,
+    session_service: Arc<dyn meerkat_mob::MobSessionService>,
+) -> anyhow::Result<RunMobToolsContext> {
+    let lock = acquire_mob_registry_lock(scope).await?;
+    let (state, registry) = hydrate_mob_state(scope, session_service).await?;
+    Ok(RunMobToolsContext {
+        state,
+        registry,
+        _lock: lock,
+    })
 }
 
 fn compose_external_tool_dispatchers(
@@ -1686,7 +1790,10 @@ fn compose_external_tool_dispatchers(
                 if secondary_unique.len() == secondary_tools.len() {
                     b
                 } else {
-                    Arc::new(meerkat_core::FilteredToolDispatcher::new(b, secondary_unique))
+                    Arc::new(meerkat_core::FilteredToolDispatcher::new(
+                        b,
+                        secondary_unique,
+                    ))
                 };
 
             let gateway = meerkat_core::ToolGatewayBuilder::new()
@@ -1805,7 +1912,9 @@ async fn run_agent(
         config.comms.address = Some(addr.clone());
     }
 
-    // Build the session service.
+    let mob_persistent = get_or_create_mob_persistent_service(scope, config.clone()).await?;
+
+    // Build the parent session service.
     let service = build_cli_service(factory, config);
 
     if host_mode {
@@ -1818,7 +1927,10 @@ async fn run_agent(
     // Wrap in Arc so we can share with the stdin reader task
     let service = Arc::new(service);
 
-    let mob_external_tools = Some(create_run_mob_external_tools(service.clone()));
+    let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+        Arc::new(MobCliSessionService::new(mob_persistent));
+    let mut run_mob_tools = prepare_run_mob_tools(scope, run_mob_service).await?;
+    let mob_external_tools = Some(run_mob_tools.dispatcher());
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
     // Pre-create session to claim the session_id
@@ -1934,6 +2046,7 @@ async fn run_agent(
     // This drops runtime-held event senders so the receiver can close cleanly.
     service.shutdown().await;
     shutdown_mcp(&mcp_adapter).await;
+    run_mob_tools.persist(scope).await?;
 
     // Wait for streaming task to complete (it will end when all senders are dropped)
     if let Some(task) = event_task {
@@ -1997,8 +2110,9 @@ async fn resume_session(
     prompt: &str,
     hooks_override: HookRunOverrides,
     scope: &RuntimeScope,
+    verbose: bool,
 ) -> anyhow::Result<()> {
-    resume_session_with_llm_override(session_id, prompt, hooks_override, scope, None).await
+    resume_session_with_llm_override(session_id, prompt, hooks_override, scope, None, verbose).await
 }
 
 async fn resume_session_with_llm_override(
@@ -2007,18 +2121,35 @@ async fn resume_session_with_llm_override(
     hooks_override: HookRunOverrides,
     scope: &RuntimeScope,
     llm_override: Option<Arc<dyn meerkat_client::LlmClient>>,
+    verbose: bool,
 ) -> anyhow::Result<()> {
+    let resume_started = std::time::Instant::now();
+    let log_stage = |stage: &str| {
+        if verbose {
+            eprintln!(
+                "[resume][+{:>6.2}s] {stage}",
+                resume_started.elapsed().as_secs_f32()
+            );
+        }
+    };
+    log_stage("begin");
+
     // Parse session locator (<session_id> or <realm_id>:<session_id>).
+    log_stage("resolve_scoped_session_id");
     let session_id = resolve_scoped_session_id(session_id, scope)?;
 
+    log_stage("load_config");
     let (config, _config_base_dir) = load_config(scope).await?;
+    log_stage("build_cli_persistent_service");
     let loader_service = build_cli_persistent_service(scope, config.clone()).await?;
+    log_stage("load_persisted");
     let session = loader_service
         .load_persisted(&session_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
     drop(loader_service);
+    log_stage("create_session_store");
     let (manifest, store) = create_session_store(scope).await?;
     let stored_metadata = session.session_metadata();
     let tooling = stored_metadata
@@ -2065,6 +2196,7 @@ async fn resume_session_with_llm_override(
         provider_core,
         model
     );
+    log_stage("load_mcp_external_tools");
 
     // Load optional MCP tools; compose with CLI-local mob tools after service setup.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope).await;
@@ -2094,11 +2226,25 @@ async fn resume_session_with_llm_override(
     #[cfg(feature = "comms")]
     let factory = factory.comms(tooling.comms || host_mode);
 
+    log_stage("get_or_create_mob_persistent_service");
+    let mob_persistent = get_or_create_mob_persistent_service(scope, config.clone()).await?;
+    log_stage("build_cli_service");
     // Build the session service.
     let service = Arc::new(build_cli_service(factory, config));
 
-    let mob_external_tools = Some(create_run_mob_external_tools(service.clone()));
+    log_stage("compose_external_tool_dispatchers");
+    let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+        Arc::new(MobCliSessionService::new(mob_persistent));
+    let mut run_mob_tools = prepare_run_mob_tools(scope, run_mob_service).await?;
+    let mob_external_tools = Some(run_mob_tools.dispatcher());
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
+
+    let (event_tx, event_task) = if verbose {
+        let (tx, rx) = mpsc::channel::<AgentEvent>(100);
+        (Some(tx), Some(spawn_event_handler(rx, true, false)))
+    } else {
+        (None, None)
+    };
 
     let build = SessionBuildOptions {
         provider: Some(provider_core),
@@ -2135,25 +2281,35 @@ async fn resume_session_with_llm_override(
     // Route through SessionService::create_session() with the resumed session
     // staged in the build config. The service builds the agent (which picks up
     // the resume_session), runs the first turn, and returns RunResult.
+    log_stage("service.create_session(start)");
     let result = service
         .create_session(CreateSessionRequest {
             model,
             prompt: prompt.to_string(),
             system_prompt: None,
             max_tokens: Some(max_tokens),
-            event_tx: None,
+            event_tx,
             host_mode,
             skill_references: None,
             build: Some(build),
         })
         .await
         .map_err(session_err_to_anyhow)?;
+    log_stage("service.create_session(done)");
 
     // Shutdown the session service and MCP connections gracefully
+    log_stage("service.shutdown");
     service.shutdown().await;
+    log_stage("shutdown_mcp");
     shutdown_mcp(&mcp_adapter).await;
+    log_stage("persist_mob_registry");
+    run_mob_tools.persist(scope).await?;
+    if let Some(task) = event_task {
+        let _ = task.await;
+    }
 
     // Output the result
+    log_stage("print_result");
     println!("{}", result.text);
     eprintln!(
         "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
@@ -2163,6 +2319,7 @@ async fn resume_session_with_llm_override(
         result.usage.input_tokens,
         result.usage.output_tokens
     );
+    log_stage("done");
 
     Ok(())
 }
@@ -2199,7 +2356,8 @@ async fn build_cli_persistent_service(
 
 type CliPersistentService = meerkat::PersistentSessionService<FactoryAgentBuilder>;
 
-fn mob_persistent_service_cache() -> &'static Mutex<std::collections::HashMap<String, Weak<CliPersistentService>>> {
+fn mob_persistent_service_cache()
+-> &'static Mutex<std::collections::HashMap<String, Weak<CliPersistentService>>> {
     static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Weak<CliPersistentService>>>> =
         OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
@@ -2241,9 +2399,8 @@ async fn get_or_create_mob_persistent_service(
 
 /// Mob-facing session service wrapper for CLI orchestration.
 ///
-/// Mob actor session creation uses host-mode build configs by default.
-/// For CLI command-driven orchestration we force non-host-mode turn execution
-/// so spawn/turn commands complete synchronously and do not block indefinitely.
+/// Mob actor host-mode behavior is defined by runtime/backend decisions.
+/// This wrapper forwards requests without rewriting host-mode flags.
 struct MobCliSessionService {
     inner: Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>,
 }
@@ -2258,18 +2415,16 @@ impl MobCliSessionService {
 impl SessionService for MobCliSessionService {
     async fn create_session(
         &self,
-        mut req: CreateSessionRequest,
+        req: CreateSessionRequest,
     ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
-        req.host_mode = false;
         self.inner.create_session(req).await
     }
 
     async fn start_turn(
         &self,
         id: &SessionId,
-        mut req: meerkat_core::service::StartTurnRequest,
+        req: meerkat_core::service::StartTurnRequest,
     ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
-        req.host_mode = false;
         self.inner.start_turn(id, req).await
     }
 
@@ -2289,6 +2444,8 @@ impl SessionService for MobCliSessionService {
         query: SessionQuery,
     ) -> Result<Vec<meerkat_core::service::SessionSummary>, meerkat_core::service::SessionError>
     {
+        // Mob reconciliation requires live comms runtimes in-process; persisted
+        // snapshots alone are not wire-ready.
         let mut summaries = self.inner.list(SessionQuery::default()).await?;
         summaries.retain(|summary| summary.is_active);
 
@@ -2732,60 +2889,67 @@ async fn acquire_mob_registry_lock(scope: &RuntimeScope) -> anyhow::Result<MobRe
     let lock_path = path.clone();
     let lock_file = tokio::time::timeout(
         Duration::from_secs(30),
-        tokio::task::spawn_blocking(move || -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
-            use std::io::{Seek, SeekFrom, Write};
+        tokio::task::spawn_blocking(
+            move || -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
+                use std::io::{Seek, SeekFrom, Write};
 
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&lock_path)
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to open mob registry lock '{}': {e}",
-                        lock_path.display()
-                    )
-                })?;
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&lock_path)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to open mob registry lock '{}': {e}",
+                            lock_path.display()
+                        )
+                    })?;
 
-            let mut file = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
-                .map_err(|(_file, e)| {
+                let mut file = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
+                    .map_err(|(_file, e)| {
                     anyhow::anyhow!(
                         "failed to acquire mob registry lock '{}': {e}",
                         lock_path.display()
                     )
                 })?;
 
-            file.set_len(0).map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to reset mob registry lock '{}': {e}",
-                    lock_path.display()
-                )
-            })?;
-            file.seek(SeekFrom::Start(0)).map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to seek mob registry lock '{}': {e}",
-                    lock_path.display()
-                )
-            })?;
-            writeln!(file, "{}", std::process::id()).map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to write mob registry lock owner '{}': {e}",
-                    lock_path.display()
-                )
-            })?;
-            file.flush().map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to flush mob registry lock '{}': {e}",
-                    lock_path.display()
-                )
-            })?;
+                file.set_len(0).map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to reset mob registry lock '{}': {e}",
+                        lock_path.display()
+                    )
+                })?;
+                file.seek(SeekFrom::Start(0)).map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to seek mob registry lock '{}': {e}",
+                        lock_path.display()
+                    )
+                })?;
+                writeln!(file, "{}", std::process::id()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to write mob registry lock owner '{}': {e}",
+                        lock_path.display()
+                    )
+                })?;
+                file.flush().map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to flush mob registry lock '{}': {e}",
+                        lock_path.display()
+                    )
+                })?;
 
-            Ok(file)
-        }),
+                Ok(file)
+            },
+        ),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for mob registry lock '{}'", path.display()))?
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "timed out waiting for mob registry lock '{}'",
+            path.display()
+        )
+    })?
     .map_err(|e| anyhow::anyhow!("mob registry lock task failed: {e}"))??;
 
     Ok(MobRegistryLock { _lock: lock_file })
@@ -2890,9 +3054,7 @@ async fn hydrate_mob_state(
                 .append(meerkat_mob::NewMobEvent {
                     mob_id: definition.id.clone(),
                     timestamp: None,
-                    kind: meerkat_mob::MobEventKind::MobCreated {
-                        definition,
-                    },
+                    kind: meerkat_mob::MobEventKind::MobCreated { definition },
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -2914,6 +3076,7 @@ async fn hydrate_mob_state(
             events: storage.events.clone(),
         })
         .with_session_service(session_service.clone())
+        .notify_orchestrator_on_resume(false)
         .resume()
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -3028,6 +3191,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     &meerkat_mob::MobId::from(mob_id.clone()),
                     ProfileName::from(profile.clone()),
                     meerkat_mob::MeerkatId::from(meerkat_id.clone()),
+                    None,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -3218,12 +3382,21 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+    use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
+    use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerSpec};
     use meerkat_core::error::ToolError;
+    use meerkat_core::interaction::InteractionId;
+    use meerkat_core::service::{
+        SessionError, SessionInfo, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    };
+    use meerkat_core::types::{RunResult, Usage};
     use meerkat_core::{ToolCallView, ToolDef, ToolResult};
-    use std::pin::Pin;
+    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use tokio::sync::RwLock;
 
     fn hooks_override_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/hooks/run_override.json")
@@ -3377,6 +3550,189 @@ mod tests {
         }
     }
 
+    struct TestCommsRuntime {
+        key: String,
+        trusted: RwLock<HashSet<String>>,
+        notify: Arc<tokio::sync::Notify>,
+    }
+
+    impl TestCommsRuntime {
+        fn new(name: &str) -> Self {
+            Self {
+                key: format!("ed25519:{name}"),
+                trusted: RwLock::new(HashSet::new()),
+                notify: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CoreCommsRuntime for TestCommsRuntime {
+        fn public_key(&self) -> Option<String> {
+            Some(self.key.clone())
+        }
+
+        async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
+            self.trusted.write().await.insert(peer.peer_id);
+            Ok(())
+        }
+
+        async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
+            Ok(self.trusted.write().await.remove(peer_id))
+        }
+
+        async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
+            let interaction_id: InteractionId = serde_json::from_str(
+                "\"00000000-0000-0000-0000-000000000000\"",
+            )
+            .expect("interaction id literal should parse");
+            Ok(SendReceipt::InputAccepted {
+                interaction_id,
+                stream_reserved: false,
+            })
+        }
+
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
+            self.notify.clone()
+        }
+    }
+
+    struct TestMobSessionService {
+        sessions: RwLock<HashMap<SessionId, Arc<TestCommsRuntime>>>,
+        counter: std::sync::atomic::AtomicU64,
+    }
+
+    impl TestMobSessionService {
+        fn new() -> Self {
+            Self {
+                sessions: RwLock::new(HashMap::new()),
+                counter: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SessionService for TestMobSessionService {
+        async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+            let sid = SessionId::new();
+            let n = self
+                .counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let name = req
+                .build
+                .and_then(|b| b.comms_name)
+                .unwrap_or_else(|| format!("test-session-{n}"));
+            self.sessions
+                .write()
+                .await
+                .insert(sid.clone(), Arc::new(TestCommsRuntime::new(&name)));
+            Ok(RunResult {
+                text: "ok".to_string(),
+                session_id: sid,
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+            })
+        }
+
+        async fn start_turn(
+            &self,
+            id: &SessionId,
+            _req: StartTurnRequest,
+        ) -> Result<RunResult, SessionError> {
+            if !self.sessions.read().await.contains_key(id) {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            Ok(RunResult {
+                text: "ok".to_string(),
+                session_id: id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+            })
+        }
+
+        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+            if !self.sessions.read().await.contains_key(id) {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            Ok(SessionView {
+                state: SessionInfo {
+                    session_id: id.clone(),
+                    created_at: std::time::SystemTime::now(),
+                    updated_at: std::time::SystemTime::now(),
+                    message_count: 0,
+                    is_active: false,
+                    last_assistant_text: None,
+                },
+                billing: SessionUsage {
+                    total_tokens: 0,
+                    usage: Usage::default(),
+                },
+            })
+        }
+
+        async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+            Ok(self
+                .sessions
+                .read()
+                .await
+                .keys()
+                .map(|id| SessionSummary {
+                    session_id: id.clone(),
+                    created_at: std::time::SystemTime::now(),
+                    updated_at: std::time::SystemTime::now(),
+                    message_count: 0,
+                    total_tokens: 0,
+                    is_active: false,
+                })
+                .collect())
+        }
+
+        async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+            self.sessions.write().await.remove(id);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl meerkat_mob::MobSessionService for TestMobSessionService {
+        async fn comms_runtime(
+            &self,
+            session_id: &SessionId,
+        ) -> Option<Arc<dyn CoreCommsRuntime>> {
+            self.sessions
+                .read()
+                .await
+                .get(session_id)
+                .map(|session| session.clone() as Arc<dyn CoreCommsRuntime>)
+        }
+
+        fn supports_persistent_sessions(&self) -> bool {
+            true
+        }
+
+        async fn session_belongs_to_mob(
+            &self,
+            _session_id: &SessionId,
+            _mob_id: &meerkat_mob::MobId,
+        ) -> bool {
+            true
+        }
+    }
+
     #[cfg(not(feature = "comms"))]
     #[test]
     fn test_resolve_host_mode_rejects_when_comms_disabled() {
@@ -3462,22 +3818,25 @@ mod tests {
             .subagents(true);
         let service = Arc::new(build_cli_service(factory, Config::default()));
 
-        let external_tools =
-            compose_external_tool_dispatchers(None, Some(create_run_mob_external_tools(service.clone())))
-                .expect("external tool composition should succeed")
-                .expect("mob tools should be present");
+        let external_tools = compose_external_tool_dispatchers(
+            None,
+            Some(create_run_mob_external_tools(service.clone())),
+        )
+        .expect("external tool composition should succeed")
+        .expect("mob tools should be present");
 
         let captured_tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_system_prompt = Arc::new(Mutex::new(None::<String>));
-        let llm_override: Arc<dyn LlmClient> =
-            Arc::new(CapturingLlmClient::new(
-                captured_tool_names.clone(),
-                captured_system_prompt.clone(),
-            ));
+        let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
+            captured_tool_names.clone(),
+            captured_system_prompt.clone(),
+        ));
 
         let build = SessionBuildOptions {
             external_tools: Some(external_tools),
-            llm_client_override: Some(meerkat::encode_llm_client_override_for_service(llm_override)),
+            llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                llm_override,
+            )),
             ..SessionBuildOptions::default()
         };
 
@@ -3517,11 +3876,148 @@ mod tests {
         assert!(system_prompt.contains("mob_create"));
     }
 
+    async fn call_tool_json(
+        dispatcher: &Arc<dyn AgentToolDispatcher>,
+        tool_use_id: &str,
+        name: &str,
+        args: serde_json::Value,
+    ) -> serde_json::Value {
+        let raw =
+            serde_json::value::RawValue::from_string(args.to_string()).expect("valid raw args");
+        let out = dispatcher
+            .dispatch(ToolCallView {
+                id: tool_use_id,
+                name,
+                args: &raw,
+            })
+            .await
+            .expect("tool dispatch should succeed");
+        assert!(!out.is_error, "tool returned error: {}", out.content);
+        serde_json::from_str(&out.content).expect("tool content should be valid json")
+    }
+
+    #[tokio::test]
+    async fn test_run_mob_tools_persist_across_context_rebuild() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+
+        let mob_service_a: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(TestMobSessionService::new());
+        let mut ctx_a = prepare_run_mob_tools(&scope, mob_service_a)
+            .await
+            .expect("first mob tools context should initialize");
+        let dispatcher_a = ctx_a.dispatcher();
+
+        let created = call_tool_json(
+            &dispatcher_a,
+            "t-create",
+            "mob_create",
+            serde_json::json!({"prefab":"pipeline"}),
+        )
+        .await;
+        let mob_id = created["mob_id"]
+            .as_str()
+            .expect("mob_create should return mob_id")
+            .to_string();
+        call_tool_json(
+            &dispatcher_a,
+            "t-spawn-a",
+            "mob_spawn",
+            serde_json::json!({
+                "mob_id": mob_id,
+                "profile": "lead",
+                "meerkat_id": "lead-1"
+            }),
+        )
+        .await;
+        ctx_a.persist(&scope)
+            .await
+            .expect("first context should persist mob registry");
+        drop(dispatcher_a);
+        drop(ctx_a);
+
+        // Simulate a fresh CLI process by rebuilding session service + tools context.
+        let mob_service_b: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(TestMobSessionService::new());
+        let mut ctx_b = prepare_run_mob_tools(&scope, mob_service_b)
+            .await
+            .expect("second mob tools context should initialize");
+        let dispatcher_b = ctx_b.dispatcher();
+
+        let status = call_tool_json(
+            &dispatcher_b,
+            "t-status",
+            "mob_status",
+            serde_json::json!({"mob_id": mob_id}),
+        )
+        .await;
+        assert_eq!(status["status"].as_str(), Some("Running"));
+        call_tool_json(
+            &dispatcher_b,
+            "t-spawn-b",
+            "mob_spawn",
+            serde_json::json!({
+                "mob_id": created["mob_id"].as_str().expect("mob id"),
+                "profile": "worker",
+                "meerkat_id": "worker-1"
+            }),
+        )
+        .await;
+        ctx_b.persist(&scope)
+            .await
+            .expect("second context should persist registry updates");
+    }
+
+    #[tokio::test]
+    async fn test_run_mob_tools_persist_destroy_removes_registry_entry() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+
+        let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(TestMobSessionService::new());
+        let mut ctx = prepare_run_mob_tools(&scope, mob_service)
+            .await
+            .expect("mob tools context should initialize");
+        let dispatcher = ctx.dispatcher();
+
+        let created = call_tool_json(
+            &dispatcher,
+            "t-create",
+            "mob_create",
+            serde_json::json!({"prefab":"pipeline"}),
+        )
+        .await;
+        let mob_id = created["mob_id"]
+            .as_str()
+            .expect("mob_create should return mob_id")
+            .to_string();
+        call_tool_json(
+            &dispatcher,
+            "t-destroy",
+            "mob_destroy",
+            serde_json::json!({"mob_id": mob_id}),
+        )
+        .await;
+        ctx.persist(&scope)
+            .await
+            .expect("context should persist registry updates");
+
+        let registry = load_mob_registry(&scope).await.expect("registry should load");
+        assert!(
+            registry.mobs.is_empty(),
+            "destroyed mob should be removed from persisted registry"
+        );
+    }
+
     #[tokio::test]
     async fn test_resume_session_wires_mob_tools_into_llm_request() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let (_manifest, store) = create_session_store(&scope)
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        #[cfg(feature = "jsonl-store")]
+        {
+            scope.backend_hint = Some(RealmBackend::Jsonl);
+        }
+        let (manifest, store) = create_session_store(&scope)
             .await
             .expect("session store should initialize");
 
@@ -3553,6 +4049,7 @@ mod tests {
             .await
             .expect("seed session should save");
         drop(store);
+        drop(manifest);
 
         let captured_tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_system_prompt = Arc::new(Mutex::new(None::<String>));
@@ -3567,6 +4064,7 @@ mod tests {
             HookRunOverrides::default(),
             &scope,
             Some(llm_override),
+            false,
         )
         .await
         .expect("resume should succeed with llm override");
@@ -3758,8 +4256,8 @@ mod tests {
     #[cfg(feature = "comms")]
     #[test]
     fn test_comms_tool_dispatcher_provides_comms_tools() {
-        use meerkat_comms::agent::CommsToolDispatcher;
         use meerkat_comms::Inbox;
+        use meerkat_comms::agent::CommsToolDispatcher;
         use meerkat_comms::{CommsConfig, Keypair, TrustedPeers};
         use meerkat_core::AgentToolDispatcher;
         use tokio::sync::RwLock;

@@ -9,13 +9,14 @@ use meerkat_core::service::{
 };
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobError, MobHandle, MobId, MobSessionService, MobState,
-    MobStorage, Prefab, ProfileName,
+    MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
+    MobSessionService, MobState, MobStorage, Prefab, ProfileName,
 };
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
@@ -113,12 +114,12 @@ impl MobMcpState {
         mob_id: &MobId,
         profile: ProfileName,
         meerkat_id: MeerkatId,
-    ) -> Result<(), MobError> {
+        backend: Option<MobBackendKind>,
+    ) -> Result<meerkat_mob::MemberRef, MobError> {
         self.handle_for(mob_id)
             .await?
-            .spawn(profile, meerkat_id, None)
+            .spawn_member_ref_with_backend(profile, meerkat_id, None, backend)
             .await
-            .map(|_| ())
     }
 
     pub async fn mob_retire(&self, mob_id: &MobId, meerkat_id: MeerkatId) -> Result<(), MobError> {
@@ -380,31 +381,94 @@ pub struct MobMcpDispatcher {
 
 impl MobMcpDispatcher {
     pub fn new(state: Arc<MobMcpState>) -> Self {
+        const PRIMER: &str = "A mob is a managed multi-agent team with shared lifecycle/events: \
+            create -> spawn members -> wire/unwire trust -> stop/resume -> complete/destroy.";
+        const COMMON: &str = "Use real mob tools (no simulation). Keep and reuse the returned \
+            mob_id from mob_create. All mob_* tools except mob_create and mob_list require mob_id.";
         let tools = vec![
-            tool("mob_create", json!({"type":"object","properties":{"prefab":{"type":"string"},"definition":{"type":"object"}}})),
-            tool("mob_stop", json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]})),
-            tool("mob_resume", json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]})),
-            tool("mob_destroy", json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]})),
-            tool("mob_complete", json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]})),
-            tool("mob_list", json!({"type":"object","properties":{}})),
-            tool("mob_status", json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]})),
-            tool("mob_spawn", json!({"type":"object","properties":{"mob_id":{"type":"string"},"profile":{"type":"string"},"meerkat_id":{"type":"string"}},"required":["mob_id","profile","meerkat_id"]})),
-            tool("mob_retire", json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"}},"required":["mob_id","meerkat_id"]})),
-            tool("mob_wire", json!({"type":"object","properties":{"mob_id":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"}},"required":["mob_id","a","b"]})),
-            tool("mob_unwire", json!({"type":"object","properties":{"mob_id":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"}},"required":["mob_id","a","b"]})),
-            tool("mob_list_meerkats", json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]})),
-            tool("mob_external_turn", json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"message":{"type":"string"}},"required":["mob_id","meerkat_id","message"]})),
-            tool("mob_events", json!({"type":"object","properties":{"mob_id":{"type":"string"},"after_cursor":{"type":"integer"},"limit":{"type":"integer"}},"required":["mob_id"]})),
+            tool(
+                "mob_create",
+                &format!(
+                    "{PRIMER} Create a new mob. Provide exactly one of: prefab or definition. \
+                     Returns mob_id."
+                ),
+                json!({"type":"object","properties":{"prefab":{"type":"string"},"definition":{"type":"object"}}}),
+            ),
+            tool(
+                "mob_stop",
+                &format!("Stop a mob (state -> Stopped). {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
+            ),
+            tool(
+                "mob_resume",
+                &format!("Resume a stopped mob (state -> Active). {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
+            ),
+            tool(
+                "mob_destroy",
+                &format!("Destroy a mob and remove it from registry/state. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
+            ),
+            tool(
+                "mob_complete",
+                &format!("Mark a mob as completed. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
+            ),
+            tool(
+                "mob_list",
+                "List current mobs and statuses.",
+                json!({"type":"object","properties":{}}),
+            ),
+            tool(
+                "mob_status",
+                &format!("Get status for a specific mob. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
+            ),
+            tool(
+                "mob_spawn",
+                &format!("Spawn a meerkat in a mob profile. Required: mob_id, profile, meerkat_id. Optional backend=subagent|external. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"profile":{"type":"string"},"meerkat_id":{"type":"string"},"backend":{"type":"string","enum":["subagent","external"]}},"required":["mob_id","profile","meerkat_id"]}),
+            ),
+            tool(
+                "mob_retire",
+                &format!("Retire a spawned meerkat by ID. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
+            ),
+            tool(
+                "mob_wire",
+                &format!("Create bidirectional trust between two meerkats (a, b). {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"}},"required":["mob_id","a","b"]}),
+            ),
+            tool(
+                "mob_unwire",
+                &format!("Remove bidirectional trust between two meerkats (a, b). {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"}},"required":["mob_id","a","b"]}),
+            ),
+            tool(
+                "mob_list_meerkats",
+                &format!("List current meerkats in a mob. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
+            ),
+            tool(
+                "mob_external_turn",
+                &format!("Send an external message to a spawned meerkat. Required: mob_id, meerkat_id, message. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"message":{"type":"string"}},"required":["mob_id","meerkat_id","message"]}),
+            ),
+            tool(
+                "mob_events",
+                &format!("Fetch mob lifecycle events. Optional: after_cursor, limit. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"after_cursor":{"type":"integer"},"limit":{"type":"integer"}},"required":["mob_id"]}),
+            ),
         ]
         .into();
         Self { state, tools }
     }
 }
 
-fn tool(name: &str, input_schema: serde_json::Value) -> Arc<ToolDef> {
+fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<ToolDef> {
     Arc::new(ToolDef {
         name: name.to_string(),
-        description: format!("mob tool {name}"),
+        description: description.to_string(),
         input_schema,
     })
 }
@@ -437,6 +501,8 @@ struct SpawnArgs {
     mob_id: String,
     profile: String,
     meerkat_id: String,
+    #[serde(default)]
+    backend: Option<MobBackendKind>,
 }
 #[derive(Deserialize)]
 struct RetireArgs {
@@ -474,7 +540,14 @@ impl AgentToolDispatcher for MobMcpDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
-        match call.name {
+        let started = Instant::now();
+        tracing::info!(
+            target: "mob_tools",
+            "MobMcpDispatcher::dispatch start tool={} tool_use_id={}",
+            call.name,
+            call.id
+        );
+        let result = match call.name {
             "mob_create" => {
                 let args: MobCreateArgs = call
                     .parse_args()
@@ -561,15 +634,20 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: SpawnArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state
+                let member_ref = self
+                    .state
                     .mob_spawn(
                         &MobId::from(args.mob_id),
                         ProfileName::from(args.profile),
                         MeerkatId::from(args.meerkat_id),
+                        args.backend,
                     )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
-                encode(call, json!({"ok": true}))
+                encode(
+                    call,
+                    json!({"ok": true, "member_ref": member_ref, "session_id": member_ref.session_id()}),
+                )
             }
             "mob_retire" => {
                 let args: RetireArgs = call
@@ -646,7 +724,23 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 encode(call, json!({"events": events}))
             }
             _ => Err(ToolError::not_found(call.name)),
+        };
+        match &result {
+            Ok(_) => tracing::info!(
+                target: "mob_tools",
+                "MobMcpDispatcher::dispatch ok tool={} elapsed_ms={}",
+                call.name,
+                started.elapsed().as_millis()
+            ),
+            Err(err) => tracing::warn!(
+                target: "mob_tools",
+                "MobMcpDispatcher::dispatch err tool={} elapsed_ms={} err={}",
+                call.name,
+                started.elapsed().as_millis(),
+                err
+            ),
         }
+        result
     }
 }
 
@@ -1080,5 +1174,57 @@ mod tests {
         .await;
         let status = call_tool(&d, "mob_status", json!({"mob_id": mob_id})).await;
         assert_eq!(status["status"], "Running");
+    }
+
+    #[tokio::test]
+    async fn test_mob_spawn_backend_arg_returns_backend_member_ref() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let created = call_tool(
+            &d,
+            "mob_create",
+            json!({
+                "definition": {
+                    "id": "ext-mob",
+                    "orchestrator": {"profile": "lead"},
+                    "profiles": {
+                        "lead": {
+                            "model": "claude-opus-4-6",
+                            "tools": {"comms": true},
+                            "external_addressable": true
+                        },
+                        "worker": {
+                            "model": "claude-sonnet-4-5",
+                            "tools": {"comms": true},
+                            "external_addressable": false
+                        }
+                    },
+                    "mcp_servers": {},
+                    "wiring": {"auto_wire_orchestrator": false, "role_wiring": []},
+                    "skills": {},
+                    "backend": {
+                        "default": "subagent",
+                        "external": {"address_base": "https://backend.example.invalid/mesh"}
+                    }
+                }
+            }),
+        )
+        .await;
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+
+        let spawned = call_tool(
+            &d,
+            "mob_spawn",
+            json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "meerkat_id": "w-ext",
+                "backend": "external"
+            }),
+        )
+        .await;
+        assert_eq!(spawned["member_ref"]["kind"], "backend_peer");
     }
 }

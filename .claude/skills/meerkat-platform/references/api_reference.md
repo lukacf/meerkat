@@ -11,7 +11,14 @@ Use explicit realm to control sharing/isolation.
 Surface defaults when no realm is provided:
 
 - CLI `run/resume/sessions`: workspace-derived `ws-...` realm.
+- CLI `mob ...`: workspace-derived `ws-...` realm.
 - RPC/REST/MCP/SDK: new opaque `realm-...` realm.
+
+Mob contract notes:
+
+- CLI `run`/`resume` include CLI-local `mob_*` tools.
+- CLI `mob ...` commands provide explicit mob lifecycle operations.
+- RPC/REST/MCP/SDK surfaces do not auto-inject `mob_*` tools (roadmap/in-progress for parity).
 
 ---
 
@@ -33,6 +40,7 @@ rkat resume <SESSION-ID> <PROMPT>
 rkat sessions list [--limit N]
 rkat sessions show <ID>
 rkat sessions delete <ID>
+rkat mob prefabs|create|list|status|spawn|retire|wire|unwire|turn|stop|resume|complete|destroy
 rkat config get|set|patch ...
 rkat-rpc
 ```

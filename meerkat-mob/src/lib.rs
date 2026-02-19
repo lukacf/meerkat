@@ -17,6 +17,7 @@
 //! - [`MobEventStore`] - Persistence trait for mob events
 //! - [`MobStorage`] - Storage bundle for a mob
 
+pub mod backend;
 pub mod build;
 pub mod definition;
 pub mod error;
@@ -32,9 +33,13 @@ pub mod tasks;
 pub mod validate;
 
 // Re-exports for convenience
+pub use backend::MobBackendKind;
 pub use definition::MobDefinition;
 pub use error::MobError;
-pub use event::{MobEvent, MobEventKind, NewMobEvent};
+pub use event::{
+    MemberRef, MobEvent, MobEventCompat, MobEventCompatError, MobEventKind, MobEventKindCompat,
+    NewMobEvent,
+};
 pub use ids::{MeerkatId, MobId, ProfileName};
 pub use prefab::Prefab;
 pub use profile::{Profile, ToolConfig};

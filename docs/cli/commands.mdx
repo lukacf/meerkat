@@ -20,6 +20,7 @@ rkat [--realm <id>] [--instance <id>] [--realm-backend <redb|jsonl>] <command> .
 | `sessions list/show/delete` | Inspect or remove sessions in active realm |
 | `config get/set/patch` | Read or mutate realm config |
 | `mcp ...` | Manage MCP server config |
+| `mob ...` | Manage mob lifecycle directly from CLI |
 | `capabilities` | Show resolved runtime capabilities |
 
 ## Realm behavior by command
@@ -59,6 +60,11 @@ Frequently used options:
 - `--hooks-override-json <JSON>`
 - `--hooks-override-file <FILE>`
 
+`run` always composes a CLI-local mob tool surface into the agent tool list (`mob_create`, `mob_list`, `mob_status`, `mob_spawn`, `mob_retire`, `mob_wire`, `mob_unwire`, `mob_external_turn`, `mob_events`, `mob_list_meerkats`, `mob_stop`, `mob_resume`, `mob_complete`, `mob_destroy`).
+These are available even when built-ins are disabled.
+
+If external MCP servers define a tool with the same name, the CLI-local mob tool wins.
+
 Comms options:
 
 - `--comms-name <NAME>`
@@ -74,6 +80,29 @@ rkat resume <SESSION_ID> <PROMPT>
 ```
 
 Resumes a session from the active realm.
+
+Like `run`, `resume` composes the CLI-local `mob_*` tool surface.
+
+## mob
+
+```bash
+rkat mob prefabs
+rkat mob create --prefab <NAME>
+rkat mob create --definition <FILE.toml>
+rkat mob list
+rkat mob status <MOB_ID>
+rkat mob spawn <MOB_ID> <PROFILE> <MEERKAT_ID>
+rkat mob retire <MOB_ID> <MEERKAT_ID>
+rkat mob wire <MOB_ID> <A> <B>
+rkat mob unwire <MOB_ID> <A> <B>
+rkat mob turn <MOB_ID> <MEERKAT_ID> <MESSAGE>
+rkat mob stop <MOB_ID>
+rkat mob resume <MOB_ID>
+rkat mob complete <MOB_ID>
+rkat mob destroy <MOB_ID>
+```
+
+CLI `mob` commands are the explicit lifecycle surface for persisted mob state in the local registry.
 
 ## sessions
 
@@ -135,3 +164,4 @@ Shows status per capability (`Available`, `DisabledByPolicy`, `NotCompiled`, `No
 - [Realms](/concepts/realms)
 - [CLI configuration](/cli/configuration)
 - [JSON-RPC](/api/rpc)
+- [Tools](/concepts/tools)

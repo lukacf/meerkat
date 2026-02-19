@@ -18,8 +18,9 @@ use std::sync::Arc;
 /// This is the first step in the construction chain:
 ///   Profile -> `build_agent_config()` -> `to_create_session_request()` -> `SessionService::create_session()`
 ///
-/// All meerkats are created with `host_mode=true` so they stay alive
-/// for comms after the initial prompt completes.
+/// Mob-managed sessions are created with `host_mode=false` so spawn returns
+/// promptly from nested tool dispatch paths. Lifecycles are managed explicitly
+/// by mob runtime commands (`start_turn`, `retire`, etc.).
 pub async fn build_agent_config(
     mob_id: &MobId,
     profile_name: &ProfileName,
@@ -51,7 +52,7 @@ pub async fn build_agent_config(
     let system_prompt = assemble_system_prompt(profile, definition).await?;
 
     let mut config = AgentBuildConfig::new(profile.model.clone());
-    config.host_mode = true;
+    config.host_mode = false;
     config.comms_name = Some(comms_name);
     config.peer_meta = Some(peer_meta);
     config.realm_id = Some(realm_id);
@@ -145,7 +146,7 @@ or removed (mob.peer_retired).
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::definition::{MobDefinition, OrchestratorConfig, WiringRules};
+    use crate::definition::{BackendConfig, MobDefinition, OrchestratorConfig, WiringRules};
     use crate::profile::ToolConfig;
     use std::collections::BTreeMap;
     use std::fs;
@@ -169,6 +170,7 @@ mod tests {
                 },
                 peer_description: "Orchestrates the mob".into(),
                 external_addressable: true,
+                backend: None,
             },
         );
         profiles.insert(
@@ -188,6 +190,7 @@ mod tests {
                 },
                 peer_description: "Does work".into(),
                 external_addressable: false,
+                backend: None,
             },
         );
 
@@ -208,11 +211,12 @@ mod tests {
             mcp_servers: BTreeMap::new(),
             wiring: WiringRules::default(),
             skills,
+            backend: BackendConfig::default(),
         }
     }
 
     #[tokio::test]
-    async fn test_build_agent_config_host_mode() {
+    async fn test_build_agent_config_non_host_mode() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("lead")];
         let config = build_agent_config(
@@ -226,7 +230,7 @@ mod tests {
         .await
         .expect("build_agent_config");
 
-        assert!(config.host_mode, "host_mode must be true");
+        assert!(!config.host_mode, "host_mode must be false for mob spawn");
     }
 
     #[tokio::test]
@@ -428,7 +432,7 @@ mod tests {
 
         let req = to_create_session_request(&config, "Hello mob".into());
         assert_eq!(req.model, "claude-opus-4-6");
-        assert!(req.host_mode, "host_mode must carry through");
+        assert!(!req.host_mode, "host_mode must carry through as false");
         assert_eq!(req.prompt, "Hello mob");
         assert!(req.system_prompt.is_some());
 
@@ -458,7 +462,7 @@ mod tests {
 
         let req = to_create_session_request(&config, "Start working".into());
         assert_eq!(req.model, "claude-sonnet-4-5");
-        assert!(req.host_mode);
+        assert!(!req.host_mode);
         let build = req.build.expect("build options");
         assert_eq!(build.override_shell, Some(false));
     }

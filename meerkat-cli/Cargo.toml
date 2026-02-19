@@ -36,6 +36,11 @@ name = "e2e_smoke"
 path = "tests/e2e_smoke.rs"
 required-features = ["integration-real-tests"]
 
+[[test]]
+name = "e2e_mob_smoke_matrix"
+path = "tests/e2e_mob_smoke_matrix.rs"
+required-features = ["integration-real-tests"]
+
 [dependencies]
 meerkat = { workspace = true }
 meerkat-core = { workspace = true }

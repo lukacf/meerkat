@@ -5,15 +5,15 @@ mod mcp;
 mod stdin_events;
 
 use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
-use meerkat_contracts::{SessionLocator, SessionLocatorError, format_session_ref};
-use meerkat_core::AgentToolDispatcher;
-#[cfg(feature = "comms")]
-use meerkat_core::CommsRuntimeMode;
+use meerkat_contracts::{format_session_ref, SessionLocator, SessionLocatorError};
 use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionQuery, SessionService,
 };
+use meerkat_core::AgentToolDispatcher;
+#[cfg(feature = "comms")]
+use meerkat_core::CommsRuntimeMode;
 use meerkat_core::{
-    AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, format_verbose_event,
+    format_verbose_event, AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat,
 };
 use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
 #[cfg(feature = "mcp")]
@@ -25,13 +25,14 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use meerkat_core::HookRunOverrides;
-use meerkat_core::SessionId;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::types::OutputSchema;
+use meerkat_core::HookRunOverrides;
+use meerkat_core::SessionId;
 use meerkat_store::{RealmBackend, RealmOrigin, SessionFilter};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -1571,13 +1572,141 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
     }
 }
 
+/// Mob-facing session service wrapper used by CLI `run`/`resume` tool calls.
+///
+/// Mob-managed meerkats are created through the same in-process session service as
+/// the parent CLI agent. We force non-host turns for compatibility with
+/// request/response tool calls.
+struct RunMobSessionService {
+    inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
+}
+
+impl RunMobSessionService {
+    fn new(inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionService for RunMobSessionService {
+    async fn create_session(
+        &self,
+        mut req: CreateSessionRequest,
+    ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
+        req.host_mode = false;
+        self.inner.create_session(req).await
+    }
+
+    async fn start_turn(
+        &self,
+        id: &SessionId,
+        mut req: meerkat_core::service::StartTurnRequest,
+    ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
+        req.host_mode = false;
+        self.inner.start_turn(id, req).await
+    }
+
+    async fn interrupt(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.interrupt(id).await
+    }
+
+    async fn read(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::service::SessionView, meerkat_core::service::SessionError> {
+        self.inner.read(id).await
+    }
+
+    async fn list(
+        &self,
+        query: SessionQuery,
+    ) -> Result<Vec<meerkat_core::service::SessionSummary>, meerkat_core::service::SessionError>
+    {
+        self.inner.list(query).await
+    }
+
+    async fn archive(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.archive(id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_mob::MobSessionService for RunMobSessionService {
+    async fn comms_runtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.inner.comms_runtime(session_id).await
+    }
+
+    fn supports_persistent_sessions(&self) -> bool {
+        // CLI run/resume keeps sessions in-memory, but this path still satisfies
+        // the mob runtime contract for a single process execution.
+        true
+    }
+
+    async fn session_belongs_to_mob(
+        &self,
+        _session_id: &SessionId,
+        _mob_id: &meerkat_mob::MobId,
+    ) -> bool {
+        false
+    }
+}
+
+fn create_run_mob_external_tools(
+    session_service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
+) -> Arc<dyn AgentToolDispatcher> {
+    let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+        Arc::new(RunMobSessionService::new(session_service));
+    let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_service));
+    Arc::new(meerkat_mob_mcp::MobMcpDispatcher::new(state))
+}
+
+fn compose_external_tool_dispatchers(
+    primary: Option<Arc<dyn AgentToolDispatcher>>,
+    secondary: Option<Arc<dyn AgentToolDispatcher>>,
+) -> anyhow::Result<Option<Arc<dyn AgentToolDispatcher>>> {
+    match (primary, secondary) {
+        (None, None) => Ok(None),
+        (Some(dispatcher), None) | (None, Some(dispatcher)) => Ok(Some(dispatcher)),
+        (Some(a), Some(b)) => {
+            let primary_names: HashSet<String> = a.tools().iter().map(|t| t.name.clone()).collect();
+            let secondary_tools = b.tools();
+            let secondary_unique: Vec<String> = secondary_tools
+                .iter()
+                .map(|t| t.name.clone())
+                .filter(|name| !primary_names.contains(name))
+                .collect();
+
+            if secondary_unique.is_empty() {
+                return Ok(Some(a));
+            }
+
+            let secondary: Arc<dyn AgentToolDispatcher> =
+                if secondary_unique.len() == secondary_tools.len() {
+                    b
+                } else {
+                    Arc::new(meerkat_core::FilteredToolDispatcher::new(b, secondary_unique))
+                };
+
+            let gateway = meerkat_core::ToolGatewayBuilder::new()
+                .add_dispatcher(a)
+                .add_dispatcher(secondary)
+                .build()
+                .map_err(|e| anyhow::anyhow!("failed to compose external tools: {e}"))?;
+            Ok(Some(Arc::new(gateway)))
+        }
+    }
+}
+
 /// Build an `EphemeralSessionService` backed by the factory.
 fn build_cli_service(
     factory: AgentFactory,
     config: Config,
 ) -> EphemeralSessionService<FactoryAgentBuilder> {
     let builder = FactoryAgentBuilder::new(factory, config);
-    EphemeralSessionService::new(builder, 1)
+    EphemeralSessionService::new(builder, 64)
 }
 
 fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Error {
@@ -1631,8 +1760,8 @@ async fn run_agent(
         (None, None)
     };
 
-    // Load MCP tools as external tools for the factory
-    let (external_tools, mcp_adapter) = load_mcp_external_tools(scope).await;
+    // Load optional MCP tools; we compose these with CLI-local mob tools below.
+    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope).await;
 
     // Resolve comms_name for the factory
     let comms_name = if cfg!(feature = "comms") && !comms_overrides.disabled {
@@ -1667,6 +1796,32 @@ async fn run_agent(
     #[cfg(feature = "comms")]
     let factory = factory.comms(!comms_overrides.disabled);
 
+    tracing::info!("Using provider: {:?}, model: {}", provider, model);
+
+    // Apply --comms-listen-tcp override to the config
+    let mut config = config.clone();
+    #[cfg(feature = "comms")]
+    if let Some(ref addr) = comms_overrides.listen_tcp {
+        config.comms.mode = CommsRuntimeMode::Tcp;
+        config.comms.address = Some(addr.clone());
+    }
+
+    // Build the session service.
+    let service = build_cli_service(factory, config);
+
+    if host_mode {
+        eprintln!(
+            "Running in host mode{} (Ctrl+C to exit)...",
+            if verbose { " with verbose output" } else { "" }
+        );
+    }
+
+    // Wrap in Arc so we can share with the stdin reader task
+    let service = Arc::new(service);
+
+    let mob_external_tools = Some(create_run_mob_external_tools(service.clone()));
+    let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
+
     // Pre-create session to claim the session_id
     let session = Session::new();
 
@@ -1692,29 +1847,6 @@ async fn run_agent(
         backend: Some(manifest.backend.as_str().to_string()),
         config_generation: None,
     };
-
-    tracing::info!("Using provider: {:?}, model: {}", provider, model);
-
-    // Apply --comms-listen-tcp override to the config
-    let mut config = config.clone();
-    #[cfg(feature = "comms")]
-    if let Some(ref addr) = comms_overrides.listen_tcp {
-        config.comms.mode = CommsRuntimeMode::Tcp;
-        config.comms.address = Some(addr.clone());
-    }
-
-    // Build the session service.
-    let service = build_cli_service(factory, config);
-
-    if host_mode {
-        eprintln!(
-            "Running in host mode{} (Ctrl+C to exit)...",
-            if verbose { " with verbose output" } else { "" }
-        );
-    }
-
-    // Wrap in Arc so we can share with the stdin reader task
-    let service = Arc::new(service);
 
     // Route through SessionService::create_session()
     let create_req = CreateSessionRequest {
@@ -1867,6 +1999,16 @@ async fn resume_session(
     hooks_override: HookRunOverrides,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
+    resume_session_with_llm_override(session_id, prompt, hooks_override, scope, None).await
+}
+
+async fn resume_session_with_llm_override(
+    session_id: &str,
+    prompt: &str,
+    hooks_override: HookRunOverrides,
+    scope: &RuntimeScope,
+    llm_override: Option<Arc<dyn meerkat_client::LlmClient>>,
+) -> anyhow::Result<()> {
     // Parse session locator (<session_id> or <realm_id>:<session_id>).
     let session_id = resolve_scoped_session_id(session_id, scope)?;
 
@@ -1877,6 +2019,7 @@ async fn resume_session(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
+    drop(loader_service);
     let (manifest, store) = create_session_store(scope).await?;
     let stored_metadata = session.session_metadata();
     let tooling = stored_metadata
@@ -1924,8 +2067,8 @@ async fn resume_session(
         model
     );
 
-    // Load MCP tools as external tools for the factory
-    let (external_tools, mcp_adapter) = load_mcp_external_tools(scope).await;
+    // Load optional MCP tools; compose with CLI-local mob tools after service setup.
+    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope).await;
 
     // Build factory with flags restored from stored session metadata
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
@@ -1952,6 +2095,12 @@ async fn resume_session(
     #[cfg(feature = "comms")]
     let factory = factory.comms(tooling.comms || host_mode);
 
+    // Build the session service.
+    let service = Arc::new(build_cli_service(factory, config));
+
+    let mob_external_tools = Some(create_run_mob_external_tools(service.clone()));
+    let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
+
     let build = SessionBuildOptions {
         provider: Some(provider_core),
         output_schema: None,
@@ -1962,7 +2111,7 @@ async fn resume_session(
         budget_limits: None,
         provider_params: None,
         external_tools,
-        llm_client_override: None,
+        llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
         override_builtins: None,
         override_shell: None,
         override_subagents: None,
@@ -1983,9 +2132,6 @@ async fn resume_session(
             .or_else(|| Some(manifest.backend.as_str().to_string())),
         config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
     };
-
-    // Build the session service.
-    let service = build_cli_service(factory, config);
 
     // Route through SessionService::create_session() with the resumed session
     // staged in the build config. The service builds the agent (which picks up
@@ -2050,6 +2196,108 @@ async fn build_cli_persistent_service(
 
     let builder = FactoryAgentBuilder::new(factory, config);
     Ok(meerkat::PersistentSessionService::new(builder, 64, store))
+}
+
+/// Mob-facing session service wrapper for CLI orchestration.
+///
+/// Mob actor session creation uses host-mode build configs by default.
+/// For CLI command-driven orchestration we force non-host-mode turn execution
+/// so spawn/turn commands complete synchronously and do not block indefinitely.
+struct MobCliSessionService {
+    inner: meerkat::PersistentSessionService<FactoryAgentBuilder>,
+}
+
+impl MobCliSessionService {
+    fn new(inner: meerkat::PersistentSessionService<FactoryAgentBuilder>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionService for MobCliSessionService {
+    async fn create_session(
+        &self,
+        mut req: CreateSessionRequest,
+    ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
+        req.host_mode = false;
+        self.inner.create_session(req).await
+    }
+
+    async fn start_turn(
+        &self,
+        id: &SessionId,
+        mut req: meerkat_core::service::StartTurnRequest,
+    ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
+        req.host_mode = false;
+        self.inner.start_turn(id, req).await
+    }
+
+    async fn interrupt(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.interrupt(id).await
+    }
+
+    async fn read(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::service::SessionView, meerkat_core::service::SessionError> {
+        self.inner.read(id).await
+    }
+
+    async fn list(
+        &self,
+        query: SessionQuery,
+    ) -> Result<Vec<meerkat_core::service::SessionSummary>, meerkat_core::service::SessionError>
+    {
+        let mut summaries = self.inner.list(SessionQuery::default()).await?;
+        summaries.retain(|summary| summary.is_active);
+
+        if let Some(offset) = query.offset {
+            if offset < summaries.len() {
+                summaries = summaries.split_off(offset);
+            } else {
+                summaries.clear();
+            }
+        }
+        if let Some(limit) = query.limit {
+            summaries.truncate(limit);
+        }
+        Ok(summaries)
+    }
+
+    async fn archive(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.archive(id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_mob::MobSessionService for MobCliSessionService {
+    async fn comms_runtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::comms_runtime(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    fn supports_persistent_sessions(&self) -> bool {
+        true
+    }
+
+    async fn session_belongs_to_mob(
+        &self,
+        session_id: &SessionId,
+        mob_id: &meerkat_mob::MobId,
+    ) -> bool {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::session_belongs_to_mob(
+            &self.inner,
+            session_id,
+            mob_id,
+        )
+        .await
+    }
 }
 
 /// List sessions from the realm-scoped persistent backend.
@@ -2530,41 +2778,6 @@ async fn save_mob_registry(
         .map_err(|e| anyhow::anyhow!("failed to commit mob registry '{}': {e}", path.display()))
 }
 
-async fn replay_mob_event(
-    state: &meerkat_mob_mcp::MobMcpState,
-    mob_id: &meerkat_mob::MobId,
-    event: &meerkat_mob::MobEvent,
-) -> anyhow::Result<()> {
-    match &event.kind {
-        meerkat_mob::MobEventKind::MobCreated { .. } => {}
-        meerkat_mob::MobEventKind::MeerkatSpawned {
-            role, meerkat_id, ..
-        } => state
-            .mob_spawn(mob_id, role.clone(), meerkat_id.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        meerkat_mob::MobEventKind::MeerkatRetired { meerkat_id, .. } => state
-            .mob_retire(mob_id, meerkat_id.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        meerkat_mob::MobEventKind::PeersWired { a, b } => state
-            .mob_wire(mob_id, a.clone(), b.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        meerkat_mob::MobEventKind::PeersUnwired { a, b } => state
-            .mob_unwire(mob_id, a.clone(), b.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        meerkat_mob::MobEventKind::MobCompleted => state
-            .mob_complete(mob_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        meerkat_mob::MobEventKind::TaskCreated { .. }
-        | meerkat_mob::MobEventKind::TaskUpdated { .. } => {}
-    };
-    Ok(())
-}
-
 async fn sync_mob_events(
     state: &meerkat_mob_mcp::MobMcpState,
     registry: &mut PersistedMobRegistry,
@@ -2589,6 +2802,26 @@ async fn sync_mob_events(
     Ok(())
 }
 
+fn latest_turn_response(
+    registry: &PersistedMobRegistry,
+    mob_id: &str,
+    meerkat_id: &str,
+) -> Option<String> {
+    let events = registry.mobs.get(mob_id)?.events.iter().rev();
+    for event in events {
+        if let meerkat_mob::MobEventKind::TurnRecorded {
+            meerkat_id: event_meerkat_id,
+            response,
+            ..
+        } = &event.kind
+            && event_meerkat_id.as_str() == meerkat_id
+        {
+            return Some(response.clone());
+        }
+    }
+    None
+}
+
 fn parse_mob_state(value: &str) -> Option<meerkat_mob::MobState> {
     match value {
         "Creating" => Some(meerkat_mob::MobState::Creating),
@@ -2602,14 +2835,46 @@ fn parse_mob_state(value: &str) -> Option<meerkat_mob::MobState> {
 
 async fn hydrate_mob_state(
     scope: &RuntimeScope,
+    session_service: Arc<dyn meerkat_mob::MobSessionService>,
 ) -> anyhow::Result<(Arc<meerkat_mob_mcp::MobMcpState>, PersistedMobRegistry)> {
     let registry = load_mob_registry(scope).await?;
-    let state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+    let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(session_service.clone()));
     for (mob_id, persisted) in &registry.mobs {
-        let created = state
-            .mob_create_definition(persisted.definition.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let storage = meerkat_mob::MobStorage::in_memory();
+        if persisted.events.is_empty() {
+            storage
+                .events
+                .append(meerkat_mob::NewMobEvent {
+                    mob_id: persisted.definition.id.clone(),
+                    timestamp: None,
+                    kind: meerkat_mob::MobEventKind::MobCreated {
+                        definition: persisted.definition.clone(),
+                    },
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        } else {
+            for event in &persisted.events {
+                storage
+                    .events
+                    .append(meerkat_mob::NewMobEvent {
+                        mob_id: event.mob_id.clone(),
+                        timestamp: Some(event.timestamp),
+                        kind: event.kind.clone(),
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            }
+        }
+
+        let handle = meerkat_mob::MobBuilder::for_resume(meerkat_mob::MobStorage {
+            events: storage.events.clone(),
+        })
+        .with_session_service(session_service.clone())
+        .resume()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let created = handle.mob_id().clone();
         if created.as_str() != mob_id {
             return Err(anyhow::anyhow!(
                 "mob registry id mismatch: key='{}' definition='{}'",
@@ -2617,38 +2882,38 @@ async fn hydrate_mob_state(
                 created
             ));
         }
-        for event in &persisted.events {
-            replay_mob_event(state.as_ref(), &created, event).await?;
-        }
+
         if let Some(target_status) = persisted.status.as_deref().and_then(parse_mob_state) {
-            let current = state
-                .mob_status(&created)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let current = handle.status();
             match (current, target_status) {
                 (meerkat_mob::MobState::Running, meerkat_mob::MobState::Stopped) => {
-                    state.mob_stop(&created).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                    handle.stop().await.map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 (meerkat_mob::MobState::Stopped, meerkat_mob::MobState::Running) => {
-                    state.mob_resume(&created).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                    handle.resume().await.map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 (meerkat_mob::MobState::Running, meerkat_mob::MobState::Completed)
                 | (meerkat_mob::MobState::Stopped, meerkat_mob::MobState::Completed) => {
-                    state
-                        .mob_complete(&created)
+                    handle
+                        .complete()
                         .await
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 _ => {}
             }
         }
+        state.mob_insert_handle(created, handle).await;
     }
     Ok((state, registry))
 }
 
 async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
     let _lock = acquire_mob_registry_lock(scope).await?;
-    let (state, mut registry) = hydrate_mob_state(scope).await?;
+    let (config, _) = load_config(scope).await?;
+    let persistent = build_cli_persistent_service(scope, config).await?;
+    let session_service: Arc<dyn meerkat_mob::MobSessionService> =
+        Arc::new(MobCliSessionService::new(persistent));
+    let (state, mut registry) = hydrate_mob_state(scope, session_service).await?;
     match command {
         MobCommands::Prefabs => {
             for prefab in Prefab::all() {
@@ -2772,14 +3037,20 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             meerkat_id,
             message,
         } => {
+            let target_meerkat = meerkat_id.clone();
             state
                 .mob_external_turn(
-                    &meerkat_mob::MobId::from(mob_id),
+                    &meerkat_mob::MobId::from(mob_id.clone()),
                     meerkat_mob::MeerkatId::from(meerkat_id),
                     message,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            if let Some(response) = latest_turn_response(&registry, &mob_id, &target_meerkat) {
+                println!("{}", response);
+            }
+            save_mob_registry(scope, &registry).await?;
             Ok(())
         }
         MobCommands::Stop { mob_id } => {
@@ -2904,7 +3175,15 @@ impl Provider {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use futures::stream;
+    use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+    use meerkat_core::error::ToolError;
+    use meerkat_core::{ToolCallView, ToolDef, ToolResult};
+    use std::pin::Pin;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::Arc;
 
     fn hooks_override_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/hooks/run_override.json")
@@ -2921,6 +3200,140 @@ mod tests {
             origin_hint: RealmOrigin::Explicit,
             context_root: None,
             user_config_root: None,
+        }
+    }
+
+    struct StaticDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    impl StaticDispatcher {
+        fn new(name: &str) -> Self {
+            let tool = Arc::new(ToolDef {
+                name: name.to_string(),
+                description: format!("tool {name}"),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            });
+            Self {
+                tools: Arc::from([tool]),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for StaticDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.tools.clone()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    struct EchoDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+        content: String,
+    }
+
+    impl EchoDispatcher {
+        fn new(name: &str, content: &str) -> Self {
+            let tool = Arc::new(ToolDef {
+                name: name.to_string(),
+                description: format!("tool {name}"),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            });
+            Self {
+                tools: Arc::from([tool]),
+                content: content.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for EchoDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.tools.clone()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            if self.tools.iter().any(|tool| tool.name == call.name) {
+                return Ok(ToolResult {
+                    tool_use_id: call.id.to_string(),
+                    content: self.content.clone(),
+                    is_error: false,
+                });
+            }
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    struct CapturingLlmClient {
+        captured_tool_names: Arc<Mutex<Vec<String>>>,
+        captured_system_prompt: Arc<Mutex<Option<String>>>,
+    }
+
+    impl CapturingLlmClient {
+        fn new(
+            captured_tool_names: Arc<Mutex<Vec<String>>>,
+            captured_system_prompt: Arc<Mutex<Option<String>>>,
+        ) -> Self {
+            Self {
+                captured_tool_names,
+                captured_system_prompt,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for CapturingLlmClient {
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let names: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+            let mut captured = self
+                .captured_tool_names
+                .lock()
+                .expect("captured tool mutex should not be poisoned");
+            *captured = names;
+            let system_prompt = request.messages.iter().find_map(|message| match message {
+                meerkat_core::Message::System(system) => Some(system.content.clone()),
+                _ => None,
+            });
+            let mut captured_prompt = self
+                .captured_system_prompt
+                .lock()
+                .expect("captured prompt mutex should not be poisoned");
+            *captured_prompt = system_prompt;
+
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
         }
     }
 
@@ -2945,6 +3358,195 @@ mod tests {
         let json = result.ok_or("missing result")?;
         assert_eq!(json["reasoning_effort"], "high");
         Ok(())
+    }
+
+    #[test]
+    fn test_compose_external_tool_dispatchers_merges_two_sources() {
+        let a: Arc<dyn AgentToolDispatcher> = Arc::new(StaticDispatcher::new("alpha_tool"));
+        let b: Arc<dyn AgentToolDispatcher> = Arc::new(StaticDispatcher::new("beta_tool"));
+        let merged = compose_external_tool_dispatchers(Some(a), Some(b))
+            .expect("compose should succeed")
+            .expect("merged dispatcher should be present");
+        let names: std::collections::BTreeSet<String> =
+            merged.tools().iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains("alpha_tool"));
+        assert!(names.contains("beta_tool"));
+    }
+
+    #[test]
+    fn test_mob_tools_available_for_composition() {
+        let mob_dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(
+            meerkat_mob_mcp::MobMcpDispatcher::new(meerkat_mob_mcp::MobMcpState::new_in_memory()),
+        );
+        let composed = compose_external_tool_dispatchers(None, Some(mob_dispatcher))
+            .expect("compose should succeed")
+            .expect("mob dispatcher should be present");
+        let names: std::collections::BTreeSet<String> =
+            composed.tools().iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains("mob_create"));
+        assert!(names.contains("mob_spawn"));
+        assert!(names.contains("mob_external_turn"));
+    }
+
+    #[tokio::test]
+    async fn test_compose_external_tool_dispatchers_prefers_primary_on_name_collision() {
+        let primary: Arc<dyn AgentToolDispatcher> =
+            Arc::new(EchoDispatcher::new("mob_list", "primary"));
+        let secondary: Arc<dyn AgentToolDispatcher> =
+            Arc::new(EchoDispatcher::new("mob_list", "secondary"));
+        let merged = compose_external_tool_dispatchers(Some(primary), Some(secondary))
+            .expect("compose should succeed")
+            .expect("merged dispatcher should be present");
+
+        let names: Vec<String> = merged.tools().iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, vec!["mob_list".to_string()]);
+
+        let args =
+            serde_json::value::RawValue::from_string("{}".to_string()).expect("valid raw args");
+        let result = merged
+            .dispatch(ToolCallView {
+                id: "call-1",
+                name: "mob_list",
+                args: &args,
+            })
+            .await
+            .expect("dispatch should succeed");
+        assert_eq!(result.content, "primary");
+    }
+
+    #[tokio::test]
+    async fn test_run_session_build_wires_mob_tools_into_llm_request() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(true)
+            .subagents(true);
+        let service = Arc::new(build_cli_service(factory, Config::default()));
+
+        let external_tools =
+            compose_external_tool_dispatchers(None, Some(create_run_mob_external_tools(service.clone())))
+                .expect("external tool composition should succeed")
+                .expect("mob tools should be present");
+
+        let captured_tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_system_prompt = Arc::new(Mutex::new(None::<String>));
+        let llm_override: Arc<dyn LlmClient> =
+            Arc::new(CapturingLlmClient::new(
+                captured_tool_names.clone(),
+                captured_system_prompt.clone(),
+            ));
+
+        let build = SessionBuildOptions {
+            external_tools: Some(external_tools),
+            llm_client_override: Some(meerkat::encode_llm_client_override_for_service(llm_override)),
+            ..SessionBuildOptions::default()
+        };
+
+        let req = CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "list tools".to_string(),
+            system_prompt: None,
+            max_tokens: Some(32),
+            event_tx: None,
+            host_mode: false,
+            skill_references: None,
+            build: Some(build),
+        };
+
+        service
+            .create_session(req)
+            .await
+            .expect("session should run with llm override");
+
+        let names: std::collections::BTreeSet<String> = captured_tool_names
+            .lock()
+            .expect("captured tool mutex should not be poisoned")
+            .iter()
+            .cloned()
+            .collect();
+
+        assert!(names.contains("mob_create"));
+        assert!(names.contains("mob_list"));
+        assert!(names.contains("mob_spawn"));
+
+        let system_prompt = captured_system_prompt
+            .lock()
+            .expect("captured prompt mutex should not be poisoned")
+            .clone()
+            .expect("system prompt must be captured");
+        assert!(system_prompt.contains("mob_list"));
+        assert!(system_prompt.contains("mob_create"));
+    }
+
+    #[tokio::test]
+    async fn test_resume_session_wires_mob_tools_into_llm_request() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let (_manifest, store) = create_session_store(&scope)
+            .await
+            .expect("session store should initialize");
+
+        let mut session = Session::new();
+        let session_id = session.id().to_string();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model: "claude-sonnet-4-5".to_string(),
+                max_tokens: 64,
+                provider: meerkat_core::Provider::Anthropic,
+                tooling: SessionTooling {
+                    builtins: true,
+                    shell: false,
+                    comms: false,
+                    subagents: true,
+                    active_skills: None,
+                },
+                host_mode: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: Some(scope.locator.realm_id.clone()),
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+            })
+            .expect("session metadata should be set");
+        store
+            .save(&session)
+            .await
+            .expect("seed session should save");
+        drop(store);
+
+        let captured_tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_system_prompt = Arc::new(Mutex::new(None::<String>));
+        let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
+            captured_tool_names.clone(),
+            captured_system_prompt.clone(),
+        ));
+
+        resume_session_with_llm_override(
+            &session_id,
+            "resume and list tools",
+            HookRunOverrides::default(),
+            &scope,
+            Some(llm_override),
+        )
+        .await
+        .expect("resume should succeed with llm override");
+
+        let names: std::collections::BTreeSet<String> = captured_tool_names
+            .lock()
+            .expect("captured tool mutex should not be poisoned")
+            .iter()
+            .cloned()
+            .collect();
+        assert!(names.contains("mob_list"));
+        assert!(names.contains("mob_create"));
+
+        let system_prompt = captured_system_prompt
+            .lock()
+            .expect("captured prompt mutex should not be poisoned")
+            .clone()
+            .expect("system prompt must be captured");
+        assert!(system_prompt.contains("mob_list"));
+        assert!(system_prompt.contains("mob_create"));
     }
 
     #[test]
@@ -3077,7 +3679,8 @@ mod tests {
             Provider::infer_from_model("chatgpt-4o-latest"),
             Some(Provider::Openai)
         );
-        assert_eq!(Provider::infer_from_model("GPT-4"), Some(Provider::Openai)); // case insensitive
+        assert_eq!(Provider::infer_from_model("GPT-4"), Some(Provider::Openai));
+        // case insensitive
     }
 
     #[test]
@@ -3115,8 +3718,8 @@ mod tests {
     #[cfg(feature = "comms")]
     #[test]
     fn test_comms_tool_dispatcher_provides_comms_tools() {
-        use meerkat_comms::Inbox;
         use meerkat_comms::agent::CommsToolDispatcher;
+        use meerkat_comms::Inbox;
         use meerkat_comms::{CommsConfig, Keypair, TrustedPeers};
         use meerkat_core::AgentToolDispatcher;
         use tokio::sync::RwLock;

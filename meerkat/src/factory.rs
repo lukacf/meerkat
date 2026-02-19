@@ -956,7 +956,7 @@ impl AgentFactory {
         // 6b. Create comms runtime (before tool wiring so sub-agent tools can
         // inherit parent comms context when auto-enabled).
         #[cfg(feature = "comms")]
-        let comms_runtime = if build_config.host_mode {
+        let comms_runtime = if build_config.host_mode || build_config.comms_name.is_some() {
             let comms_name = build_config
                 .comms_name
                 .as_ref()
@@ -1153,6 +1153,10 @@ impl AgentFactory {
             builder = builder.resume_session(session);
         }
         #[cfg(feature = "comms")]
+        let comms_enabled = comms_runtime.is_some();
+        #[cfg(not(feature = "comms"))]
+        let comms_enabled = false;
+        #[cfg(feature = "comms")]
         if let Some(runtime) = comms_runtime {
             builder =
                 builder.with_comms_runtime(
@@ -1230,7 +1234,7 @@ impl AgentFactory {
             tooling: SessionTooling {
                 builtins: effective_builtins,
                 shell: effective_shell,
-                comms: build_config.host_mode,
+                comms: comms_enabled,
                 subagents: effective_subagents,
                 active_skills: active_skill_ids,
             },
@@ -1306,7 +1310,10 @@ impl AgentFactory {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
             return match external {
-                Some(ext) => Ok((ext, String::new())),
+                Some(ext) => {
+                    let usage = render_tool_usage_instructions(ext.tools().as_ref());
+                    Ok((ext, usage))
+                }
                 None => Ok((Arc::new(EmptyToolDispatcher), String::new())),
             };
         }
@@ -1360,9 +1367,18 @@ impl AgentFactory {
             )
             .await?;
 
-        // Extract usage instructions from the dispatcher
-        // (CompositeDispatcher implements AgentToolDispatcher which has tools())
-        let usage = String::new(); // Usage instructions are injected via system prompt assembly
+        let usage = render_tool_usage_instructions(dispatcher.tools().as_ref());
         Ok((dispatcher, usage))
     }
+}
+
+fn render_tool_usage_instructions(tools: &[Arc<meerkat_core::ToolDef>]) -> String {
+    if tools.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("# Available Tools\n\n");
+    for tool in tools {
+        out.push_str(&format!("## {}\n{}\n\n", tool.name, tool.description));
+    }
+    out
 }

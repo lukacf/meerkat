@@ -25,6 +25,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, mpsc, oneshot};
 
 // ---------------------------------------------------------------------------
@@ -50,7 +51,11 @@ impl MobState {
             2 => Self::Stopped,
             3 => Self::Completed,
             4 => Self::Destroyed,
-            _ => Self::Creating,
+            _ => {
+                debug_assert!(false, "invalid mob lifecycle state byte: {v}");
+                tracing::error!(state_byte = v, "invalid mob lifecycle state byte");
+                Self::Destroyed
+            }
         }
     }
 
@@ -63,6 +68,12 @@ impl MobState {
             Self::Completed => "Completed",
             Self::Destroyed => "Destroyed",
         }
+    }
+}
+
+impl std::fmt::Display for MobState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -145,6 +156,7 @@ enum MobCommand {
 pub struct MobHandle {
     command_tx: mpsc::Sender<MobCommand>,
     roster: Arc<RwLock<Roster>>,
+    task_board: Arc<RwLock<TaskBoard>>,
     definition: Arc<MobDefinition>,
     state: Arc<AtomicU8>,
     events: Arc<dyn MobEventStore>,
@@ -404,16 +416,14 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Project and list tasks from persisted events.
+    /// List tasks from the in-memory task board projection.
     pub async fn task_list(&self) -> Result<Vec<MobTask>, MobError> {
-        let events = self.events.replay_all().await?;
-        Ok(TaskBoard::project(&events).list().cloned().collect())
+        Ok(self.task_board.read().await.list().cloned().collect())
     }
 
-    /// Project and get a task by ID from persisted events.
+    /// Get a task by ID from the in-memory task board projection.
     pub async fn task_get(&self, task_id: &str) -> Result<Option<MobTask>, MobError> {
-        let events = self.events.replay_all().await?;
-        Ok(TaskBoard::project(&events).get(task_id).cloned())
+        Ok(self.task_board.read().await.get(task_id).cloned())
     }
 
     /// Shut down the actor. After this, no more commands are accepted.
@@ -448,8 +458,10 @@ enum BuilderMode {
 
 struct RuntimeWiring {
     roster: Arc<RwLock<Roster>>,
+    task_board: Arc<RwLock<TaskBoard>>,
     state: Arc<AtomicU8>,
     mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
+    mcp_processes: Arc<tokio::sync::Mutex<BTreeMap<String, Child>>>,
     command_tx: mpsc::Sender<MobCommand>,
     command_rx: mpsc::Receiver<MobCommand>,
 }
@@ -549,6 +561,7 @@ impl MobBuilder {
         Ok(Self::start_runtime(
             definition,
             Roster::new(),
+            TaskBoard::default(),
             MobState::Running,
             storage.events.clone(),
             session_service,
@@ -559,7 +572,7 @@ impl MobBuilder {
 
     /// Resume a mob from persisted events.
     ///
-    /// Phase-1 behavior:
+    /// Resume behavior:
     /// - Recover definition from `MobCreated`.
     /// - Rebuild roster by replaying structural events.
     /// - Start actor/runtime in Running state.
@@ -610,6 +623,7 @@ impl MobBuilder {
             .filter(|event| event.mob_id == definition.id)
             .collect();
         let mut roster = Roster::project(&mob_events);
+        let task_board = TaskBoard::project(&mob_events);
         let resumed_state = if mob_events
             .iter()
             .any(|event| matches!(event.kind, MobEventKind::MobCompleted))
@@ -622,8 +636,9 @@ impl MobBuilder {
         // Prepare shared runtime components early so resume reconciliation can
         // wire tool dispatchers for recreated sessions to the final actor channel.
         let roster_state = Arc::new(RwLock::new(Roster::new()));
+        let task_board_state = Arc::new(RwLock::new(TaskBoard::default()));
         let state = Arc::new(AtomicU8::new(resumed_state as u8));
-        let mcp_servers_running = resumed_state == MobState::Running;
+        let mcp_servers_running = false;
         let mcp_running = Arc::new(RwLock::new(
             definition
                 .mcp_servers
@@ -631,17 +646,21 @@ impl MobBuilder {
                 .map(|name| (name.clone(), mcp_servers_running))
                 .collect::<BTreeMap<_, _>>(),
         ));
+        let mcp_processes = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
         let (command_tx, command_rx) = mpsc::channel(64);
         let wiring = RuntimeWiring {
             roster: roster_state.clone(),
+            task_board: task_board_state.clone(),
             state: state.clone(),
             mcp_running: mcp_running.clone(),
+            mcp_processes: mcp_processes.clone(),
             command_tx: command_tx.clone(),
             command_rx,
         };
         let preview_handle = MobHandle {
             command_tx: command_tx.clone(),
             roster: roster_state.clone(),
+            task_board: task_board_state.clone(),
             definition: definition.clone(),
             state: state.clone(),
             events: storage.events.clone(),
@@ -661,6 +680,7 @@ impl MobBuilder {
         }
 
         *wiring.roster.write().await = roster;
+        *wiring.task_board.write().await = task_board;
 
         Ok(Self::start_runtime_with_components(
             definition,
@@ -722,9 +742,10 @@ impl MobBuilder {
                     compose_external_tools_for_profile(
                         profile,
                         tool_bundles,
-                        Some(tool_handle.clone()),
+                        tool_handle.clone(),
                     )?,
-                )?;
+                )
+                .await?;
                 if let Some(ref client) = default_llm_client {
                     config.llm_client_override = Some(client.clone());
                 }
@@ -802,9 +823,11 @@ impl MobBuilder {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_runtime(
         definition: Arc<MobDefinition>,
         initial_roster: Roster,
+        initial_task_board: TaskBoard,
         initial_state: MobState,
         events: Arc<dyn MobEventStore>,
         session_service: Arc<dyn MobSessionService>,
@@ -812,8 +835,9 @@ impl MobBuilder {
         default_llm_client: Option<Arc<dyn LlmClient>>,
     ) -> MobHandle {
         let roster = Arc::new(RwLock::new(initial_roster));
+        let task_board = Arc::new(RwLock::new(initial_task_board));
         let state = Arc::new(AtomicU8::new(initial_state as u8));
-        let mcp_servers_running = initial_state == MobState::Running;
+        let mcp_servers_running = false;
         let mcp_running = Arc::new(RwLock::new(
             definition
                 .mcp_servers
@@ -821,11 +845,14 @@ impl MobBuilder {
                 .map(|name| (name.clone(), mcp_servers_running))
                 .collect::<BTreeMap<_, _>>(),
         ));
+        let mcp_processes = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
         let (command_tx, command_rx) = mpsc::channel(64);
         let wiring = RuntimeWiring {
             roster,
+            task_board,
             state,
             mcp_running,
+            mcp_processes,
             command_tx,
             command_rx,
         };
@@ -850,14 +877,17 @@ impl MobBuilder {
     ) -> MobHandle {
         let RuntimeWiring {
             roster,
+            task_board,
             state,
             mcp_running,
+            mcp_processes,
             command_tx,
             command_rx,
         } = wiring;
         let handle = MobHandle {
             command_tx: command_tx.clone(),
             roster: roster.clone(),
+            task_board: task_board.clone(),
             definition: definition.clone(),
             state: state.clone(),
             events: events.clone(),
@@ -867,10 +897,12 @@ impl MobBuilder {
         let actor = MobActor {
             definition,
             roster,
+            task_board,
             state,
             events,
             session_service,
             mcp_running,
+            mcp_processes,
             command_tx,
             tool_bundles,
             default_llm_client,
@@ -892,10 +924,12 @@ impl MobBuilder {
 struct MobActor {
     definition: Arc<MobDefinition>,
     roster: Arc<RwLock<Roster>>,
+    task_board: Arc<RwLock<TaskBoard>>,
     state: Arc<AtomicU8>,
     events: Arc<dyn MobEventStore>,
     session_service: Arc<dyn MobSessionService>,
     mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
+    mcp_processes: Arc<tokio::sync::Mutex<BTreeMap<String, Child>>>,
     command_tx: mpsc::Sender<MobCommand>,
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
@@ -910,6 +944,7 @@ impl MobActor {
         MobHandle {
             command_tx: self.command_tx.clone(),
             roster: self.roster.clone(),
+            task_board: self.task_board.clone(),
             definition: self.definition.clone(),
             state: self.state.clone(),
             events: self.events.clone(),
@@ -917,13 +952,10 @@ impl MobActor {
         }
     }
 
-    fn expect_state(&self, expected: MobState, to: &'static str) -> Result<(), MobError> {
+    fn expect_state(&self, expected: MobState, to: MobState) -> Result<(), MobError> {
         let current = self.state();
         if current != expected {
-            return Err(MobError::InvalidTransition {
-                from: current.as_str(),
-                to,
-            });
+            return Err(MobError::InvalidTransition { from: current, to });
         }
         Ok(())
     }
@@ -954,6 +986,17 @@ impl MobActor {
     }
 
     async fn stop_mcp_servers(&self) -> Result<(), MobError> {
+        let mut processes = self.mcp_processes.lock().await;
+        for (name, child) in processes.iter_mut() {
+            child.kill().await.map_err(|error| {
+                MobError::Internal(format!("failed to stop mcp server '{name}': {error}"))
+            })?;
+            let _ = child.wait().await.map_err(|error| {
+                MobError::Internal(format!("failed waiting for mcp server '{name}' to exit: {error}"))
+            })?;
+        }
+        processes.clear();
+
         let mut running = self.mcp_running.write().await;
         for state in running.values_mut() {
             *state = false;
@@ -962,6 +1005,34 @@ impl MobActor {
     }
 
     async fn start_mcp_servers(&self) -> Result<(), MobError> {
+        let mut processes = self.mcp_processes.lock().await;
+        for (name, cfg) in &self.definition.mcp_servers {
+            if let Some(command) = &cfg.command {
+                if command.is_empty() {
+                    return Err(MobError::Internal(format!(
+                        "mcp server '{name}' has empty command"
+                    )));
+                }
+                if processes.contains_key(name) {
+                    continue;
+                }
+                let mut cmd = Command::new(&command[0]);
+                for arg in command.iter().skip(1) {
+                    cmd.arg(arg);
+                }
+                for (k, v) in &cfg.env {
+                    cmd.env(k, v);
+                }
+                let child = cmd.spawn().map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to start mcp server '{name}' command '{}': {error}",
+                        command.join(" ")
+                    ))
+                })?;
+                processes.insert(name.clone(), child);
+            }
+        }
+
         let mut running = self.mcp_running.write().await;
         for state in running.values_mut() {
             *state = true;
@@ -970,12 +1041,22 @@ impl MobActor {
     }
 
     async fn cleanup_namespace(&self) -> Result<(), MobError> {
+        self.mcp_processes.lock().await.clear();
         self.mcp_running.write().await.clear();
         Ok(())
     }
 
     /// Main actor loop: process commands sequentially until Shutdown.
     async fn run(self, mut command_rx: mpsc::Receiver<MobCommand>) {
+        if matches!(self.state(), MobState::Running)
+            && let Err(error) = self.start_mcp_servers().await
+        {
+            tracing::error!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "failed to start mcp servers during actor startup"
+            );
+        }
         while let Some(cmd) = command_rx.recv().await {
             match cmd {
                 MobCommand::Spawn {
@@ -984,7 +1065,7 @@ impl MobActor {
                     initial_message,
                     reply_tx,
                 } => {
-                    let result = match self.expect_state(MobState::Running, "Running") {
+                    let result = match self.expect_state(MobState::Running, MobState::Running) {
                         Ok(()) => self
                             .handle_spawn(profile_name, meerkat_id, initial_message)
                             .await,
@@ -996,21 +1077,21 @@ impl MobActor {
                     meerkat_id,
                     reply_tx,
                 } => {
-                    let result = match self.expect_state(MobState::Running, "Running") {
+                    let result = match self.expect_state(MobState::Running, MobState::Running) {
                         Ok(()) => self.handle_retire(meerkat_id).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Wire { a, b, reply_tx } => {
-                    let result = match self.expect_state(MobState::Running, "Running") {
+                    let result = match self.expect_state(MobState::Running, MobState::Running) {
                         Ok(()) => self.handle_wire(a, b).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Unwire { a, b, reply_tx } => {
-                    let result = match self.expect_state(MobState::Running, "Running") {
+                    let result = match self.expect_state(MobState::Running, MobState::Running) {
                         Ok(()) => self.handle_unwire(a, b).await,
                         Err(error) => Err(error),
                     };
@@ -1021,7 +1102,7 @@ impl MobActor {
                     message,
                     reply_tx,
                 } => {
-                    let result = match self.expect_state(MobState::Running, "Running") {
+                    let result = match self.expect_state(MobState::Running, MobState::Running) {
                         Ok(()) => self.handle_external_turn(meerkat_id, message).await,
                         Err(error) => Err(error),
                     };
@@ -1032,14 +1113,14 @@ impl MobActor {
                     message,
                     reply_tx,
                 } => {
-                    let result = match self.expect_state(MobState::Running, "Running") {
+                    let result = match self.expect_state(MobState::Running, MobState::Running) {
                         Ok(()) => self.handle_internal_turn(meerkat_id, message).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Stop { reply_tx } => {
-                    let result = match self.expect_state(MobState::Running, "Stopped") {
+                    let result = match self.expect_state(MobState::Running, MobState::Stopped) {
                         Ok(()) => {
                             self.notify_orchestrator_lifecycle(format!(
                                 "Mob '{}' is stopping.",
@@ -1058,7 +1139,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ResumeLifecycle { reply_tx } => {
-                    let result = match self.expect_state(MobState::Stopped, "Running") {
+                    let result = match self.expect_state(MobState::Stopped, MobState::Running) {
                         Ok(()) => {
                             if let Err(error) = self.start_mcp_servers().await {
                                 Err(error)
@@ -1072,7 +1153,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Complete { reply_tx } => {
-                    let result = match self.expect_state(MobState::Running, "Completed") {
+                    let result = match self.expect_state(MobState::Running, MobState::Completed) {
                         Ok(()) => self.handle_complete().await,
                         Err(error) => Err(error),
                     };
@@ -1084,8 +1165,8 @@ impl MobActor {
                             self.handle_destroy().await
                         }
                         current => Err(MobError::InvalidTransition {
-                            from: current.as_str(),
-                            to: "Destroyed",
+                            from: current,
+                            to: MobState::Destroyed,
                         }),
                     };
                     let _ = reply_tx.send(result);
@@ -1097,7 +1178,7 @@ impl MobActor {
                     blocked_by,
                     reply_tx,
                 } => {
-                    let result = match self.expect_state(MobState::Running, "Running") {
+                    let result = match self.expect_state(MobState::Running, MobState::Running) {
                         Ok(()) => {
                             self.handle_task_create(task_id, subject, description, blocked_by)
                                 .await
@@ -1112,7 +1193,7 @@ impl MobActor {
                     owner,
                     reply_tx,
                 } => {
-                    let result = match self.expect_state(MobState::Running, "Running") {
+                    let result = match self.expect_state(MobState::Running, MobState::Running) {
                         Ok(()) => self.handle_task_update(task_id, status, owner).await,
                         Err(error) => Err(error),
                     };
@@ -1160,7 +1241,8 @@ impl MobActor {
             profile,
             &self.definition,
             external_tools,
-        )?;
+        )
+        .await?;
 
         // Inject default LLM client if set
         if let Some(ref client) = self.default_llm_client {
@@ -1293,6 +1375,11 @@ impl MobActor {
         let entry = {
             let roster = self.roster.read().await;
             let Some(entry) = roster.get(&meerkat_id).cloned() else {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    meerkat_id = %meerkat_id,
+                    "retire requested for unknown meerkat id"
+                );
                 return Ok(());
             };
             entry
@@ -1457,10 +1544,10 @@ impl MobActor {
 
         // Notify both peers BEFORE removing trust (need trust to send).
         // Send FROM a TO b: notify b that a is being unwired
-        self.notify_peer_retired(&b, &a, &entry_a, &comms_a).await?;
+        self.notify_peer_unwired(&b, &a, &entry_a, &comms_a).await?;
         // Send FROM b TO a: notify a that b is being unwired
         if let Err(second_notification_error) =
-            self.notify_peer_retired(&a, &b, &entry_b, &comms_b).await
+            self.notify_peer_unwired(&a, &b, &entry_b, &comms_b).await
         {
             if let Err(compensation_error) =
                 self.notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a).await
@@ -1641,14 +1728,14 @@ impl MobActor {
             return Err(MobError::Internal("task subject cannot be empty".to_string()));
         }
 
-        let board = TaskBoard::project(&self.events.replay_all().await?);
-        if board.get(&task_id).is_some() {
+        if self.task_board.read().await.get(&task_id).is_some() {
             return Err(MobError::Internal(format!(
                 "task '{task_id}' already exists"
             )));
         }
 
-        self.events
+        let appended = self
+            .events
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
                 kind: MobEventKind::TaskCreated {
@@ -1659,6 +1746,7 @@ impl MobActor {
                 },
             })
             .await?;
+        self.task_board.write().await.apply(&appended);
         Ok(())
     }
 
@@ -1668,28 +1756,31 @@ impl MobActor {
         status: TaskStatus,
         owner: Option<MeerkatId>,
     ) -> Result<(), MobError> {
-        let board = TaskBoard::project(&self.events.replay_all().await?);
-        let task = board
-            .get(&task_id)
-            .ok_or_else(|| MobError::Internal(format!("task '{task_id}' not found")))?;
+        {
+            let board = self.task_board.read().await;
+            let task = board
+                .get(&task_id)
+                .ok_or_else(|| MobError::Internal(format!("task '{task_id}' not found")))?;
 
-        if owner.is_some() {
-            if !matches!(status, TaskStatus::InProgress) {
-                return Err(MobError::Internal(format!(
-                    "task '{task_id}' owner can only be set with in_progress status"
-                )));
-            }
-            let blocked = task.blocked_by.iter().any(|dependency| {
-                board.get(dependency).map(|t| t.status) != Some(TaskStatus::Completed)
-            });
-            if blocked {
-                return Err(MobError::Internal(format!(
-                    "task '{task_id}' is blocked by incomplete dependencies"
-                )));
+            if owner.is_some() {
+                if !matches!(status, TaskStatus::InProgress) {
+                    return Err(MobError::Internal(format!(
+                        "task '{task_id}' owner can only be set with in_progress status"
+                    )));
+                }
+                let blocked = task.blocked_by.iter().any(|dependency| {
+                    board.get(dependency).map(|t| t.status) != Some(TaskStatus::Completed)
+                });
+                if blocked {
+                    return Err(MobError::Internal(format!(
+                        "task '{task_id}' is blocked by incomplete dependencies"
+                    )));
+                }
             }
         }
 
-        self.events
+        let appended = self
+            .events
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
                 kind: MobEventKind::TaskUpdated {
@@ -1699,6 +1790,7 @@ impl MobActor {
                 },
             })
             .await?;
+        self.task_board.write().await.apply(&appended);
         Ok(())
     }
 
@@ -1949,7 +2041,7 @@ impl MobActor {
         compose_external_tools_for_profile(
             profile,
             &self.tool_bundles,
-            Some(self.mob_handle_for_tools()),
+            self.mob_handle_for_tools(),
         )
     }
 
@@ -2223,19 +2315,13 @@ impl MobActor {
         Ok(())
     }
 
-    /// Notify a peer that another peer was retired.
-    ///
-    /// Sends a `PeerRequest` with intent `mob.peer_retired` FROM the retiring
-    /// meerkat's comms TO the peer being notified. The params contain the
-    /// retired peer's identity and role.
-    ///
-    /// REQ-MOB-012/013: Notification is required for successful unwire/retire.
-    async fn notify_peer_retired(
+    async fn notify_peer_event(
         &self,
+        intent: &'static str,
         peer_id: &MeerkatId,
-        retired_id: &MeerkatId,
-        retired_entry: &RosterEntry,
-        retiring_comms: &Arc<dyn CoreCommsRuntime>,
+        other_peer_id: &MeerkatId,
+        other_peer_entry: &RosterEntry,
+        sender_comms: &Arc<dyn CoreCommsRuntime>,
     ) -> Result<(), MobError> {
         let peer_entry = {
             let roster = self.roster.read().await;
@@ -2257,17 +2343,54 @@ impl MobActor {
 
         let cmd = CommsCommand::PeerRequest {
             to: peer_name,
-            intent: "mob.peer_retired".to_string(),
+            intent: intent.to_string(),
             params: serde_json::json!({
-                "peer": retired_id.as_str(),
-                "role": retired_entry.profile.as_str(),
+                "peer": other_peer_id.as_str(),
+                "role": other_peer_entry.profile.as_str(),
             }),
             stream: InputStreamMode::None,
         };
 
-        retiring_comms.send(cmd).await?;
+        sender_comms.send(cmd).await?;
         Ok(())
     }
+
+    /// Notify a peer that another peer was retired from the mob.
+    async fn notify_peer_retired(
+        &self,
+        peer_id: &MeerkatId,
+        retired_id: &MeerkatId,
+        retired_entry: &RosterEntry,
+        retiring_comms: &Arc<dyn CoreCommsRuntime>,
+    ) -> Result<(), MobError> {
+        self.notify_peer_event(
+            "mob.peer_retired",
+            peer_id,
+            retired_id,
+            retired_entry,
+            retiring_comms,
+        )
+        .await
+    }
+
+    /// Notify a peer that another peer was unwired (trust link removed).
+    async fn notify_peer_unwired(
+        &self,
+        peer_id: &MeerkatId,
+        unwired_id: &MeerkatId,
+        unwired_entry: &RosterEntry,
+        sender_comms: &Arc<dyn CoreCommsRuntime>,
+    ) -> Result<(), MobError> {
+        self.notify_peer_event(
+            "mob.peer_unwired",
+            peer_id,
+            unwired_id,
+            unwired_entry,
+            sender_comms,
+        )
+        .await
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -2277,18 +2400,13 @@ impl MobActor {
 fn compose_external_tools_for_profile(
     profile: &crate::profile::Profile,
     tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
-    mob_handle: Option<MobHandle>,
+    mob_handle: MobHandle,
 ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, MobError> {
     let mut dispatchers: Vec<Arc<dyn AgentToolDispatcher>> = Vec::new();
 
     if profile.tools.mob || profile.tools.mob_tasks {
-        let handle = mob_handle.ok_or_else(|| {
-            MobError::Internal(
-                "mob/task tools require a runtime handle for dispatcher wiring".to_string(),
-            )
-        })?;
         dispatchers.push(Arc::new(MobToolDispatcher::new(
-            handle,
+            mob_handle,
             profile.tools.mob,
             profile.tools.mob_tasks,
         )));
@@ -2373,7 +2491,7 @@ impl MobToolDispatcher {
             ));
             defs.push(tool_def(
                 "list_meerkats",
-                "List all active meerkats",
+                "List all active meerkats. Response includes meerkat_id, profile, session_id, wired_to.",
                 json!({
                     "type": "object",
                     "properties": {}
@@ -2405,7 +2523,7 @@ impl MobToolDispatcher {
             ));
             defs.push(tool_def(
                 "mob_task_update",
-                "Update task status and owner",
+                "Update task status and owner. If owner is set, status must be in_progress and blocked_by dependencies must be completed.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -2556,6 +2674,17 @@ impl AgentToolDispatcher for MobToolDispatcher {
             }
             "list_meerkats" if self.enable_mob => {
                 let meerkats = self.handle.list_meerkats().await;
+                let meerkats = meerkats
+                    .into_iter()
+                    .map(|entry| {
+                        json!({
+                            "meerkat_id": entry.meerkat_id,
+                            "profile": entry.profile,
+                            "session_id": entry.session_id,
+                            "wired_to": entry.wired_to,
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 Self::encode_result(call, json!({ "meerkats": meerkats }))
             }
             "mob_task_create" if self.enable_mob_tasks => {
@@ -2717,6 +2846,7 @@ mod tests {
         fail_remove_trust_once: bool,
         fail_send_peer_added: bool,
         fail_send_peer_retired: bool,
+        fail_send_peer_unwired: bool,
     }
 
     struct MockCommsRuntime {
@@ -2726,6 +2856,7 @@ mod tests {
         remove_failures_remaining: RwLock<usize>,
         fail_send_peer_added: bool,
         fail_send_peer_retired: bool,
+        fail_send_peer_unwired: bool,
         trusted_peers: RwLock<HashMap<String, String>>,
         sent_intents: RwLock<Vec<String>>,
         inbox_notify: Arc<tokio::sync::Notify>,
@@ -2748,6 +2879,7 @@ mod tests {
                 }),
                 fail_send_peer_added: behavior.fail_send_peer_added,
                 fail_send_peer_retired: behavior.fail_send_peer_retired,
+                fail_send_peer_unwired: behavior.fail_send_peer_unwired,
                 trusted_peers: RwLock::new(HashMap::new()),
                 sent_intents: RwLock::new(Vec::new()),
                 inbox_notify: Arc::new(tokio::sync::Notify::new()),
@@ -2829,6 +2961,11 @@ mod tests {
                     if intent == "mob.peer_retired" && self.fail_send_peer_retired {
                         return Err(SendError::Unsupported(
                             "mock mob.peer_retired notification failure".to_string(),
+                        ));
+                    }
+                    if intent == "mob.peer_unwired" && self.fail_send_peer_unwired {
+                        return Err(SendError::Unsupported(
+                            "mock mob.peer_unwired notification failure".to_string(),
                         ));
                     }
 
@@ -3456,8 +3593,8 @@ mod tests {
         def.mcp_servers.insert(
             "search".to_string(),
             crate::definition::McpServerConfig {
-                command: Some(vec!["mcp-search".to_string()]),
-                url: None,
+                command: None,
+                url: Some("https://example.invalid/mcp".to_string()),
                 env: BTreeMap::new(),
             },
         );
@@ -3701,6 +3838,7 @@ mod tests {
     #[tokio::test]
     async fn test_lifecycle_updates_mcp_server_states() {
         let (handle, _service) = create_test_mob(sample_definition_with_mcp_servers()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let initial = handle.mcp_server_states().await;
         assert!(
             initial.values().all(|running| *running),
@@ -5295,13 +5433,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unwire_fails_when_peer_retired_notification_fails_without_side_effects() {
+    async fn test_unwire_fails_when_peer_unwired_notification_fails_without_side_effects() {
         let (handle, service) = create_test_mob(sample_definition()).await;
         service
             .set_comms_behavior(
                 &test_comms_name("lead", "l-1"),
                 MockCommsBehavior {
-                    fail_send_peer_retired: true,
+                    fail_send_peer_unwired: true,
                     ..MockCommsBehavior::default()
                 },
             )
@@ -5355,7 +5493,7 @@ mod tests {
             .set_comms_behavior(
                 &test_comms_name("worker", "w-1"),
                 MockCommsBehavior {
-                    fail_send_peer_retired: true,
+                    fail_send_peer_unwired: true,
                     ..MockCommsBehavior::default()
                 },
             )
@@ -6216,6 +6354,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "invalid mob lifecycle state byte")]
+    fn test_mob_state_invalid_byte_panics_in_debug() {
+        let _ = MobState::from_u8(255);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_mob_state_invalid_byte_falls_back_to_destroyed() {
+        assert_eq!(MobState::from_u8(255), MobState::Destroyed);
+    }
+
+    #[test]
     fn test_mob_state_as_str() {
         assert_eq!(MobState::Creating.as_str(), "Creating");
         assert_eq!(MobState::Running.as_str(), "Running");
@@ -6654,7 +6805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unwire_sends_required_peer_retired_notifications() {
+    async fn test_unwire_sends_required_peer_unwired_notifications() {
         let (handle, service) = create_test_mob(sample_definition()).await;
         let sid_l = handle
             .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
@@ -6677,12 +6828,12 @@ mod tests {
         let intents_lead = service.sent_intents(&sid_l).await;
         let intents_worker = service.sent_intents(&sid_w).await;
         assert!(
-            intents_lead.iter().any(|intent| intent == "mob.peer_retired"),
-            "lead should send mob.peer_retired during unwire"
+            intents_lead.iter().any(|intent| intent == "mob.peer_unwired"),
+            "lead should send mob.peer_unwired during unwire"
         );
         assert!(
-            intents_worker.iter().any(|intent| intent == "mob.peer_retired"),
-            "worker should send mob.peer_retired during unwire"
+            intents_worker.iter().any(|intent| intent == "mob.peer_unwired"),
+            "worker should send mob.peer_unwired during unwire"
         );
     }
 

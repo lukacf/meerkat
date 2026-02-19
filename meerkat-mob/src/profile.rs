@@ -32,7 +32,7 @@ pub struct ToolConfig {
     /// MCP server names this profile connects to.
     #[serde(default)]
     pub mcp: Vec<String>,
-    /// Named Rust tool bundles (wired in Phase 1 runtime).
+    /// Named Rust tool bundles wired by the mob runtime.
     ///
     /// String names referencing `Arc<dyn AgentToolDispatcher>` instances
     /// registered at mob construction time. Not serializable — must be

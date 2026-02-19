@@ -1,6 +1,7 @@
 //! Error types for mob operations.
 
 use crate::validate::Diagnostic;
+use crate::runtime::MobState;
 
 /// Errors returned by mob operations.
 #[derive(Debug, thiserror::Error)]
@@ -24,8 +25,8 @@ pub enum MobError {
     /// The requested lifecycle state transition is invalid.
     #[error("invalid state transition: {from} -> {to}")]
     InvalidTransition {
-        from: &'static str,
-        to: &'static str,
+        from: MobState,
+        to: MobState,
     },
 
     /// A wiring operation failed.
@@ -75,8 +76,8 @@ mod tests {
     #[test]
     fn test_invalid_transition_display() {
         let err = MobError::InvalidTransition {
-            from: "Completed",
-            to: "Running",
+            from: MobState::Completed,
+            to: MobState::Running,
         };
         let msg = format!("{err}");
         assert!(msg.contains("Completed"));
@@ -135,7 +136,10 @@ mod tests {
             MobError::MeerkatNotFound("m".to_string()),
             MobError::MeerkatAlreadyExists("m".to_string()),
             MobError::NotExternallyAddressable("m".to_string()),
-            MobError::InvalidTransition { from: "A", to: "B" },
+            MobError::InvalidTransition {
+                from: MobState::Creating,
+                to: MobState::Running,
+            },
             MobError::WiringError("w".to_string()),
             MobError::DefinitionError(vec![]),
             MobError::StorageError(Box::new(std::io::Error::new(

@@ -20,7 +20,7 @@ use std::sync::Arc;
 ///
 /// All meerkats are created with `host_mode=true` so they stay alive
 /// for comms after the initial prompt completes.
-pub fn build_agent_config(
+pub async fn build_agent_config(
     mob_id: &MobId,
     profile_name: &ProfileName,
     meerkat_id: &MeerkatId,
@@ -48,7 +48,7 @@ pub fn build_agent_config(
     let realm_id = format!("mob:{}", mob_id);
 
     // Assemble system prompt from skills + mob comms instructions
-    let system_prompt = assemble_system_prompt(profile, definition)?;
+    let system_prompt = assemble_system_prompt(profile, definition).await?;
 
     let mut config = AgentBuildConfig::new(profile.model.clone());
     config.host_mode = true;
@@ -94,7 +94,7 @@ pub fn to_create_session_request(
 }
 
 /// Assemble the system prompt for a mob meerkat from skills and mob comms instructions.
-fn assemble_system_prompt(profile: &Profile, definition: &MobDefinition) -> Result<String, MobError> {
+async fn assemble_system_prompt(profile: &Profile, definition: &MobDefinition) -> Result<String, MobError> {
     let mut sections = Vec::new();
 
     // Resolve inline skills from the definition
@@ -105,7 +105,7 @@ fn assemble_system_prompt(profile: &Profile, definition: &MobDefinition) -> Resu
                     sections.push(content.clone());
                 }
                 SkillSource::Path { path } => {
-                    let content = std::fs::read_to_string(path).map_err(|error| {
+                    let content = tokio::fs::read_to_string(path).await.map_err(|error| {
                         MobError::Internal(format!(
                             "failed to read skill file '{path}' while building system prompt: {error}"
                         ))
@@ -208,8 +208,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_build_agent_config_host_mode() {
+    #[tokio::test]
+    async fn test_build_agent_config_host_mode() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("lead")];
         let config = build_agent_config(
@@ -219,14 +219,14 @@ mod tests {
             profile,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config");
 
         assert!(config.host_mode, "host_mode must be true");
     }
 
-    #[test]
-    fn test_build_agent_config_comms_name() {
+    #[tokio::test]
+    async fn test_build_agent_config_comms_name() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("lead")];
         let config = build_agent_config(
@@ -236,7 +236,7 @@ mod tests {
             profile,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config");
 
         assert_eq!(
@@ -246,8 +246,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_agent_config_peer_meta_labels() {
+    #[tokio::test]
+    async fn test_build_agent_config_peer_meta_labels() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("worker")];
         let config = build_agent_config(
@@ -257,7 +257,7 @@ mod tests {
             profile,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config");
 
         let meta = config.peer_meta.as_ref().expect("peer_meta should be set");
@@ -273,8 +273,8 @@ mod tests {
         assert_eq!(meta.description.as_deref(), Some("Does work"));
     }
 
-    #[test]
-    fn test_build_agent_config_realm_id() {
+    #[tokio::test]
+    async fn test_build_agent_config_realm_id() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("lead")];
         let config = build_agent_config(
@@ -284,7 +284,7 @@ mod tests {
             profile,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config");
 
         assert_eq!(
@@ -294,8 +294,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_agent_config_tool_overrides() {
+    #[tokio::test]
+    async fn test_build_agent_config_tool_overrides() {
         let def = sample_definition();
 
         // Lead profile has builtins=true, shell=true, memory=false
@@ -307,7 +307,7 @@ mod tests {
             lead,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config");
         assert_eq!(config.override_builtins, Some(true));
         assert_eq!(config.override_shell, Some(true));
@@ -323,15 +323,15 @@ mod tests {
             worker,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config");
         assert_eq!(config.override_builtins, Some(true));
         assert_eq!(config.override_shell, Some(false));
         assert_eq!(config.override_memory, Some(false));
     }
 
-    #[test]
-    fn test_build_agent_config_fails_when_comms_disabled() {
+    #[tokio::test]
+    async fn test_build_agent_config_fails_when_comms_disabled() {
         let mut def = sample_definition();
         let worker = def
             .profiles
@@ -350,15 +350,15 @@ mod tests {
             worker,
             &def,
             None,
-        );
+        ).await;
         assert!(
             matches!(result, Err(MobError::WiringError(_))),
             "tools.comms=false must be rejected at build_agent_config"
         );
     }
 
-    #[test]
-    fn test_build_agent_config_system_prompt_includes_skills() {
+    #[tokio::test]
+    async fn test_build_agent_config_system_prompt_includes_skills() {
         let def = sample_definition();
         let lead = &def.profiles[&ProfileName::from("lead")];
         let config = build_agent_config(
@@ -368,7 +368,7 @@ mod tests {
             lead,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config");
 
         let prompt = config.system_prompt.as_deref().expect("system_prompt set");
@@ -382,8 +382,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_agent_config_model() {
+    #[tokio::test]
+    async fn test_build_agent_config_model() {
         let def = sample_definition();
         let lead = &def.profiles[&ProfileName::from("lead")];
         let config = build_agent_config(
@@ -393,14 +393,14 @@ mod tests {
             lead,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config");
 
         assert_eq!(config.model, "claude-opus-4-6");
     }
 
-    #[test]
-    fn test_to_create_session_request() {
+    #[tokio::test]
+    async fn test_to_create_session_request() {
         let def = sample_definition();
         let lead = &def.profiles[&ProfileName::from("lead")];
         let config = build_agent_config(
@@ -410,7 +410,7 @@ mod tests {
             lead,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config");
 
         let req = to_create_session_request(&config, "Hello mob".into());
@@ -428,8 +428,8 @@ mod tests {
         assert_eq!(build.override_subagents, Some(false));
     }
 
-    #[test]
-    fn test_to_create_session_request_worker() {
+    #[tokio::test]
+    async fn test_to_create_session_request_worker() {
         let def = sample_definition();
         let worker = &def.profiles[&ProfileName::from("worker")];
         let config = build_agent_config(
@@ -439,7 +439,7 @@ mod tests {
             worker,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config");
 
         let req = to_create_session_request(&config, "Start working".into());
@@ -449,8 +449,8 @@ mod tests {
         assert_eq!(build.override_shell, Some(false));
     }
 
-    #[test]
-    fn test_build_agent_config_resolves_path_skills() {
+    #[tokio::test]
+    async fn test_build_agent_config_resolves_path_skills() {
         let mut def = sample_definition();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let skill_path = tempdir.path().join("leader.md");
@@ -479,7 +479,7 @@ mod tests {
             lead,
             &def,
             None,
-        )
+        ).await
         .expect("build_agent_config should resolve path skill");
 
         let prompt = config.system_prompt.expect("system prompt");
@@ -487,8 +487,8 @@ mod tests {
         assert!(!prompt.contains("[skill from:"));
     }
 
-    #[test]
-    fn test_build_agent_config_fails_for_missing_path_skill() {
+    #[tokio::test]
+    async fn test_build_agent_config_fails_for_missing_path_skill() {
         let mut def = sample_definition();
         let missing_path = std::env::temp_dir()
             .join("meerkat-mob-missing-skill.md")
@@ -517,7 +517,7 @@ mod tests {
             lead,
             &def,
             None,
-        )
+        ).await
         .expect_err("missing path skill should fail");
 
         match err {

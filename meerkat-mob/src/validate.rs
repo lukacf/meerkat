@@ -22,6 +22,8 @@ pub enum DiagnosticCode {
     InvalidProfileName,
     /// A wiring rule references a profile that does not exist.
     InvalidWiringProfile,
+    /// Definition has no spawnable profiles.
+    EmptyProfiles,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -32,6 +34,7 @@ impl fmt::Display for DiagnosticCode {
             Self::MissingOrchestratorProfile => "missing_orchestrator_profile",
             Self::InvalidProfileName => "invalid_profile_name",
             Self::InvalidWiringProfile => "invalid_wiring_profile",
+            Self::EmptyProfiles => "empty_profiles",
         };
         f.write_str(s)
     }
@@ -53,6 +56,14 @@ pub struct Diagnostic {
 /// Returns an empty `Vec` if the definition is valid.
 pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+
+    if def.profiles.is_empty() {
+        diagnostics.push(Diagnostic {
+            code: DiagnosticCode::EmptyProfiles,
+            message: "mob definition must define at least one profile".to_string(),
+            location: Some("profiles".to_string()),
+        });
+    }
 
     // Check orchestrator profile exists
     if let Some(orch) = &def.orchestrator
@@ -218,6 +229,17 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_profiles_is_invalid() {
+        let mut def = valid_definition();
+        def.profiles.clear();
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics.iter().any(|d| d.code == DiagnosticCode::EmptyProfiles),
+            "empty profile map must be rejected"
+        );
+    }
+
+    #[test]
     fn test_missing_skill_ref() {
         let mut def = valid_definition();
         def.profiles
@@ -350,6 +372,9 @@ mod tests {
             skills: BTreeMap::new(),
         };
         let diagnostics = validate_definition(&def);
-        assert!(diagnostics.is_empty());
+        assert!(
+            diagnostics.iter().any(|d| d.code == DiagnosticCode::EmptyProfiles),
+            "minimal definition without profiles should fail validation"
+        );
     }
 }

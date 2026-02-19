@@ -63,6 +63,14 @@ impl MobMcpState {
         self.mob_create_definition(prefab.definition()).await
     }
 
+    /// Register an existing mob handle in this dispatcher state.
+    pub async fn mob_insert_handle(&self, mob_id: MobId, handle: MobHandle) {
+        self.mobs
+            .write()
+            .await
+            .insert(mob_id, ManagedMob { handle });
+    }
+
     pub async fn mob_list(&self) -> Vec<(MobId, MobState)> {
         self.mobs
             .read()

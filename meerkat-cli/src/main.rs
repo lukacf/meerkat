@@ -21,7 +21,6 @@ use meerkat_mcp::McpRouterAdapter;
 use meerkat_mob::{MobDefinition, Prefab, ProfileName};
 use meerkat_store::SessionStore;
 use meerkat_tools::find_project_root;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -35,7 +34,7 @@ use meerkat_store::{RealmBackend, RealmOrigin, SessionFilter};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 /// Exit codes as per DESIGN.md §12
@@ -2198,17 +2197,59 @@ async fn build_cli_persistent_service(
     Ok(meerkat::PersistentSessionService::new(builder, 64, store))
 }
 
+type CliPersistentService = meerkat::PersistentSessionService<FactoryAgentBuilder>;
+
+fn mob_persistent_service_cache() -> &'static Mutex<std::collections::HashMap<String, Weak<CliPersistentService>>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Weak<CliPersistentService>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn mob_persistent_service_key(scope: &RuntimeScope) -> String {
+    format!(
+        "{}::{}",
+        scope.locator.state_root.display(),
+        scope.locator.realm_id
+    )
+}
+
+async fn get_or_create_mob_persistent_service(
+    scope: &RuntimeScope,
+    config: Config,
+) -> anyhow::Result<Arc<CliPersistentService>> {
+    let key = mob_persistent_service_key(scope);
+    if let Some(existing) = mob_persistent_service_cache()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("mob persistent service cache poisoned"))?
+        .get(&key)
+        .and_then(Weak::upgrade)
+    {
+        return Ok(existing);
+    }
+
+    let created = Arc::new(build_cli_persistent_service(scope, config).await?);
+    let mut cache = mob_persistent_service_cache()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("mob persistent service cache poisoned"))?;
+    if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
+        Ok(existing)
+    } else {
+        cache.insert(key, Arc::downgrade(&created));
+        Ok(created)
+    }
+}
+
 /// Mob-facing session service wrapper for CLI orchestration.
 ///
 /// Mob actor session creation uses host-mode build configs by default.
 /// For CLI command-driven orchestration we force non-host-mode turn execution
 /// so spawn/turn commands complete synchronously and do not block indefinitely.
 struct MobCliSessionService {
-    inner: meerkat::PersistentSessionService<FactoryAgentBuilder>,
+    inner: Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>,
 }
 
 impl MobCliSessionService {
-    fn new(inner: meerkat::PersistentSessionService<FactoryAgentBuilder>) -> Self {
+    fn new(inner: Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>) -> Self {
         Self { inner }
     }
 }
@@ -2654,9 +2695,12 @@ struct PersistedMobRegistry {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PersistedMob {
-    definition: MobDefinition,
+    /// Legacy fallback for old registry entries written before events were persisted.
+    #[serde(default)]
+    definition: Option<MobDefinition>,
     #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
     events: Vec<meerkat_mob::MobEvent>,
 }
 
@@ -2671,13 +2715,7 @@ fn mob_registry_lock_path(scope: &RuntimeScope) -> PathBuf {
 }
 
 struct MobRegistryLock {
-    path: PathBuf,
-}
-
-impl Drop for MobRegistryLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
+    _lock: nix::fcntl::Flock<std::fs::File>,
 }
 
 async fn acquire_mob_registry_lock(scope: &RuntimeScope) -> anyhow::Result<MobRegistryLock> {
@@ -2691,47 +2729,66 @@ async fn acquire_mob_registry_lock(scope: &RuntimeScope) -> anyhow::Result<MobRe
         })?;
     }
 
-    let max_wait = Duration::from_secs(5);
-    let started = std::time::Instant::now();
-    loop {
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await
-        {
-            Ok(file) => {
-                let pid = std::process::id();
-                let mut writer = tokio::io::BufWriter::new(file);
-                let _ = writer.write_all(format!("{pid}\n").as_bytes()).await;
-                return Ok(MobRegistryLock { path });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if let Ok(content) = tokio::fs::read_to_string(&path).await
-                    && let Ok(pid) = content.trim().parse::<i32>()
-                {
-                    let alive =
-                        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
-                    if !alive {
-                        let _ = tokio::fs::remove_file(&path).await;
-                    }
-                }
-                if started.elapsed() >= max_wait {
-                    return Err(anyhow::anyhow!(
-                        "timed out waiting for mob registry lock '{}'",
-                        path.display()
-                    ));
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "failed to acquire mob registry lock '{}': {e}",
-                    path.display()
-                ));
-            }
-        }
-    }
+    let lock_path = path.clone();
+    let lock_file = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
+            use std::io::{Seek, SeekFrom, Write};
+
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to open mob registry lock '{}': {e}",
+                        lock_path.display()
+                    )
+                })?;
+
+            let mut file = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
+                .map_err(|(_file, e)| {
+                    anyhow::anyhow!(
+                        "failed to acquire mob registry lock '{}': {e}",
+                        lock_path.display()
+                    )
+                })?;
+
+            file.set_len(0).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to reset mob registry lock '{}': {e}",
+                    lock_path.display()
+                )
+            })?;
+            file.seek(SeekFrom::Start(0)).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to seek mob registry lock '{}': {e}",
+                    lock_path.display()
+                )
+            })?;
+            writeln!(file, "{}", std::process::id()).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to write mob registry lock owner '{}': {e}",
+                    lock_path.display()
+                )
+            })?;
+            file.flush().map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to flush mob registry lock '{}': {e}",
+                    lock_path.display()
+                )
+            })?;
+
+            Ok(file)
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out waiting for mob registry lock '{}'", path.display()))?
+    .map_err(|e| anyhow::anyhow!("mob registry lock task failed: {e}"))??;
+
+    Ok(MobRegistryLock { _lock: lock_file })
 }
 
 async fn load_mob_registry(scope: &RuntimeScope) -> anyhow::Result<PersistedMobRegistry> {
@@ -2802,26 +2859,6 @@ async fn sync_mob_events(
     Ok(())
 }
 
-fn latest_turn_response(
-    registry: &PersistedMobRegistry,
-    mob_id: &str,
-    meerkat_id: &str,
-) -> Option<String> {
-    let events = registry.mobs.get(mob_id)?.events.iter().rev();
-    for event in events {
-        if let meerkat_mob::MobEventKind::TurnRecorded {
-            meerkat_id: event_meerkat_id,
-            response,
-            ..
-        } = &event.kind
-            && event_meerkat_id.as_str() == meerkat_id
-        {
-            return Some(response.clone());
-        }
-    }
-    None
-}
-
 fn parse_mob_state(value: &str) -> Option<meerkat_mob::MobState> {
     match value {
         "Creating" => Some(meerkat_mob::MobState::Creating),
@@ -2842,13 +2879,19 @@ async fn hydrate_mob_state(
     for (mob_id, persisted) in &registry.mobs {
         let storage = meerkat_mob::MobStorage::in_memory();
         if persisted.events.is_empty() {
+            let definition = persisted.definition.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "mob registry entry '{}' has no persisted events and no legacy definition",
+                    mob_id
+                )
+            })?;
             storage
                 .events
                 .append(meerkat_mob::NewMobEvent {
-                    mob_id: persisted.definition.id.clone(),
+                    mob_id: definition.id.clone(),
                     timestamp: None,
                     kind: meerkat_mob::MobEventKind::MobCreated {
-                        definition: persisted.definition.clone(),
+                        definition,
                     },
                 })
                 .await
@@ -2910,11 +2953,11 @@ async fn hydrate_mob_state(
 async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
     let _lock = acquire_mob_registry_lock(scope).await?;
     let (config, _) = load_config(scope).await?;
-    let persistent = build_cli_persistent_service(scope, config).await?;
+    let persistent = get_or_create_mob_persistent_service(scope, config).await?;
     let session_service: Arc<dyn meerkat_mob::MobSessionService> =
-        Arc::new(MobCliSessionService::new(persistent));
+        Arc::new(MobCliSessionService::new(persistent.clone()));
     let (state, mut registry) = hydrate_mob_state(scope, session_service).await?;
-    match command {
+    let result = match command {
         MobCommands::Prefabs => {
             for prefab in Prefab::all() {
                 println!("{}", prefab.key());
@@ -2922,29 +2965,27 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             Ok(())
         }
         MobCommands::Create { prefab, definition } => {
-            let (mob_id, definition) = if let Some(prefab_key) = prefab {
+            let mob_id = if let Some(prefab_key) = prefab {
                 let prefab = Prefab::from_key(&prefab_key)
                     .ok_or_else(|| anyhow::anyhow!("unknown prefab '{}'", prefab_key))?;
                 let definition = prefab.definition();
-                let mob_id = state
+                state
                     .mob_create_definition(definition.clone())
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?
-                    .to_string();
-                (mob_id, definition)
+                    .to_string()
             } else if let Some(path) = definition {
-                let content = std::fs::read_to_string(&path).map_err(|e| {
+                let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
                     anyhow::anyhow!("failed reading definition '{}': {e}", path.display())
                 })?;
                 let definition = MobDefinition::from_toml(&content).map_err(|e| {
                     anyhow::anyhow!("failed parsing TOML definition '{}': {e}", path.display())
                 })?;
-                let mob_id = state
+                state
                     .mob_create_definition(definition.clone())
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?
-                    .to_string();
-                (mob_id, definition)
+                    .to_string()
             } else {
                 return Err(anyhow::anyhow!(
                     "provide one of --prefab <name> or --definition <file>"
@@ -2953,7 +2994,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             registry.mobs.insert(
                 mob_id.clone(),
                 PersistedMob {
-                    definition,
+                    definition: None,
                     status: Some(meerkat_mob::MobState::Running.as_str().to_string()),
                     events: Vec::new(),
                 },
@@ -3037,7 +3078,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             meerkat_id,
             message,
         } => {
-            let target_meerkat = meerkat_id.clone();
             state
                 .mob_external_turn(
                     &meerkat_mob::MobId::from(mob_id.clone()),
@@ -3047,9 +3087,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            if let Some(response) = latest_turn_response(&registry, &mob_id, &target_meerkat) {
-                println!("{}", response);
-            }
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
@@ -3089,7 +3126,10 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
-    }
+    };
+
+    drop(state);
+    result
 }
 
 /// LLM Provider selection

@@ -837,11 +837,7 @@ impl AgentToolDispatcher for EchoBundleDispatcher {
         vec![Arc::new(meerkat_core::ToolDef {
             name: "bundle_echo".to_string(),
             description: "Echo input value".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": { "value": { "type": "string" } },
-                "required": ["value"]
-            }),
+            input_schema: serde_json::Value::Object(serde_json::Map::new()),
         })]
         .into()
     }

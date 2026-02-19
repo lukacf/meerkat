@@ -20,6 +20,7 @@ pub(super) struct MobActor {
     pub(super) command_tx: mpsc::Sender<MobCommand>,
     pub(super) tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     pub(super) default_llm_client: Option<Arc<dyn LlmClient>>,
+    pub(super) retired_event_index: Arc<RwLock<HashSet<String>>>,
 }
 
 impl MobActor {
@@ -76,7 +77,7 @@ impl MobActor {
             let provisioner = self.provisioner.clone();
             let member_ref = orchestrator_entry.member_ref;
             tokio::spawn(async move {
-                let _ = provisioner
+                if let Err(error) = provisioner
                     .start_turn(
                         &member_ref,
                         meerkat_core::service::StartTurnRequest {
@@ -86,9 +87,21 @@ impl MobActor {
                             skill_references: None,
                         },
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        orchestrator_member_ref = ?member_ref,
+                        error = %error,
+                        "failed to notify orchestrator lifecycle turn"
+                    );
+                }
             });
         }
+    }
+
+    fn retire_event_key(meerkat_id: &MeerkatId, member_ref: &MemberRef) -> String {
+        let member = serde_json::to_string(member_ref).unwrap_or_else(|_| format!("{member_ref:?}"));
+        format!("{meerkat_id}|{member}")
     }
 
     async fn stop_mcp_servers(&self) -> Result<(), MobError> {
@@ -1214,17 +1227,9 @@ impl MobActor {
         meerkat_id: &MeerkatId,
         member_ref: &MemberRef,
     ) -> Result<bool, MobError> {
-        let events = self.events.replay_all().await?;
-        Ok(events.iter().any(|event| {
-            matches!(
-                &event.kind,
-                MobEventKind::MeerkatRetired {
-                    meerkat_id: existing_meerkat,
-                    member_ref: existing_member_ref,
-                    ..
-                } if existing_meerkat == meerkat_id && existing_member_ref == member_ref
-            )
-        }))
+        let key = Self::retire_event_key(meerkat_id, member_ref);
+        let index = self.retired_event_index.read().await;
+        Ok(index.contains(&key))
     }
 
     async fn append_retire_event(
@@ -1244,6 +1249,8 @@ impl MobActor {
                 },
             })
             .await?;
+        let key = Self::retire_event_key(meerkat_id, member_ref);
+        self.retired_event_index.write().await.insert(key);
         Ok(())
     }
 

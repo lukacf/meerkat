@@ -647,6 +647,7 @@ impl MobSessionService for MockSessionService {
 struct FaultInjectedMobEventStore {
     events: RwLock<Vec<MobEvent>>,
     fail_on_kind: RwLock<HashSet<&'static str>>,
+    replay_calls: AtomicU64,
 }
 
 impl FaultInjectedMobEventStore {
@@ -654,11 +655,16 @@ impl FaultInjectedMobEventStore {
         Self {
             events: RwLock::new(Vec::new()),
             fail_on_kind: RwLock::new(HashSet::new()),
+            replay_calls: AtomicU64::new(0),
         }
     }
 
     async fn fail_appends_for(&self, kind: &'static str) {
         self.fail_on_kind.write().await.insert(kind);
+    }
+
+    fn replay_calls(&self) -> u64 {
+        self.replay_calls.load(Ordering::Relaxed)
     }
 
     fn kind_label(kind: &MobEventKind) -> &'static str {
@@ -708,6 +714,7 @@ impl MobEventStore for FaultInjectedMobEventStore {
     }
 
     async fn replay_all(&self) -> Result<Vec<MobEvent>, MobError> {
+        self.replay_calls.fetch_add(1, Ordering::Relaxed);
         Ok(self.events.read().await.clone())
     }
 
@@ -2360,6 +2367,23 @@ async fn test_spawn_supports_subagent_and_external_backends() {
 }
 
 #[tokio::test]
+async fn test_external_backend_rejects_invalid_peer_name_components() {
+    let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
+    let result = handle
+        .spawn_member_ref_with_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("../w-ext"),
+            None,
+            Some(MobBackendKind::External),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(MobError::WiringError(_))),
+        "invalid peer name components must fail external member registration"
+    );
+}
+
+#[tokio::test]
 async fn test_external_backend_wiring_uses_sendable_transport_addresses() {
     let (handle, service) = create_test_mob(sample_definition_with_external_backend()).await;
 
@@ -2496,6 +2520,24 @@ async fn test_retire_removes_from_roster() {
     handle.retire(MeerkatId::from("w-1")).await.expect("retire");
 
     assert!(handle.list_meerkats().await.is_empty());
+}
+
+#[tokio::test]
+async fn test_retire_path_does_not_replay_full_event_log() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+    assert_eq!(events.replay_calls(), 0, "setup should not replay events");
+
+    handle.retire(MeerkatId::from("w-1")).await.expect("retire");
+    assert_eq!(
+        events.replay_calls(),
+        0,
+        "retire idempotency check should not replay full event log per request"
+    );
 }
 
 #[tokio::test]

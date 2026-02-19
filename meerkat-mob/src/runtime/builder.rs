@@ -525,6 +525,7 @@ impl MobBuilder {
             command_tx,
             tool_bundles,
             default_llm_client,
+            retired_event_index: Arc::new(RwLock::new(HashSet::new())),
         };
         tokio::spawn(actor.run(command_rx));
 

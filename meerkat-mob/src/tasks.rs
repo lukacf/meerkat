@@ -94,6 +94,12 @@ impl TaskBoard {
                     task.status = *status;
                     task.owner = owner.clone();
                     task.updated_at = event.timestamp;
+                } else {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        cursor = event.cursor,
+                        "task update ignored for unknown task id"
+                    );
                 }
             }
             _ => {}

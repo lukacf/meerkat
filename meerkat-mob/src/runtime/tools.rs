@@ -137,7 +137,7 @@ impl MobToolDispatcher {
                             "type": "string",
                             "enum": ["open", "in_progress", "completed", "cancelled"]
                         },
-                        "owner": {"type": "string"}
+                        "owner": {"type": "string", "description": "Optional. Only valid when status is in_progress."}
                     },
                     "required": ["task_id", "status"]
                 }),

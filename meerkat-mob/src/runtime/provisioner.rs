@@ -98,11 +98,7 @@ impl MobProvisioner for SubagentBackend {
     }
 
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
-        let session_id =
-            Self::require_session(member_ref, "retire").map_err(|error| match error {
-                MobError::Internal(_) => MobError::WiringError(error.to_string()),
-                other => other,
-            })?;
+        let session_id = Self::require_session(member_ref, "retire")?;
         self.session_service.archive(&session_id).await?;
         Ok(())
     }
@@ -146,6 +142,37 @@ impl ExternalBackend {
     }
 }
 
+fn is_valid_peer_name_component(component: &str) -> bool {
+    if component.is_empty() {
+        return false;
+    }
+    let mut chars = component.chars();
+    let first = chars.next().unwrap_or(' ');
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn is_valid_external_peer_name(peer_name: &str) -> bool {
+    let mut parts = peer_name.split('/');
+    let Some(mob_id) = parts.next() else {
+        return false;
+    };
+    let Some(profile) = parts.next() else {
+        return false;
+    };
+    let Some(meerkat_id) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    [mob_id, profile, meerkat_id]
+        .iter()
+        .all(|part| is_valid_peer_name_component(part))
+}
+
 pub struct MultiBackendProvisioner {
     subagent: SubagentBackend,
     external: Option<ExternalBackend>,
@@ -166,6 +193,12 @@ impl MultiBackendProvisioner {
         create_session: CreateSessionRequest,
         peer_name: String,
     ) -> Result<MemberRef, MobError> {
+        if !is_valid_external_peer_name(&peer_name) {
+            return Err(MobError::WiringError(format!(
+                "invalid external peer name '{}': expected '<mob>/<profile>/<meerkat>' using identifier-safe segments",
+                peer_name
+            )));
+        }
         mob_debug(format!(
             "ExternalBackend::external_member_ref start peer_name={}",
             peer_name

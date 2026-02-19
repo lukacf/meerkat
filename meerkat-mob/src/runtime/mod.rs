@@ -23,7 +23,7 @@ use meerkat_core::service::SessionService;
 use meerkat_core::types::{SessionId, ToolCallView, ToolDef, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::process::{Child, Command};

@@ -14,7 +14,7 @@ use meerkat_mob::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -43,6 +43,9 @@ impl MobMcpState {
         definition: MobDefinition,
     ) -> Result<MobId, MobError> {
         let mob_id = definition.id.clone();
+        if self.mobs.read().await.contains_key(&mob_id) {
+            return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
+        }
         let storage = MobStorage::in_memory();
         let handle = MobBuilder::new(
             definition.clone(),
@@ -53,10 +56,22 @@ impl MobMcpState {
         .with_session_service(self.session_service.clone())
         .create()
         .await?;
-        self.mobs
-            .write()
-            .await
-            .insert(mob_id.clone(), ManagedMob { handle });
+        match self.mobs.write().await.entry(mob_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(ManagedMob { handle });
+            }
+            Entry::Occupied(_) => {
+                // Race-safe duplicate guard: avoid leaking the just-created runtime.
+                if let Err(error) = handle.destroy().await {
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        error = %error,
+                        "duplicate mob create cleanup failed"
+                    );
+                }
+                return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
+            }
+        }
         Ok(mob_id)
     }
 
@@ -552,6 +567,12 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MobCreateArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                if args.prefab.is_some() && args.definition.is_some() {
+                    return Err(ToolError::invalid_arguments(
+                        call.name,
+                        "provide exactly one of prefab or definition",
+                    ));
+                }
                 let mob_id = if let Some(prefab) = args.prefab {
                     let p = Prefab::from_key(&prefab)
                         .ok_or_else(|| ToolError::invalid_arguments(call.name, "unknown prefab"))?;
@@ -1009,6 +1030,17 @@ mod tests {
         serde_json::from_str(&out.content).expect("tool json")
     }
 
+    async fn call_tool_err(
+        d: &MobMcpDispatcher,
+        name: &str,
+        args: serde_json::Value,
+    ) -> ToolError {
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+        d.dispatch(mk_call(name, &raw))
+            .await
+            .expect_err("tool call should fail")
+    }
+
     #[tokio::test]
     async fn test_dispatcher_exposes_14_tools() {
         let svc = Arc::new(MockSessionSvc::new());
@@ -1226,5 +1258,67 @@ mod tests {
         )
         .await;
         assert_eq!(spawned["member_ref"]["kind"], "backend_peer");
+    }
+
+    #[tokio::test]
+    async fn test_mob_create_rejects_duplicate_mob_id() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let created = call_tool(&d, "mob_create", json!({"prefab":"pipeline"})).await;
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+        let error = call_tool_err(&d, "mob_create", json!({"prefab":"pipeline"})).await;
+        assert!(
+            matches!(error, ToolError::ExecutionFailed { .. }),
+            "duplicate mob creation should fail deterministically"
+        );
+
+        let listed = call_tool(&d, "mob_list", json!({})).await;
+        let ids: Vec<String> = listed["mobs"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|m| m["mob_id"].as_str().map(ToString::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(ids, vec![mob_id], "duplicate create must not replace active mob");
+    }
+
+    #[tokio::test]
+    async fn test_mob_create_rejects_prefab_and_definition_together() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let error = call_tool_err(
+            &d,
+            "mob_create",
+            json!({
+                "prefab":"pipeline",
+                "definition": {
+                    "id": "ignored",
+                    "orchestrator": {"profile": "lead"},
+                    "profiles": {
+                        "lead": {
+                            "model": "claude-opus-4-6",
+                            "tools": {"comms": true},
+                            "external_addressable": true
+                        }
+                    },
+                    "mcp_servers": {},
+                    "wiring": {"auto_wire_orchestrator": false, "role_wiring": []},
+                    "skills": {},
+                    "backend": {"default": "subagent"}
+                }
+            }),
+        )
+        .await;
+        assert!(
+            matches!(error, ToolError::InvalidArguments { .. }),
+            "mob_create should reject conflicting inputs"
+        );
     }
 }

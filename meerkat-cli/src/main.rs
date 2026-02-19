@@ -7,7 +7,6 @@ mod stdin_events;
 use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_contracts::{SessionLocator, SessionLocatorError, format_session_ref};
 use meerkat_core::AgentToolDispatcher;
-use meerkat_mob::{MobDefinition, Prefab, ProfileName};
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::service::{
@@ -19,6 +18,7 @@ use meerkat_core::{
 use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
+use meerkat_mob::{MobDefinition, Prefab, ProfileName};
 use meerkat_store::SessionStore;
 use meerkat_tools::find_project_root;
 use tokio::io::AsyncWriteExt;
@@ -584,9 +584,17 @@ enum MobCommands {
     /// Retire a meerkat.
     Retire { mob_id: String, meerkat_id: String },
     /// Wire two peers.
-    Wire { mob_id: String, a: String, b: String },
+    Wire {
+        mob_id: String,
+        a: String,
+        b: String,
+    },
     /// Unwire two peers.
-    Unwire { mob_id: String, a: String, b: String },
+    Unwire {
+        mob_id: String,
+        a: String,
+        b: String,
+    },
     /// Send external turn to a meerkat.
     Turn {
         mob_id: String,
@@ -2399,30 +2407,9 @@ struct PersistedMobRegistry {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PersistedMob {
     definition: MobDefinition,
-    ops: Vec<PersistedMobOp>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum PersistedMobOp {
-    Spawn {
-        profile: String,
-        meerkat_id: String,
-    },
-    Retire {
-        meerkat_id: String,
-    },
-    Wire {
-        a: String,
-        b: String,
-    },
-    Unwire {
-        a: String,
-        b: String,
-    },
-    Stop,
-    Resume,
-    Complete,
+    #[serde(default)]
+    status: Option<String>,
+    events: Vec<meerkat_mob::MobEvent>,
 }
 
 fn mob_registry_path(scope: &RuntimeScope) -> PathBuf {
@@ -2472,12 +2459,14 @@ async fn acquire_mob_registry_lock(scope: &RuntimeScope) -> anyhow::Result<MobRe
                 return Ok(MobRegistryLock { path });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if let Ok(meta) = tokio::fs::metadata(&path).await
-                    && let Ok(modified) = meta.modified()
-                    && let Ok(age) = modified.elapsed()
-                    && age > Duration::from_secs(30)
+                if let Ok(content) = tokio::fs::read_to_string(&path).await
+                    && let Ok(pid) = content.trim().parse::<i32>()
                 {
-                    let _ = tokio::fs::remove_file(&path).await;
+                    let alive =
+                        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+                    if !alive {
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
                 }
                 if started.elapsed() >= max_wait {
                     return Err(anyhow::anyhow!(
@@ -2510,7 +2499,10 @@ async fn load_mob_registry(scope: &RuntimeScope) -> anyhow::Result<PersistedMobR
     Ok(parsed)
 }
 
-async fn save_mob_registry(scope: &RuntimeScope, registry: &PersistedMobRegistry) -> anyhow::Result<()> {
+async fn save_mob_registry(
+    scope: &RuntimeScope,
+    registry: &PersistedMobRegistry,
+) -> anyhow::Result<()> {
     let path = mob_registry_path(scope);
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -2527,78 +2519,85 @@ async fn save_mob_registry(scope: &RuntimeScope, registry: &PersistedMobRegistry
         std::process::id(),
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
-    tokio::fs::write(&tmp_path, content)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to write temp mob registry '{}': {e}", tmp_path.display()))?;
+    tokio::fs::write(&tmp_path, content).await.map_err(|e| {
+        anyhow::anyhow!(
+            "failed to write temp mob registry '{}': {e}",
+            tmp_path.display()
+        )
+    })?;
     tokio::fs::rename(&tmp_path, &path)
         .await
         .map_err(|e| anyhow::anyhow!("failed to commit mob registry '{}': {e}", path.display()))
 }
 
-fn push_mob_op(
+async fn replay_mob_event(
+    state: &meerkat_mob_mcp::MobMcpState,
+    mob_id: &meerkat_mob::MobId,
+    event: &meerkat_mob::MobEvent,
+) -> anyhow::Result<()> {
+    match &event.kind {
+        meerkat_mob::MobEventKind::MobCreated { .. } => {}
+        meerkat_mob::MobEventKind::MeerkatSpawned {
+            role, meerkat_id, ..
+        } => state
+            .mob_spawn(mob_id, role.clone(), meerkat_id.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        meerkat_mob::MobEventKind::MeerkatRetired { meerkat_id, .. } => state
+            .mob_retire(mob_id, meerkat_id.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        meerkat_mob::MobEventKind::PeersWired { a, b } => state
+            .mob_wire(mob_id, a.clone(), b.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        meerkat_mob::MobEventKind::PeersUnwired { a, b } => state
+            .mob_unwire(mob_id, a.clone(), b.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        meerkat_mob::MobEventKind::MobCompleted => state
+            .mob_complete(mob_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        meerkat_mob::MobEventKind::TaskCreated { .. }
+        | meerkat_mob::MobEventKind::TaskUpdated { .. } => {}
+    };
+    Ok(())
+}
+
+async fn sync_mob_events(
+    state: &meerkat_mob_mcp::MobMcpState,
     registry: &mut PersistedMobRegistry,
     mob_id: &str,
-    op: PersistedMobOp,
 ) -> anyhow::Result<()> {
     let mob = registry
         .mobs
         .get_mut(mob_id)
         .ok_or_else(|| anyhow::anyhow!("mob not found in persisted registry: {mob_id}"))?;
-    mob.ops.push(op);
+    mob.events = state
+        .mob_events(&meerkat_mob::MobId::from(mob_id.to_string()), 0, usize::MAX)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    mob.status = Some(
+        state
+            .mob_status(&meerkat_mob::MobId::from(mob_id.to_string()))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .as_str()
+            .to_string(),
+    );
     Ok(())
 }
 
-async fn replay_mob_op(
-    state: &meerkat_mob_mcp::MobMcpState,
-    mob_id: &meerkat_mob::MobId,
-    op: &PersistedMobOp,
-) -> anyhow::Result<()> {
-    match op {
-        PersistedMobOp::Spawn {
-            profile,
-            meerkat_id,
-        } => state
-            .mob_spawn(
-                mob_id,
-                ProfileName::from(profile.clone()),
-                meerkat_mob::MeerkatId::from(meerkat_id.clone()),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        PersistedMobOp::Retire { meerkat_id } => state
-            .mob_retire(mob_id, meerkat_mob::MeerkatId::from(meerkat_id.clone()))
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        PersistedMobOp::Wire { a, b } => state
-            .mob_wire(
-                mob_id,
-                meerkat_mob::MeerkatId::from(a.clone()),
-                meerkat_mob::MeerkatId::from(b.clone()),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        PersistedMobOp::Unwire { a, b } => state
-            .mob_unwire(
-                mob_id,
-                meerkat_mob::MeerkatId::from(a.clone()),
-                meerkat_mob::MeerkatId::from(b.clone()),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        PersistedMobOp::Stop => state
-            .mob_stop(mob_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        PersistedMobOp::Resume => state
-            .mob_resume(mob_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        PersistedMobOp::Complete => state
-            .mob_complete(mob_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-    };
-    Ok(())
+fn parse_mob_state(value: &str) -> Option<meerkat_mob::MobState> {
+    match value {
+        "Creating" => Some(meerkat_mob::MobState::Creating),
+        "Running" => Some(meerkat_mob::MobState::Running),
+        "Stopped" => Some(meerkat_mob::MobState::Stopped),
+        "Completed" => Some(meerkat_mob::MobState::Completed),
+        "Destroyed" => Some(meerkat_mob::MobState::Destroyed),
+        _ => None,
+    }
 }
 
 async fn hydrate_mob_state(
@@ -2618,8 +2617,30 @@ async fn hydrate_mob_state(
                 created
             ));
         }
-        for op in &persisted.ops {
-            replay_mob_op(state.as_ref(), &created, op).await?;
+        for event in &persisted.events {
+            replay_mob_event(state.as_ref(), &created, event).await?;
+        }
+        if let Some(target_status) = persisted.status.as_deref().and_then(parse_mob_state) {
+            let current = state
+                .mob_status(&created)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            match (current, target_status) {
+                (meerkat_mob::MobState::Running, meerkat_mob::MobState::Stopped) => {
+                    state.mob_stop(&created).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+                (meerkat_mob::MobState::Stopped, meerkat_mob::MobState::Running) => {
+                    state.mob_resume(&created).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+                (meerkat_mob::MobState::Running, meerkat_mob::MobState::Completed)
+                | (meerkat_mob::MobState::Stopped, meerkat_mob::MobState::Completed) => {
+                    state
+                        .mob_complete(&created)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+                _ => {}
+            }
         }
     }
     Ok((state, registry))
@@ -2664,9 +2685,15 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     "provide one of --prefab <name> or --definition <file>"
                 ));
             };
-            registry
-                .mobs
-                .insert(mob_id.clone(), PersistedMob { definition, ops: vec![] });
+            registry.mobs.insert(
+                mob_id.clone(),
+                PersistedMob {
+                    definition,
+                    status: Some(meerkat_mob::MobState::Running.as_str().to_string()),
+                    events: Vec::new(),
+                },
+            );
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             println!("{mob_id}");
             Ok(())
@@ -2698,14 +2725,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            push_mob_op(
-                &mut registry,
-                &mob_id,
-                PersistedMobOp::Spawn {
-                    profile,
-                    meerkat_id,
-                },
-            )?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
@@ -2717,13 +2737,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            push_mob_op(
-                &mut registry,
-                &mob_id,
-                PersistedMobOp::Retire {
-                    meerkat_id,
-                },
-            )?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
@@ -2736,14 +2750,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            push_mob_op(
-                &mut registry,
-                &mob_id,
-                PersistedMobOp::Wire {
-                    a,
-                    b,
-                },
-            )?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
@@ -2756,14 +2763,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            push_mob_op(
-                &mut registry,
-                &mob_id,
-                PersistedMobOp::Unwire {
-                    a,
-                    b,
-                },
-            )?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
@@ -2787,7 +2787,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 .mob_stop(&meerkat_mob::MobId::from(mob_id.clone()))
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            push_mob_op(&mut registry, &mob_id, PersistedMobOp::Stop)?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
@@ -2796,7 +2796,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 .mob_resume(&meerkat_mob::MobId::from(mob_id.clone()))
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            push_mob_op(&mut registry, &mob_id, PersistedMobOp::Resume)?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
@@ -2805,7 +2805,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 .mob_complete(&meerkat_mob::MobId::from(mob_id.clone()))
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            push_mob_op(&mut registry, &mob_id, PersistedMobOp::Complete)?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
@@ -3537,7 +3537,9 @@ mod tests {
         .await
         .expect("mob create should succeed");
 
-        let registry = load_mob_registry(&scope).await.expect("registry should load");
+        let registry = load_mob_registry(&scope)
+            .await
+            .expect("registry should load");
         assert!(registry.mobs.contains_key("coding_swarm"));
 
         handle_mob_command(MobCommands::List, &scope)

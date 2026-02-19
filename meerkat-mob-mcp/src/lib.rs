@@ -8,7 +8,10 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
-use meerkat_mob::{MeerkatId, MobBuilder, MobDefinition, MobError, MobHandle, MobId, MobSessionService, MobState, MobStorage, Prefab, ProfileName};
+use meerkat_mob::{
+    MeerkatId, MobBuilder, MobDefinition, MobError, MobHandle, MobId, MobSessionService, MobState,
+    MobStorage, Prefab, ProfileName,
+};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -34,7 +37,10 @@ impl MobMcpState {
         }
     }
 
-    pub async fn mob_create_definition(&self, definition: MobDefinition) -> Result<MobId, MobError> {
+    pub async fn mob_create_definition(
+        &self,
+        definition: MobDefinition,
+    ) -> Result<MobId, MobError> {
         let mob_id = definition.id.clone();
         let storage = MobStorage::in_memory();
         let handle = MobBuilder::new(
@@ -46,12 +52,10 @@ impl MobMcpState {
         .with_session_service(self.session_service.clone())
         .create()
         .await?;
-        self.mobs.write().await.insert(
-            mob_id.clone(),
-            ManagedMob {
-                handle,
-            },
-        );
+        self.mobs
+            .write()
+            .await
+            .insert(mob_id.clone(), ManagedMob { handle });
         Ok(mob_id)
     }
 
@@ -96,7 +100,12 @@ impl MobMcpState {
         Ok(())
     }
 
-    pub async fn mob_spawn(&self, mob_id: &MobId, profile: ProfileName, meerkat_id: MeerkatId) -> Result<(), MobError> {
+    pub async fn mob_spawn(
+        &self,
+        mob_id: &MobId,
+        profile: ProfileName,
+        meerkat_id: MeerkatId,
+    ) -> Result<(), MobError> {
         self.handle_for(mob_id)
             .await?
             .spawn(profile, meerkat_id, None)
@@ -108,27 +117,58 @@ impl MobMcpState {
         self.handle_for(mob_id).await?.retire(meerkat_id).await
     }
 
-    pub async fn mob_wire(&self, mob_id: &MobId, a: MeerkatId, b: MeerkatId) -> Result<(), MobError> {
+    pub async fn mob_wire(
+        &self,
+        mob_id: &MobId,
+        a: MeerkatId,
+        b: MeerkatId,
+    ) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.wire(a, b).await
     }
 
-    pub async fn mob_unwire(&self, mob_id: &MobId, a: MeerkatId, b: MeerkatId) -> Result<(), MobError> {
+    pub async fn mob_unwire(
+        &self,
+        mob_id: &MobId,
+        a: MeerkatId,
+        b: MeerkatId,
+    ) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.unwire(a, b).await
     }
 
-    pub async fn mob_list_meerkats(&self, mob_id: &MobId) -> Result<Vec<meerkat_mob::RosterEntry>, MobError> {
-        self.handle_for(mob_id).await?.list_meerkats().await.pipe(Ok)
+    pub async fn mob_list_meerkats(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<meerkat_mob::RosterEntry>, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .list_meerkats()
+            .await
+            .pipe(Ok)
     }
 
-    pub async fn mob_external_turn(&self, mob_id: &MobId, meerkat_id: MeerkatId, message: String) -> Result<(), MobError> {
+    pub async fn mob_external_turn(
+        &self,
+        mob_id: &MobId,
+        meerkat_id: MeerkatId,
+        message: String,
+    ) -> Result<(), MobError> {
         self.handle_for(mob_id)
             .await?
             .external_turn(meerkat_id, message)
             .await
     }
 
-    pub async fn mob_events(&self, mob_id: &MobId, after_cursor: u64, limit: usize) -> Result<Vec<meerkat_mob::MobEvent>, MobError> {
-        self.handle_for(mob_id).await?.events().poll(after_cursor, limit).await
+    pub async fn mob_events(
+        &self,
+        mob_id: &MobId,
+        after_cursor: u64,
+        limit: usize,
+    ) -> Result<Vec<meerkat_mob::MobEvent>, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .events()
+            .poll(after_cursor, limit)
+            .await
     }
 
     async fn handle_for(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
@@ -233,7 +273,11 @@ impl SessionService for LocalSessionService {
         })
     }
 
-    async fn start_turn(&self, id: &SessionId, _req: StartTurnRequest) -> Result<RunResult, SessionError> {
+    async fn start_turn(
+        &self,
+        id: &SessionId,
+        _req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
         if !self.sessions.read().await.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
         }
@@ -455,63 +499,142 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 )
             }
             "mob_status" => {
-                let args: MobIdArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let status = self.state.mob_status(&MobId::from(args.mob_id)).await.map_err(|e| map_mob_err(call, e))?;
+                let args: MobIdArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let status = self
+                    .state
+                    .mob_status(&MobId::from(args.mob_id))
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"status": status.as_str()}))
             }
             "mob_stop" => {
-                let args: MobIdArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state.mob_stop(&MobId::from(args.mob_id)).await.map_err(|e| map_mob_err(call, e))?;
+                let args: MobIdArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_stop(&MobId::from(args.mob_id))
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_resume" => {
-                let args: MobIdArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state.mob_resume(&MobId::from(args.mob_id)).await.map_err(|e| map_mob_err(call, e))?;
+                let args: MobIdArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_resume(&MobId::from(args.mob_id))
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_complete" => {
-                let args: MobIdArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state.mob_complete(&MobId::from(args.mob_id)).await.map_err(|e| map_mob_err(call, e))?;
+                let args: MobIdArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_complete(&MobId::from(args.mob_id))
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_destroy" => {
-                let args: MobIdArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state.mob_destroy(&MobId::from(args.mob_id)).await.map_err(|e| map_mob_err(call, e))?;
+                let args: MobIdArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_destroy(&MobId::from(args.mob_id))
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_spawn" => {
-                let args: SpawnArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state.mob_spawn(&MobId::from(args.mob_id), ProfileName::from(args.profile), MeerkatId::from(args.meerkat_id)).await.map_err(|e| map_mob_err(call, e))?;
+                let args: SpawnArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_spawn(
+                        &MobId::from(args.mob_id),
+                        ProfileName::from(args.profile),
+                        MeerkatId::from(args.meerkat_id),
+                    )
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_retire" => {
-                let args: RetireArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state.mob_retire(&MobId::from(args.mob_id), MeerkatId::from(args.meerkat_id)).await.map_err(|e| map_mob_err(call, e))?;
+                let args: RetireArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_retire(&MobId::from(args.mob_id), MeerkatId::from(args.meerkat_id))
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_wire" => {
-                let args: WireArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state.mob_wire(&MobId::from(args.mob_id), MeerkatId::from(args.a), MeerkatId::from(args.b)).await.map_err(|e| map_mob_err(call, e))?;
+                let args: WireArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_wire(
+                        &MobId::from(args.mob_id),
+                        MeerkatId::from(args.a),
+                        MeerkatId::from(args.b),
+                    )
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_unwire" => {
-                let args: WireArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state.mob_unwire(&MobId::from(args.mob_id), MeerkatId::from(args.a), MeerkatId::from(args.b)).await.map_err(|e| map_mob_err(call, e))?;
+                let args: WireArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_unwire(
+                        &MobId::from(args.mob_id),
+                        MeerkatId::from(args.a),
+                        MeerkatId::from(args.b),
+                    )
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_list_meerkats" => {
-                let args: MobIdArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let rows = self.state.mob_list_meerkats(&MobId::from(args.mob_id)).await.map_err(|e| map_mob_err(call, e))?;
+                let args: MobIdArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let rows = self
+                    .state
+                    .mob_list_meerkats(&MobId::from(args.mob_id))
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"meerkats": rows}))
             }
             "mob_external_turn" => {
-                let args: TurnArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state.mob_external_turn(&MobId::from(args.mob_id), MeerkatId::from(args.meerkat_id), args.message).await.map_err(|e| map_mob_err(call, e))?;
+                let args: TurnArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_external_turn(
+                        &MobId::from(args.mob_id),
+                        MeerkatId::from(args.meerkat_id),
+                        args.message,
+                    )
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_events" => {
-                let args: EventsArgs = call.parse_args().map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let events = self.state.mob_events(&MobId::from(args.mob_id), args.after_cursor, args.limit).await.map_err(|e| map_mob_err(call, e))?;
+                let args: EventsArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let events = self
+                    .state
+                    .mob_events(&MobId::from(args.mob_id), args.after_cursor, args.limit)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"events": events}))
             }
             _ => Err(ToolError::not_found(call.name)),
@@ -547,10 +670,12 @@ pub async fn handle_tools_call(
     arguments: &serde_json::Value,
 ) -> Result<serde_json::Value, McpToolError> {
     let dispatcher = MobMcpDispatcher::new(state.clone());
-    let raw = serde_json::value::RawValue::from_string(arguments.to_string()).map_err(|e| McpToolError {
-        code: -32602,
-        message: format!("invalid arguments: {e}"),
-        data: None,
+    let raw = serde_json::value::RawValue::from_string(arguments.to_string()).map_err(|e| {
+        McpToolError {
+            code: -32602,
+            message: format!("invalid arguments: {e}"),
+            data: None,
+        }
     })?;
     let result = dispatcher
         .dispatch(ToolCallView {
@@ -578,7 +703,10 @@ mod tests {
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
     use meerkat_core::comms::{CommsCommand, SendError, SendReceipt};
     use meerkat_core::service::SessionService;
-    use meerkat_core::service::{CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionSummary, SessionUsage, SessionView, StartTurnRequest};
+    use meerkat_core::service::{
+        CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionSummary,
+        SessionUsage, SessionView, StartTurnRequest,
+    };
     use meerkat_core::types::{RunResult, SessionId, Usage};
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -603,9 +731,14 @@ mod tests {
 
     #[async_trait]
     impl CoreCommsRuntime for MockComms {
-        fn public_key(&self) -> Option<String> { Some(self.key.clone()) }
+        fn public_key(&self) -> Option<String> {
+            Some(self.key.clone())
+        }
 
-        async fn add_trusted_peer(&self, peer: meerkat_core::comms::TrustedPeerSpec) -> Result<(), SendError> {
+        async fn add_trusted_peer(
+            &self,
+            peer: meerkat_core::comms::TrustedPeerSpec,
+        ) -> Result<(), SendError> {
             self.trusted.write().await.insert(peer.peer_id);
             Ok(())
         }
@@ -637,41 +770,98 @@ mod tests {
 
     impl MockSessionSvc {
         fn new() -> Self {
-            Self { sessions: RwLock::new(HashMap::new()), counter: AtomicU64::new(0) }
+            Self {
+                sessions: RwLock::new(HashMap::new()),
+                counter: AtomicU64::new(0),
+            }
         }
     }
 
     #[async_trait]
     impl SessionService for MockSessionSvc {
-        async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+        async fn create_session(
+            &self,
+            req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
             let sid = SessionId::new();
             let n = self.counter.fetch_add(1, Ordering::Relaxed);
-            let name = req.build.and_then(|b| b.comms_name).unwrap_or_else(|| format!("s-{n}"));
-            self.sessions.write().await.insert(sid.clone(), Arc::new(MockComms::new(&name)));
-            Ok(RunResult { text: "ok".to_string(), session_id: sid, usage: Usage::default(), turns: 1, tool_calls: 0, structured_output: None, schema_warnings: None })
+            let name = req
+                .build
+                .and_then(|b| b.comms_name)
+                .unwrap_or_else(|| format!("s-{n}"));
+            self.sessions
+                .write()
+                .await
+                .insert(sid.clone(), Arc::new(MockComms::new(&name)));
+            Ok(RunResult {
+                text: "ok".to_string(),
+                session_id: sid,
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+            })
         }
 
-        async fn start_turn(&self, id: &SessionId, _req: StartTurnRequest) -> Result<RunResult, SessionError> {
+        async fn start_turn(
+            &self,
+            id: &SessionId,
+            _req: StartTurnRequest,
+        ) -> Result<RunResult, SessionError> {
             if !self.sessions.read().await.contains_key(id) {
                 return Err(SessionError::NotFound { id: id.clone() });
             }
-            Ok(RunResult { text: "ok".to_string(), session_id: id.clone(), usage: Usage::default(), turns: 1, tool_calls: 0, structured_output: None, schema_warnings: None })
+            Ok(RunResult {
+                text: "ok".to_string(),
+                session_id: id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+            })
         }
 
-        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> { Ok(()) }
+        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+            Ok(())
+        }
 
         async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
             if !self.sessions.read().await.contains_key(id) {
                 return Err(SessionError::NotFound { id: id.clone() });
             }
             Ok(SessionView {
-                state: SessionInfo { session_id: id.clone(), created_at: SystemTime::now(), updated_at: SystemTime::now(), message_count: 0, is_active: false, last_assistant_text: None },
-                billing: SessionUsage { total_tokens: 0, usage: Usage::default() },
+                state: SessionInfo {
+                    session_id: id.clone(),
+                    created_at: SystemTime::now(),
+                    updated_at: SystemTime::now(),
+                    message_count: 0,
+                    is_active: false,
+                    last_assistant_text: None,
+                },
+                billing: SessionUsage {
+                    total_tokens: 0,
+                    usage: Usage::default(),
+                },
             })
         }
 
         async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
-            Ok(self.sessions.read().await.keys().map(|id| SessionSummary { session_id: id.clone(), created_at: SystemTime::now(), updated_at: SystemTime::now(), message_count: 0, total_tokens: 0, is_active: false }).collect())
+            Ok(self
+                .sessions
+                .read()
+                .await
+                .keys()
+                .map(|id| SessionSummary {
+                    session_id: id.clone(),
+                    created_at: SystemTime::now(),
+                    updated_at: SystemTime::now(),
+                    message_count: 0,
+                    total_tokens: 0,
+                    is_active: false,
+                })
+                .collect())
         }
 
         async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
@@ -690,7 +880,9 @@ mod tests {
                 .map(|s| s.clone() as Arc<dyn CoreCommsRuntime>)
         }
 
-        fn supports_persistent_sessions(&self) -> bool { true }
+        fn supports_persistent_sessions(&self) -> bool {
+            true
+        }
 
         async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
             true
@@ -698,10 +890,18 @@ mod tests {
     }
 
     fn mk_call<'a>(name: &'a str, args: &'a serde_json::value::RawValue) -> ToolCallView<'a> {
-        ToolCallView { id: "t1", name, args }
+        ToolCallView {
+            id: "t1",
+            name,
+            args,
+        }
     }
 
-    async fn call_tool(d: &MobMcpDispatcher, name: &str, args: serde_json::Value) -> serde_json::Value {
+    async fn call_tool(
+        d: &MobMcpDispatcher,
+        name: &str,
+        args: serde_json::Value,
+    ) -> serde_json::Value {
         let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
         let out = d.dispatch(mk_call(name, &raw)).await.expect("tool call");
         serde_json::from_str(&out.content).expect("tool json")
@@ -721,11 +921,27 @@ mod tests {
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let a = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await["mob_id"].as_str().unwrap().to_string();
-        let b = call_tool(&d, "mob_create", json!({"prefab":"code_review"})).await["mob_id"].as_str().unwrap().to_string();
+        let a = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let b = call_tool(&d, "mob_create", json!({"prefab":"code_review"})).await["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
-        call_tool(&d, "mob_spawn", json!({"mob_id": a, "profile":"worker", "meerkat_id":"wa"})).await;
-        call_tool(&d, "mob_spawn", json!({"mob_id": b, "profile":"worker", "meerkat_id":"wb"})).await;
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({"mob_id": a, "profile":"worker", "meerkat_id":"wa"}),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({"mob_id": b, "profile":"worker", "meerkat_id":"wb"}),
+        )
+        .await;
 
         let la = call_tool(&d, "mob_list_meerkats", json!({"mob_id": a})).await;
         let lb = call_tool(&d, "mob_list_meerkats", json!({"mob_id": b})).await;
@@ -739,21 +955,66 @@ mod tests {
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let mob_id = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await["mob_id"].as_str().unwrap().to_string();
-        call_tool(&d, "mob_spawn", json!({"mob_id": mob_id, "profile":"lead", "meerkat_id":"lead"})).await;
-        call_tool(&d, "mob_spawn", json!({"mob_id": mob_id, "profile":"worker", "meerkat_id":"w1"})).await;
-        call_tool(&d, "mob_spawn", json!({"mob_id": mob_id, "profile":"worker", "meerkat_id":"w2"})).await;
-        call_tool(&d, "mob_wire", json!({"mob_id": mob_id, "a":"w1", "b":"w2"})).await;
-        let _ = call_tool(&d, "mob_external_turn", json!({"mob_id": mob_id, "meerkat_id":"lead", "message":"ping"})).await;
+        let mob_id = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({"mob_id": mob_id, "profile":"lead", "meerkat_id":"lead"}),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({"mob_id": mob_id, "profile":"worker", "meerkat_id":"w1"}),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({"mob_id": mob_id, "profile":"worker", "meerkat_id":"w2"}),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_wire",
+            json!({"mob_id": mob_id, "a":"w1", "b":"w2"}),
+        )
+        .await;
+        let _ = call_tool(
+            &d,
+            "mob_external_turn",
+            json!({"mob_id": mob_id, "meerkat_id":"lead", "message":"ping"}),
+        )
+        .await;
         let listed = call_tool(&d, "mob_list_meerkats", json!({"mob_id": mob_id})).await;
         assert_eq!(listed["meerkats"].as_array().map(|v| v.len()), Some(3));
-        call_tool(&d, "mob_unwire", json!({"mob_id": mob_id, "a":"w1", "b":"w2"})).await;
-        call_tool(&d, "mob_retire", json!({"mob_id": mob_id, "meerkat_id":"w2"})).await;
+        call_tool(
+            &d,
+            "mob_unwire",
+            json!({"mob_id": mob_id, "a":"w1", "b":"w2"}),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_retire",
+            json!({"mob_id": mob_id, "meerkat_id":"w2"}),
+        )
+        .await;
         call_tool(&d, "mob_complete", json!({"mob_id": mob_id})).await;
-        let events = call_tool(&d, "mob_events", json!({"mob_id": mob_id, "after_cursor":0, "limit":50})).await;
+        let events = call_tool(
+            &d,
+            "mob_events",
+            json!({"mob_id": mob_id, "after_cursor":0, "limit":50}),
+        )
+        .await;
         let events = events["events"].as_array().cloned().unwrap_or_default();
         assert!(
-            events.iter().any(|e| e["kind"]["type"] == "meerkat_spawned"),
+            events
+                .iter()
+                .any(|e| e["kind"]["type"] == "meerkat_spawned"),
             "expected structural events to include meerkat_spawned"
         );
         assert!(
@@ -771,17 +1032,44 @@ mod tests {
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let mob_id = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await["mob_id"].as_str().unwrap().to_string();
-        call_tool(&d, "mob_spawn", json!({"mob_id": mob_id, "profile":"lead", "meerkat_id":"lead"})).await;
-        call_tool(&d, "mob_spawn", json!({"mob_id": mob_id, "profile":"worker", "meerkat_id":"w1"})).await;
-        call_tool(&d, "mob_spawn", json!({"mob_id": mob_id, "profile":"worker", "meerkat_id":"w2"})).await;
-        call_tool(&d, "mob_wire", json!({"mob_id": mob_id, "a":"w1", "b":"w2"})).await;
+        let mob_id = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({"mob_id": mob_id, "profile":"lead", "meerkat_id":"lead"}),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({"mob_id": mob_id, "profile":"worker", "meerkat_id":"w1"}),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({"mob_id": mob_id, "profile":"worker", "meerkat_id":"w2"}),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_wire",
+            json!({"mob_id": mob_id, "a":"w1", "b":"w2"}),
+        )
+        .await;
         call_tool(&d, "mob_stop", json!({"mob_id": mob_id})).await;
         call_tool(&d, "mob_resume", json!({"mob_id": mob_id})).await;
         let members = call_tool(&d, "mob_list_meerkats", json!({"mob_id": mob_id})).await;
         assert_eq!(members["meerkats"].as_array().unwrap().len(), 3); // lead + 2 workers
-        call_tool(&d, "mob_external_turn", json!({"mob_id": mob_id, "meerkat_id":"lead", "message":"status"}))
-            .await;
+        call_tool(
+            &d,
+            "mob_external_turn",
+            json!({"mob_id": mob_id, "meerkat_id":"lead", "message":"status"}),
+        )
+        .await;
         let status = call_tool(&d, "mob_status", json!({"mob_id": mob_id})).await;
         assert_eq!(status["status"], "Running");
     }

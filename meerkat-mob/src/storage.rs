@@ -44,6 +44,7 @@ mod tests {
         // Event store works
         let event = NewMobEvent {
             mob_id: MobId::from("test"),
+            timestamp: None,
             kind: MobEventKind::MobCompleted,
         };
         let stored = storage.events.append(event).await.unwrap();

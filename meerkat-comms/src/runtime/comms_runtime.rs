@@ -202,8 +202,8 @@ impl CoreCommsRuntime for CommsRuntime {
     }
 
     async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-        let public_key = PubKey::from_peer_id(peer_id)
-            .map_err(|err| SendError::Validation(err.to_string()))?;
+        let public_key =
+            PubKey::from_peer_id(peer_id).map_err(|err| SendError::Validation(err.to_string()))?;
         let removed = self.router.remove_trusted_peer(&public_key).await;
         Ok(removed)
     }

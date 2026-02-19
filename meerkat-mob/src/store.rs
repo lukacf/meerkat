@@ -59,7 +59,7 @@ impl MobEventStore for InMemoryMobEventStore {
         let cursor = events.len() as u64 + 1;
         let stored = MobEvent {
             cursor,
-            timestamp: Utc::now(),
+            timestamp: event.timestamp.unwrap_or_else(Utc::now),
             mob_id: event.mob_id,
             kind: event.kind,
         };
@@ -100,6 +100,7 @@ mod tests {
     fn new_event(mob_id: &str, kind: MobEventKind) -> NewMobEvent {
         NewMobEvent {
             mob_id: MobId::from(mob_id),
+            timestamp: None,
             kind,
         }
     }

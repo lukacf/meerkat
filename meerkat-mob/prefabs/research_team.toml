@@ -1,0 +1,38 @@
+[mob]
+id = "research_team"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+skills = ["orchestrator"]
+peer_description = "Orchestrator"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+skills = ["worker"]
+peer_description = "Worker"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+shell = true
+comms = true
+mob_tasks = true
+
+[wiring]
+auto_wire_orchestrator = true
+
+[skills.orchestrator]
+source = "inline"
+content = "## Role\nRun structured research with synthesis."
+
+[skills.worker]
+source = "inline"
+content = "Gather evidence and return sourced summaries for assigned questions."

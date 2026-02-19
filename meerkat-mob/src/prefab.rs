@@ -110,6 +110,16 @@ impl Prefab {
             skills,
         }
     }
+
+    /// User-editable TOML template for this prefab.
+    pub fn toml_template(self) -> &'static str {
+        match self {
+            Self::CodingSwarm => include_str!("../prefabs/coding_swarm.toml"),
+            Self::CodeReview => include_str!("../prefabs/code_review.toml"),
+            Self::ResearchTeam => include_str!("../prefabs/research_team.toml"),
+            Self::Pipeline => include_str!("../prefabs/pipeline.toml"),
+        }
+    }
 }
 
 fn orchestrator_skill(prefab: Prefab) -> &'static str {
@@ -133,7 +143,9 @@ fn worker_skill(prefab: Prefab) -> &'static str {
     match prefab {
         Prefab::CodingSwarm => "Implement assigned code tasks and report concise diffs.",
         Prefab::CodeReview => "Review assigned changes and report concrete findings with evidence.",
-        Prefab::ResearchTeam => "Gather evidence and return sourced summaries for assigned questions.",
+        Prefab::ResearchTeam => {
+            "Gather evidence and return sourced summaries for assigned questions."
+        }
         Prefab::Pipeline => "Execute your stage deterministically and emit handoff artifacts.",
     }
 }
@@ -186,6 +198,19 @@ mod tests {
                     prefab.key()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_prefab_toml_templates_parse() {
+        for prefab in Prefab::all() {
+            let parsed = crate::definition::MobDefinition::from_toml(prefab.toml_template())
+                .expect("prefab toml should parse");
+            assert_eq!(
+                parsed.id.as_str(),
+                prefab.key(),
+                "prefab toml id must match prefab key"
+            );
         }
     }
 }

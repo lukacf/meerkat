@@ -21,7 +21,7 @@ pub struct OrchestratorConfig {
 pub struct McpServerConfig {
     /// Stdio command to launch the server (mutually exclusive with `url`).
     #[serde(default)]
-    pub command: Option<Vec<String>>,
+    pub command: Vec<String>,
     /// HTTP/SSE URL for the server (mutually exclusive with `command`).
     #[serde(default)]
     pub url: Option<String>,
@@ -97,7 +97,14 @@ pub struct MobDefinition {
 #[derive(Deserialize)]
 struct TomlMob {
     id: MobId,
-    orchestrator: Option<String>,
+    orchestrator: Option<TomlOrchestrator>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TomlOrchestrator {
+    Profile(String),
+    Config(OrchestratorConfig),
 }
 
 /// Top-level TOML structure for mob definition files.
@@ -118,8 +125,11 @@ impl MobDefinition {
     /// Parse a mob definition from TOML content.
     pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
         let raw: TomlDefinition = toml::from_str(content)?;
-        let orchestrator = raw.mob.orchestrator.map(|profile| OrchestratorConfig {
-            profile: ProfileName::from(profile),
+        let orchestrator = raw.mob.orchestrator.map(|orchestrator| match orchestrator {
+            TomlOrchestrator::Profile(profile) => OrchestratorConfig {
+                profile: ProfileName::from(profile),
+            },
+            TomlOrchestrator::Config(config) => config,
         });
         Ok(Self {
             id: raw.mob.id,
@@ -215,8 +225,8 @@ path = "skills/reviewer.md"
         assert!(def.mcp_servers.contains_key("code-server"));
         let code_server = &def.mcp_servers["code-server"];
         assert_eq!(
-            code_server.command.as_ref().unwrap(),
-            &vec![
+            code_server.command,
+            vec![
                 "npx".to_string(),
                 "-y".to_string(),
                 "@mcp/code-server".to_string()
@@ -320,7 +330,7 @@ id = "minimal"
     #[test]
     fn test_mcp_server_config_serde() {
         let stdio = McpServerConfig {
-            command: Some(vec!["node".to_string(), "server.js".to_string()]),
+            command: vec!["node".to_string(), "server.js".to_string()],
             url: None,
             env: {
                 let mut m = BTreeMap::new();
@@ -331,6 +341,20 @@ id = "minimal"
         let json = serde_json::to_string(&stdio).unwrap();
         let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, stdio);
+    }
+
+    #[test]
+    fn test_mob_definition_from_toml_supports_orchestrator_table() {
+        let toml = r#"
+[mob]
+id = "table-orchestrator"
+orchestrator = { profile = "lead" }
+"#;
+        let def = MobDefinition::from_toml(toml).unwrap();
+        assert_eq!(
+            def.orchestrator.as_ref().map(|o| o.profile.as_str()),
+            Some("lead")
+        );
     }
 
     #[test]

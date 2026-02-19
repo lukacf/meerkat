@@ -26,7 +26,7 @@ pub struct RosterEntry {
 ///
 /// Built by replaying events. Shared via `Arc<RwLock<Roster>>` between
 /// the actor (writes) and handle (reads).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Roster {
     entries: BTreeMap<MeerkatId, RosterEntry>,
 }
@@ -70,16 +70,23 @@ impl Roster {
     }
 
     /// Add a meerkat to the roster.
-    pub fn add(&mut self, meerkat_id: MeerkatId, profile: ProfileName, session_id: SessionId) {
-        self.entries.insert(
-            meerkat_id.clone(),
-            RosterEntry {
-                meerkat_id,
-                profile,
-                session_id,
-                wired_to: BTreeSet::new(),
-            },
-        );
+    pub fn add(
+        &mut self,
+        meerkat_id: MeerkatId,
+        profile: ProfileName,
+        session_id: SessionId,
+    ) -> bool {
+        self.entries
+            .insert(
+                meerkat_id.clone(),
+                RosterEntry {
+                    meerkat_id,
+                    profile,
+                    session_id,
+                    wired_to: BTreeSet::new(),
+                },
+            )
+            .is_none()
     }
 
     /// Remove a meerkat from the roster. Also removes it from all peer wiring sets.

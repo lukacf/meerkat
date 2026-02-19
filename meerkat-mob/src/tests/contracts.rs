@@ -4,12 +4,12 @@
 //! behave as expected. Each test is tagged with a CONTRACT-MOB-NNN
 //! identifier matching `.rct/mob/spec.yaml`.
 
+use async_trait::async_trait;
 use meerkat_comms::CommsRuntime;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, InputStreamMode, PeerDirectorySource, PeerName, SendReceipt, TrustedPeerSpec,
 };
-use async_trait::async_trait;
 use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionError, SessionInfo, SessionQuery,
     SessionService, SessionSummary, SessionUsage, SessionView, StartTurnRequest,

@@ -35,16 +35,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let response = handle_request(&state, &request).await;
-        stdout
-            .write_all(format!("{response}\n").as_bytes())
-            .await?;
+        stdout.write_all(format!("{response}\n").as_bytes()).await?;
         stdout.flush().await?;
     }
 
     Ok(())
 }
 
-async fn handle_request(state: &std::sync::Arc<meerkat_mob_mcp::MobMcpState>, request: &Value) -> Value {
+async fn handle_request(
+    state: &std::sync::Arc<meerkat_mob_mcp::MobMcpState>,
+    request: &Value,
+) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
 

@@ -1,7 +1,7 @@
 //! Error types for mob operations.
 
-use crate::validate::Diagnostic;
 use crate::runtime::MobState;
+use crate::validate::Diagnostic;
 
 /// Errors returned by mob operations.
 #[derive(Debug, thiserror::Error)]
@@ -24,10 +24,7 @@ pub enum MobError {
 
     /// The requested lifecycle state transition is invalid.
     #[error("invalid state transition: {from} -> {to}")]
-    InvalidTransition {
-        from: MobState,
-        to: MobState,
-    },
+    InvalidTransition { from: MobState, to: MobState },
 
     /// A wiring operation failed.
     #[error("wiring error: {0}")]
@@ -60,6 +57,12 @@ fn format_diagnostics(diagnostics: &[Diagnostic]) -> String {
         .map(|d| format!("{}: {}", d.code, d.message))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for MobError {
+    fn from(error: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        Self::StorageError(error)
+    }
 }
 
 #[cfg(test)]

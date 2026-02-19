@@ -94,7 +94,10 @@ pub fn to_create_session_request(
 }
 
 /// Assemble the system prompt for a mob meerkat from skills and mob comms instructions.
-async fn assemble_system_prompt(profile: &Profile, definition: &MobDefinition) -> Result<String, MobError> {
+async fn assemble_system_prompt(
+    profile: &Profile,
+    definition: &MobDefinition,
+) -> Result<String, MobError> {
     let mut sections = Vec::new();
 
     // Resolve inline skills from the definition
@@ -219,7 +222,8 @@ mod tests {
             profile,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config");
 
         assert!(config.host_mode, "host_mode must be true");
@@ -236,7 +240,8 @@ mod tests {
             profile,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config");
 
         assert_eq!(
@@ -257,7 +262,8 @@ mod tests {
             profile,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config");
 
         let meta = config.peer_meta.as_ref().expect("peer_meta should be set");
@@ -284,7 +290,8 @@ mod tests {
             profile,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config");
 
         assert_eq!(
@@ -307,7 +314,8 @@ mod tests {
             lead,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config");
         assert_eq!(config.override_builtins, Some(true));
         assert_eq!(config.override_shell, Some(true));
@@ -323,7 +331,8 @@ mod tests {
             worker,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config");
         assert_eq!(config.override_builtins, Some(true));
         assert_eq!(config.override_shell, Some(false));
@@ -350,7 +359,8 @@ mod tests {
             worker,
             &def,
             None,
-        ).await;
+        )
+        .await;
         assert!(
             matches!(result, Err(MobError::WiringError(_))),
             "tools.comms=false must be rejected at build_agent_config"
@@ -368,7 +378,8 @@ mod tests {
             lead,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config");
 
         let prompt = config.system_prompt.as_deref().expect("system_prompt set");
@@ -393,7 +404,8 @@ mod tests {
             lead,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config");
 
         assert_eq!(config.model, "claude-opus-4-6");
@@ -410,7 +422,8 @@ mod tests {
             lead,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config");
 
         let req = to_create_session_request(&config, "Hello mob".into());
@@ -439,7 +452,8 @@ mod tests {
             worker,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config");
 
         let req = to_create_session_request(&config, "Start working".into());
@@ -479,7 +493,8 @@ mod tests {
             lead,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect("build_agent_config should resolve path skill");
 
         let prompt = config.system_prompt.expect("system prompt");
@@ -517,7 +532,8 @@ mod tests {
             lead,
             &def,
             None,
-        ).await
+        )
+        .await
         .expect_err("missing path skill should fail");
 
         match err {

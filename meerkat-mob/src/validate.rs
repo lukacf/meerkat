@@ -198,7 +198,7 @@ mod tests {
         mcp_servers.insert(
             "server-a".to_string(),
             McpServerConfig {
-                command: Some(vec!["node".to_string(), "server.js".to_string()]),
+                command: vec!["node".to_string(), "server.js".to_string()],
                 url: None,
                 env: BTreeMap::new(),
             },
@@ -234,7 +234,9 @@ mod tests {
         def.profiles.clear();
         let diagnostics = validate_definition(&def);
         assert!(
-            diagnostics.iter().any(|d| d.code == DiagnosticCode::EmptyProfiles),
+            diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::EmptyProfiles),
             "empty profile map must be rejected"
         );
     }
@@ -373,7 +375,9 @@ mod tests {
         };
         let diagnostics = validate_definition(&def);
         assert!(
-            diagnostics.iter().any(|d| d.code == DiagnosticCode::EmptyProfiles),
+            diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::EmptyProfiles),
             "minimal definition without profiles should fail validation"
         );
     }

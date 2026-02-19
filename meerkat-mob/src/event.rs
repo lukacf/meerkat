@@ -22,11 +22,13 @@ pub struct MobEvent {
     pub kind: MobEventKind,
 }
 
-/// A new event before store assignment (no cursor or timestamp).
+/// A new event before store assignment (no cursor).
 #[derive(Debug, Clone)]
 pub struct NewMobEvent {
     /// Mob this event belongs to.
     pub mob_id: MobId,
+    /// Optional timestamp override (primarily for deterministic/backdated tests).
+    pub timestamp: Option<DateTime<Utc>>,
     /// Event payload.
     pub kind: MobEventKind,
 }

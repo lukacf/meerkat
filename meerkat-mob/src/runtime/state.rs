@@ -1,3 +1,5 @@
+use super::*;
+
 // ---------------------------------------------------------------------------
 // MobState
 // ---------------------------------------------------------------------------
@@ -14,7 +16,7 @@ pub enum MobState {
 }
 
 impl MobState {
-    fn from_u8(v: u8) -> Self {
+    pub(super) fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Creating,
             1 => Self::Running,
@@ -52,7 +54,7 @@ impl std::fmt::Display for MobState {
 // ---------------------------------------------------------------------------
 
 /// Commands sent from [`MobHandle`] to the [`MobActor`] for serialized processing.
-enum MobCommand {
+pub(super) enum MobCommand {
     Spawn {
         profile_name: ProfileName,
         meerkat_id: MeerkatId,

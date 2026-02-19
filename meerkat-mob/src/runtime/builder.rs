@@ -1,3 +1,5 @@
+use super::*;
+
 // ---------------------------------------------------------------------------
 // MobBuilder
 // ---------------------------------------------------------------------------
@@ -313,11 +315,7 @@ impl MobBuilder {
                     &entry.meerkat_id,
                     profile,
                     definition,
-                    compose_external_tools_for_profile(
-                        profile,
-                        tool_bundles,
-                        tool_handle.clone(),
-                    )?,
+                    compose_external_tools_for_profile(profile, tool_bundles, tool_handle.clone())?,
                 )
                 .await?;
                 if let Some(ref client) = default_llm_client {
@@ -365,10 +363,12 @@ impl MobBuilder {
                     definition.id, peer_entry.profile, peer_entry.meerkat_id
                 );
 
-                let spec_b = TrustedPeerSpec::new(&name_b, key_b.clone(), format!("inproc://{name_b}"))
-                    .map_err(|e| MobError::WiringError(format!("invalid peer spec: {e}")))?;
-                let spec_a = TrustedPeerSpec::new(&name_a, key_a.clone(), format!("inproc://{name_a}"))
-                    .map_err(|e| MobError::WiringError(format!("invalid peer spec: {e}")))?;
+                let spec_b =
+                    TrustedPeerSpec::new(&name_b, key_b.clone(), format!("inproc://{name_b}"))
+                        .map_err(|e| MobError::WiringError(format!("invalid peer spec: {e}")))?;
+                let spec_a =
+                    TrustedPeerSpec::new(&name_a, key_a.clone(), format!("inproc://{name_a}"))
+                        .map_err(|e| MobError::WiringError(format!("invalid peer spec: {e}")))?;
                 comms_a.add_trusted_peer(spec_b).await?;
                 comms_b.add_trusted_peer(spec_a).await?;
             }

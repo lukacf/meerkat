@@ -1,3 +1,5 @@
+use super::*;
+
 // ---------------------------------------------------------------------------
 // MobHandle
 // ---------------------------------------------------------------------------
@@ -9,13 +11,13 @@
 /// shared `Arc` state directly.
 #[derive(Clone)]
 pub struct MobHandle {
-    command_tx: mpsc::Sender<MobCommand>,
-    roster: Arc<RwLock<Roster>>,
-    task_board: Arc<RwLock<TaskBoard>>,
-    definition: Arc<MobDefinition>,
-    state: Arc<AtomicU8>,
-    events: Arc<dyn MobEventStore>,
-    mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
+    pub(super) command_tx: mpsc::Sender<MobCommand>,
+    pub(super) roster: Arc<RwLock<Roster>>,
+    pub(super) task_board: Arc<RwLock<TaskBoard>>,
+    pub(super) definition: Arc<MobDefinition>,
+    pub(super) state: Arc<AtomicU8>,
+    pub(super) events: Arc<dyn MobEventStore>,
+    pub(super) mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
 }
 
 #[derive(Clone)]
@@ -24,7 +26,11 @@ pub struct MobEventsView {
 }
 
 impl MobEventsView {
-    pub async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<crate::event::MobEvent>, MobError> {
+    pub async fn poll(
+        &self,
+        after_cursor: u64,
+        limit: usize,
+    ) -> Result<Vec<crate::event::MobEvent>, MobError> {
         self.inner.poll(after_cursor, limit).await
     }
 

@@ -28,12 +28,22 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, mpsc, oneshot};
 
-include!("state.rs");
-include!("handle.rs");
-include!("builder.rs");
-include!("actor.rs");
-include!("tools.rs");
-include!("session_service.rs");
+mod actor;
+mod builder;
+mod handle;
+mod session_service;
+mod state;
+mod tools;
 
 #[cfg(test)]
-include!("tests.rs");
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests;
+
+use actor::MobActor;
+use state::MobCommand;
+use tools::compose_external_tools_for_profile;
+
+pub use builder::MobBuilder;
+pub use handle::{MobEventsView, MobHandle};
+pub use session_service::MobSessionService;
+pub use state::MobState;

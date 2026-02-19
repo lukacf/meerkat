@@ -1,3 +1,5 @@
+use super::*;
+
 // ---------------------------------------------------------------------------
 // MobActor
 // ---------------------------------------------------------------------------
@@ -6,18 +8,18 @@
 ///
 /// Owns all mutable state. Runs in a dedicated tokio task.
 /// All mutations go through here; reads bypass via shared `Arc` state.
-struct MobActor {
-    definition: Arc<MobDefinition>,
-    roster: Arc<RwLock<Roster>>,
-    task_board: Arc<RwLock<TaskBoard>>,
-    state: Arc<AtomicU8>,
-    events: Arc<dyn MobEventStore>,
-    session_service: Arc<dyn MobSessionService>,
-    mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
-    mcp_processes: Arc<tokio::sync::Mutex<BTreeMap<String, Child>>>,
-    command_tx: mpsc::Sender<MobCommand>,
-    tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
-    default_llm_client: Option<Arc<dyn LlmClient>>,
+pub(super) struct MobActor {
+    pub(super) definition: Arc<MobDefinition>,
+    pub(super) roster: Arc<RwLock<Roster>>,
+    pub(super) task_board: Arc<RwLock<TaskBoard>>,
+    pub(super) state: Arc<AtomicU8>,
+    pub(super) events: Arc<dyn MobEventStore>,
+    pub(super) session_service: Arc<dyn MobSessionService>,
+    pub(super) mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
+    pub(super) mcp_processes: Arc<tokio::sync::Mutex<BTreeMap<String, Child>>>,
+    pub(super) command_tx: mpsc::Sender<MobCommand>,
+    pub(super) tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
+    pub(super) default_llm_client: Option<Arc<dyn LlmClient>>,
 }
 
 impl MobActor {
@@ -77,7 +79,9 @@ impl MobActor {
                 MobError::Internal(format!("failed to stop mcp server '{name}': {error}"))
             })?;
             let _ = child.wait().await.map_err(|error| {
-                MobError::Internal(format!("failed waiting for mcp server '{name}' to exit: {error}"))
+                MobError::Internal(format!(
+                    "failed waiting for mcp server '{name}' to exit: {error}"
+                ))
             })?;
         }
         processes.clear();
@@ -128,7 +132,7 @@ impl MobActor {
     }
 
     /// Main actor loop: process commands sequentially until Shutdown.
-    async fn run(self, mut command_rx: mpsc::Receiver<MobCommand>) {
+    pub(super) async fn run(self, mut command_rx: mpsc::Receiver<MobCommand>) {
         if matches!(self.state(), MobState::Running)
             && let Err(error) = self.start_mcp_servers().await
         {
@@ -146,11 +150,13 @@ impl MobActor {
                     initial_message,
                     reply_tx,
                 } => {
-                    let result =
-                        match self.expect_state(&[MobState::Running, MobState::Creating], MobState::Running) {
-                        Ok(()) => self
-                            .handle_spawn(profile_name, meerkat_id, initial_message)
-                            .await,
+                    let result = match self
+                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                    {
+                        Ok(()) => {
+                            self.handle_spawn(profile_name, meerkat_id, initial_message)
+                                .await
+                        }
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -159,24 +165,27 @@ impl MobActor {
                     meerkat_id,
                     reply_tx,
                 } => {
-                    let result =
-                        match self.expect_state(&[MobState::Running, MobState::Creating], MobState::Running) {
+                    let result = match self
+                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                    {
                         Ok(()) => self.handle_retire(meerkat_id).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Wire { a, b, reply_tx } => {
-                    let result =
-                        match self.expect_state(&[MobState::Running, MobState::Creating], MobState::Running) {
+                    let result = match self
+                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                    {
                         Ok(()) => self.handle_wire(a, b).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Unwire { a, b, reply_tx } => {
-                    let result =
-                        match self.expect_state(&[MobState::Running, MobState::Creating], MobState::Running) {
+                    let result = match self
+                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                    {
                         Ok(()) => self.handle_unwire(a, b).await,
                         Err(error) => Err(error),
                     };
@@ -187,8 +196,9 @@ impl MobActor {
                     message,
                     reply_tx,
                 } => {
-                    let result =
-                        match self.expect_state(&[MobState::Running, MobState::Creating], MobState::Running) {
+                    let result = match self
+                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                    {
                         Ok(()) => self.handle_external_turn(meerkat_id, message).await,
                         Err(error) => Err(error),
                     };
@@ -199,8 +209,9 @@ impl MobActor {
                     message,
                     reply_tx,
                 } => {
-                    let result =
-                        match self.expect_state(&[MobState::Running, MobState::Creating], MobState::Running) {
+                    let result = match self
+                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                    {
                         Ok(()) => self.handle_internal_turn(meerkat_id, message).await,
                         Err(error) => Err(error),
                     };
@@ -240,7 +251,8 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Complete { reply_tx } => {
-                    let result = match self.expect_state(&[MobState::Running], MobState::Completed) {
+                    let result = match self.expect_state(&[MobState::Running], MobState::Completed)
+                    {
                         Ok(()) => self.handle_complete().await,
                         Err(error) => Err(error),
                     };
@@ -264,9 +276,13 @@ impl MobActor {
                     blocked_by,
                     reply_tx,
                 } => {
-                    let result =
-                        match self.expect_state(&[MobState::Running, MobState::Creating], MobState::Running) {
-                        Ok(()) => self.handle_task_create(subject, description, blocked_by).await,
+                    let result = match self
+                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                    {
+                        Ok(()) => {
+                            self.handle_task_create(subject, description, blocked_by)
+                                .await
+                        }
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -277,8 +293,9 @@ impl MobActor {
                     owner,
                     reply_tx,
                 } => {
-                    let result =
-                        match self.expect_state(&[MobState::Running, MobState::Creating], MobState::Running) {
+                    let result = match self
+                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                    {
                         Ok(()) => self.handle_task_update(task_id, status, owner).await,
                         Err(error) => Err(error),
                     };
@@ -371,12 +388,13 @@ impl MobActor {
         {
             let mut roster = self.roster.write().await;
             let inserted = roster.add(meerkat_id.clone(), profile_name.clone(), session_id.clone());
-            debug_assert!(inserted, "duplicate meerkat insert should be prevented before add()");
+            debug_assert!(
+                inserted,
+                "duplicate meerkat insert should be prevented before add()"
+            );
         }
 
-        let planned_wiring_targets = self
-            .spawn_wiring_targets(&profile_name, &meerkat_id)
-            .await;
+        let planned_wiring_targets = self.spawn_wiring_targets(&profile_name, &meerkat_id).await;
 
         if let Err(wiring_error) = self.apply_spawn_wiring(&profile_name, &meerkat_id).await {
             if let Err(rollback_error) = self
@@ -636,8 +654,9 @@ impl MobActor {
         if let Err(second_notification_error) =
             self.notify_peer_unwired(&a, &b, &entry_b, &comms_b).await
         {
-            if let Err(compensation_error) =
-                self.notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a).await
+            if let Err(compensation_error) = self
+                .notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a)
+                .await
             {
                 return Err(MobError::Internal(format!(
                     "unwire second notification failed for '{b}' -> '{a}': {second_notification_error}; compensating mob.peer_added '{a}' -> '{b}' failed: {compensation_error}"
@@ -649,15 +668,17 @@ impl MobActor {
         // Remove trust on both sides (required)
         if let Err(remove_a_error) = comms_a.remove_trusted_peer(&key_b).await {
             let mut cleanup_errors = Vec::new();
-            if let Err(compensation_error) =
-                self.notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b).await
+            if let Err(compensation_error) = self
+                .notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b)
+                .await
             {
                 cleanup_errors.push(format!(
                     "compensating mob.peer_added '{b}' -> '{a}' failed: {compensation_error}"
                 ));
             }
-            if let Err(compensation_error) =
-                self.notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a).await
+            if let Err(compensation_error) = self
+                .notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a)
+                .await
             {
                 cleanup_errors.push(format!(
                     "compensating mob.peer_added '{a}' -> '{b}' failed: {compensation_error}"
@@ -678,15 +699,17 @@ impl MobActor {
                     "restore trust '{a}' -> '{b}' failed after second removal failure: {restore_error}"
                 ));
             }
-            if let Err(compensation_error) =
-                self.notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b).await
+            if let Err(compensation_error) = self
+                .notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b)
+                .await
             {
                 cleanup_errors.push(format!(
                     "compensating mob.peer_added '{b}' -> '{a}' failed: {compensation_error}"
                 ));
             }
-            if let Err(compensation_error) =
-                self.notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a).await
+            if let Err(compensation_error) = self
+                .notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a)
+                .await
             {
                 cleanup_errors.push(format!(
                     "compensating mob.peer_added '{a}' -> '{b}' failed: {compensation_error}"
@@ -725,13 +748,17 @@ impl MobActor {
                     "restore trust '{b}' -> '{a}' failed during append rollback: {error}"
                 ));
             }
-            if let Err(error) = self.notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b).await
+            if let Err(error) = self
+                .notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b)
+                .await
             {
                 cleanup_errors.push(format!(
                     "compensating mob.peer_added '{b}' -> '{a}' failed during append rollback: {error}"
                 ));
             }
-            if let Err(error) = self.notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a).await
+            if let Err(error) = self
+                .notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a)
+                .await
             {
                 cleanup_errors.push(format!(
                     "compensating mob.peer_added '{a}' -> '{b}' failed during append rollback: {error}"
@@ -810,7 +837,9 @@ impl MobActor {
         blocked_by: Vec<String>,
     ) -> Result<String, MobError> {
         if subject.trim().is_empty() {
-            return Err(MobError::Internal("task subject cannot be empty".to_string()));
+            return Err(MobError::Internal(
+                "task subject cannot be empty".to_string(),
+            ));
         }
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -1075,9 +1104,7 @@ impl MobActor {
                     }
                     continue;
                 };
-                let peer_comms = self
-                    .session_service_comms(&peer_entry.session_id)
-                    .await;
+                let peer_comms = self.session_service_comms(&peer_entry.session_id).await;
                 let Some(peer_comms) = peer_comms else {
                     if is_wired_peer {
                         cleanup_errors.push(format!(
@@ -1121,11 +1148,7 @@ impl MobActor {
         &self,
         profile: &crate::profile::Profile,
     ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, MobError> {
-        compose_external_tools_for_profile(
-            profile,
-            &self.tool_bundles,
-            self.mob_handle_for_tools(),
-        )
+        compose_external_tools_for_profile(profile, &self.tool_bundles, self.mob_handle_for_tools())
     }
 
     async fn retire_event_exists(
@@ -1475,5 +1498,4 @@ impl MobActor {
         )
         .await
     }
-
 }

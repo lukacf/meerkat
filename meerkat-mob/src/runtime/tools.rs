@@ -1,8 +1,10 @@
+use super::*;
+
 // ---------------------------------------------------------------------------
 // Mob tool dispatcher
 // ---------------------------------------------------------------------------
 
-fn compose_external_tools_for_profile(
+pub(super) fn compose_external_tools_for_profile(
     profile: &crate::profile::Profile,
     tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     mob_handle: MobHandle,
@@ -160,7 +162,10 @@ impl MobToolDispatcher {
         ToolError::execution_failed(format!("tool '{}' failed: {error}", call.name))
     }
 
-    fn encode_result(call: ToolCallView<'_>, value: serde_json::Value) -> Result<ToolResult, ToolError> {
+    fn encode_result(
+        call: ToolCallView<'_>,
+        value: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
         let content = serde_json::to_string(&value)
             .map_err(|error| ToolError::execution_failed(format!("encode tool result: {error}")))?;
         Ok(ToolResult {
@@ -310,11 +315,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .task_update(
-                        args.task_id,
-                        args.status,
-                        args.owner.map(MeerkatId::from),
-                    )
+                    .task_update(args.task_id, args.status, args.owner.map(MeerkatId::from))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 Self::encode_result(call, json!({"ok": true}))

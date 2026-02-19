@@ -30,7 +30,7 @@ tracing = { workspace = true }
 redb = { workspace = true }
 jsonschema = { workspace = true }
 parking_lot = { workspace = true }
-indexmap = "2.7"
+indexmap = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

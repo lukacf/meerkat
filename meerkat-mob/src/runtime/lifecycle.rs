@@ -148,7 +148,7 @@ impl MobRuntime {
 
                 let mut resolved = resolver.list_meerkats(&context).await?;
                 for identity in &mut resolved {
-                    if identity.role.is_empty() {
+                    if identity.role.as_ref().is_empty() {
                         identity.role = RoleId::from(role_name);
                     }
                     if identity.labels.is_empty() {
@@ -300,7 +300,11 @@ impl MobRuntime {
                 }
 
                 if matches!(spec.topology.ad_hoc.mode, PolicyMode::Strict)
-                    && !role_pair_allowed(&spec.topology.ad_hoc, &source.role, &target.role)
+                    && !role_pair_allowed(
+                        &spec.topology.ad_hoc,
+                        source.role.as_ref(),
+                        target.role.as_ref(),
+                    )
                 {
                     self.emit_event(
                         self.event(

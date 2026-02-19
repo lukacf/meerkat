@@ -9,7 +9,7 @@ macro_rules! id_newtype {
     ($name:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
-        pub struct $name(pub String);
+        pub struct $name(String);
 
         impl $name {
             #[must_use]
@@ -38,14 +38,6 @@ macro_rules! id_newtype {
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(&self.0)
-            }
-        }
-
-        impl std::ops::Deref for $name {
-            type Target = str;
-
-            fn deref(&self) -> &Self::Target {
-                self.as_str()
             }
         }
 

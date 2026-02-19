@@ -377,8 +377,8 @@ impl MobRuntime {
             .resolve_step_targets(
                 &mob_id,
                 spec,
-                &step.targets.role,
-                &step.targets.meerkat_id,
+                step.targets.role.as_ref(),
+                step.targets.meerkat_id.as_ref(),
                 activation_payload.clone(),
             )
             .await?;
@@ -402,7 +402,13 @@ impl MobRuntime {
 
         for target in targets {
             let intent = step.intent.as_deref().unwrap_or("delegate").to_string();
-            let allowed = evaluate_topology(policy, "supervisor", &target.role, "peer_request", &intent);
+            let allowed = evaluate_topology(
+                policy,
+                "supervisor",
+                target.role.as_ref(),
+                "peer_request",
+                &intent,
+            );
 
             if !allowed {
                 self.emit_event(

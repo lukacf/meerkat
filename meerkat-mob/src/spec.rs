@@ -232,7 +232,7 @@ impl SpecValidator {
 
             let mut step_ids: IndexMap<StepId, usize> = IndexMap::new();
             for (index, step) in flow.steps.iter().enumerate() {
-                if step.step_id.trim().is_empty() {
+                if step.step_id.as_ref().trim().is_empty() {
                     return Err(MobError::validation(
                         &format!("flows.{flow_id}.steps[{index}].step_id"),
                         "must not be empty",
@@ -245,7 +245,7 @@ impl SpecValidator {
                     ));
                 }
 
-                if step.targets.role.trim().is_empty() {
+                if step.targets.role.as_ref().trim().is_empty() {
                     return Err(MobError::validation(
                         &format!("flows.{flow_id}.steps[{index}].targets.role"),
                         "must not be empty",

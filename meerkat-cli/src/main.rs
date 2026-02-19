@@ -1720,8 +1720,7 @@ fn create_run_mob_external_tools(
 
 struct RunMobToolsContext {
     state: Arc<meerkat_mob_mcp::MobMcpState>,
-    registry: PersistedMobRegistry,
-    _lock: MobRegistryLock,
+    known_mob_ids: std::collections::BTreeSet<String>,
 }
 
 impl RunMobToolsContext {
@@ -1730,13 +1729,15 @@ impl RunMobToolsContext {
     }
 
     async fn persist(&mut self, scope: &RuntimeScope) -> anyhow::Result<()> {
+        let _lock = acquire_mob_registry_lock(scope).await?;
+        let mut registry = load_mob_registry(scope).await?;
         let active = self.state.mob_list().await;
         let active_ids: std::collections::BTreeSet<String> =
             active.iter().map(|(id, _)| id.to_string()).collect();
 
         for (mob_id, status) in active {
             let mob_id = mob_id.to_string();
-            self.registry
+            registry
                 .mobs
                 .entry(mob_id.clone())
                 .or_insert_with(|| PersistedMob {
@@ -1744,11 +1745,18 @@ impl RunMobToolsContext {
                     status: Some(status.as_str().to_string()),
                     events: Vec::new(),
                 });
-            sync_mob_events(self.state.as_ref(), &mut self.registry, &mob_id).await?;
+            sync_mob_events(self.state.as_ref(), &mut registry, &mob_id).await?;
         }
 
-        self.registry.mobs.retain(|mob_id, _| active_ids.contains(mob_id));
-        save_mob_registry(scope, &self.registry).await?;
+        // Remove entries that disappeared from this context's previously known set.
+        // This avoids dropping mobs created by other concurrent CLI processes.
+        for mob_id in &self.known_mob_ids {
+            if !active_ids.contains(mob_id) {
+                registry.mobs.remove(mob_id);
+            }
+        }
+        save_mob_registry(scope, &registry).await?;
+        self.known_mob_ids = active_ids;
         Ok(())
     }
 }
@@ -1757,12 +1765,12 @@ async fn prepare_run_mob_tools(
     scope: &RuntimeScope,
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
 ) -> anyhow::Result<RunMobToolsContext> {
-    let lock = acquire_mob_registry_lock(scope).await?;
+    let _lock = acquire_mob_registry_lock(scope).await?;
     let (state, registry) = hydrate_mob_state(scope, session_service).await?;
+    let known_mob_ids = registry.mobs.keys().cloned().collect();
     Ok(RunMobToolsContext {
         state,
-        registry,
-        _lock: lock,
+        known_mob_ids,
     })
 }
 
@@ -3128,6 +3136,11 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             Ok(())
         }
         MobCommands::Create { prefab, definition } => {
+            if prefab.is_some() && definition.is_some() {
+                return Err(anyhow::anyhow!(
+                    "provide exactly one of --prefab <name> or --definition <file>, not both"
+                ));
+            }
             let mob_id = if let Some(prefab_key) = prefab {
                 let prefab = Prefab::from_key(&prefab_key)
                     .ok_or_else(|| anyhow::anyhow!("unknown prefab '{}'", prefab_key))?;
@@ -4686,6 +4699,54 @@ mod tests {
         handle_mob_command(MobCommands::List, &scope)
             .await
             .expect("mob list should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_mob_create_rejects_prefab_and_definition_together() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let definition_path = temp.path().join("mob.toml");
+        tokio::fs::write(&definition_path, "id = \"x\"")
+            .await
+            .expect("write definition");
+
+        let result = handle_mob_command(
+            MobCommands::Create {
+                prefab: Some("pipeline".to_string()),
+                definition: Some(definition_path),
+            },
+            &scope,
+        )
+        .await;
+
+        assert!(result.is_err(), "conflicting create inputs must fail");
+        let err = result.expect_err("expected conflict error").to_string();
+        assert!(
+            err.contains("exactly one"),
+            "error should explain mutually exclusive flags: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_run_mob_tools_does_not_hold_registry_lock_for_context_lifetime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+
+        let mob_service_a: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(TestMobSessionService::new());
+        let _ctx_a = prepare_run_mob_tools(&scope, mob_service_a)
+            .await
+            .expect("first context should initialize");
+
+        let mob_service_b: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(TestMobSessionService::new());
+        let _ctx_b = tokio::time::timeout(
+            Duration::from_secs(2),
+            prepare_run_mob_tools(&scope, mob_service_b),
+        )
+        .await
+        .expect("second context should not block on long-held registry lock")
+        .expect("second context should initialize");
     }
 
     #[tokio::test]

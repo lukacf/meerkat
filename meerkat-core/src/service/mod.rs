@@ -263,6 +263,17 @@ pub trait SessionService: Send + Sync {
 
     /// Archive (remove) a session.
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError>;
+
+    /// Access the session comms runtime when available.
+    ///
+    /// Default implementation returns `None` so existing implementations remain
+    /// source-compatible.
+    async fn comms_runtime(
+        &self,
+        _id: &SessionId,
+    ) -> Option<Arc<dyn crate::agent::CommsRuntime>> {
+        None
+    }
 }
 
 /// Extension trait for `Arc<dyn SessionService>` to allow calling methods directly.

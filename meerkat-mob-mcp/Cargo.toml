@@ -1,0 +1,34 @@
+[package]
+name = "meerkat-mob-mcp"
+version = "0.1.0"
+description = "MCP server plugin exposing Meerkat Mob orchestration"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "rkat-mob-mcp"
+path = "src/main.rs"
+
+[dependencies]
+meerkat-mob = { workspace = true }
+meerkat-core = { workspace = true }
+meerkat-store = { workspace = true }
+meerkat = { workspace = true, features = ["comms", "mcp", "jsonl-store", "session-store", "memory-store"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+thiserror = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true

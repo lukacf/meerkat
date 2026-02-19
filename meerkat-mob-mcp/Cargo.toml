@@ -1,0 +1,40 @@
+[package]
+name = "meerkat-mob-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "MCP server for meerkat-mob"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+meerkat-mob = { workspace = true }
+meerkat-core = { workspace = true }
+meerkat-memory = { workspace = true }
+meerkat-session = { workspace = true }
+meerkat-store = { workspace = true, features = ["jsonl"] }
+
+async-trait = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lib]
+name = "meerkat_mob_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rkat-mob-mcp"
+path = "src/main.rs"
+
+[lints]
+workspace = true

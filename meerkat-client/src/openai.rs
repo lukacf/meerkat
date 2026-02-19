@@ -23,6 +23,19 @@ pub struct OpenAiClient {
 }
 
 impl OpenAiClient {
+    fn model_supports_temperature(model: &str) -> bool {
+        let model = model.to_ascii_lowercase();
+        // OpenAI gpt-5/codex models reject temperature.
+        !(model.starts_with("gpt-5") || model.contains("codex"))
+    }
+
+    fn model_supports_reasoning_payload(model: &str) -> bool {
+        let model = model.to_ascii_lowercase();
+        // We only enable explicit reasoning payload settings for gpt-5 family.
+        // Other models can reject encrypted reasoning include fields.
+        model.starts_with("gpt-5")
+    }
+
     /// Create a new OpenAI client with the given API key
     pub fn new(api_key: String) -> Self {
         Self::new_with_base_url(api_key, "https://api.openai.com".to_string())
@@ -62,23 +75,27 @@ impl OpenAiClient {
     /// Build request body for OpenAI Responses API
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let input = Self::convert_to_responses_input(&request.messages);
+        let reasoning_enabled = Self::model_supports_reasoning_payload(&request.model);
 
         let mut body = serde_json::json!({
             "model": request.model,
             "input": input,
             "max_output_tokens": request.max_tokens,
             "stream": true,
-            // Request encrypted_content for stateless replay
-            "include": ["reasoning.encrypted_content"],
         });
 
-        // Enable reasoning with default effort
-        body["reasoning"] = serde_json::json!({
-            "effort": "medium",
-            "summary": "auto"
-        });
+        if reasoning_enabled {
+            // Request encrypted_content for stateless replay.
+            body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
+            // Enable reasoning with default effort.
+            body["reasoning"] = serde_json::json!({
+                "effort": "medium",
+                "summary": "auto"
+            });
+        }
 
-        if let Some(temp) = request.temperature
+        if Self::model_supports_temperature(&request.model)
+            && let Some(temp) = request.temperature
             && let Some(num) = serde_json::Number::from_f64(temp as f64)
         {
             body["temperature"] = Value::Number(num);
@@ -103,7 +120,9 @@ impl OpenAiClient {
 
         // Extract OpenAI-specific parameters from provider_params
         if let Some(params) = &request.provider_params {
-            if let Some(reasoning_effort) = params.get("reasoning_effort") {
+            if reasoning_enabled
+                && let Some(reasoning_effort) = params.get("reasoning_effort")
+            {
                 body["reasoning"]["effort"] = reasoning_effort.clone();
             }
 
@@ -149,10 +168,10 @@ impl OpenAiClient {
 
     /// Convert messages to Responses API input format.
     ///
-    /// OpenAI requires every `reasoning` item to be immediately followed by an
-    /// output item (`message` with `role: assistant` or `function_call`). Orphaned
-    /// reasoning items (e.g., from stream interruption or cancellation) are stripped
-    /// in a post-processing pass to prevent `invalid_request_error`.
+    /// Note: we intentionally do not replay prior `reasoning` items.
+    /// OpenAI enforces strict adjacency invariants for reasoning replay, and
+    /// violating them causes hard request failures. Replaying only user/assistant
+    /// messages and tool items is robust across retries and tool-call turns.
     fn convert_to_responses_input(messages: &[Message]) -> Vec<Value> {
         let mut items = Vec::new();
 
@@ -203,29 +222,10 @@ impl OpenAiClient {
                                     }));
                                 }
                             }
-                            AssistantBlock::Reasoning {
-                                text,
-                                meta: Some(meta),
-                            } => {
-                                if let ProviderMeta::OpenAi {
-                                    id,
-                                    encrypted_content,
-                                } = meta.as_ref()
-                                {
-                                    // OpenAI requires id and summary for reasoning items
-                                    let mut item = serde_json::json!({
-                                        "type": "reasoning",
-                                        "id": id,
-                                        "summary": [{"type": "summary_text", "text": text}]
-                                    });
-                                    if let Some(enc) = encrypted_content {
-                                        item["encrypted_content"] = serde_json::json!(enc);
-                                    }
-                                    items.push(item);
-                                }
-                                // Skip reasoning blocks without OpenAI metadata
+                            AssistantBlock::Reasoning { .. } => {
+                                // Intentionally skipped: reasoning replay can violate
+                                // Responses API adjacency constraints and hard-fail requests.
                             }
-                            AssistantBlock::Reasoning { .. } => {}
                             AssistantBlock::ToolUse { id, name, args, .. } => {
                                 items.push(serde_json::json!({
                                     "type": "function_call",
@@ -250,63 +250,7 @@ impl OpenAiClient {
             }
         }
 
-        Self::strip_orphaned_reasoning(&mut items);
         items
-    }
-
-    /// Remove reasoning items not immediately followed by an output item.
-    ///
-    /// OpenAI's Responses API requires every `reasoning` item to be immediately
-    /// followed by either a `message` with `role: assistant` or a `function_call`.
-    /// Orphaned reasoning can appear when a stream is interrupted/cancelled after
-    /// reasoning completes but before output is produced, or when a response hits
-    /// `max_output_tokens` during reasoning.
-    ///
-    /// Note: stripping discards any `encrypted_content` on the reasoning item.
-    /// This is acceptable — the alternative is an API rejection that blocks the
-    /// entire conversation. The model will re-derive reasoning on the next call.
-    fn strip_orphaned_reasoning(items: &mut Vec<Value>) {
-        let mut i = 0;
-        while i < items.len() {
-            let is_reasoning = items[i].get("type").and_then(|t| t.as_str()) == Some("reasoning");
-
-            if !is_reasoning {
-                i += 1;
-                continue;
-            }
-
-            // Reasoning without encrypted_content is not safely replayable —
-            // OpenAI requires exact follower linkage that Meerkat can't guarantee.
-            let has_encrypted_content = items[i]
-                .get("encrypted_content")
-                .and_then(|v| v.as_str())
-                .is_some();
-
-            // Check if the next item is a valid output for this reasoning
-            let has_valid_follower = items.get(i + 1).is_some_and(|next| {
-                let next_type = next.get("type").and_then(|t| t.as_str());
-                match next_type {
-                    Some("function_call") => true,
-                    Some("message") => {
-                        next.get("role").and_then(|r| r.as_str()) == Some("assistant")
-                    }
-                    _ => false,
-                }
-            });
-
-            if has_valid_follower && has_encrypted_content {
-                i += 1;
-            } else {
-                tracing::warn!(
-                    reasoning_id = items[i].get("id").and_then(|id| id.as_str()),
-                    has_follower = has_valid_follower,
-                    has_encrypted = has_encrypted_content,
-                    "stripping reasoning item (orphaned or missing encrypted_content)"
-                );
-                items.remove(i);
-                // Don't increment i — the next element shifted into this position
-            }
-        }
     }
 
     /// Parse an SSE event from the Responses API stream
@@ -1003,6 +947,36 @@ mod tests {
         assert_eq!(body["reasoning"]["effort"], "high");
     }
 
+    #[test]
+    fn test_request_omits_reasoning_payload_for_non_gpt5_model() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4.1-mini",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("include").is_none());
+    }
+
+    #[test]
+    fn test_reasoning_effort_ignored_for_non_gpt5_model() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4.1-mini",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param("reasoning_effort", "high");
+
+        let body = client.build_request_body(&request).expect("build request");
+        assert!(body.get("reasoning").is_none());
+    }
+
     // =========================================================================
     // BlockAssistant Message Tests
     // =========================================================================
@@ -1037,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn test_request_input_format_block_assistant_reasoning_with_output() {
+    fn test_request_input_format_block_assistant_reasoning_with_output_skips_reasoning_replay() {
         use meerkat_core::BlockAssistantMessage;
 
         let client = OpenAiClient::new("test-key".to_string());
@@ -1069,17 +1043,10 @@ mod tests {
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
-        // Reasoning followed by assistant message — both preserved
-        assert_eq!(input.len(), 3);
-        assert_eq!(input[1]["type"], "reasoning");
-        assert_eq!(input[1]["id"], "rs_abc123");
-        assert_eq!(input[1]["encrypted_content"], "encrypted_data");
-        let summary = input[1]["summary"]
-            .as_array()
-            .expect("summary should be array");
-        assert_eq!(summary[0]["text"], "Let me think about this");
-        assert_eq!(input[2]["type"], "message");
-        assert_eq!(input[2]["role"], "assistant");
+        // Reasoning is intentionally not replayed; assistant text remains.
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["role"], "assistant");
     }
 
     #[test]
@@ -1189,6 +1156,42 @@ mod tests {
         assert!(body.get("unknown_param").is_none());
         assert!(body.get("another_unknown").is_none());
         assert_eq!(body["seed"], 42);
+    }
+
+    #[test]
+    fn test_request_omits_temperature_for_gpt5_family() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2-codex",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_temperature(0.2);
+
+        let body = client.build_request_body(&request).expect("build request");
+        assert!(
+            body.get("temperature").is_none(),
+            "gpt-5/codex requests should not include temperature"
+        );
+    }
+
+    #[test]
+    fn test_request_includes_temperature_for_supported_model() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4o-mini",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_temperature(0.3);
+
+        let body = client.build_request_body(&request).expect("build request");
+        let temp = body["temperature"]
+            .as_f64()
+            .expect("temperature should be numeric");
+        assert!((temp - 0.3).abs() < 1e-6);
     }
 
     #[test]
@@ -1659,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_followed_by_function_call_is_preserved() {
+    fn test_reasoning_followed_by_function_call_skips_reasoning_replay() {
         use meerkat_core::BlockAssistantMessage;
 
         let client = OpenAiClient::new("test-key".to_string());
@@ -1694,10 +1697,9 @@ mod tests {
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
-        // Reasoning with encrypted_content + function_call is a valid pair — both preserved
-        assert_eq!(input.len(), 3);
-        assert_eq!(input[1]["type"], "reasoning");
-        assert_eq!(input[2]["type"], "function_call");
+        // Reasoning is intentionally not replayed; function_call remains.
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[1]["type"], "function_call");
     }
 
     #[test]
@@ -1869,7 +1871,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_with_encrypted_content_is_preserved() {
+    fn test_reasoning_with_encrypted_content_is_not_replayed() {
         use meerkat_core::BlockAssistantMessage;
 
         let client = OpenAiClient::new("test-key".to_string());
@@ -1901,11 +1903,9 @@ mod tests {
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
-        // Reasoning with encrypted_content + valid follower is preserved
-        assert_eq!(input.len(), 3);
-        assert_eq!(input[1]["type"], "reasoning");
-        assert_eq!(input[1]["encrypted_content"], "enc_data_here");
-        assert_eq!(input[2]["type"], "message");
+        // Reasoning is intentionally not replayed; assistant text remains.
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[1]["type"], "message");
     }
 
     // =========================================================================

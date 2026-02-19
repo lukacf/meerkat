@@ -105,6 +105,9 @@ async connect(options?: {
 Spawns `rkat-rpc`, performs `initialize` handshake, checks contract version compatibility, and fetches capabilities. Returns `this` for chaining.
 
 If `realmId` is omitted, each SDK process gets an isolated default RPC realm. Reuse `realmId` to share sessions/config across surfaces.
+`realmBackend` is a creation hint only; backend selection is pinned per realm in `realm_manifest.json`.
+
+The TypeScript SDK does not auto-inject CLI-local `mob_*` tools. For current "mob as tool" behavior, use CLI `rkat run`/`rkat resume`, or use explicit `rkat mob ...` lifecycle commands.
 
 ### createSession(params)
 

@@ -153,8 +153,10 @@ impl CompositeDispatcher {
     /// Get usage instructions for all enabled tools.
     pub fn usage_instructions(&self) -> String {
         let mut out = String::from("# Available Tools\n\n");
+        let mut seen_names: HashSet<String> = HashSet::new();
         for tool in &self.builtin_tools {
             if self.allowed_tools.contains(tool.name()) {
+                seen_names.insert(tool.name().to_string());
                 out.push_str(&format!(
                     "## {}\n{}\n\n",
                     tool.name(),
@@ -165,6 +167,20 @@ impl CompositeDispatcher {
         #[cfg(feature = "sub-agents")]
         if self.sub_agent_tools.is_some() {
             out.push_str("## Sub-agent tools\nManage hierarchical agents.\n\n");
+        }
+        if let Some(ref ext) = self.external {
+            let mut wrote_external_header = false;
+            for tool in ext.tools().iter() {
+                if seen_names.contains(&tool.name) {
+                    continue;
+                }
+                if !wrote_external_header {
+                    out.push_str("## External tools\nProvided by integrated runtimes/services.\n\n");
+                    wrote_external_header = true;
+                }
+                seen_names.insert(tool.name.clone());
+                out.push_str(&format!("## {}\n{}\n\n", tool.name, tool.description));
+            }
         }
         out
     }
@@ -327,5 +343,73 @@ impl AgentToolDispatcher for CompositeDispatcher {
         Err(ToolError::NotFound {
             name: call.name.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::builtin::MemoryTaskStore;
+    use serde_json::json;
+
+    struct MockExternalDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    impl MockExternalDispatcher {
+        fn new(name: &str, description: &str) -> Self {
+            let tools: Arc<[Arc<ToolDef>]> = Arc::from([Arc::new(ToolDef {
+                name: name.to_string(),
+                description: description.to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            })]);
+            Self { tools }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for MockExternalDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.tools.clone()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            if self.tools.iter().any(|tool| tool.name == call.name) {
+                return Ok(ToolResult {
+                    tool_use_id: call.id.to_string(),
+                    content: "{}".to_string(),
+                    is_error: false,
+                });
+            }
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    #[test]
+    fn usage_instructions_include_external_tools() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let external: Arc<dyn AgentToolDispatcher> = Arc::new(MockExternalDispatcher::new(
+            "mob_list",
+            "List active mobs",
+        ));
+
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            Some(external),
+            None,
+        )
+        .expect("composite dispatcher should build");
+
+        let usage = dispatcher.usage_instructions();
+        assert!(usage.contains("External tools"));
+        assert!(usage.contains("mob_list"));
+        assert!(usage.contains("List active mobs"));
     }
 }

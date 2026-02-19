@@ -19,6 +19,7 @@ These flags decide which realm config/session state is used.
 | Command surface | Default when `--realm` is omitted |
 |----------------|------------------------------------|
 | `rkat run`, `rkat resume`, `rkat sessions ...` | Workspace-derived stable realm (`ws-...`) |
+| `rkat mob ...` | Workspace-derived stable realm (`ws-...`) |
 | `rkat-rpc` | New opaque realm (`realm-...`) |
 
 If you want CLI + RPC to share the same state, pass the same explicit `--realm` to both.
@@ -62,6 +63,11 @@ Important files:
 - `config.toml` (realm config)
 - `sessions.redb` (when backend is redb)
 - `sessions_jsonl/` (when backend is jsonl)
+- `mob_registry.json` (CLI mob registry)
+- `mob_registry.lock` (CLI mob registry lock)
+
+`--realm-backend` is a creation hint. After first realm creation, backend selection is pinned by `realm_manifest.json`.
+This applies to both session storage and `rkat mob` command behavior in that realm.
 
 ## MCP configuration
 

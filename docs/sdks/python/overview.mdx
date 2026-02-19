@@ -112,6 +112,9 @@ async def connect(
 Starts the `rkat-rpc` subprocess, performs the `initialize` handshake, checks contract version compatibility, and fetches capabilities. Returns `self` for chaining.
 
 If `realm_id` is omitted, each SDK process gets an isolated default RPC realm. Reuse `realm_id` to share config and sessions across SDK/CLI/REST/MCP surfaces.
+`realm_backend` is a creation hint only; backend selection is pinned per realm in `realm_manifest.json`.
+
+The Python SDK does not auto-inject CLI-local `mob_*` tools. For current "mob as tool" behavior, use CLI `rkat run`/`rkat resume`, or use explicit `rkat mob ...` lifecycle commands.
 
 ### close()
 

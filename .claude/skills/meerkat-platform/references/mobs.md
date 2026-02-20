@@ -29,6 +29,17 @@ Lifecycle:
 5. stop/resume/complete
 6. destroy
 
+### Member runtime mode (current default)
+
+- Default is `autonomous_host` when `runtime_mode` is omitted.
+- `autonomous_host` members are long-lived peers; mob dispatch routes via injector/subscription path.
+- `turn_driven` is explicit opt-in; mob dispatch routes via `start_turn`.
+
+Override points:
+
+- profile-level: `[profiles.<name>].runtime_mode`
+- spawn-level: `runtime_mode` argument on spawn tool/command
+
 ## Definition model
 
 Common sections:
@@ -48,6 +59,7 @@ Important semantics:
 - `external_addressable` gates external turnability.
 - `wiring.auto_wire_orchestrator` and `wiring.role_wiring` shape default graph edges.
 - topology rules can enforce strict role-level communication policy.
+- `runtime_mode` omitted means `autonomous_host` (new default).
 
 ## Rust SDK (detailed)
 
@@ -194,6 +206,11 @@ let build = SessionBuildOptions {
 | MCP | `meerkat_*` session tools | `mob_*` capability via composed `meerkat-mob-mcp` dispatcher |
 | Python SDK | RPC wrapper | inherits `mob_*` capability from RPC host composition |
 | TypeScript SDK | RPC wrapper | inherits `mob_*` capability from RPC host composition |
+
+Runtime-mode behavior is shared across these surfaces because dispatch comes from the same mob runtime:
+
+- autonomous members: event injection/subscription dispatch
+- turn-driven members: direct `start_turn` dispatch
 
 ## Multi-surface examples
 

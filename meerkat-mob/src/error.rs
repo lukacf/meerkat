@@ -1,5 +1,6 @@
 //! Error types for mob operations.
 
+use crate::ids::{FlowId, MeerkatId, ProfileName};
 use crate::runtime::MobState;
 use crate::validate::Diagnostic;
 use crate::{MobId, RunId, StepId};
@@ -9,19 +10,19 @@ use crate::{MobId, RunId, StepId};
 pub enum MobError {
     /// The requested profile does not exist in the mob definition.
     #[error("profile not found: {0}")]
-    ProfileNotFound(String),
+    ProfileNotFound(ProfileName),
 
     /// The requested meerkat does not exist in the roster.
     #[error("meerkat not found: {0}")]
-    MeerkatNotFound(String),
+    MeerkatNotFound(MeerkatId),
 
     /// A meerkat with the given ID already exists.
     #[error("meerkat already exists: {0}")]
-    MeerkatAlreadyExists(String),
+    MeerkatAlreadyExists(MeerkatId),
 
     /// The meerkat's profile does not allow external turns.
     #[error("meerkat is not externally addressable: {0}")]
-    NotExternallyAddressable(String),
+    NotExternallyAddressable(MeerkatId),
 
     /// The requested lifecycle state transition is invalid.
     #[error("invalid state transition: {from} -> {to}")]
@@ -37,7 +38,7 @@ pub enum MobError {
 
     /// Referenced flow does not exist.
     #[error("flow not found: {0}")]
-    FlowNotFound(String),
+    FlowNotFound(FlowId),
 
     /// Run failed with a reason.
     #[error("flow failed for run {run_id}: {reason}")]
@@ -77,7 +78,10 @@ pub enum MobError {
 
     /// Topology policy denied a dispatch edge.
     #[error("topology violation: {from_role} -> {to_role}")]
-    TopologyViolation { from_role: String, to_role: String },
+    TopologyViolation {
+        from_role: ProfileName,
+        to_role: ProfileName,
+    },
 
     /// Supervisor escalation happened.
     #[error("supervisor escalation: {0}")]
@@ -125,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_profile_not_found_display() {
-        let err = MobError::ProfileNotFound("missing".to_string());
+        let err = MobError::ProfileNotFound(ProfileName::from("missing"));
         assert!(format!("{err}").contains("missing"));
     }
 
@@ -190,17 +194,17 @@ mod tests {
     fn test_all_variants_exist() {
         // Ensures all variants are constructible.
         let _variants: Vec<MobError> = vec![
-            MobError::ProfileNotFound("p".to_string()),
-            MobError::MeerkatNotFound("m".to_string()),
-            MobError::MeerkatAlreadyExists("m".to_string()),
-            MobError::NotExternallyAddressable("m".to_string()),
+            MobError::ProfileNotFound(ProfileName::from("p")),
+            MobError::MeerkatNotFound(MeerkatId::from("m")),
+            MobError::MeerkatAlreadyExists(MeerkatId::from("m")),
+            MobError::NotExternallyAddressable(MeerkatId::from("m")),
             MobError::InvalidTransition {
                 from: MobState::Creating,
                 to: MobState::Running,
             },
             MobError::WiringError("w".to_string()),
             MobError::DefinitionError(vec![]),
-            MobError::FlowNotFound("f".to_string()),
+            MobError::FlowNotFound(FlowId::from("f")),
             MobError::FlowFailed {
                 run_id: RunId::new(),
                 reason: "r".to_string(),
@@ -223,8 +227,8 @@ mod tests {
                 available: 1,
             },
             MobError::TopologyViolation {
-                from_role: "lead".to_string(),
-                to_role: "worker".to_string(),
+                from_role: ProfileName::from("lead"),
+                to_role: ProfileName::from("worker"),
             },
             MobError::SupervisorEscalation("boom".to_string()),
             MobError::ResetBarrier,

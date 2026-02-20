@@ -1,6 +1,7 @@
 //! Flow specification validation.
 
 use crate::definition::{CollectionPolicy, DependencyMode, FlowSpec, FlowStepSpec, MobDefinition};
+use crate::ids::{BranchId, FlowId, StepId};
 use crate::validate::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -25,7 +26,9 @@ impl SpecValidator {
 
         if let Some(topology) = &definition.topology {
             for (index, rule) in topology.rules.iter().enumerate() {
-                if !definition.profiles.contains_key(rule.from_role.as_str()) {
+                if rule.from_role.as_str() != "*"
+                    && !definition.profiles.contains_key(rule.from_role.as_str())
+                {
                     diagnostics.push(Diagnostic {
                         code: DiagnosticCode::TopologyUnknownRole,
                         message: format!(
@@ -36,7 +39,9 @@ impl SpecValidator {
                         severity: DiagnosticSeverity::Error,
                     });
                 }
-                if !definition.profiles.contains_key(rule.to_role.as_str()) {
+                if rule.to_role.as_str() != "*"
+                    && !definition.profiles.contains_key(rule.to_role.as_str())
+                {
                     diagnostics.push(Diagnostic {
                         code: DiagnosticCode::TopologyUnknownRole,
                         message: format!(
@@ -59,12 +64,13 @@ impl SpecValidator {
 
     fn validate_flow(
         definition: &MobDefinition,
-        flow_name: &str,
+        flow_name: &FlowId,
         flow: &FlowSpec,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         let step_keys = flow.steps.keys().cloned().collect::<BTreeSet<_>>();
-        let mut branch_groups: BTreeMap<String, Vec<(&str, &FlowStepSpec)>> = BTreeMap::new();
+        let mut branch_groups: BTreeMap<BranchId, Vec<(&StepId, &FlowStepSpec)>> =
+            BTreeMap::new();
 
         for (step_id, step) in &flow.steps {
             if !definition.profiles.contains_key(step.role.as_str()) {
@@ -104,7 +110,7 @@ impl SpecValidator {
                 branch_groups
                     .entry(group.clone())
                     .or_default()
-                    .push((step_id.as_str(), step));
+                    .push((step_id, step));
             }
 
             if step.depends_on_mode == DependencyMode::Any {
@@ -228,7 +234,10 @@ fn analyze_dag(flow: &FlowSpec) -> (bool, usize) {
 
     while let Some(step) = queue.pop_front() {
         processed += 1;
-        let current_depth = *depth.get(step).unwrap_or(&1);
+        let current_depth = match depth.get(step) {
+            Some(depth) => *depth,
+            None => unreachable!("step must exist in depth map after Kahn initialization"),
+        };
         max_depth = max_depth.max(current_depth);
 
         for next in adjacency.get(step).cloned().unwrap_or_default() {
@@ -254,7 +263,7 @@ mod tests {
         BackendConfig, DispatchMode, FlowStepSpec, PolicyMode, TopologyRule, TopologySpec,
         WiringRules,
     };
-    use crate::ids::{MobId, ProfileName};
+    use crate::ids::{FlowId, MobId, ProfileName, StepId};
     use crate::profile::{Profile, ToolConfig};
     use indexmap::IndexMap;
 
@@ -291,7 +300,7 @@ mod tests {
 
     fn step(role: &str, message: &str) -> FlowStepSpec {
         FlowStepSpec {
-            role: role.to_string(),
+            role: ProfileName::from(role),
             message: message.to_string(),
             depends_on: Vec::new(),
             dispatch_mode: DispatchMode::FanOut,
@@ -310,14 +319,14 @@ mod tests {
 
         let mut steps = IndexMap::new();
         let mut a = step("worker", "a");
-        a.depends_on = vec!["b".to_string(), "missing".to_string()];
-        steps.insert("a".to_string(), a);
+        a.depends_on = vec![StepId::from("b"), StepId::from("missing")];
+        steps.insert(StepId::from("a"), a);
         let mut b = step("ghost-role", "b");
-        b.depends_on = vec!["a".to_string()];
-        steps.insert("b".to_string(), b);
+        b.depends_on = vec![StepId::from("a")];
+        steps.insert(StepId::from("b"), b);
 
         def.flows.insert(
-            "flow".to_string(),
+            FlowId::from("flow"),
             FlowSpec {
                 description: None,
                 steps,
@@ -349,12 +358,12 @@ mod tests {
         for index in 0..33 {
             let mut current = step("worker", "x");
             if index > 0 {
-                current.depends_on = vec![format!("s{}", index - 1)];
+                current.depends_on = vec![StepId::from(format!("s{}", index - 1))];
             }
-            steps.insert(format!("s{index}"), current);
+            steps.insert(StepId::from(format!("s{index}")), current);
         }
         def.flows.insert(
-            "deep".to_string(),
+            FlowId::from("deep"),
             FlowSpec {
                 description: None,
                 steps,
@@ -375,40 +384,40 @@ mod tests {
         let mut steps = IndexMap::new();
 
         let mut branch_a = step("worker", "a");
-        branch_a.branch = Some("pick".to_string());
+        branch_a.branch = Some(crate::ids::BranchId::from("pick"));
         branch_a.condition = Some(crate::definition::ConditionExpr::Eq {
             path: "params.choice".to_string(),
             value: serde_json::json!("a"),
         });
-        branch_a.depends_on = vec!["start".to_string()];
-        steps.insert("branch_a".to_string(), branch_a);
+        branch_a.depends_on = vec![StepId::from("start")];
+        steps.insert(StepId::from("branch_a"), branch_a);
 
         let mut branch_b = step("worker", "b");
-        branch_b.branch = Some("pick".to_string());
-        branch_b.depends_on = vec!["different".to_string()];
-        steps.insert("branch_b".to_string(), branch_b);
+        branch_b.branch = Some(crate::ids::BranchId::from("pick"));
+        branch_b.depends_on = vec![StepId::from("different")];
+        steps.insert(StepId::from("branch_b"), branch_b);
 
-        steps.insert("start".to_string(), step("worker", "start"));
+        steps.insert(StepId::from("start"), step("worker", "start"));
 
         let mut join = step("worker", "join");
         join.depends_on_mode = DependencyMode::Any;
-        join.depends_on = vec!["start".to_string()];
-        steps.insert("join".to_string(), join);
+        join.depends_on = vec![StepId::from("start")];
+        steps.insert(StepId::from("join"), join);
 
         let mut quorum = step("worker", "q");
         quorum.collection_policy = CollectionPolicy::Quorum { n: 0 };
-        steps.insert("quorum".to_string(), quorum);
+        steps.insert(StepId::from("quorum"), quorum);
 
         let mut lonely_branch = step("worker", "lonely");
-        lonely_branch.branch = Some("solo".to_string());
+        lonely_branch.branch = Some(crate::ids::BranchId::from("solo"));
         lonely_branch.condition = Some(crate::definition::ConditionExpr::Eq {
             path: "params.x".to_string(),
             value: serde_json::json!(1),
         });
-        steps.insert("lonely_branch".to_string(), lonely_branch);
+        steps.insert(StepId::from("lonely_branch"), lonely_branch);
 
         def.flows.insert(
-            "flow".to_string(),
+            FlowId::from("flow"),
             FlowSpec {
                 description: None,
                 steps,
@@ -450,13 +459,13 @@ mod tests {
             mode: PolicyMode::Strict,
             rules: vec![
                 TopologyRule {
-                    from_role: "lead".to_string(),
-                    to_role: "ghost".to_string(),
+                    from_role: ProfileName::from("lead"),
+                    to_role: ProfileName::from("ghost"),
                     allowed: true,
                 },
                 TopologyRule {
-                    from_role: "ghost".to_string(),
-                    to_role: "worker".to_string(),
+                    from_role: ProfileName::from("ghost"),
+                    to_role: ProfileName::from("worker"),
                     allowed: false,
                 },
             ],
@@ -469,6 +478,27 @@ mod tests {
                 .filter(|d| d.code == DiagnosticCode::TopologyUnknownRole)
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn test_topology_wildcard_role_is_allowed() {
+        let mut def = base_definition();
+        def.topology = Some(TopologySpec {
+            mode: PolicyMode::Strict,
+            rules: vec![TopologyRule {
+                from_role: ProfileName::from("*"),
+                to_role: ProfileName::from("worker"),
+                allowed: false,
+            }],
+        });
+
+        let diagnostics = SpecValidator::validate(&def);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.code != DiagnosticCode::TopologyUnknownRole),
+            "wildcard topology roles should bypass unknown-role diagnostics"
         );
     }
 }

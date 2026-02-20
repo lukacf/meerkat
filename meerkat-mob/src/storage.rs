@@ -4,8 +4,9 @@
 
 use crate::store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
-    MobSpecStore,
+    MobSpecStore, RedbMobStores,
 };
+use std::path::Path;
 use std::sync::Arc;
 
 /// Storage bundle for a mob.
@@ -43,7 +44,21 @@ impl MobStorage {
     /// Build a full storage bundle from a custom event store and in-memory flow stores.
     pub fn with_events(events: Arc<dyn MobEventStore>) -> Self {
         let (runs, specs) = Self::in_memory_flow_stores();
-        Self { events, runs, specs }
+        Self {
+            events,
+            runs,
+            specs,
+        }
+    }
+
+    /// Create a storage bundle backed by a single shared redb database handle.
+    pub fn redb(path: impl AsRef<Path>) -> Result<Self, crate::MobError> {
+        let stores = RedbMobStores::open(path)?;
+        Ok(Self {
+            events: Arc::new(stores.event_store()),
+            runs: Arc::new(stores.run_store()),
+            specs: Arc::new(stores.spec_store()),
+        })
     }
 }
 
@@ -109,6 +124,50 @@ model = "test"
         )
         .unwrap();
         let revision = specs
+            .put_spec(&MobId::from("mob"), &definition, None)
+            .await
+            .unwrap();
+        assert_eq!(revision, 1);
+    }
+
+    #[tokio::test]
+    async fn test_redb_storage_uses_shared_database_handle_for_all_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("mob.redb");
+        let storage = MobStorage::redb(&db_path).unwrap();
+
+        let event = NewMobEvent {
+            mob_id: MobId::from("mob"),
+            timestamp: None,
+            kind: MobEventKind::MobCompleted,
+        };
+        storage.events.append(event).await.unwrap();
+
+        let run = MobRun {
+            run_id: RunId::new(),
+            mob_id: MobId::from("mob"),
+            flow_id: crate::FlowId::from("flow"),
+            status: MobRunStatus::Pending,
+            activation_params: serde_json::json!({}),
+            created_at: Utc::now(),
+            completed_at: None,
+            step_ledger: Vec::new(),
+            failure_ledger: Vec::new(),
+        };
+        storage.runs.create_run(run.clone()).await.unwrap();
+        assert!(storage.runs.get_run(&run.run_id).await.unwrap().is_some());
+
+        let definition = crate::definition::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "mob"
+[profiles.worker]
+model = "test"
+"#,
+        )
+        .unwrap();
+        let revision = storage
+            .specs
             .put_spec(&MobId::from("mob"), &definition, None)
             .await
             .unwrap();

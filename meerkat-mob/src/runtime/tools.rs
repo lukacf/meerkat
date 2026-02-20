@@ -253,19 +253,19 @@ struct TaskCreateArgs {
     subject: String,
     description: String,
     #[serde(default)]
-    blocked_by: Vec<String>,
+    blocked_by: Vec<TaskId>,
 }
 
 #[derive(Deserialize)]
 struct TaskUpdateArgs {
-    task_id: String,
+    task_id: TaskId,
     status: TaskStatus,
     owner: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TaskGetArgs {
-    task_id: String,
+    task_id: TaskId,
 }
 
 #[derive(Deserialize)]
@@ -375,12 +375,9 @@ impl AgentToolDispatcher for MobToolDispatcher {
                 let args: FlowStatusArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
-                let run_id = args
-                    .run_id
-                    .parse::<RunId>()
-                    .map_err(|error| {
-                        ToolError::invalid_arguments(call.name, format!("invalid run_id: {error}"))
-                    })?;
+                let run_id = args.run_id.parse::<RunId>().map_err(|error| {
+                    ToolError::invalid_arguments(call.name, format!("invalid run_id: {error}"))
+                })?;
                 let run = self
                     .handle
                     .flow_status(run_id)
@@ -392,12 +389,9 @@ impl AgentToolDispatcher for MobToolDispatcher {
                 let args: FlowStatusArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
-                let run_id = args
-                    .run_id
-                    .parse::<RunId>()
-                    .map_err(|error| {
-                        ToolError::invalid_arguments(call.name, format!("invalid run_id: {error}"))
-                    })?;
+                let run_id = args.run_id.parse::<RunId>().map_err(|error| {
+                    ToolError::invalid_arguments(call.name, format!("invalid run_id: {error}"))
+                })?;
                 self.handle
                     .cancel_flow(run_id)
                     .await

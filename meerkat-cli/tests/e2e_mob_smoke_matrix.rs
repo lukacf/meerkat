@@ -1212,27 +1212,27 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_stop. Reply exactly OK.",
-        returned_mob_id
-    ),
+            "Use mob_* tools only. For mob '{}', call mob_stop. Reply exactly OK.",
+            returned_mob_id
+        ),
     )
     .await?;
     quick(
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_resume. Reply exactly OK.",
-        returned_mob_id
-    ),
+            "Use mob_* tools only. For mob '{}', call mob_resume. Reply exactly OK.",
+            returned_mob_id
+        ),
     )
     .await?;
     quick(
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_complete. Reply exactly OK.",
-        returned_mob_id
-    ),
+            "Use mob_* tools only. For mob '{}', call mob_complete. Reply exactly OK.",
+            returned_mob_id
+        ),
     )
     .await?;
 

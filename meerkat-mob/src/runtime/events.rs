@@ -1,6 +1,6 @@
 use crate::error::MobError;
 use crate::event::{MobEvent, MobEventKind, NewMobEvent};
-use crate::ids::{FlowId, MeerkatId, MobId, RunId, StepId};
+use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId};
 use crate::store::MobEventStore;
 use std::sync::Arc;
 
@@ -37,38 +37,6 @@ impl MobEventEmitter {
             params,
         })
         .await
-    }
-
-    pub async fn flow_completed(
-        &self,
-        run_id: RunId,
-        flow_id: FlowId,
-    ) -> Result<MobEvent, MobError> {
-        self.append(MobEventKind::FlowCompleted { run_id, flow_id })
-            .await
-    }
-
-    pub async fn flow_failed(
-        &self,
-        run_id: RunId,
-        flow_id: FlowId,
-        reason: String,
-    ) -> Result<MobEvent, MobError> {
-        self.append(MobEventKind::FlowFailed {
-            run_id,
-            flow_id,
-            reason,
-        })
-        .await
-    }
-
-    pub async fn flow_canceled(
-        &self,
-        run_id: RunId,
-        flow_id: FlowId,
-    ) -> Result<MobEvent, MobError> {
-        self.append(MobEventKind::FlowCanceled { run_id, flow_id })
-            .await
     }
 
     pub async fn step_dispatched(
@@ -154,8 +122,8 @@ impl MobEventEmitter {
 
     pub async fn topology_violation(
         &self,
-        from_role: String,
-        to_role: String,
+        from_role: ProfileName,
+        to_role: ProfileName,
     ) -> Result<MobEvent, MobError> {
         self.append(MobEventKind::TopologyViolation { from_role, to_role })
             .await

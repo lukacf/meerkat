@@ -42,7 +42,7 @@ pub use event::{
     MemberRef, MobEvent, MobEventCompat, MobEventCompatError, MobEventKind, MobEventKindCompat,
     NewMobEvent,
 };
-pub use ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId};
+pub use ids::{BranchId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 pub use prefab::Prefab;
 pub use profile::{Profile, ToolConfig};
 pub use roster::{Roster, RosterEntry};
@@ -50,15 +50,13 @@ pub use run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobRun, MobRunStatus, StepLedgerEntry,
     StepRunStatus,
 };
+pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime::{MobBuilder, MobHandle, MobSessionService, MobState};
-pub use runtime::{
-    FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition,
-};
 pub use spec::SpecValidator;
 pub use storage::MobStorage;
 pub use store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
-    MobSpecStore, RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore,
+    MobSpecStore, RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore, RedbMobStores,
 };
 pub use tasks::{MobTask, TaskBoard, TaskStatus};
 pub use validate::{

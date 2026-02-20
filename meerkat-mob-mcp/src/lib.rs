@@ -48,9 +48,9 @@ impl MobMcpState {
         }
         let storage = MobStorage::in_memory();
         let handle = MobBuilder::new(definition.clone(), storage)
-        .with_session_service(self.session_service.clone())
-        .create()
-        .await?;
+            .with_session_service(self.session_service.clone())
+            .create()
+            .await?;
         match self.mobs.write().await.entry(mob_id.clone()) {
             Entry::Vacant(entry) => {
                 entry.insert(ManagedMob { handle });
@@ -191,7 +191,11 @@ impl MobMcpState {
     }
 
     pub async fn mob_list_flows(&self, mob_id: &MobId) -> Result<Vec<String>, MobError> {
-        Ok(self.handle_for(mob_id).await?.list_flows())
+        let flows = self.handle_for(mob_id).await?.list_flows();
+        Ok(flows
+            .into_iter()
+            .map(|flow_id| flow_id.to_string())
+            .collect())
     }
 
     pub async fn mob_run_flow(
@@ -200,7 +204,10 @@ impl MobMcpState {
         flow_id: FlowId,
         params: serde_json::Value,
     ) -> Result<RunId, MobError> {
-        self.handle_for(mob_id).await?.run_flow(flow_id, params).await
+        self.handle_for(mob_id)
+            .await?
+            .run_flow(flow_id, params)
+            .await
     }
 
     pub async fn mob_flow_status(
@@ -1130,11 +1137,7 @@ mod tests {
         serde_json::from_str(&out.content).expect("tool json")
     }
 
-    async fn call_tool_err(
-        d: &MobMcpDispatcher,
-        name: &str,
-        args: serde_json::Value,
-    ) -> ToolError {
+    async fn call_tool_err(d: &MobMcpDispatcher, name: &str, args: serde_json::Value) -> ToolError {
         let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
         d.dispatch(mk_call(name, &raw))
             .await
@@ -1545,7 +1548,11 @@ timeout_ms = 1000
                     .collect()
             })
             .unwrap_or_default();
-        assert_eq!(ids, vec![mob_id], "duplicate create must not replace active mob");
+        assert_eq!(
+            ids,
+            vec![mob_id],
+            "duplicate create must not replace active mob"
+        );
     }
 
     #[tokio::test]

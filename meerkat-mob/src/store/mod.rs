@@ -4,7 +4,7 @@ mod in_memory;
 mod redb;
 
 pub use in_memory::{InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore};
-pub use redb::{RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore};
+pub use redb::{RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore, RedbMobStores};
 
 use crate::definition::MobDefinition;
 use crate::error::MobError;

@@ -4,7 +4,7 @@
 //! are projections rebuilt by replaying events.
 
 use crate::definition::MobDefinition;
-use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId};
+use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 use chrono::{DateTime, Utc};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
@@ -192,13 +192,13 @@ pub enum MobEventKindCompat {
         b: MeerkatId,
     },
     TaskCreated {
-        task_id: String,
+        task_id: TaskId,
         subject: String,
         description: String,
-        blocked_by: Vec<String>,
+        blocked_by: Vec<TaskId>,
     },
     TaskUpdated {
-        task_id: String,
+        task_id: TaskId,
         status: super::tasks::TaskStatus,
         owner: Option<MeerkatId>,
     },
@@ -251,8 +251,8 @@ pub enum MobEventKindCompat {
         reason: String,
     },
     TopologyViolation {
-        from_role: String,
-        to_role: String,
+        from_role: ProfileName,
+        to_role: ProfileName,
     },
     SupervisorEscalation {
         run_id: RunId,
@@ -509,18 +509,18 @@ pub enum MobEventKind {
     /// A task was created on the shared task board.
     TaskCreated {
         /// Unique task identifier.
-        task_id: String,
+        task_id: TaskId,
         /// Short subject line.
         subject: String,
         /// Detailed description.
         description: String,
         /// Task IDs that must be completed before this task can be claimed.
-        blocked_by: Vec<String>,
+        blocked_by: Vec<TaskId>,
     },
     /// A task's status or owner was updated.
     TaskUpdated {
         /// Task being updated.
-        task_id: String,
+        task_id: TaskId,
         /// New status.
         status: super::tasks::TaskStatus,
         /// New owner (if assigned).
@@ -576,7 +576,10 @@ pub enum MobEventKind {
         reason: String,
     },
     /// Topology violation event.
-    TopologyViolation { from_role: String, to_role: String },
+    TopologyViolation {
+        from_role: ProfileName,
+        to_role: ProfileName,
+    },
     /// Supervisor escalation event.
     SupervisorEscalation {
         run_id: RunId,
@@ -683,17 +686,17 @@ mod tests {
     #[test]
     fn test_task_created_roundtrip() {
         roundtrip(&MobEventKind::TaskCreated {
-            task_id: "task-001".to_string(),
+            task_id: TaskId::from("task-001"),
             subject: "Implement feature".to_string(),
             description: "Build the widget factory".to_string(),
-            blocked_by: vec!["task-000".to_string()],
+            blocked_by: vec![TaskId::from("task-000")],
         });
     }
 
     #[test]
     fn test_task_updated_roundtrip() {
         roundtrip(&MobEventKind::TaskUpdated {
-            task_id: "task-001".to_string(),
+            task_id: TaskId::from("task-001"),
             status: TaskStatus::InProgress,
             owner: Some(MeerkatId::from("agent-1")),
         });
@@ -755,8 +758,8 @@ mod tests {
             reason: "branch lost".to_string(),
         });
         roundtrip(&MobEventKind::TopologyViolation {
-            from_role: "lead".to_string(),
-            to_role: "worker".to_string(),
+            from_role: ProfileName::from("lead"),
+            to_role: ProfileName::from("worker"),
         });
         roundtrip(&MobEventKind::SupervisorEscalation {
             run_id,

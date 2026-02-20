@@ -3,6 +3,9 @@ use super::handle::MobHandle;
 use crate::error::MobError;
 use crate::ids::{RunId, StepId};
 use crate::run::FlowRunConfig;
+use std::time::Duration;
+
+const ESCALATION_TURN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct Supervisor {
     handle: MobHandle,
@@ -33,21 +36,27 @@ impl Supervisor {
             .list_meerkats()
             .await
             .into_iter()
-            .find(|entry| entry.profile.as_str() == supervisor_role)
+            .find(|entry| entry.profile == supervisor_role)
             .ok_or_else(|| {
                 MobError::SupervisorEscalation(format!(
                     "no active supervisor member for role '{supervisor_role}'"
                 ))
             })?;
 
-        self.handle
-            .internal_turn(
+        tokio::time::timeout(
+            ESCALATION_TURN_TIMEOUT,
+            self.handle.internal_turn(
                 escalation_target.meerkat_id.clone(),
-                format!(
-                    "Supervisor escalation for run '{run_id}', step '{step_id}': {reason}"
-                ),
-            )
-            .await?;
+                format!("Supervisor escalation for run '{run_id}', step '{step_id}': {reason}"),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            MobError::SupervisorEscalation(format!(
+                "supervisor escalation timed out after {}ms",
+                ESCALATION_TURN_TIMEOUT.as_millis()
+            ))
+        })??;
 
         self.emitter
             .supervisor_escalation(
@@ -69,8 +78,19 @@ impl Supervisor {
             .map(|entry| entry.meerkat_id)
             .collect::<Vec<_>>();
 
+        let mut failures = Vec::new();
         for id in ids {
-            self.handle.retire(id).await?;
+            if let Err(error) = self.handle.retire(id.clone()).await {
+                failures.push(format!("{id}: {error}"));
+            }
+        }
+
+        if !failures.is_empty() {
+            return Err(MobError::SupervisorEscalation(format!(
+                "force_reset encountered {} retirement error(s): {}",
+                failures.len(),
+                failures.join("; ")
+            )));
         }
 
         Ok(())

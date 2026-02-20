@@ -104,6 +104,16 @@ string_newtype!(
 );
 
 string_newtype!(
+    /// Branch group identifier used by mutually-exclusive flow steps.
+    BranchId
+);
+
+string_newtype!(
+    /// Unique identifier for a task in the shared task board.
+    TaskId
+);
+
+string_newtype!(
     /// Unique identifier for a meerkat (agent instance) within a mob.
     MeerkatId
 );
@@ -146,6 +156,22 @@ mod tests {
         let id = StepId::from("step-a");
         let encoded = serde_json::to_string(&id).unwrap();
         let decoded: StepId = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn test_branch_id_roundtrip_json() {
+        let id = BranchId::from("branch-a");
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded: BranchId = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn test_task_id_roundtrip_json() {
+        let id = TaskId::from("task-a");
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded: TaskId = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, id);
     }
 

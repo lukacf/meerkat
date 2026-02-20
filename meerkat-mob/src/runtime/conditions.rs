@@ -1,5 +1,6 @@
 //! Pure condition evaluator for flow specs.
 
+use super::path::resolve_context_path;
 use crate::definition::ConditionExpr;
 use crate::run::FlowContext;
 use serde_json::Value;
@@ -7,13 +8,15 @@ use serde_json::Value;
 /// Evaluate a condition expression against runtime flow context.
 pub fn evaluate_condition(expr: &ConditionExpr, ctx: &FlowContext) -> bool {
     match expr {
-        ConditionExpr::Eq { path, value } => resolve_path(ctx, path).is_some_and(|v| v == value),
-        ConditionExpr::In { path, values } => {
-            resolve_path(ctx, path).is_some_and(|v| values.contains(v))
+        ConditionExpr::Eq { path, value } => {
+            resolve_context_path(ctx, path).is_some_and(|v| v == value)
         }
-        ConditionExpr::Gt { path, value } => resolve_path(ctx, path)
+        ConditionExpr::In { path, values } => {
+            resolve_context_path(ctx, path).is_some_and(|v| values.contains(v))
+        }
+        ConditionExpr::Gt { path, value } => resolve_context_path(ctx, path)
             .is_some_and(|v| compare_values(v, value).is_some_and(|ord| ord.is_gt())),
-        ConditionExpr::Lt { path, value } => resolve_path(ctx, path)
+        ConditionExpr::Lt { path, value } => resolve_context_path(ctx, path)
             .is_some_and(|v| compare_values(v, value).is_some_and(|ord| ord.is_lt())),
         ConditionExpr::And { exprs } => exprs.iter().all(|expr| evaluate_condition(expr, ctx)),
         ConditionExpr::Or { exprs } => exprs.iter().any(|expr| evaluate_condition(expr, ctx)),
@@ -31,47 +34,6 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::String(left), Value::String(right)) => Some(left.cmp(right)),
         _ => None,
     }
-}
-
-/// Resolve a condition path from context.
-pub fn resolve_path<'a>(ctx: &'a FlowContext, path: &str) -> Option<&'a Value> {
-    if path == "params" {
-        return Some(&ctx.activation_params);
-    }
-    if path == "steps" {
-        return None;
-    }
-
-    let mut parts = path.split('.');
-    match parts.next()? {
-        "params" => walk_json(&ctx.activation_params, parts),
-        "steps" => {
-            let step_id = parts.next()?;
-            let output = ctx.step_outputs.get(step_id)?;
-            walk_json(output, parts)
-        }
-        _ => None,
-    }
-}
-
-fn walk_json<I>(root: &Value, parts: I) -> Option<&Value>
-where
-    I: IntoIterator,
-    I::Item: AsRef<str>,
-{
-    let mut current = root;
-    for segment in parts {
-        let segment = segment.as_ref();
-        current = match current {
-            Value::Object(map) => map.get(segment)?,
-            Value::Array(items) => {
-                let index: usize = segment.parse().ok()?;
-                items.get(index)?
-            }
-            _ => return None,
-        };
-    }
-    Some(current)
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 
 use crate::definition::{FlowSpec, LimitsSpec, SupervisorSpec, TopologySpec};
 use crate::error::MobError;
-use crate::ids::{FlowId, MeerkatId, MobId, RunId, StepId};
+use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId};
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -75,7 +75,7 @@ pub struct FlowRunConfig {
     pub topology: Option<TopologySpec>,
     pub supervisor: Option<SupervisorSpec>,
     pub limits: Option<LimitsSpec>,
-    pub orchestrator_role: Option<String>,
+    pub orchestrator_role: Option<ProfileName>,
 }
 
 impl FlowRunConfig {
@@ -85,19 +85,26 @@ impl FlowRunConfig {
     ) -> Result<Self, MobError> {
         let flow_spec = definition
             .flows
-            .get(flow_id.as_str())
+            .get(&flow_id)
             .cloned()
-            .ok_or_else(|| MobError::FlowNotFound(flow_id.as_str().to_string()))?;
+            .ok_or_else(|| MobError::FlowNotFound(flow_id.clone()))?;
+        let topology = definition.topology.clone();
+        let orchestrator_role = definition
+            .orchestrator
+            .as_ref()
+            .map(|orchestrator| orchestrator.profile.clone());
+        if topology.is_some() && orchestrator_role.is_none() {
+            return Err(MobError::Internal(
+                "topology requires an orchestrator profile".to_string(),
+            ));
+        }
         Ok(Self {
             flow_id,
             flow_spec,
-            topology: definition.topology.clone(),
+            topology,
             supervisor: definition.supervisor.clone(),
             limits: definition.limits.clone(),
-            orchestrator_role: definition
-                .orchestrator
-                .as_ref()
-                .map(|orchestrator| orchestrator.profile.to_string()),
+            orchestrator_role,
         })
     }
 }
@@ -117,16 +124,16 @@ mod tests {
         BackendConfig, ConditionExpr, DispatchMode, FlowStepSpec, MobDefinition,
         OrchestratorConfig, WiringRules,
     };
-    use crate::ids::ProfileName;
+    use crate::ids::{BranchId, ProfileName};
     use crate::profile::{Profile, ToolConfig};
     use std::collections::BTreeMap;
 
     fn sample_definition() -> MobDefinition {
         let mut steps = IndexMap::new();
         steps.insert(
-            "s1".to_string(),
+            StepId::from("s1"),
             FlowStepSpec {
-                role: "worker".to_string(),
+                role: ProfileName::from("worker"),
                 message: "do it".to_string(),
                 depends_on: Vec::new(),
                 dispatch_mode: DispatchMode::FanOut,
@@ -137,14 +144,14 @@ mod tests {
                 }),
                 timeout_ms: Some(2000),
                 expected_schema_ref: Some("schema.json".to_string()),
-                branch: Some("branch-a".to_string()),
+                branch: Some(BranchId::from("branch-a")),
                 depends_on_mode: crate::definition::DependencyMode::All,
             },
         );
 
         let mut flows = BTreeMap::new();
         flows.insert(
-            "flow-a".to_string(),
+            FlowId::from("flow-a"),
             FlowSpec {
                 description: Some("demo flow".to_string()),
                 steps,
@@ -189,13 +196,13 @@ mod tests {
             topology: Some(TopologySpec {
                 mode: crate::definition::PolicyMode::Advisory,
                 rules: vec![crate::definition::TopologyRule {
-                    from_role: "lead".to_string(),
-                    to_role: "worker".to_string(),
+                    from_role: ProfileName::from("lead"),
+                    to_role: ProfileName::from("worker"),
                     allowed: true,
                 }],
             }),
             supervisor: Some(SupervisorSpec {
-                role: "lead".to_string(),
+                role: ProfileName::from("lead"),
                 escalation_threshold: 3,
             }),
             limits: Some(LimitsSpec {
@@ -221,14 +228,28 @@ mod tests {
         let config = FlowRunConfig::from_definition(FlowId::from("flow-a"), &def).unwrap();
         assert_eq!(config.flow_id, FlowId::from("flow-a"));
         assert_eq!(config.flow_spec.steps.len(), 1);
-        assert_eq!(config.orchestrator_role.as_deref(), Some("lead"));
+        assert_eq!(
+            config.orchestrator_role.as_ref(),
+            Some(&ProfileName::from("lead"))
+        );
     }
 
     #[test]
     fn test_flow_run_config_from_definition_missing_flow() {
         let def = sample_definition();
         let error = FlowRunConfig::from_definition(FlowId::from("missing"), &def).unwrap_err();
-        assert!(matches!(error, MobError::FlowNotFound(name) if name == "missing"));
+        assert!(matches!(error, MobError::FlowNotFound(name) if name == FlowId::from("missing")));
+    }
+
+    #[test]
+    fn test_flow_run_config_rejects_topology_without_orchestrator() {
+        let mut def = sample_definition();
+        def.orchestrator = None;
+        let error = FlowRunConfig::from_definition(FlowId::from("flow-a"), &def).unwrap_err();
+        assert!(
+            matches!(error, MobError::Internal(message) if message.contains("topology requires")),
+            "expected explicit topology/orchestrator configuration error"
+        );
     }
 
     #[test]

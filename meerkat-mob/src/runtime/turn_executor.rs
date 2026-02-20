@@ -1,36 +1,28 @@
 use crate::error::MobError;
 use crate::ids::{MeerkatId, RunId, StepId};
 use async_trait::async_trait;
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{Mutex, oneshot};
+use tokio::task::JoinHandle;
+
+pub struct ActorTurnTicket {
+    pub(crate) run_id: RunId,
+    pub(crate) completion_rx: Mutex<Option<oneshot::Receiver<FlowTurnOutcome>>>,
+    pub(crate) bridge_handle: Mutex<Option<JoinHandle<()>>>,
+}
 
 #[derive(Clone)]
-pub struct FlowTurnTicket(Arc<dyn Any + Send + Sync>);
-
-impl FlowTurnTicket {
-    pub fn new<T>(ticket: T) -> Self
-    where
-        T: Any + Send + Sync,
-    {
-        Self(Arc::new(ticket))
-    }
-
-    pub fn downcast<T>(self) -> Result<Arc<T>, Self>
-    where
-        T: Any + Send + Sync,
-    {
-        match Arc::downcast::<T>(self.0) {
-            Ok(ticket) => Ok(ticket),
-            Err(ticket) => Err(Self(ticket)),
-        }
-    }
+pub enum FlowTurnTicket {
+    Actor(Arc<ActorTurnTicket>),
 }
 
 impl fmt::Debug for FlowTurnTicket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("FlowTurnTicket(..)")
+        match self {
+            Self::Actor(_) => f.write_str("FlowTurnTicket::Actor(..)"),
+        }
     }
 }
 

@@ -5,7 +5,7 @@
 //! so they can be stored in `MobCreated` events for resume recovery.
 
 use crate::MobBackendKind;
-use crate::ids::{MobId, ProfileName};
+use crate::ids::{BranchId, FlowId, MobId, ProfileName, StepId};
 use crate::profile::Profile;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -154,10 +154,10 @@ pub enum ConditionExpr {
 /// Per-step flow execution configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowStepSpec {
-    pub role: String,
+    pub role: ProfileName,
     pub message: String,
     #[serde(default)]
-    pub depends_on: Vec<String>,
+    pub depends_on: Vec<StepId>,
     #[serde(default)]
     pub dispatch_mode: DispatchMode,
     #[serde(default)]
@@ -169,7 +169,7 @@ pub struct FlowStepSpec {
     #[serde(default)]
     pub expected_schema_ref: Option<String>,
     #[serde(default)]
-    pub branch: Option<String>,
+    pub branch: Option<BranchId>,
     #[serde(default)]
     pub depends_on_mode: DependencyMode,
 }
@@ -180,7 +180,7 @@ pub struct FlowSpec {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub steps: IndexMap<String, FlowStepSpec>,
+    pub steps: IndexMap<StepId, FlowStepSpec>,
 }
 
 /// Topology enforcement mode.
@@ -195,8 +195,8 @@ pub enum PolicyMode {
 /// Directed topology rule between roles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyRule {
-    pub from_role: String,
-    pub to_role: String,
+    pub from_role: ProfileName,
+    pub to_role: ProfileName,
     pub allowed: bool,
 }
 
@@ -210,7 +210,7 @@ pub struct TopologySpec {
 /// Supervisor configuration for escalation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorSpec {
-    pub role: String,
+    pub role: ProfileName,
     pub escalation_threshold: u32,
 }
 
@@ -252,7 +252,7 @@ pub struct MobDefinition {
     pub backend: BackendConfig,
     /// Named flow definitions.
     #[serde(default)]
-    pub flows: BTreeMap<String, FlowSpec>,
+    pub flows: BTreeMap<FlowId, FlowSpec>,
     /// Optional topology policy for role dispatch.
     #[serde(default)]
     pub topology: Option<TopologySpec>,
@@ -293,7 +293,7 @@ struct TomlDefinition {
     #[serde(default)]
     backend: BackendConfig,
     #[serde(default)]
-    flows: BTreeMap<String, FlowSpec>,
+    flows: BTreeMap<FlowId, FlowSpec>,
     #[serde(default)]
     topology: Option<TopologySpec>,
     #[serde(default)]
@@ -591,10 +591,17 @@ message = "first"
 [flows.demo.steps.second]
 role = "lead"
 message = "second"
-"#;
+        "#;
         let definition = MobDefinition::from_toml(toml).unwrap();
-        let flow = definition.flows.get("demo").expect("flow exists");
+        let flow = definition
+            .flows
+            .get(&FlowId::from("demo"))
+            .expect("flow exists");
         let step_order = flow.steps.keys().cloned().collect::<Vec<_>>();
+        let step_order = step_order
+            .into_iter()
+            .map(|step_id| step_id.to_string())
+            .collect::<Vec<_>>();
         assert_eq!(step_order, vec!["first".to_string(), "second".to_string()]);
     }
 
@@ -654,10 +661,10 @@ escalation_threshold = 2
 max_flow_duration_ms = 30000
 max_step_retries = 1
 max_orphaned_turns = 8
-"#;
+        "#;
 
         let definition = MobDefinition::from_toml(toml).unwrap();
-        assert!(definition.flows.contains_key("pipeline"));
+        assert!(definition.flows.contains_key(&FlowId::from("pipeline")));
         assert_eq!(
             definition.topology.as_ref().map(|t| t.mode.clone()),
             Some(PolicyMode::Strict)

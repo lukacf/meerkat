@@ -18,6 +18,7 @@ const EVENT_META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("mob_e
 const RUNS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mob_runs");
 const SPECS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mob_specs");
 const EVENT_CURSOR_KEY: &str = "next_cursor";
+const DELETE_BATCH_SIZE: usize = 256;
 
 fn storage_error<E>(error: E) -> MobError
 where
@@ -47,7 +48,9 @@ fn open_db(path: impl AsRef<Path>) -> Result<Arc<Database>, MobError> {
     let write_txn = db.begin_write().map_err(storage_error)?;
     {
         let _ = write_txn.open_table(EVENTS_TABLE).map_err(storage_error)?;
-        let _ = write_txn.open_table(EVENT_META_TABLE).map_err(storage_error)?;
+        let _ = write_txn
+            .open_table(EVENT_META_TABLE)
+            .map_err(storage_error)?;
         let _ = write_txn.open_table(RUNS_TABLE).map_err(storage_error)?;
         let _ = write_txn.open_table(SPECS_TABLE).map_err(storage_error)?;
     }
@@ -56,7 +59,9 @@ fn open_db(path: impl AsRef<Path>) -> Result<Arc<Database>, MobError> {
     Ok(Arc::new(db))
 }
 
-async fn run_redb_task<T>(task: impl FnOnce() -> Result<T, MobError> + Send + 'static) -> Result<T, MobError>
+async fn run_redb_task<T>(
+    task: impl FnOnce() -> Result<T, MobError> + Send + 'static,
+) -> Result<T, MobError>
 where
     T: Send + 'static,
 {
@@ -80,7 +85,11 @@ impl std::fmt::Debug for RedbMobEventStore {
 
 impl RedbMobEventStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MobError> {
-        Ok(Self { db: open_db(path)? })
+        Ok(Self::from_db(open_db(path)?))
+    }
+
+    fn from_db(db: Arc<Database>) -> Self {
+        Self { db }
     }
 }
 
@@ -91,7 +100,9 @@ impl MobEventStore for RedbMobEventStore {
         run_redb_task(move || {
             let write_txn = db.begin_write().map_err(storage_error)?;
             let cursor = {
-                let mut meta = write_txn.open_table(EVENT_META_TABLE).map_err(storage_error)?;
+                let mut meta = write_txn
+                    .open_table(EVENT_META_TABLE)
+                    .map_err(storage_error)?;
                 let cursor = meta
                     .get(EVENT_CURSOR_KEY)
                     .map_err(storage_error)?
@@ -112,7 +123,9 @@ impl MobEventStore for RedbMobEventStore {
 
             {
                 let mut table = write_txn.open_table(EVENTS_TABLE).map_err(storage_error)?;
-                table.insert(cursor, encoded.as_slice()).map_err(storage_error)?;
+                table
+                    .insert(cursor, encoded.as_slice())
+                    .map_err(storage_error)?;
             }
 
             write_txn.commit().map_err(storage_error)?;
@@ -164,18 +177,25 @@ impl MobEventStore for RedbMobEventStore {
             let write_txn = db.begin_write().map_err(storage_error)?;
             {
                 let mut table = write_txn.open_table(EVENTS_TABLE).map_err(storage_error)?;
-                let mut keys = Vec::new();
-                let iter = table.iter().map_err(storage_error)?;
-                for entry in iter {
-                    let (key, _) = entry.map_err(storage_error)?;
-                    keys.push(key.value());
-                }
-                for key in keys {
-                    let _ = table.remove(key).map_err(storage_error)?;
+                loop {
+                    let mut batch = Vec::with_capacity(DELETE_BATCH_SIZE);
+                    let iter = table.iter().map_err(storage_error)?;
+                    for entry in iter.take(DELETE_BATCH_SIZE) {
+                        let (key, _) = entry.map_err(storage_error)?;
+                        batch.push(key.value());
+                    }
+                    if batch.is_empty() {
+                        break;
+                    }
+                    for key in batch {
+                        let _ = table.remove(key).map_err(storage_error)?;
+                    }
                 }
             }
             {
-                let mut meta = write_txn.open_table(EVENT_META_TABLE).map_err(storage_error)?;
+                let mut meta = write_txn
+                    .open_table(EVENT_META_TABLE)
+                    .map_err(storage_error)?;
                 meta.insert(EVENT_CURSOR_KEY, 1).map_err(storage_error)?;
             }
             write_txn.commit().map_err(storage_error)?;
@@ -188,24 +208,31 @@ impl MobEventStore for RedbMobEventStore {
         let db = self.db.clone();
         run_redb_task(move || {
             let write_txn = db.begin_write().map_err(storage_error)?;
-            let removed_count = {
+            let mut removed_count = 0u64;
+            {
                 let mut table = write_txn.open_table(EVENTS_TABLE).map_err(storage_error)?;
-                let mut stale = Vec::new();
-                let iter = table.iter().map_err(storage_error)?;
-
-                for entry in iter {
-                    let (key, value) = entry.map_err(storage_error)?;
-                    let event: MobEvent = decode_json(value.value())?;
-                    if event.timestamp < older_than {
-                        stale.push(key.value());
+                loop {
+                    let mut stale = Vec::with_capacity(DELETE_BATCH_SIZE);
+                    let iter = table.iter().map_err(storage_error)?;
+                    for entry in iter {
+                        let (key, value) = entry.map_err(storage_error)?;
+                        let event: MobEvent = decode_json(value.value())?;
+                        if event.timestamp < older_than {
+                            stale.push(key.value());
+                        }
+                        if stale.len() >= DELETE_BATCH_SIZE {
+                            break;
+                        }
+                    }
+                    if stale.is_empty() {
+                        break;
+                    }
+                    for key in stale {
+                        let _ = table.remove(key).map_err(storage_error)?;
+                        removed_count = removed_count.saturating_add(1);
                     }
                 }
-
-                for key in &stale {
-                    let _ = table.remove(*key).map_err(storage_error)?;
-                }
-                stale.len() as u64
-            };
+            }
 
             write_txn.commit().map_err(storage_error)?;
             Ok(removed_count)
@@ -229,7 +256,11 @@ impl std::fmt::Debug for RedbMobRunStore {
 
 impl RedbMobRunStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MobError> {
-        Ok(Self { db: open_db(path)? })
+        Ok(Self::from_db(open_db(path)?))
+    }
+
+    fn from_db(db: Arc<Database>) -> Self {
+        Self { db }
     }
 }
 
@@ -517,7 +548,42 @@ impl std::fmt::Debug for RedbMobSpecStore {
 
 impl RedbMobSpecStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MobError> {
+        Ok(Self::from_db(open_db(path)?))
+    }
+
+    fn from_db(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+}
+
+#[derive(Clone)]
+pub struct RedbMobStores {
+    db: Arc<Database>,
+}
+
+impl std::fmt::Debug for RedbMobStores {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedbMobStores")
+            .field("db", &"<redb::Database>")
+            .finish()
+    }
+}
+
+impl RedbMobStores {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, MobError> {
         Ok(Self { db: open_db(path)? })
+    }
+
+    pub fn event_store(&self) -> RedbMobEventStore {
+        RedbMobEventStore::from_db(self.db.clone())
+    }
+
+    pub fn run_store(&self) -> RedbMobRunStore {
+        RedbMobRunStore::from_db(self.db.clone())
+    }
+
+    pub fn spec_store(&self) -> RedbMobSpecStore {
+        RedbMobSpecStore::from_db(self.db.clone())
     }
 }
 
@@ -687,7 +753,7 @@ mod tests {
             flows: {
                 let mut flows = std::collections::BTreeMap::new();
                 flows.insert(
-                    "flow-a".to_string(),
+                    FlowId::from("flow-a"),
                     FlowSpec {
                         description: None,
                         steps: IndexMap::new(),
@@ -741,11 +807,45 @@ mod tests {
         let polled = store.poll(0, 10).await.unwrap();
         assert_eq!(polled.len(), 2);
 
-        let removed = store.prune(now - chrono::Duration::minutes(1)).await.unwrap();
+        let removed = store
+            .prune(now - chrono::Duration::minutes(1))
+            .await
+            .unwrap();
         assert_eq!(removed, 1);
 
         let replayed = store.replay_all().await.unwrap();
         assert_eq!(replayed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_redb_event_store_clear_and_prune_large_keyset() {
+        let (_dir, path) = temp_db_path();
+        let store = RedbMobEventStore::open(&path).unwrap();
+        let now = Utc::now();
+
+        for i in 0..2_000 {
+            store
+                .append(NewMobEvent {
+                    mob_id: MobId::from("mob"),
+                    timestamp: Some(now - chrono::Duration::minutes((i % 10) as i64)),
+                    kind: MobEventKind::MobCompleted,
+                })
+                .await
+                .unwrap();
+        }
+
+        let removed = store
+            .prune(now - chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+        assert!(removed > 0, "expected stale events to be pruned");
+
+        store.clear().await.unwrap();
+        let replayed = store.replay_all().await.unwrap();
+        assert!(
+            replayed.is_empty(),
+            "clear should remove all persisted events"
+        );
     }
 
     #[tokio::test]
@@ -824,5 +924,40 @@ mod tests {
 
         let loaded = store.get_spec(&MobId::from("mob")).await.unwrap();
         assert!(loaded.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_redb_stores_share_single_database_handle() {
+        let (_dir, path) = temp_db_path();
+        let shared = RedbMobStores::open(&path).unwrap();
+        let events = shared.event_store();
+        let runs = shared.run_store();
+        let specs = shared.spec_store();
+
+        events
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+
+        let run = sample_run(MobRunStatus::Pending);
+        let run_id = run.run_id.clone();
+        runs.create_run(run).await.unwrap();
+        let fetched_run = runs.get_run(&run_id).await.unwrap();
+        assert!(
+            fetched_run.is_some(),
+            "run store should share same open db lifecycle"
+        );
+
+        let definition = sample_definition();
+        let revision = specs
+            .put_spec(&MobId::from("mob"), &definition, None)
+            .await
+            .unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(events.replay_all().await.unwrap().len(), 1);
     }
 }

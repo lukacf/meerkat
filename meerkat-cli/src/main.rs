@@ -3070,7 +3070,9 @@ async fn refresh_persisted_run_snapshots(
                 refreshed.insert(run.run_id.to_string(), run);
             }
             None => {
-                refreshed.insert(run_id, cached_run);
+                if cached_run.status.is_terminal() {
+                    refreshed.insert(run_id, cached_run);
+                }
             }
         }
     }
@@ -3100,6 +3102,7 @@ fn cached_run_snapshot(
         .mobs
         .get(mob_id)
         .and_then(|mob| mob.runs.get(run_id))
+        .filter(|run| run.status.is_terminal())
         .cloned()
 }
 
@@ -3153,6 +3156,9 @@ async fn hydrate_mob_state(
         }
 
         for run in persisted.runs.values() {
+            if !run.status.is_terminal() {
+                continue;
+            }
             storage
                 .runs
                 .create_run(run.clone())
@@ -3161,11 +3167,11 @@ async fn hydrate_mob_state(
         }
 
         let handle = meerkat_mob::MobBuilder::for_resume(storage)
-        .with_session_service(session_service.clone())
-        .notify_orchestrator_on_resume(false)
-        .resume()
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .with_session_service(session_service.clone())
+            .notify_orchestrator_on_resume(false)
+            .resume()
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let created = handle.mob_id().clone();
         if created.as_str() != mob_id {
             return Err(anyhow::anyhow!(
@@ -3205,9 +3211,7 @@ fn parse_run_flow_params(raw_params: Option<String>) -> anyhow::Result<serde_jso
             let params: serde_json::Value = serde_json::from_str(&raw)
                 .map_err(|e| anyhow::anyhow!("invalid --params JSON: {e}"))?;
             if !params.is_object() {
-                return Err(anyhow::anyhow!(
-                    "invalid --params JSON: expected an object"
-                ));
+                return Err(anyhow::anyhow!("invalid --params JSON: expected an object"));
             }
             Ok(params)
         }
@@ -3217,6 +3221,32 @@ fn parse_run_flow_params(raw_params: Option<String>) -> anyhow::Result<serde_jso
 
 fn render_flow_status_json(run: Option<meerkat_mob::MobRun>) -> anyhow::Result<String> {
     serde_json::to_string(&run).map_err(|e| anyhow::anyhow!("failed to encode flow status: {e}"))
+}
+
+async fn wait_for_terminal_flow_run(
+    state: &meerkat_mob_mcp::MobMcpState,
+    mob_id: &str,
+    run_id: &RunId,
+) -> anyhow::Result<meerkat_mob::MobRun> {
+    loop {
+        let Some(run) = state
+            .mob_flow_status(
+                &meerkat_mob::MobId::from(mob_id.to_string()),
+                run_id.clone(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+        else {
+            return Err(anyhow::anyhow!(
+                "run '{}' disappeared before reaching terminal state",
+                run_id
+            ));
+        };
+        if run.status.is_terminal() {
+            return Ok(run);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
@@ -3417,13 +3447,8 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            if let Some(run) = state
-                .mob_flow_status(&meerkat_mob::MobId::from(mob_id.clone()), run_id.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-            {
-                cache_run_snapshot(&mut registry, &mob_id, run)?;
-            }
+            let run = wait_for_terminal_flow_run(state.as_ref(), &mob_id, &run_id).await?;
+            cache_run_snapshot(&mut registry, &mob_id, run)?;
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             println!("{run_id}");
@@ -3750,10 +3775,9 @@ mod tests {
         }
 
         async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
-            let interaction_id: InteractionId = serde_json::from_str(
-                "\"00000000-0000-0000-0000-000000000000\"",
-            )
-            .expect("interaction id literal should parse");
+            let interaction_id: InteractionId =
+                serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"")
+                    .expect("interaction id literal should parse");
             Ok(SendReceipt::InputAccepted {
                 interaction_id,
                 stream_reserved: false,
@@ -3785,7 +3809,10 @@ mod tests {
 
     #[async_trait]
     impl SessionService for TestMobSessionService {
-        async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+        async fn create_session(
+            &self,
+            req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
             let sid = SessionId::new();
             let n = self
                 .counter
@@ -3877,10 +3904,7 @@ mod tests {
 
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
-        async fn comms_runtime(
-            &self,
-            session_id: &SessionId,
-        ) -> Option<Arc<dyn CoreCommsRuntime>> {
+        async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
             self.sessions
                 .read()
                 .await
@@ -4098,7 +4122,8 @@ mod tests {
             }),
         )
         .await;
-        ctx_a.persist(&scope)
+        ctx_a
+            .persist(&scope)
             .await
             .expect("first context should persist mob registry");
         drop(dispatcher_a);
@@ -4131,7 +4156,8 @@ mod tests {
             }),
         )
         .await;
-        ctx_b.persist(&scope)
+        ctx_b
+            .persist(&scope)
             .await
             .expect("second context should persist registry updates");
     }
@@ -4170,7 +4196,9 @@ mod tests {
             .await
             .expect("context should persist registry updates");
 
-        let registry = load_mob_registry(&scope).await.expect("registry should load");
+        let registry = load_mob_registry(&scope)
+            .await
+            .expect("registry should load");
         assert!(
             registry.mobs.is_empty(),
             "destroyed mob should be removed from persisted registry"
@@ -5053,6 +5081,129 @@ timeout_ms = 1000
         assert_eq!(null_json, "null");
     }
 
+    #[test]
+    fn test_cached_run_snapshot_returns_only_terminal_runs() {
+        let completed_id = RunId::new();
+        let running_id = RunId::new();
+        let now = chrono::Utc::now();
+        let mut registry = PersistedMobRegistry::default();
+        registry.mobs.insert(
+            "flow-mob".to_string(),
+            PersistedMob {
+                definition: None,
+                status: Some("Running".to_string()),
+                events: Vec::new(),
+                runs: std::collections::BTreeMap::from([
+                    (
+                        completed_id.to_string(),
+                        meerkat_mob::MobRun {
+                            run_id: completed_id.clone(),
+                            mob_id: meerkat_mob::MobId::from("flow-mob"),
+                            flow_id: FlowId::from("demo"),
+                            status: meerkat_mob::MobRunStatus::Completed,
+                            activation_params: serde_json::json!({}),
+                            created_at: now,
+                            completed_at: Some(now),
+                            step_ledger: Vec::new(),
+                            failure_ledger: Vec::new(),
+                        },
+                    ),
+                    (
+                        running_id.to_string(),
+                        meerkat_mob::MobRun {
+                            run_id: running_id.clone(),
+                            mob_id: meerkat_mob::MobId::from("flow-mob"),
+                            flow_id: FlowId::from("demo"),
+                            status: meerkat_mob::MobRunStatus::Running,
+                            activation_params: serde_json::json!({}),
+                            created_at: now,
+                            completed_at: None,
+                            step_ledger: Vec::new(),
+                            failure_ledger: Vec::new(),
+                        },
+                    ),
+                ]),
+            },
+        );
+
+        let completed = cached_run_snapshot(&registry, "flow-mob", &completed_id.to_string());
+        let running = cached_run_snapshot(&registry, "flow-mob", &running_id.to_string());
+        assert!(completed.is_some(), "terminal cached run should resolve");
+        assert!(
+            running.is_none(),
+            "non-terminal cached run must never be treated as authoritative"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flow_status_discards_non_terminal_cached_snapshot_when_run_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let definition_path = temp.path().join("flow-mob.toml");
+        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
+            .await
+            .expect("write flow mob definition");
+
+        handle_mob_command(
+            MobCommands::Create {
+                prefab: None,
+                definition: Some(definition_path),
+            },
+            &scope,
+        )
+        .await
+        .expect("create flow mob");
+
+        let run_id = RunId::new();
+        let now = chrono::Utc::now();
+        let mut registry = load_mob_registry(&scope)
+            .await
+            .expect("registry should load");
+        let mob = registry
+            .mobs
+            .get_mut("flow-mob")
+            .expect("flow-mob should exist");
+        mob.runs.insert(
+            run_id.to_string(),
+            meerkat_mob::MobRun {
+                run_id: run_id.clone(),
+                mob_id: meerkat_mob::MobId::from("flow-mob"),
+                flow_id: FlowId::from("demo"),
+                status: meerkat_mob::MobRunStatus::Running,
+                activation_params: serde_json::json!({}),
+                created_at: now,
+                completed_at: None,
+                step_ledger: Vec::new(),
+                failure_ledger: Vec::new(),
+            },
+        );
+        save_mob_registry(&scope, &registry)
+            .await
+            .expect("save injected running snapshot");
+
+        handle_mob_command(
+            MobCommands::FlowStatus {
+                mob_id: "flow-mob".to_string(),
+                run_id: run_id.to_string(),
+            },
+            &scope,
+        )
+        .await
+        .expect("flow status should not trust non-terminal cache");
+
+        let refreshed = load_mob_registry(&scope)
+            .await
+            .expect("registry should reload");
+        let refreshed_mob = refreshed
+            .mobs
+            .get("flow-mob")
+            .expect("flow-mob should remain persisted");
+        assert!(
+            !refreshed_mob.runs.contains_key(&run_id.to_string()),
+            "flow-status should drop non-terminal cached snapshots when no live run exists"
+        );
+    }
+
     #[tokio::test]
     async fn test_mob_flow_commands_parse_and_dispatch() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -5101,7 +5252,9 @@ timeout_ms = 1000
         .await
         .expect("run flow");
 
-        let registry = load_mob_registry(&scope).await.expect("registry should load");
+        let registry = load_mob_registry(&scope)
+            .await
+            .expect("registry should load");
         let persisted = registry
             .mobs
             .get("flow-mob")
@@ -5116,6 +5269,10 @@ timeout_ms = 1000
             persisted_run.flow_id,
             FlowId::from("demo"),
             "persisted run snapshot should keep flow identity"
+        );
+        assert!(
+            persisted_run.status.is_terminal(),
+            "run-flow command should persist terminal run status before returning"
         );
         assert_eq!(
             persisted_run.activation_params,
@@ -5145,8 +5302,78 @@ timeout_ms = 1000
             )
             .await
             .expect("flow status in rehydrated state should succeed");
-        let roundtrip = roundtrip.expect("run should resolve after rehydration");
+        let roundtrip = roundtrip.expect("terminal run should resolve after rehydration");
         assert_eq!(roundtrip.flow_id, FlowId::from("demo"));
+    }
+
+    #[tokio::test]
+    async fn test_mob_run_flow_failure_persists_terminal_snapshot_and_rehydrates() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let scope_2 = test_scope_with_context(temp.path().to_path_buf());
+        let definition_path = temp.path().join("flow-mob.toml");
+        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
+            .await
+            .expect("write flow mob definition");
+
+        handle_mob_command(
+            MobCommands::Create {
+                prefab: None,
+                definition: Some(definition_path),
+            },
+            &scope,
+        )
+        .await
+        .expect("create flow mob");
+
+        // Do not spawn any worker so the flow fails with no targets and still reaches terminal state.
+        handle_mob_command(
+            MobCommands::RunFlow {
+                mob_id: "flow-mob".to_string(),
+                flow: "demo".to_string(),
+                params: Some(r#"{"ticket":"REQ-020"}"#.to_string()),
+            },
+            &scope,
+        )
+        .await
+        .expect("run flow should return after terminal failure");
+
+        let registry = load_mob_registry(&scope)
+            .await
+            .expect("registry should load");
+        let persisted = registry
+            .mobs
+            .get("flow-mob")
+            .expect("flow-mob should be persisted");
+        let (_run_id, persisted_run) = persisted.runs.iter().next().expect("persisted run");
+        assert_eq!(
+            persisted_run.status,
+            meerkat_mob::MobRunStatus::Failed,
+            "failed run should be cached as terminal failure"
+        );
+        assert!(
+            persisted_run.status.is_terminal(),
+            "cached run snapshot must always be terminal"
+        );
+
+        let session_service: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(TestMobSessionService::new());
+        let (rehydrated_state, _registry) = hydrate_mob_state(&scope_2, session_service)
+            .await
+            .expect("rehydration should succeed");
+        let rehydrated = rehydrated_state
+            .mob_flow_status(
+                &meerkat_mob::MobId::from("flow-mob"),
+                persisted_run.run_id.clone(),
+            )
+            .await
+            .expect("flow status in rehydrated state should succeed")
+            .expect("terminal run should resolve after rehydration");
+        assert_eq!(
+            rehydrated.status,
+            meerkat_mob::MobRunStatus::Failed,
+            "rehydrated run should preserve failure terminal status"
+        );
     }
 
     #[tokio::test]

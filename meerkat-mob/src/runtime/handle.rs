@@ -136,7 +136,7 @@ impl MobHandle {
     }
 
     /// List all configured flow IDs in this mob definition.
-    pub fn list_flows(&self) -> Vec<String> {
+    pub fn list_flows(&self) -> Vec<FlowId> {
         self.definition.flows.keys().cloned().collect()
     }
 
@@ -326,8 +326,8 @@ impl MobHandle {
         &self,
         subject: String,
         description: String,
-        blocked_by: Vec<String>,
-    ) -> Result<String, MobError> {
+        blocked_by: Vec<TaskId>,
+    ) -> Result<TaskId, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::TaskCreate {
@@ -346,7 +346,7 @@ impl MobHandle {
     /// Update task status/owner in the shared mob task board.
     pub async fn task_update(
         &self,
-        task_id: String,
+        task_id: TaskId,
         status: TaskStatus,
         owner: Option<MeerkatId>,
     ) -> Result<(), MobError> {
@@ -371,7 +371,7 @@ impl MobHandle {
     }
 
     /// Get a task by ID from the in-memory task board projection.
-    pub async fn task_get(&self, task_id: &str) -> Result<Option<MobTask>, MobError> {
+    pub async fn task_get(&self, task_id: &TaskId) -> Result<Option<MobTask>, MobError> {
         Ok(self.task_board.read().await.get(task_id).cloned())
     }
 

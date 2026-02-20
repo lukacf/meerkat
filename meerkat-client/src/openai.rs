@@ -120,9 +120,7 @@ impl OpenAiClient {
 
         // Extract OpenAI-specific parameters from provider_params
         if let Some(params) = &request.provider_params {
-            if reasoning_enabled
-                && let Some(reasoning_effort) = params.get("reasoning_effort")
-            {
+            if reasoning_enabled && let Some(reasoning_effort) = params.get("reasoning_effort") {
                 body["reasoning"]["effort"] = reasoning_effort.clone();
             }
 

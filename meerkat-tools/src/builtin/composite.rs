@@ -175,7 +175,9 @@ impl CompositeDispatcher {
                     continue;
                 }
                 if !wrote_external_header {
-                    out.push_str("## External tools\nProvided by integrated runtimes/services.\n\n");
+                    out.push_str(
+                        "## External tools\nProvided by integrated runtimes/services.\n\n",
+                    );
                     wrote_external_header = true;
                 }
                 seen_names.insert(tool.name.clone());
@@ -393,10 +395,8 @@ mod tests {
     #[test]
     fn usage_instructions_include_external_tools() {
         let store = Arc::new(MemoryTaskStore::new());
-        let external: Arc<dyn AgentToolDispatcher> = Arc::new(MockExternalDispatcher::new(
-            "mob_list",
-            "List active mobs",
-        ));
+        let external: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockExternalDispatcher::new("mob_list", "List active mobs"));
 
         let dispatcher = CompositeDispatcher::new(
             store,

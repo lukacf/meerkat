@@ -9,9 +9,9 @@ use crate::build;
 use crate::definition::MobDefinition;
 use crate::error::MobError;
 use crate::event::{MemberRef, MobEventKind, NewMobEvent};
-use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId};
-use crate::run::{FlowRunConfig, MobRun, MobRunStatus};
+use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 use crate::roster::{Roster, RosterEntry};
+use crate::run::{FlowRunConfig, MobRun, MobRunStatus};
 use crate::storage::MobStorage;
 use crate::store::{MobEventStore, MobRunStore};
 use crate::tasks::{MobTask, TaskBoard, TaskStatus};
@@ -30,6 +30,18 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, mpsc, oneshot};
 
+const FLOW_SYSTEM_STEP_ID_RAW: &str = "__flow__";
+const FLOW_SYSTEM_MEMBER_ID_RAW: &str = "__flow_system_member__";
+pub(crate) const FLOW_SYSTEM_MEMBER_ID_PREFIX: &str = "__flow_system_";
+
+pub(crate) fn flow_system_step_id() -> StepId {
+    StepId::from(FLOW_SYSTEM_STEP_ID_RAW)
+}
+
+pub(crate) fn flow_system_member_id() -> MeerkatId {
+    MeerkatId::from(FLOW_SYSTEM_MEMBER_ID_RAW)
+}
+
 mod actor;
 mod actor_turn_executor;
 mod builder;
@@ -37,12 +49,15 @@ pub mod conditions;
 mod events;
 mod flow;
 mod handle;
+mod path;
 mod provisioner;
 mod session_service;
 mod state;
 mod supervisor;
+mod terminalization;
 mod tools;
 pub mod topology;
+mod transaction;
 pub mod turn_executor;
 
 #[cfg(test)]

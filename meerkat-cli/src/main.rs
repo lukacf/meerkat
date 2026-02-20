@@ -1,6 +1,7 @@
 //! meerkat-cli - Headless CLI for Meerkat
 
 mod mcp;
+mod stream_renderer;
 #[cfg(feature = "comms")]
 mod stdin_events;
 
@@ -84,27 +85,34 @@ fn parse_skill_ref_arg(s: &str) -> Result<SkillRef, String> {
     }
 }
 
-/// Spawn a task that handles verbose event output
+/// Spawn a task that handles streaming and/or verbose event output.
+///
+/// When `stream` is true, uses the rich `StreamRenderer` that shows
+/// thinking traces, tool calls, and text with ANSI styling.
+/// When `verbose` is true (and not streaming), uses the legacy
+/// `format_verbose_event` path.
 fn spawn_event_handler(
     mut agent_event_rx: mpsc::Receiver<AgentEvent>,
     verbose: bool,
     stream: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        use std::io::Write;
+        if stream {
+            let ansi = stream_renderer::stderr_is_tty();
+            let mut renderer = stream_renderer::StreamRenderer::new(ansi);
 
-        while let Some(event) = agent_event_rx.recv().await {
-            if stream && let AgentEvent::TextDelta { delta } = &event {
-                print!("{}", delta);
-                let _ = std::io::stdout().flush();
+            while let Some(event) = agent_event_rx.recv().await {
+                renderer.render(&event);
             }
-
-            if !verbose {
-                continue;
-            }
-
-            if let Some(line) = format_verbose_event(&event) {
-                eprintln!("{}", line);
+            renderer.finish();
+        } else {
+            // Verbose-only mode: legacy format_verbose_event path
+            while let Some(event) = agent_event_rx.recv().await {
+                if verbose {
+                    if let Some(line) = format_verbose_event(&event) {
+                        eprintln!("{}", line);
+                    }
+                }
             }
         }
     })

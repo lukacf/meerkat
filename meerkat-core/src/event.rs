@@ -80,6 +80,12 @@ pub enum AgentEvent {
     /// New turn started (calling LLM)
     TurnStarted { turn_number: u32 },
 
+    /// Streaming reasoning/thinking from the model
+    ReasoningDelta { delta: String },
+
+    /// Reasoning/thinking complete for this block
+    ReasoningComplete { content: String },
+
     /// Streaming text from the model
     TextDelta { delta: String },
 
@@ -266,6 +272,14 @@ pub fn format_verbose_event_with_config(
             } else {
                 let preview = truncate_preview(content, config.max_text_bytes);
                 Some(format!("  💬 Response: {}", preview))
+            }
+        }
+        AgentEvent::ReasoningComplete { content } => {
+            if content.is_empty() {
+                None
+            } else {
+                let preview = truncate_preview(content, config.max_text_bytes);
+                Some(format!("  💭 Thinking: {}", preview))
             }
         }
         AgentEvent::Retrying {

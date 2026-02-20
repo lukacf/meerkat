@@ -139,6 +139,15 @@ impl BlockAssembler {
         // Complete without prior start is silently ignored - provider protocol quirk
     }
 
+    /// Return a snapshot of the current reasoning buffer text.
+    /// Returns an empty string if no reasoning block is in progress.
+    pub fn current_reasoning_text(&self) -> String {
+        self.reasoning_buffer
+            .as_ref()
+            .map(|buf| buf.text.clone())
+            .unwrap_or_default()
+    }
+
     /// Start a new tool call block.
     ///
     /// # Errors

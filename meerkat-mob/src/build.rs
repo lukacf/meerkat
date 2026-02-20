@@ -171,6 +171,7 @@ mod tests {
                 peer_description: "Orchestrates the mob".into(),
                 external_addressable: true,
                 backend: None,
+                runtime_mode: crate::MobRuntimeMode::AutonomousHost,
             },
         );
         profiles.insert(
@@ -191,6 +192,7 @@ mod tests {
                 peer_description: "Does work".into(),
                 external_addressable: false,
                 backend: None,
+                runtime_mode: crate::MobRuntimeMode::AutonomousHost,
             },
         );
 

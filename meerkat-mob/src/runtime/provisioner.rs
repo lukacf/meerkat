@@ -4,7 +4,9 @@ use crate::definition::ExternalBackendConfig;
 use crate::event::MemberRef;
 use async_trait::async_trait;
 use meerkat_core::comms::TrustedPeerSpec;
+use meerkat_core::event_injector::SubscribableInjector;
 use meerkat_core::service::{CreateSessionRequest, StartTurnRequest};
+use meerkat_core::types::SessionId;
 
 pub struct ProvisionMemberRequest {
     pub create_session: CreateSessionRequest,
@@ -16,11 +18,17 @@ pub struct ProvisionMemberRequest {
 pub trait MobProvisioner: Send + Sync {
     async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError>;
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
+    async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
     async fn start_turn(
         &self,
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError>;
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn SubscribableInjector>>;
+    async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError>;
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>>;
     async fn trusted_peer_spec(
         &self,
@@ -88,6 +96,12 @@ impl MobProvisioner for SubagentBackend {
         Ok(())
     }
 
+    async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "interrupt")?;
+        self.session_service.interrupt(&session_id).await?;
+        Ok(())
+    }
+
     async fn start_turn(
         &self,
         member_ref: &MemberRef,
@@ -96,6 +110,25 @@ impl MobProvisioner for SubagentBackend {
         let session_id = Self::require_session(member_ref, "start turn")?;
         self.session_service.start_turn(&session_id, req).await?;
         Ok(())
+    }
+
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn SubscribableInjector>> {
+        self.session_service.event_injector(session_id).await
+    }
+
+    async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError> {
+        let session_id = match member_ref.session_id() {
+            Some(id) => id.clone(),
+            None => return Ok(None),
+        };
+        match self.session_service.read(&session_id).await {
+            Ok(view) => Ok(Some(view.state.is_active)),
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => Ok(Some(false)),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>> {
@@ -252,12 +285,27 @@ impl MobProvisioner for MultiBackendProvisioner {
         self.subagent.retire_member(member_ref).await
     }
 
+    async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
+        self.subagent.interrupt_member(member_ref).await
+    }
+
     async fn start_turn(
         &self,
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError> {
         self.subagent.start_turn(member_ref, req).await
+    }
+
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn SubscribableInjector>> {
+        self.subagent.event_injector(session_id).await
+    }
+
+    async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError> {
+        self.subagent.is_member_active(member_ref).await
     }
 
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>> {

@@ -4,6 +4,7 @@
 //! which skills to load, tool configuration, and communication settings.
 
 use crate::backend::MobBackendKind;
+use crate::runtime_mode::MobRuntimeMode;
 use serde::{Deserialize, Serialize};
 
 /// Tool configuration for a meerkat profile.
@@ -67,6 +68,11 @@ pub struct Profile {
     /// If unset, runtime uses `definition.backend.default`.
     #[serde(default)]
     pub backend: Option<MobBackendKind>,
+    /// Runtime mode for members spawned from this profile.
+    ///
+    /// Defaults to autonomous host-mode behavior when omitted.
+    #[serde(default)]
+    pub runtime_mode: MobRuntimeMode,
 }
 
 #[cfg(test)]
@@ -125,6 +131,7 @@ mod tests {
             peer_description: "Orchestrates worker agents".to_string(),
             external_addressable: true,
             backend: None,
+            runtime_mode: MobRuntimeMode::AutonomousHost,
         };
         let json = serde_json::to_string(&profile).unwrap();
         let parsed: Profile = serde_json::from_str(&json).unwrap();
@@ -149,6 +156,7 @@ mod tests {
             peer_description: "Writes code".to_string(),
             external_addressable: false,
             backend: Some(MobBackendKind::External),
+            runtime_mode: MobRuntimeMode::TurnDriven,
         };
         let toml_str = toml::to_string(&profile).unwrap();
         let parsed: Profile = toml::from_str(&toml_str).unwrap();
@@ -180,5 +188,6 @@ model = "claude-sonnet-4-5"
         assert_eq!(profile.peer_description, "");
         assert!(!profile.external_addressable);
         assert_eq!(profile.backend, None);
+        assert_eq!(profile.runtime_mode, MobRuntimeMode::AutonomousHost);
     }
 }

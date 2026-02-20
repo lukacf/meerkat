@@ -293,6 +293,7 @@ mod tests {
                 peer_description: "worker".to_string(),
                 external_addressable: false,
                 backend: None,
+                runtime_mode: crate::MobRuntimeMode::AutonomousHost,
             },
         );
         MobDefinition {

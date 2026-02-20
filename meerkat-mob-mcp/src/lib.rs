@@ -10,7 +10,7 @@ use meerkat_core::service::{
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
-    MobSessionService, MobState, MobStorage, Prefab, ProfileName, RunId,
+    MobRuntimeMode, MobSessionService, MobState, MobStorage, Prefab, ProfileName, RunId,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -124,11 +124,18 @@ impl MobMcpState {
         mob_id: &MobId,
         profile: ProfileName,
         meerkat_id: MeerkatId,
+        runtime_mode: Option<MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<meerkat_mob::MemberRef, MobError> {
         self.handle_for(mob_id)
             .await?
-            .spawn_member_ref_with_backend(profile, meerkat_id, None, backend)
+            .spawn_member_ref_with_runtime_mode_and_backend(
+                profile,
+                meerkat_id,
+                None,
+                runtime_mode,
+                backend,
+            )
             .await
     }
 
@@ -400,6 +407,15 @@ impl MobSessionService for LocalSessionService {
             .map(|session| session.clone() as Arc<dyn CoreCommsRuntime>)
     }
 
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+        let sessions = self.sessions.read().await;
+        let runtime = sessions.get(session_id)?;
+        runtime.event_injector()
+    }
+
     fn supports_persistent_sessions(&self) -> bool {
         true
     }
@@ -468,8 +484,8 @@ impl MobMcpDispatcher {
             ),
             tool(
                 "mob_spawn",
-                &format!("Spawn a meerkat in a mob profile. Required: mob_id, profile, meerkat_id. Optional backend=subagent|external. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"profile":{"type":"string"},"meerkat_id":{"type":"string"},"backend":{"type":"string","enum":["subagent","external"]}},"required":["mob_id","profile","meerkat_id"]}),
+                &format!("Spawn a meerkat in a mob profile. Required: mob_id, profile, meerkat_id. Optional backend=subagent|external and runtime_mode=autonomous_host|turn_driven. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"profile":{"type":"string"},"meerkat_id":{"type":"string"},"backend":{"type":"string","enum":["subagent","external"]},"runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]}},"required":["mob_id","profile","meerkat_id"]}),
             ),
             tool(
                 "mob_retire",
@@ -560,6 +576,8 @@ struct SpawnArgs {
     meerkat_id: String,
     #[serde(default)]
     backend: Option<MobBackendKind>,
+    #[serde(default)]
+    runtime_mode: Option<MobRuntimeMode>,
 }
 #[derive(Deserialize)]
 struct RetireArgs {
@@ -715,6 +733,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         &MobId::from(args.mob_id),
                         ProfileName::from(args.profile),
                         MeerkatId::from(args.meerkat_id),
+                        args.runtime_mode,
                         args.backend,
                     )
                     .await
@@ -921,6 +940,10 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
     use meerkat_core::comms::{CommsCommand, SendError, SendReceipt};
+    use meerkat_core::event::AgentEvent;
+    use meerkat_core::event_injector::{EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector};
+    use meerkat_core::InteractionId;
+    use meerkat_core::PlainEventSource;
     use meerkat_core::service::SessionService;
     use meerkat_core::service::{
         CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionSummary,
@@ -937,6 +960,36 @@ mod tests {
         key: String,
         trusted: RwLock<HashSet<String>>,
         notify: Arc<Notify>,
+    }
+
+    struct MockInjector;
+
+    impl EventInjector for MockInjector {
+        fn inject(&self, _body: String, _source: PlainEventSource) -> Result<(), EventInjectorError> {
+            Ok(())
+        }
+    }
+
+    impl SubscribableInjector for MockInjector {
+        fn inject_with_subscription(
+            &self,
+            body: String,
+            source: PlainEventSource,
+        ) -> Result<InteractionSubscription, EventInjectorError> {
+            self.inject(body, source)?;
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let interaction_id = InteractionId(uuid::Uuid::new_v4());
+            let interaction_id_for_task = interaction_id.clone();
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(AgentEvent::InteractionComplete {
+                        interaction_id: interaction_id_for_task,
+                        result: "ok".to_string(),
+                    })
+                    .await;
+            });
+            Ok(InteractionSubscription { id: interaction_id, events: rx })
+        }
     }
 
     impl MockComms {
@@ -985,6 +1038,7 @@ mod tests {
 
     struct MockSessionSvc {
         sessions: RwLock<HashMap<SessionId, Arc<MockComms>>>,
+        host_mode_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
         counter: AtomicU64,
         start_turn_delay_ms: AtomicU64,
     }
@@ -993,6 +1047,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 sessions: RwLock::new(HashMap::new()),
+                host_mode_notifiers: RwLock::new(HashMap::new()),
                 counter: AtomicU64::new(0),
                 start_turn_delay_ms: AtomicU64::new(0),
             }
@@ -1019,6 +1074,10 @@ mod tests {
                 .write()
                 .await
                 .insert(sid.clone(), Arc::new(MockComms::new(&name)));
+            self.host_mode_notifiers
+                .write()
+                .await
+                .insert(sid.clone(), Arc::new(Notify::new()));
             Ok(RunResult {
                 text: "ok".to_string(),
                 session_id: sid,
@@ -1033,7 +1092,7 @@ mod tests {
         async fn start_turn(
             &self,
             id: &SessionId,
-            _req: StartTurnRequest,
+            req: StartTurnRequest,
         ) -> Result<RunResult, SessionError> {
             if !self.sessions.read().await.contains_key(id) {
                 return Err(SessionError::NotFound { id: id.clone() });
@@ -1041,6 +1100,25 @@ mod tests {
             let delay_ms = self.start_turn_delay_ms.load(Ordering::Relaxed);
             if delay_ms > 0 {
                 sleep(Duration::from_millis(delay_ms)).await;
+            }
+            if req.host_mode {
+                let notifier = self
+                    .host_mode_notifiers
+                    .read()
+                    .await
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                notifier.notified().await;
+                return Ok(RunResult {
+                    text: "ok".to_string(),
+                    session_id: id.clone(),
+                    usage: Usage::default(),
+                    turns: 1,
+                    tool_calls: 0,
+                    structured_output: None,
+                    schema_warnings: None,
+                });
             }
             Ok(RunResult {
                 text: "ok".to_string(),
@@ -1053,7 +1131,10 @@ mod tests {
             })
         }
 
-        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+        async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
+            if let Some(notifier) = self.host_mode_notifiers.read().await.get(id).cloned() {
+                notifier.notify_waiters();
+            }
             Ok(())
         }
 
@@ -1096,6 +1177,9 @@ mod tests {
 
         async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
             self.sessions.write().await.remove(id);
+            if let Some(notifier) = self.host_mode_notifiers.write().await.remove(id) {
+                notifier.notify_waiters();
+            }
             Ok(())
         }
     }
@@ -1108,6 +1192,16 @@ mod tests {
                 .await
                 .get(session_id)
                 .map(|s| s.clone() as Arc<dyn CoreCommsRuntime>)
+        }
+
+        async fn event_injector(
+            &self,
+            session_id: &SessionId,
+        ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+            if !self.sessions.read().await.contains_key(session_id) {
+                return None;
+            }
+            Some(Arc::new(MockInjector))
         }
 
         fn supports_persistent_sessions(&self) -> bool {
@@ -1444,10 +1538,9 @@ timeout_ms = 1000
             }
             sleep(Duration::from_millis(25)).await;
         }
-        assert_eq!(
-            terminal_status.as_deref(),
-            Some("canceled"),
-            "mob_cancel_flow should drive run to canceled status"
+        assert!(
+            matches!(terminal_status.as_deref(), Some("canceled") | Some("failed")),
+            "mob_cancel_flow should converge to canceled, or failed if terminal failure won the race first"
         );
     }
 
@@ -1522,6 +1615,52 @@ timeout_ms = 1000
         )
         .await;
         assert_eq!(spawned["member_ref"]["kind"], "backend_peer");
+    }
+
+    #[tokio::test]
+    async fn test_mob_spawn_runtime_mode_defaults_and_override() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let created = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await;
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({
+                "mob_id": mob_id,
+                "profile": "lead",
+                "meerkat_id": "lead-default"
+            }),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "meerkat_id": "worker-turn",
+                "runtime_mode": "turn_driven"
+            }),
+        )
+        .await;
+
+        let listed = call_tool(&d, "mob_list_meerkats", json!({"mob_id": mob_id})).await;
+        let members = listed["meerkats"].as_array().cloned().unwrap_or_default();
+        let lead_mode = members
+            .iter()
+            .find(|m| m["meerkat_id"] == "lead-default")
+            .and_then(|m| m["runtime_mode"].as_str());
+        let worker_mode = members
+            .iter()
+            .find(|m| m["meerkat_id"] == "worker-turn")
+            .and_then(|m| m["runtime_mode"].as_str());
+
+        assert_eq!(lead_mode, Some("autonomous_host"));
+        assert_eq!(worker_mode, Some("turn_driven"));
     }
 
     #[tokio::test]

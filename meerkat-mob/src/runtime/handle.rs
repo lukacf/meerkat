@@ -147,7 +147,13 @@ impl MobHandle {
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
     ) -> Result<MemberRef, MobError> {
-        self.spawn_member_ref_with_backend(profile_name, meerkat_id, initial_message, None)
+        self.spawn_member_ref_with_runtime_mode_and_backend(
+            profile_name,
+            meerkat_id,
+            initial_message,
+            None,
+            None,
+        )
             .await
     }
 
@@ -159,12 +165,32 @@ impl MobHandle {
         initial_message: Option<String>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
+        self.spawn_member_ref_with_runtime_mode_and_backend(
+            profile_name,
+            meerkat_id,
+            initial_message,
+            None,
+            backend,
+        )
+        .await
+    }
+
+    /// Spawn a new meerkat from a profile with explicit runtime mode/backend overrides.
+    pub async fn spawn_member_ref_with_runtime_mode_and_backend(
+        &self,
+        profile_name: ProfileName,
+        meerkat_id: MeerkatId,
+        initial_message: Option<String>,
+        runtime_mode: Option<crate::MobRuntimeMode>,
+        backend: Option<MobBackendKind>,
+    ) -> Result<MemberRef, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::Spawn {
                 profile_name,
                 meerkat_id,
                 initial_message,
+                runtime_mode,
                 backend,
                 reply_tx,
             })
@@ -390,11 +416,14 @@ impl MobHandle {
     /// Shut down the actor. After this, no more commands are accepted.
     pub async fn shutdown(&self) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
+        self
             .command_tx
             .send(MobCommand::Shutdown { reply_tx })
-            .await;
-        let _ = reply_rx.await;
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))??;
         Ok(())
     }
 }

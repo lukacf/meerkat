@@ -63,7 +63,8 @@ impl MobToolDispatcher {
                         "profile": {"type": "string"},
                         "meerkat_id": {"type": "string"},
                         "initial_message": {"type": "string"},
-                        "backend": {"type": "string", "enum": ["subagent", "external"]}
+                        "backend": {"type": "string", "enum": ["subagent", "external"]},
+                        "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
                     },
                     "required": ["profile", "meerkat_id"]
                 }),
@@ -235,6 +236,8 @@ struct SpawnMeerkatArgs {
     initial_message: Option<String>,
     #[serde(default)]
     backend: Option<MobBackendKind>,
+    #[serde(default)]
+    runtime_mode: Option<crate::MobRuntimeMode>,
 }
 
 #[derive(Deserialize)]
@@ -294,10 +297,11 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 let member_ref = self
                     .handle
-                    .spawn_member_ref_with_backend(
+                    .spawn_member_ref_with_runtime_mode_and_backend(
                         ProfileName::from(args.profile),
                         MeerkatId::from(args.meerkat_id),
                         args.initial_message,
+                        args.runtime_mode,
                         args.backend,
                     )
                     .await
@@ -348,6 +352,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                         json!({
                             "meerkat_id": entry.meerkat_id,
                             "profile": entry.profile,
+                            "runtime_mode": entry.runtime_mode,
                             "member_ref": entry.member_ref,
                             "session_id": entry.session_id(),
                             "wired_to": entry.wired_to,

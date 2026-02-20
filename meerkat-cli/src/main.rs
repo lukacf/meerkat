@@ -1705,6 +1705,25 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         self.inner.comms_runtime(session_id).await
     }
 
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+        self.inner.event_injector(session_id).await
+    }
+
+    async fn subscribe_session_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        let runtime = self
+            .inner
+            .comms_runtime(session_id)
+            .await
+            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {session_id}")))?;
+        runtime.stream(meerkat_core::comms::StreamScope::Session(session_id.clone()))
+    }
+
     fn supports_persistent_sessions(&self) -> bool {
         // CLI run/resume keeps sessions in-memory, but this path still satisfies
         // the mob runtime contract for a single process execution.
@@ -2499,6 +2518,26 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             session_id,
         )
         .await
+    }
+
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+        self.inner.event_injector(session_id).await
+    }
+
+    async fn subscribe_session_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        let runtime = <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::comms_runtime(
+            &self.inner,
+            session_id,
+        )
+        .await
+        .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {session_id}")))?;
+        runtime.stream(meerkat_core::comms::StreamScope::Session(session_id.clone()))
     }
 
     fn supports_persistent_sessions(&self) -> bool {
@@ -3334,6 +3373,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     ProfileName::from(profile.clone()),
                     meerkat_mob::MeerkatId::from(meerkat_id.clone()),
                     None,
+                    None,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -3912,6 +3952,13 @@ mod tests {
                 .map(|session| session.clone() as Arc<dyn CoreCommsRuntime>)
         }
 
+        async fn event_injector(
+            &self,
+            _session_id: &SessionId,
+        ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+            None
+        }
+
         fn supports_persistent_sessions(&self) -> bool {
             true
         }
@@ -4118,7 +4165,8 @@ mod tests {
             serde_json::json!({
                 "mob_id": mob_id,
                 "profile": "lead",
-                "meerkat_id": "lead-1"
+                "meerkat_id": "lead-1",
+                "runtime_mode": "turn_driven"
             }),
         )
         .await;
@@ -4152,7 +4200,8 @@ mod tests {
             serde_json::json!({
                 "mob_id": created["mob_id"].as_str().expect("mob id"),
                 "profile": "worker",
-                "meerkat_id": "worker-1"
+                "meerkat_id": "worker-1",
+                "runtime_mode": "turn_driven"
             }),
         )
         .await;
@@ -4160,6 +4209,56 @@ mod tests {
             .persist(&scope)
             .await
             .expect("second context should persist registry updates");
+    }
+
+    #[tokio::test]
+    async fn test_run_mob_tools_runtime_mode_turn_driven_surface_wiring() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+
+        let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(TestMobSessionService::new());
+        let ctx = prepare_run_mob_tools(&scope, mob_service)
+            .await
+            .expect("mob tools context should initialize");
+        let dispatcher = ctx.dispatcher();
+
+        let created = call_tool_json(
+            &dispatcher,
+            "t-create-runtime",
+            "mob_create",
+            serde_json::json!({"prefab":"pipeline"}),
+        )
+        .await;
+        let mob_id = created["mob_id"].as_str().expect("mob id").to_string();
+
+        call_tool_json(
+            &dispatcher,
+            "t-spawn-turn",
+            "mob_spawn",
+            serde_json::json!({
+                "mob_id": mob_id,
+                "profile": "lead",
+                "meerkat_id": "lead-turn",
+                "runtime_mode": "turn_driven"
+            }),
+        )
+        .await;
+
+        let listed = call_tool_json(
+            &dispatcher,
+            "t-list-runtime",
+            "mob_list_meerkats",
+            serde_json::json!({"mob_id": mob_id}),
+        )
+        .await;
+        let members = listed["meerkats"].as_array().cloned().unwrap_or_default();
+        let lead_mode = members
+            .iter()
+            .find(|m| m["meerkat_id"] == "lead-turn")
+            .and_then(|m| m["runtime_mode"].as_str());
+
+        assert_eq!(lead_mode, Some("turn_driven"));
     }
 
     #[tokio::test]
@@ -4879,6 +4978,7 @@ mob = true
 model = "claude-sonnet-4-5"
 external_addressable = false
 peer_description = "Worker"
+runtime_mode = "turn_driven"
 
 [profiles.worker.tools]
 comms = true

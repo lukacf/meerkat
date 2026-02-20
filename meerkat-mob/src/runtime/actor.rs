@@ -2,6 +2,8 @@ use super::terminalization::{FlowTerminalizationAuthority, TerminalizationTarget
 use super::transaction::LifecycleRollback;
 use super::*;
 
+type AutonomousHostLoopHandle = tokio::task::JoinHandle<Result<(), MobError>>;
+
 // ---------------------------------------------------------------------------
 // MobActor
 // ---------------------------------------------------------------------------
@@ -27,6 +29,7 @@ pub(super) struct MobActor {
     pub(super) tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     pub(super) default_llm_client: Option<Arc<dyn LlmClient>>,
     pub(super) retired_event_index: Arc<RwLock<HashSet<String>>>,
+    pub(super) autonomous_host_loops: Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, AutonomousHostLoopHandle>>>,
 }
 
 impl MobActor {
@@ -66,19 +69,41 @@ impl MobActor {
         {
             let provisioner = self.provisioner.clone();
             let member_ref = orchestrator_entry.member_ref;
+            let runtime_mode = orchestrator_entry.runtime_mode;
+            let meerkat_id = orchestrator_entry.meerkat_id;
             tokio::spawn(async move {
-                if let Err(error) = provisioner
-                    .start_turn(
-                        &member_ref,
-                        meerkat_core::service::StartTurnRequest {
-                            prompt: message,
-                            event_tx: None,
-                            host_mode: false,
-                            skill_references: None,
-                        },
-                    )
-                    .await
-                {
+                let result = match runtime_mode {
+                    crate::MobRuntimeMode::AutonomousHost => {
+                        let Some(session_id) = member_ref.session_id() else {
+                            return;
+                        };
+                        let Some(injector) = provisioner.event_injector(session_id).await else {
+                            return;
+                        };
+                        injector
+                            .inject(message, meerkat_core::PlainEventSource::Rpc)
+                            .map_err(|error| {
+                                MobError::Internal(format!(
+                                    "orchestrator lifecycle inject failed for '{}': {}",
+                                    meerkat_id, error
+                                ))
+                            })
+                    }
+                    crate::MobRuntimeMode::TurnDriven => {
+                        provisioner
+                            .start_turn(
+                                &member_ref,
+                                meerkat_core::service::StartTurnRequest {
+                                    prompt: message,
+                                    event_tx: None,
+                                    host_mode: false,
+                                    skill_references: None,
+                                },
+                            )
+                            .await
+                    }
+                };
+                if let Err(error) = result {
                     tracing::warn!(
                         orchestrator_member_ref = ?member_ref,
                         error = %error,
@@ -97,21 +122,34 @@ impl MobActor {
 
     async fn stop_mcp_servers(&self) -> Result<(), MobError> {
         let mut processes = self.mcp_processes.lock().await;
+        let mut first_error: Option<MobError> = None;
         for (name, child) in processes.iter_mut() {
-            child.kill().await.map_err(|error| {
-                MobError::Internal(format!("failed to stop mcp server '{name}': {error}"))
-            })?;
-            let _ = child.wait().await.map_err(|error| {
-                MobError::Internal(format!(
+            if let Err(error) = child.kill().await {
+                let mob_error =
+                    MobError::Internal(format!("failed to stop mcp server '{name}': {error}"));
+                tracing::warn!(error = %mob_error, "mcp server kill failed");
+                if first_error.is_none() {
+                    first_error = Some(mob_error);
+                }
+            }
+            if let Err(error) = child.wait().await {
+                let mob_error = MobError::Internal(format!(
                     "failed waiting for mcp server '{name}' to exit: {error}"
-                ))
-            })?;
+                ));
+                tracing::warn!(error = %mob_error, "mcp server wait failed");
+                if first_error.is_none() {
+                    first_error = Some(mob_error);
+                }
+            }
         }
         processes.clear();
 
         let mut running = self.mcp_running.write().await;
         for state in running.values_mut() {
             *state = false;
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(())
     }
@@ -154,16 +192,220 @@ impl MobActor {
         Ok(())
     }
 
+    fn fallback_spawn_prompt(&self, profile_name: &ProfileName, meerkat_id: &MeerkatId) -> String {
+        format!(
+            "You have been spawned as '{}' (role: {}) in mob '{}'.",
+            meerkat_id, profile_name, self.definition.id
+        )
+    }
+
+    fn resume_host_loop_prompt(&self, profile_name: &ProfileName, meerkat_id: &MeerkatId) -> String {
+        format!(
+            "Mob '{}' resumed autonomous host loop for '{}' (role: {}). Continue coordinated execution.",
+            self.definition.id, meerkat_id, profile_name
+        )
+    }
+
+    async fn start_autonomous_host_loop(
+        &self,
+        meerkat_id: &MeerkatId,
+        member_ref: &MemberRef,
+        prompt: String,
+    ) -> Result<(), MobError> {
+        {
+            let mut loops = self.autonomous_host_loops.lock().await;
+            if let Some(existing) = loops.get(meerkat_id)
+                && !existing.is_finished()
+            {
+                return Ok(());
+            }
+            loops.remove(meerkat_id);
+        }
+
+        let member_ref_cloned = member_ref.clone();
+        let provisioner = self.provisioner.clone();
+        let loop_id = meerkat_id.clone();
+        let handle = tokio::spawn(async move {
+            provisioner
+                .start_turn(
+                    &member_ref_cloned,
+                    meerkat_core::service::StartTurnRequest {
+                        prompt,
+                        event_tx: None,
+                        host_mode: true,
+                        skill_references: None,
+                    },
+                )
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        if handle.is_finished() {
+            match handle.await {
+                Ok(Ok(())) => {
+                    return Err(MobError::Internal(format!(
+                        "autonomous host loop for '{loop_id}' exited immediately"
+                    )));
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(join_error) => {
+                    return Err(MobError::Internal(format!(
+                        "autonomous host loop task join failed for '{loop_id}': {join_error}"
+                    )));
+                }
+            }
+        }
+
+        self.autonomous_host_loops
+            .lock()
+            .await
+            .insert(meerkat_id.clone(), handle);
+        Ok(())
+    }
+
+    async fn start_autonomous_host_loops_from_roster(&self) -> Result<(), MobError> {
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list().cloned().collect::<Vec<_>>()
+        };
+        for entry in entries {
+            if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+                self.ensure_autonomous_dispatch_capability(&entry.meerkat_id, &entry.member_ref)
+                    .await?;
+                self.start_autonomous_host_loop(
+                    &entry.meerkat_id,
+                    &entry.member_ref,
+                    self.resume_host_loop_prompt(&entry.profile, &entry.meerkat_id),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_autonomous_dispatch_capability(
+        &self,
+        meerkat_id: &MeerkatId,
+        member_ref: &MemberRef,
+    ) -> Result<(), MobError> {
+        let session_id = member_ref.session_id().ok_or_else(|| {
+            MobError::Internal(format!(
+                "autonomous member '{}' must be session-backed for injector dispatch",
+                meerkat_id
+            ))
+        })?;
+        if self.provisioner.event_injector(session_id).await.is_none() {
+            return Err(MobError::Internal(format!(
+                "autonomous member '{}' is missing event injector capability",
+                meerkat_id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn stop_autonomous_host_loop_for_member(
+        &self,
+        meerkat_id: &MeerkatId,
+        member_ref: &MemberRef,
+    ) -> Result<(), MobError> {
+        if let Err(error) = self.provisioner.interrupt_member(member_ref).await
+            && !matches!(
+                error,
+                MobError::SessionError(meerkat_core::service::SessionError::NotFound { .. })
+            )
+        {
+            return Err(error);
+        }
+        if let Some(handle) = self.autonomous_host_loops.lock().await.remove(meerkat_id) {
+            handle.abort();
+        }
+        // Ensure stop semantics are strong: do not report completion while the
+        // session still appears active, otherwise immediate resume can race into
+        // SessionError::Busy.
+        for _ in 0..40 {
+            match self.provisioner.is_member_active(member_ref).await? {
+                Some(true) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+                _ => break,
+            }
+        }
+        Ok(())
+    }
+
+    async fn stop_all_autonomous_host_loops(&self) -> Result<(), MobError> {
+        let entries = {
+            let roster = self.roster.read().await;
+            roster
+                .list()
+                .filter(|entry| entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut first_error: Option<MobError> = None;
+        for entry in entries {
+            if let Err(error) = self
+                .stop_autonomous_host_loop_for_member(&entry.meerkat_id, &entry.member_ref)
+                .await
+            {
+                tracing::warn!(
+                    meerkat_id = %entry.meerkat_id,
+                    error = %error,
+                    "failed stopping autonomous host loop member"
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+
+        let mut loops = self.autonomous_host_loops.lock().await;
+        for (_, handle) in std::mem::take(&mut *loops) {
+            handle.abort();
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Main actor loop: process commands sequentially until Shutdown.
     pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<MobCommand>) {
-        if matches!(self.state(), MobState::Running)
-            && let Err(error) = self.start_mcp_servers().await
-        {
-            tracing::error!(
-                mob_id = %self.definition.id,
-                error = %error,
-                "failed to start mcp servers during actor startup"
-            );
+        if matches!(self.state(), MobState::Running) {
+            if let Err(error) = self.start_mcp_servers().await {
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    error = %error,
+                    "failed to start mcp servers during actor startup; entering Stopped"
+                );
+                if let Err(stop_error) = self.stop_mcp_servers().await {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        error = %stop_error,
+                        "failed cleaning up mcp servers after startup error"
+                    );
+                }
+                self.state.store(MobState::Stopped as u8, Ordering::Release);
+            } else if let Err(error) = self.start_autonomous_host_loops_from_roster().await {
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    error = %error,
+                    "failed to start autonomous host loops during actor startup; entering Stopped"
+                );
+                if let Err(stop_error) = self.stop_all_autonomous_host_loops().await {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        error = %stop_error,
+                        "failed cleaning up autonomous host loops after startup error"
+                    );
+                }
+                if let Err(stop_error) = self.stop_mcp_servers().await {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        error = %stop_error,
+                        "failed cleaning up mcp servers after startup error"
+                    );
+                }
+                self.state.store(MobState::Stopped as u8, Ordering::Release);
+            }
         }
         while let Some(cmd) = command_rx.recv().await {
             match cmd {
@@ -171,6 +413,7 @@ impl MobActor {
                     profile_name,
                     meerkat_id,
                     initial_message,
+                    runtime_mode,
                     backend,
                     reply_tx,
                 } => {
@@ -178,8 +421,14 @@ impl MobActor {
                         .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
                     {
                         Ok(()) => {
-                            self.handle_spawn(profile_name, meerkat_id, initial_message, backend)
-                                .await
+                            self.handle_spawn(
+                                profile_name,
+                                meerkat_id,
+                                initial_message,
+                                runtime_mode,
+                                backend,
+                            )
+                            .await
                         }
                         Err(error) => Err(error),
                     };
@@ -281,12 +530,31 @@ impl MobActor {
                                 self.definition.id
                             ))
                             .await;
-                            if let Err(error) = self.stop_mcp_servers().await {
-                                Err(error)
-                            } else {
-                                self.state.store(MobState::Stopped as u8, Ordering::Release);
-                                Ok(())
+                            let mut stop_result: Result<(), MobError> = Ok(());
+                            if let Err(error) = self.stop_all_autonomous_host_loops().await {
+                                tracing::warn!(
+                                    mob_id = %self.definition.id,
+                                    error = %error,
+                                    "stop encountered autonomous loop cleanup error"
+                                );
+                                if stop_result.is_ok() {
+                                    stop_result = Err(error);
+                                }
                             }
+                            if let Err(error) = self.stop_mcp_servers().await {
+                                tracing::warn!(
+                                    mob_id = %self.definition.id,
+                                    error = %error,
+                                    "stop encountered mcp cleanup error"
+                                );
+                                if stop_result.is_ok() {
+                                    stop_result = Err(error);
+                                }
+                            }
+                            if stop_result.is_ok() {
+                                self.state.store(MobState::Stopped as u8, Ordering::Release);
+                            }
+                            stop_result
                         }
                         Err(error) => Err(error),
                     };
@@ -296,6 +564,29 @@ impl MobActor {
                     let result = match self.expect_state(&[MobState::Stopped], MobState::Running) {
                         Ok(()) => {
                             if let Err(error) = self.start_mcp_servers().await {
+                                if let Err(stop_error) = self.stop_mcp_servers().await {
+                                    tracing::warn!(
+                                        mob_id = %self.definition.id,
+                                        error = %stop_error,
+                                        "resume cleanup failed while stopping mcp servers"
+                                    );
+                                }
+                                Err(error)
+                            } else if let Err(error) = self.start_autonomous_host_loops_from_roster().await {
+                                if let Err(stop_error) = self.stop_all_autonomous_host_loops().await {
+                                    tracing::warn!(
+                                        mob_id = %self.definition.id,
+                                        error = %stop_error,
+                                        "resume cleanup failed while stopping autonomous loops"
+                                    );
+                                }
+                                if let Err(stop_error) = self.stop_mcp_servers().await {
+                                    tracing::warn!(
+                                        mob_id = %self.definition.id,
+                                        error = %stop_error,
+                                        "resume cleanup failed while stopping mcp servers"
+                                    );
+                                }
                                 Err(error)
                             } else {
                                 self.state.store(MobState::Running as u8, Ordering::Release);
@@ -358,8 +649,22 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Shutdown { reply_tx } => {
+                    self.cancel_all_flow_tasks().await;
+                    let mut result: Result<(), MobError> = Ok(());
+                    if let Err(error) = self.stop_all_autonomous_host_loops().await {
+                        tracing::warn!(error = %error, "shutdown loop stop encountered errors");
+                        if result.is_ok() {
+                            result = Err(error);
+                        }
+                    }
+                    if let Err(error) = self.stop_mcp_servers().await {
+                        tracing::warn!(error = %error, "shutdown mcp stop encountered errors");
+                        if result.is_ok() {
+                            result = Err(error);
+                        }
+                    }
                     self.state.store(MobState::Stopped as u8, Ordering::Release);
-                    let _ = reply_tx.send(());
+                    let _ = reply_tx.send(result);
                     break;
                 }
             }
@@ -374,6 +679,7 @@ impl MobActor {
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
+        runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
         if meerkat_id
@@ -424,16 +730,14 @@ impl MobActor {
         }
 
         // Create the session via SessionService (effect-first)
-        let prompt = initial_message.unwrap_or_else(|| {
-            format!(
-                "You have been spawned as '{}' (role: {}) in mob '{}'.",
-                meerkat_id, profile_name, self.definition.id
-            )
-        });
-        let req = build::to_create_session_request(&config, prompt);
+        let prompt = initial_message
+            .clone()
+            .unwrap_or_else(|| self.fallback_spawn_prompt(&profile_name, &meerkat_id));
+        let req = build::to_create_session_request(&config, prompt.clone());
         let selected_backend = backend
             .or(profile.backend)
             .unwrap_or(self.definition.backend.default);
+        let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
         let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
         tracing::debug!(
             selected_backend = ?selected_backend,
@@ -453,6 +757,19 @@ impl MobActor {
             "MobActor::handle_spawn provisioned member"
         );
 
+        if selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost
+            && let Err(capability_error) = self
+                .ensure_autonomous_dispatch_capability(&meerkat_id, &member_ref)
+                .await
+        {
+            if let Err(retire_error) = self.provisioner.retire_member(&member_ref).await {
+                return Err(MobError::Internal(format!(
+                    "autonomous capability check failed for '{meerkat_id}': {capability_error}; cleanup retire failed for member '{member_ref:?}': {retire_error}"
+                )));
+            }
+            return Err(capability_error);
+        }
+
         // Emit MeerkatSpawned event
         if let Err(append_error) = self
             .events
@@ -462,6 +779,7 @@ impl MobActor {
                 kind: MobEventKind::MeerkatSpawned {
                     meerkat_id: meerkat_id.clone(),
                     role: profile_name.clone(),
+                    runtime_mode: selected_runtime_mode,
                     member_ref: member_ref.clone(),
                 },
             })
@@ -478,7 +796,12 @@ impl MobActor {
         // Update roster
         {
             let mut roster = self.roster.write().await;
-            let inserted = roster.add(meerkat_id.clone(), profile_name.clone(), member_ref.clone());
+            let inserted = roster.add(
+                meerkat_id.clone(),
+                profile_name.clone(),
+                selected_runtime_mode,
+                member_ref.clone(),
+            );
             debug_assert!(
                 inserted,
                 "duplicate meerkat insert should be prevented before add()"
@@ -508,6 +831,26 @@ impl MobActor {
             return Err(wiring_error);
         }
 
+        if selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost
+            && let Err(start_error) = self
+                .start_autonomous_host_loop(&meerkat_id, &member_ref, prompt)
+                .await
+        {
+            if let Err(rollback_error) = self
+                .rollback_failed_spawn(
+                    &meerkat_id,
+                    &profile_name,
+                    &member_ref,
+                    &planned_wiring_targets,
+                )
+                .await
+            {
+                return Err(MobError::Internal(format!(
+                    "spawn host-loop start failed for '{meerkat_id}': {start_error}; rollback failed: {rollback_error}"
+                )));
+            }
+            return Err(start_error);
+        }
         tracing::debug!(
             meerkat_id = %meerkat_id,
             "MobActor::handle_spawn done"
@@ -594,6 +937,10 @@ impl MobActor {
             .await?;
         if !retire_event_already_present {
             self.append_retire_event(&meerkat_id, &entry.profile, &entry.member_ref)
+                .await?;
+        }
+        if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+            self.stop_autonomous_host_loop_for_member(&meerkat_id, &entry.member_ref)
                 .await?;
         }
 
@@ -1042,14 +1389,7 @@ impl MobActor {
             return Err(MobError::NotExternallyAddressable(meerkat_id));
         }
 
-        // Start a turn on the session
-        let req = meerkat_core::service::StartTurnRequest {
-            prompt: message,
-            event_tx: None,
-            host_mode: false,
-            skill_references: None,
-        };
-        self.provisioner.start_turn(&entry.member_ref, req).await?;
+        self.dispatch_member_turn(&entry, message).await?;
 
         Ok(())
     }
@@ -1068,14 +1408,49 @@ impl MobActor {
                 .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
         };
 
-        let req = meerkat_core::service::StartTurnRequest {
-            prompt: message,
-            event_tx: None,
-            host_mode: false,
-            skill_references: None,
-        };
-        self.provisioner.start_turn(&entry.member_ref, req).await?;
+        self.dispatch_member_turn(&entry, message).await?;
         Ok(())
+    }
+
+    async fn dispatch_member_turn(&self, entry: &RosterEntry, message: String) -> Result<(), MobError> {
+        match entry.runtime_mode {
+            crate::MobRuntimeMode::AutonomousHost => {
+                let session_id = entry.member_ref.session_id().ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "autonomous dispatch requires session-backed member ref for '{}'",
+                        entry.meerkat_id
+                    ))
+                })?;
+                let injector = self
+                    .provisioner
+                    .event_injector(session_id)
+                    .await
+                    .ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "missing event injector for autonomous member '{}'",
+                            entry.meerkat_id
+                        ))
+                    })?;
+                injector
+                    .inject(message, meerkat_core::PlainEventSource::Rpc)
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "autonomous dispatch inject failed for '{}': {}",
+                            entry.meerkat_id, error
+                        ))
+                    })?;
+                Ok(())
+            }
+            crate::MobRuntimeMode::TurnDriven => {
+                let req = meerkat_core::service::StartTurnRequest {
+                    prompt: message,
+                    event_tx: None,
+                    host_mode: false,
+                    skill_references: None,
+                };
+                self.provisioner.start_turn(&entry.member_ref, req).await
+            }
+        }
     }
 
     async fn handle_run_flow(

@@ -26,6 +26,11 @@ This page is a quick-lookup index. For detailed usage with examples, see the [Ru
 | `AgentError` | `meerkat_core` | Error types (LLM, tool, budget, hook, cancellation) |
 | `BudgetLimits` | `meerkat_core` | Resource constraints (tokens, duration, tool calls) |
 | `RetryPolicy` | `meerkat_core` | Exponential backoff configuration |
+| `MobRun` | `meerkat_mob` | Persisted flow run aggregate |
+| `MobRunStatus` | `meerkat_mob` | Flow run lifecycle (`pending`, `running`, `completed`, `failed`, `canceled`) |
+| `StepLedgerEntry` | `meerkat_mob` | Per-target step execution record |
+| `FailureLedgerEntry` | `meerkat_mob` | Flow-level failure log record |
+| `FlowRunConfig` | `meerkat_mob` | Immutable per-run config snapshot |
 
 ## Traits
 
@@ -40,6 +45,127 @@ This page is a quick-lookup index. For detailed usage with examples, see the [Ru
 | `SkillEngine` | `meerkat_core::skills` | Skill loading and injection | [Skills guide](/guides/skills) |
 | `SkillSource` | `meerkat_core::skills` | Skill discovery from various sources | [Skills guide](/guides/skills) |
 | `HookEngine` | `meerkat_core` | Hook pipeline execution | [Hooks guide](/guides/hooks) |
+| `FlowTurnExecutor` | `meerkat_mob` | Runtime boundary between flow engine and dispatch/turn transport | [Mobs](/guides/mobs) |
+
+## Mobs (Rust SDK)
+
+Mob runtime APIs live primarily in:
+
+- `meerkat_mob` (core runtime)
+- `meerkat_mob_mcp` (tool-dispatch helpers)
+
+### Core Rust types
+
+| Type | Purpose |
+|------|---------|
+| `MobDefinition` | Declarative mob structure (profiles, wiring, topology, limits, flows) |
+| `MobStorage` | Event/run/spec storage bundle (in-memory or redb) |
+| `MobBuilder` | Construct or resume mob runtime |
+| `MobHandle` | Runtime handle for lifecycle, membership, wiring, turns, flows, tasks |
+| `MobSessionService` | Session-service bridge trait required by mob runtime |
+| `MobState` | Lifecycle state (`Creating`, `Running`, `Stopped`, `Completed`, `Destroyed`) |
+| `MobRun` | Persisted flow run aggregate |
+
+### `MobBuilder` methods
+
+| Method | Purpose |
+|------|---------|
+| `MobBuilder::new(definition, storage)` | Build a new mob |
+| `MobBuilder::for_resume(storage)` | Resume from persisted events |
+| `with_session_service(Arc<dyn MobSessionService>)` | Attach required session bridge |
+| `allow_ephemeral_sessions(bool)` | Allow non-persistent session services (dev/test) |
+| `notify_orchestrator_on_resume(bool)` | Control resume notification behavior |
+| `register_tool_bundle(name, dispatcher)` | Register named Rust tool bundle |
+| `create().await` | Validate + create runtime |
+| `resume().await` | Rehydrate runtime from store |
+
+### `MobHandle` methods
+
+| Method | Purpose |
+|------|---------|
+| `status()` | Current lifecycle state |
+| `roster().await` / `list_meerkats().await` | Membership inspection |
+| `spawn_member_ref(...).await` | Spawn member |
+| `retire(...).await` | Retire member |
+| `wire(...).await` / `unwire(...).await` | Peer graph mutation |
+| `external_turn(...).await` / `internal_turn(...).await` | Turn dispatch |
+| `stop().await` / `resume().await` / `complete().await` / `destroy().await` | Lifecycle transitions |
+| `list_flows()` / `run_flow(...).await` / `flow_status(...).await` / `cancel_flow(...).await` | Flow runtime control |
+| `task_create(...).await` / `task_update(...).await` / `task_list().await` | Shared task board |
+| `events().poll(...)` / `poll_events(...)` | Event stream access |
+
+### Rust example
+
+```rust
+use std::sync::Arc;
+use meerkat_mob::{
+    FlowId, MeerkatId, MobBuilder, MobDefinition, MobSessionService, MobStorage, ProfileName,
+};
+
+async fn orchestrate(
+    definition_toml: &str,
+    session_service: Arc<dyn MobSessionService>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let definition = MobDefinition::from_toml(definition_toml)?;
+    let storage = MobStorage::redb("./mob.redb")?;
+
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(session_service)
+        .create()
+        .await?;
+
+    handle
+        .spawn_member_ref(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .await?;
+    handle
+        .spawn_member_ref(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
+        .await?;
+    handle
+        .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
+        .await?;
+    handle
+        .external_turn(MeerkatId::from("lead-1"), "Coordinate work.".to_string())
+        .await?;
+
+    let run_id = handle
+        .run_flow(FlowId::from("release_flow"), serde_json::json!({"severity":"critical"}))
+        .await?;
+    let _run = handle.flow_status(run_id).await?;
+    Ok(())
+}
+```
+
+### Cross-surface mob integration (`meerkat-mob-mcp`)
+
+Mob capability for non-Rust-SDK surfaces is exposed by composing:
+
+- `meerkat_mob_mcp::MobMcpState`
+- `meerkat_mob_mcp::MobMcpDispatcher`
+
+into:
+
+- `SessionBuildOptions.external_tools` (`meerkat_core::service`).
+
+```rust
+use std::sync::Arc;
+use meerkat_core::service::SessionBuildOptions;
+use meerkat_core::AgentToolDispatcher;
+use meerkat_mob::MobSessionService;
+use meerkat_mob_mcp::{MobMcpDispatcher, MobMcpState};
+
+fn with_mob_tools(session_service: Arc<dyn MobSessionService>) -> SessionBuildOptions {
+    let state = Arc::new(MobMcpState::new(session_service));
+    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(MobMcpDispatcher::new(state));
+    SessionBuildOptions {
+        external_tools: Some(tools),
+        ..Default::default()
+    }
+}
+```
+
+This is the shared mechanism used by session-driven surfaces (MCP/REST/RPC and SDKs) to provide `mob_*` tool capability.
+
+For cross-surface behavior and examples (CLI/RPC/REST/MCP/Python/TypeScript), see [Mobs](/guides/mobs).
 
 ## SDK entry points
 

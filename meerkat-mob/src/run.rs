@@ -209,6 +209,7 @@ mod tests {
                 max_flow_duration_ms: Some(60_000),
                 max_step_retries: Some(1),
                 max_orphaned_turns: Some(8),
+                cancel_grace_timeout_ms: None,
             }),
         }
     }

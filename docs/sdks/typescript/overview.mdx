@@ -107,7 +107,7 @@ Spawns `rkat-rpc`, performs `initialize` handshake, checks contract version comp
 If `realmId` is omitted, each SDK process gets an isolated default RPC realm. Reuse `realmId` to share sessions/config across surfaces.
 `realmBackend` is a creation hint only; backend selection is pinned per realm in `realm_manifest.json`.
 
-The TypeScript SDK does not auto-inject CLI-local `mob_*` tools. For current "mob as tool" behavior, use CLI `rkat run`/`rkat resume`, or use explicit `rkat mob ...` lifecycle commands.
+The TypeScript SDK is RPC-backed. Mob capability is provided by the RPC host composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which exposes `mob_*` tools to session turns.
 
 ### createSession(params)
 

@@ -35,6 +35,12 @@ The `meerkat-mcp-server` crate exposes Meerkat as MCP tools that other clients c
 | `meerkat_config` | Get or update server config |
 | `meerkat_capabilities` | Query runtime capabilities |
 
+<Note>
+Mob capability for MCP session tools is provided by composing
+`meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into the session build
+path (`SessionBuildOptions.external_tools`) used by `meerkat_run`/`meerkat_resume`.
+</Note>
+
 ## Use MCP servers as tools (client)
 
 ### CLI configuration (recommended)

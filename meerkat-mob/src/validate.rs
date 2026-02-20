@@ -49,6 +49,8 @@ pub enum DiagnosticCode {
     BranchStepConflictingDeps,
     /// `depends_on_mode = any` used without branch dependencies.
     BranchJoinWithoutBranch,
+    /// Definition uses a reserved flow-system identifier.
+    ReservedSystemIdentifier,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -72,6 +74,7 @@ impl fmt::Display for DiagnosticCode {
             Self::BranchStepMissingCondition => "branch_step_missing_condition",
             Self::BranchStepConflictingDeps => "branch_step_conflicting_deps",
             Self::BranchJoinWithoutBranch => "branch_join_without_branch",
+            Self::ReservedSystemIdentifier => "reserved_system_identifier",
         };
         f.write_str(s)
     }
@@ -135,6 +138,21 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::InvalidProfileName,
                 message: format!("profile name '{}' is not a valid identifier", name.as_str()),
+                location: Some(format!("profiles.{}", name.as_str())),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
+        if name.as_str() == crate::runtime::flow_system_member_id().as_str()
+            || name
+                .as_str()
+                .starts_with(crate::runtime::FLOW_SYSTEM_MEMBER_ID_PREFIX)
+        {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::ReservedSystemIdentifier,
+                message: format!(
+                    "profile name '{}' uses reserved flow-system identifier namespace",
+                    name.as_str()
+                ),
                 location: Some(format!("profiles.{}", name.as_str())),
                 severity: DiagnosticSeverity::Error,
             });
@@ -396,6 +414,21 @@ mod tests {
                 .iter()
                 .any(|d| d.code == DiagnosticCode::InvalidProfileName)
         );
+    }
+
+    #[test]
+    fn test_reserved_system_profile_name_rejected() {
+        let mut def = valid_definition();
+        def.profiles.insert(
+            crate::runtime::flow_system_member_id().as_str().into(),
+            base_profile(),
+        );
+
+        let diagnostics = validate_definition(&def);
+        assert!(diagnostics.iter().any(|d| {
+            d.code == DiagnosticCode::ReservedSystemIdentifier
+                && d.message.contains("reserved flow-system identifier")
+        }));
     }
 
     #[test]

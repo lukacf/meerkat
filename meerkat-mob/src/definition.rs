@@ -220,6 +220,8 @@ pub struct LimitsSpec {
     pub max_flow_duration_ms: Option<u64>,
     pub max_step_retries: Option<u32>,
     pub max_orphaned_turns: Option<u32>,
+    #[serde(default)]
+    pub cancel_grace_timeout_ms: Option<u64>,
 }
 
 /// Complete mob definition.

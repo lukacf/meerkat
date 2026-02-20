@@ -67,7 +67,7 @@ agent construction. Zero `AgentBuilder::new()` calls in surface crates.
 </Note>
 
 <Note>
-**Mob runtime contract vs backend selection:** CLI `run`/`resume` compose a CLI-local mob tool dispatcher into the agent tool set, while `rkat mob ...` is the explicit mob lifecycle surface. Backend selection remains realm-driven (`realm_manifest.json`) and independent from mob tool composition.
+**Mob runtime contract vs backend selection:** Mob tools are exposed through `meerkat-mob-mcp` dispatcher composition (`SessionBuildOptions.external_tools`). CLI `run`/`resume` pre-compose this path, while `rkat mob ...` is the explicit direct lifecycle surface. Backend selection remains realm-driven (`realm_manifest.json`) and independent from mob tool composition.
 </Note>
 
 ### Detailed component view

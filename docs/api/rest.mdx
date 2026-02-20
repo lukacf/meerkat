@@ -65,6 +65,12 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `PUT` | `/config` | Replace config |
 | `PATCH` | `/config` | Merge-patch config (RFC 7396) |
 
+<Note>
+Mob capability on REST is exposed through the same session endpoints by composing
+`meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into
+`SessionBuildOptions.external_tools` in the host runtime.
+</Note>
+
 ## Configuration
 
 <Accordion title="Server configuration details">

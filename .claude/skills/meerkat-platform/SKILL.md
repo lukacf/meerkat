@@ -42,12 +42,65 @@ rkat-mcp --realm team-alpha
 | Rust SDK | Direct library API | Embedded Rust systems |
 
 For full per-surface schemas and examples, load: `references/api_reference.md`.
+For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 
 ## Mob behavior (current contract)
 
-- CLI `run`/`resume` compose CLI-local `mob_*` tools into the agent tool list ("mob as tool").
+- CLI `run`/`resume` compose `mob_*` tools through `meerkat-mob-mcp` dispatcher integration.
 - CLI `mob ...` is the explicit lifecycle surface for persisted mob registry operations.
-- RPC/REST/MCP server/Python SDK/TypeScript SDK do not auto-inject `mob_*` tools today.
+- RPC/REST/MCP server/Python SDK/TypeScript SDK expose mob capability via the same dispatcher composition model (`SessionBuildOptions.external_tools`) in host integrations.
+
+### Mob lifecycle (standard/default usage)
+
+Primary CLI usage is tool-driven through `run`/`resume`:
+
+```bash
+rkat run "create a mob with a lead and workers, then wire and report status"
+rkat resume <session_id> "retire worker-2 and add worker-4"
+```
+
+Where needed, direct lifecycle commands are available as operational compatibility surface:
+
+```bash
+rkat mob prefabs
+rkat mob create --prefab <name> | --definition <path>
+rkat mob list
+rkat mob status <mob_id>
+rkat mob spawn <mob_id> <profile> <meerkat_id>
+rkat mob retire <mob_id> <meerkat_id>
+rkat mob wire <mob_id> <a> <b>
+rkat mob unwire <mob_id> <a> <b>
+rkat mob turn <mob_id> <meerkat_id> <message>
+rkat mob stop|resume|complete <mob_id>
+rkat mob destroy <mob_id>
+```
+
+Mob flows are optional and layered on top of this lifecycle.
+
+### Mob flows (DAG runtime)
+
+Flow commands are now part of the CLI mob lifecycle:
+
+```bash
+rkat mob flows <mob_id>
+rkat mob run-flow <mob_id> --flow <flow_id> [--params <json-object>]
+rkat mob flow-status <mob_id> <run_id>
+```
+
+Flow model highlights:
+
+- declarative DAG step graph (`depends_on`),
+- dependency mode (`all` or `any`),
+- branching via `branch` + `condition`,
+- dispatch mode (`one_to_one`, `fan_out`, `fan_in`),
+- topology policy enforcement (`strict|permissive` + role rules including `"*"` wildcard),
+- persisted run snapshots (`MobRun`) with `step_ledger` and `failure_ledger`.
+
+Operational notes:
+
+- `run-flow` waits until terminal and persists a terminal snapshot.
+- `flow-status` checks live run state first and falls back to terminal snapshots.
+- flow limits are defined in mob `limits` (`max_flow_duration_ms`, `max_step_retries`, `cancel_grace_timeout_ms`, `max_orphaned_turns`).
 
 Terminology:
 

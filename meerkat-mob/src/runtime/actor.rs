@@ -1173,10 +1173,17 @@ impl MobActor {
         let run_store = self.run_store.clone();
         let events = self.events.clone();
         let mob_id = self.definition.id.clone();
+        let cancel_grace_timeout = self
+            .definition
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.cancel_grace_timeout_ms)
+            .map(std::time::Duration::from_millis)
+            .unwrap_or_else(|| std::time::Duration::from_secs(5));
         tokio::spawn(async move {
             let completed = tokio::select! {
                 _ = &mut handle => true,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => false,
+                _ = tokio::time::sleep(cancel_grace_timeout) => false,
             };
             if completed {
                 return;

@@ -60,10 +60,16 @@ Frequently used options:
 - `--hooks-override-json <JSON>`
 - `--hooks-override-file <FILE>`
 
-`run` always composes a CLI-local mob tool surface into the agent tool list (`mob_create`, `mob_list`, `mob_status`, `mob_spawn`, `mob_retire`, `mob_wire`, `mob_unwire`, `mob_external_turn`, `mob_events`, `mob_list_meerkats`, `mob_stop`, `mob_resume`, `mob_complete`, `mob_destroy`).
+`run` composes the mob tool surface (backed by `meerkat-mob-mcp`) into the agent tool list (`mob_create`, `mob_list`, `mob_status`, `mob_spawn`, `mob_retire`, `mob_wire`, `mob_unwire`, `mob_external_turn`, `mob_events`, `mob_list_meerkats`, `mob_stop`, `mob_resume`, `mob_complete`, `mob_destroy`).
 These are available even when built-ins are disabled.
 
-If external MCP servers define a tool with the same name, the CLI-local mob tool wins.
+For mob workflows, this tool path is the primary CLI UX:
+
+```bash
+rkat run "create a mob for release triage with 1 lead and 3 workers"
+```
+
+If external MCP servers define a tool with the same name, the mob tool dispatcher wins.
 
 Comms options:
 
@@ -81,7 +87,7 @@ rkat resume <SESSION_ID> <PROMPT>
 
 Resumes a session from the active realm.
 
-Like `run`, `resume` composes the CLI-local `mob_*` tool surface.
+Like `run`, `resume` composes the `mob_*` tool surface.
 
 ## mob
 
@@ -99,10 +105,22 @@ rkat mob turn <MOB_ID> <MEERKAT_ID> <MESSAGE>
 rkat mob stop <MOB_ID>
 rkat mob resume <MOB_ID>
 rkat mob complete <MOB_ID>
+rkat mob flows <MOB_ID>
+rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON_OBJECT>]
+rkat mob flow-status <MOB_ID> <RUN_ID>
 rkat mob destroy <MOB_ID>
 ```
 
-CLI `mob` commands are the explicit lifecycle surface for persisted mob state in the local registry.
+CLI `mob` commands are the explicit compatibility/operational surface for persisted mob state in the local registry.
+Primary day-to-day mob usage on CLI is tool-driven through `run`/`resume`; this command group is for direct/manual control.
+
+Flow commands:
+
+- `mob flows`: list configured flow IDs in a mob definition.
+- `mob run-flow`: starts a run and waits for terminal state before returning `run_id`.
+- `mob flow-status`: returns JSON `MobRun` (or `null`) for the run.
+
+`mob run-flow` persists terminal status snapshots, and `mob flow-status` prefers live runtime status when available, then terminal snapshots as fallback.
 
 ## sessions
 

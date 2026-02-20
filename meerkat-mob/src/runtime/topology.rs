@@ -3,6 +3,8 @@
 use crate::definition::TopologyRule;
 use crate::ids::ProfileName;
 
+const WILDCARD_ROLE: &str = "*";
+
 /// Rule evaluation output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyDecision {
@@ -35,7 +37,7 @@ pub fn evaluate_topology(
 }
 
 fn role_matches(rule_role: &ProfileName, actual_role: &ProfileName) -> bool {
-    rule_role.as_str() == "*" || rule_role == actual_role
+    rule_role.as_str() == WILDCARD_ROLE || rule_role == actual_role
 }
 
 #[cfg(test)]
@@ -128,6 +130,39 @@ mod tests {
                 &rules,
                 &ProfileName::from("reviewer"),
                 &ProfileName::from("lead")
+            ),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn test_topology_supports_to_role_wildcard_matching() {
+        let rules = vec![TopologyRule {
+            from_role: ProfileName::from("lead"),
+            to_role: ProfileName::from("*"),
+            allowed: false,
+        }];
+        assert_eq!(
+            evaluate_topology(
+                &rules,
+                &ProfileName::from("lead"),
+                &ProfileName::from("worker")
+            ),
+            PolicyDecision::Deny
+        );
+        assert_eq!(
+            evaluate_topology(
+                &rules,
+                &ProfileName::from("lead"),
+                &ProfileName::from("reviewer")
+            ),
+            PolicyDecision::Deny
+        );
+        assert_eq!(
+            evaluate_topology(
+                &rules,
+                &ProfileName::from("worker"),
+                &ProfileName::from("reviewer")
             ),
             PolicyDecision::Allow
         );

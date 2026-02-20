@@ -1163,6 +1163,7 @@ fn sample_definition_with_single_step_flow(
         max_flow_duration_ms: None,
         max_step_retries: None,
         max_orphaned_turns: Some(max_orphaned_turns),
+        cancel_grace_timeout_ms: None,
     });
     def
 }
@@ -1331,6 +1332,7 @@ fn sample_definition_with_retry_flow(max_step_retries: u32) -> MobDefinition {
         max_flow_duration_ms: None,
         max_step_retries: Some(max_step_retries),
         max_orphaned_turns: Some(8),
+        cancel_grace_timeout_ms: None,
     });
     def
 }
@@ -6117,6 +6119,40 @@ async fn test_cancel_flow_fallback_marks_run_canceled_when_turn_stalls() {
 }
 
 #[tokio::test]
+async fn test_cancel_flow_fallback_uses_configured_grace_timeout() {
+    let mut definition = sample_definition_with_single_step_flow(60_000, 8);
+    definition.limits = Some(LimitsSpec {
+        max_flow_duration_ms: None,
+        max_step_retries: None,
+        max_orphaned_turns: Some(8),
+        cancel_grace_timeout_ms: Some(25),
+    });
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow");
+
+    let start = Instant::now();
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "configured cancel grace timeout should be honored by fallback cancellation"
+    );
+}
+
+#[tokio::test]
 async fn test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts() {
     let run_store = Arc::new(RecordingRunStore::new());
     let (handle, service) = create_test_mob_with_run_store(
@@ -6697,6 +6733,7 @@ async fn test_max_flow_duration_limit_is_enforced() {
         max_flow_duration_ms: Some(25),
         max_step_retries: None,
         max_orphaned_turns: Some(8),
+        cancel_grace_timeout_ms: None,
     });
     let (handle, service) = create_test_mob(definition).await;
     handle

@@ -69,8 +69,7 @@ impl SpecValidator {
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         let step_keys = flow.steps.keys().cloned().collect::<BTreeSet<_>>();
-        let mut branch_groups: BTreeMap<BranchId, Vec<(&StepId, &FlowStepSpec)>> =
-            BTreeMap::new();
+        let mut branch_groups: BTreeMap<BranchId, Vec<(&StepId, &FlowStepSpec)>> = BTreeMap::new();
 
         for (step_id, step) in &flow.steps {
             if !definition.profiles.contains_key(step.role.as_str()) {

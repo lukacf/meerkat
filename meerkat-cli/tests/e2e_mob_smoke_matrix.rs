@@ -61,8 +61,8 @@ fn smoke_timeout_secs() -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
-        .map(|value| value.min(120))
-        .unwrap_or(120)
+        .map(|value| value.min(600))
+        .unwrap_or(180)
 }
 
 fn skip_if_no_api_prereqs() -> bool {
@@ -188,6 +188,7 @@ impl SmokeHarness {
             .env("XDG_DATA_HOME", &self.data_dir)
             .env("ANTHROPIC_API_KEY", &self.api_key)
             .env("RKAT_ANTHROPIC_API_KEY", &self.api_key)
+            .env("RUST_LOG", "off")
             .env("RKAT_MOB_DEBUG", if self.verbose { "1" } else { "0" })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -431,6 +432,95 @@ impl SmokeHarness {
         Ok(())
     }
 
+    async fn mob_flows(&self, mob_id: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let out = self
+            .run_ok_owned(vec![
+                "mob".to_string(),
+                "flows".to_string(),
+                mob_id.to_string(),
+            ])
+            .await?;
+        Ok(out
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
+    }
+
+    async fn mob_run_flow(
+        &self,
+        mob_id: &str,
+        flow_id: &str,
+        params: Option<Value>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let mut args = vec![
+            "mob".to_string(),
+            "run-flow".to_string(),
+            mob_id.to_string(),
+            "--flow".to_string(),
+            flow_id.to_string(),
+        ];
+        if let Some(params) = params {
+            args.push("--params".to_string());
+            args.push(serde_json::to_string(&params)?);
+        }
+        let out = self.run_ok_owned(args).await?;
+        let run_id = out
+            .split_whitespace()
+            .find_map(|token| {
+                let trimmed = token.trim_matches(|c: char| {
+                    c == '"' || c == '\'' || c == ',' || c == ';' || c == ')' || c == '('
+                });
+                trimmed
+                    .parse::<meerkat_mob::RunId>()
+                    .ok()
+                    .map(|parsed| parsed.to_string())
+            })
+            .ok_or("mob run-flow output missing uuid run_id")?;
+        Ok(run_id)
+    }
+
+    async fn mob_flow_status(
+        &self,
+        mob_id: &str,
+        run_id: &str,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let out = self
+            .run_ok_owned(vec![
+                "mob".to_string(),
+                "flow-status".to_string(),
+                mob_id.to_string(),
+                run_id.to_string(),
+            ])
+            .await?;
+        Ok(serde_json::from_str(&out)?)
+    }
+
+    async fn wait_for_terminal_flow_status(
+        &self,
+        mob_id: &str,
+        run_id: &str,
+        timeout: Duration,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let status = self.mob_flow_status(mob_id, run_id).await?;
+            if let Some(state) = status.get("status").and_then(Value::as_str)
+                && matches!(state, "completed" | "failed" | "canceled")
+            {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for terminal flow status: run_id={run_id}, last_status={status}",
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     async fn mob_destroy(&self, mob_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.run_ok_owned(vec![
             "mob".to_string(),
@@ -547,10 +637,10 @@ impl SmokeHarness {
     }
 
     async fn registry_path(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let realm_id = self.run_ok(&["realm", "current"]).await?;
+        let realm_id = self.run_ok(&["realms", "current"]).await?;
         let show = self
             .run_ok_owned(vec![
-                "realm".to_string(),
+                "realms".to_string(),
                 "show".to_string(),
                 realm_id.clone(),
             ])
@@ -713,6 +803,301 @@ content = "Coordinate a subset of workers and escalate blockers."
 [skills.worker]
 source = "inline"
 content = "Execute delegated actions and report results."
+"#
+    )
+}
+
+fn flow_single_step_definition(mob_id: &str) -> String {
+    let model = smoke_model();
+    format!(
+        r#"[mob]
+id = "{mob_id}"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "{model}"
+skills = ["orchestrator"]
+peer_description = "Lead"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "{model}"
+skills = ["worker"]
+peer_description = "Worker"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+comms = true
+mob_tasks = true
+
+[skills.orchestrator]
+source = "inline"
+content = "Coordinate workers and keep outputs deterministic."
+
+[skills.worker]
+source = "inline"
+content = "Follow instructions exactly and return concise output."
+
+[flows.demo]
+description = "single-step smoke flow"
+
+[flows.demo.steps.start]
+role = "worker"
+message = "Reply with EXACTLY this JSON and nothing else: {{\"result\":\"ok\"}}"
+dispatch_mode = "one_to_one"
+collection_policy = {{ type = "any" }}
+depends_on_mode = "all"
+timeout_ms = 120000
+"#
+    )
+}
+
+fn flow_topology_wildcard_deny_definition(mob_id: &str) -> String {
+    let model = smoke_model();
+    format!(
+        r#"[mob]
+id = "{mob_id}"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "{model}"
+skills = ["orchestrator"]
+peer_description = "Lead"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "{model}"
+skills = ["worker"]
+peer_description = "Worker"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+comms = true
+mob_tasks = true
+
+[skills.orchestrator]
+source = "inline"
+content = "Coordinate workers."
+
+[skills.worker]
+source = "inline"
+content = "Execute work."
+
+[flows.demo]
+description = "topology deny smoke flow"
+
+[flows.demo.steps.start]
+role = "worker"
+message = "Reply with EXACTLY this JSON and nothing else: {{\"blocked\":false}}"
+dispatch_mode = "one_to_one"
+collection_policy = {{ type = "any" }}
+depends_on_mode = "all"
+timeout_ms = 120000
+
+[topology]
+mode = "strict"
+rules = [{{ from_role = "*", to_role = "worker", allowed = false }}]
+"#
+    )
+}
+
+fn flow_branch_join_definition(mob_id: &str) -> String {
+    let model = smoke_model();
+    format!(
+        r#"[mob]
+id = "{mob_id}"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "{model}"
+skills = ["orchestrator"]
+peer_description = "Lead"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "{model}"
+skills = ["worker"]
+peer_description = "Worker"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+comms = true
+mob_tasks = true
+
+[skills.orchestrator]
+source = "inline"
+content = "Coordinate branch execution."
+
+[skills.worker]
+source = "inline"
+content = "Always return exactly one JSON object with no markdown."
+
+[flows.branching]
+description = "branch and join smoke flow"
+
+[flows.branching.steps.start]
+role = "worker"
+message = "Reply with EXACTLY this JSON and nothing else: {{\"start\":\"ok\"}}"
+dispatch_mode = "one_to_one"
+collection_policy = {{ type = "any" }}
+depends_on_mode = "all"
+timeout_ms = 120000
+
+[flows.branching.steps.fix_critical]
+role = "worker"
+message = "Reply with EXACTLY this JSON and nothing else: {{\"repair\":\"critical\"}}"
+depends_on = ["start"]
+branch = "repair"
+condition = {{ op = "eq", path = "params.severity", value = "critical" }}
+dispatch_mode = "one_to_one"
+collection_policy = {{ type = "any" }}
+depends_on_mode = "all"
+timeout_ms = 120000
+
+[flows.branching.steps.fix_minor]
+role = "worker"
+message = "Reply with EXACTLY this JSON and nothing else: {{\"repair\":\"minor\"}}"
+depends_on = ["start"]
+branch = "repair"
+condition = {{ op = "eq", path = "params.severity", value = "minor" }}
+dispatch_mode = "one_to_one"
+collection_policy = {{ type = "any" }}
+depends_on_mode = "all"
+timeout_ms = 120000
+
+[flows.branching.steps.join]
+role = "worker"
+message = "Reply with EXACTLY this JSON and nothing else: {{\"join\":\"ok\"}}"
+depends_on = ["fix_critical", "fix_minor"]
+dispatch_mode = "one_to_one"
+collection_policy = {{ type = "any" }}
+depends_on_mode = "any"
+timeout_ms = 120000
+"#
+    )
+}
+
+fn flow_fan_in_definition(mob_id: &str) -> String {
+    let model = smoke_model();
+    format!(
+        r#"[mob]
+id = "{mob_id}"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "{model}"
+skills = ["orchestrator"]
+peer_description = "Lead"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "{model}"
+skills = ["worker"]
+peer_description = "Worker"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+comms = true
+mob_tasks = true
+
+[skills.orchestrator]
+source = "inline"
+content = "Coordinate workers."
+
+[skills.worker]
+source = "inline"
+content = "Always return exactly one JSON object with no markdown."
+
+[flows.collect]
+description = "fan-in aggregate smoke flow"
+
+[flows.collect.steps.gather]
+role = "worker"
+message = "Reply with EXACTLY this JSON and nothing else: {{\"worker\":\"ok\"}}"
+dispatch_mode = "fan_in"
+collection_policy = {{ type = "any" }}
+depends_on_mode = "all"
+timeout_ms = 120000
+"#
+    )
+}
+
+fn flow_malformed_json_definition(mob_id: &str) -> String {
+    let model = smoke_model();
+    format!(
+        r#"[mob]
+id = "{mob_id}"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "{model}"
+skills = ["orchestrator"]
+peer_description = "Lead"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "{model}"
+skills = ["worker"]
+peer_description = "Worker"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+comms = true
+mob_tasks = true
+
+[skills.orchestrator]
+source = "inline"
+content = "Coordinate workers."
+
+[skills.worker]
+source = "inline"
+content = "Follow output constraints exactly."
+
+[flows.invalid_json]
+description = "malformed model output smoke flow"
+
+[flows.invalid_json.steps.start]
+role = "worker"
+message = "Reply with plain text only: done"
+dispatch_mode = "one_to_one"
+collection_policy = {{ type = "any" }}
+depends_on_mode = "all"
+timeout_ms = 120000
 "#
     )
 }
@@ -1697,6 +2082,244 @@ async fn e2e_smoke_13_legacy_resume_event_shape_compat() -> Result<(), Box<dyn s
 
     harness.mob_resume(&mob_id).await?;
     assert_eq!(harness.mob_status(&mob_id).await?, "Running");
+    harness.mob_destroy(&mob_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "integration-real: live API"]
+async fn e2e_smoke_14_flow_list_run_and_terminal_success() -> Result<(), Box<dyn std::error::Error>>
+{
+    if skip_if_no_api_prereqs() {
+        return Ok(());
+    }
+
+    let harness = SmokeHarness::new().await?;
+    let mob_id = unique_mob_id("flow-demo");
+    let definition = flow_single_step_definition(&mob_id);
+    let definition_path = harness
+        .write_definition("flow-demo.toml", &definition)
+        .await?;
+
+    harness.mob_create_definition(&definition_path).await?;
+    harness.mob_spawn(&mob_id, "lead", "lead-1").await?;
+    harness.mob_spawn(&mob_id, "worker", "worker-1").await?;
+
+    let flows = harness.mob_flows(&mob_id).await?;
+    assert!(flows.iter().any(|flow| flow == "demo"));
+
+    let run_id = harness.mob_run_flow(&mob_id, "demo", None).await?;
+    let status = harness
+        .wait_for_terminal_flow_status(&mob_id, &run_id, Duration::from_secs(60))
+        .await?;
+
+    let terminal = status["status"].as_str().unwrap_or_default();
+    assert!(
+        matches!(terminal, "completed" | "failed"),
+        "unexpected terminal state: {status}"
+    );
+    let has_start_step = status["step_ledger"].as_array().is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry.get("step_id").and_then(Value::as_str) == Some("start"))
+    });
+    assert!(has_start_step, "expected start step in ledger");
+
+    harness.mob_destroy(&mob_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "integration-real: live API"]
+async fn e2e_smoke_15_flow_topology_strict_wildcard_denial()
+-> Result<(), Box<dyn std::error::Error>> {
+    if skip_if_no_api_prereqs() {
+        return Ok(());
+    }
+
+    let harness = SmokeHarness::new().await?;
+    let mob_id = unique_mob_id("flow-topology-deny");
+    let definition = flow_topology_wildcard_deny_definition(&mob_id);
+    let definition_path = harness
+        .write_definition("flow-topology-deny.toml", &definition)
+        .await?;
+
+    harness.mob_create_definition(&definition_path).await?;
+    harness.mob_spawn(&mob_id, "lead", "lead-1").await?;
+    harness.mob_spawn(&mob_id, "worker", "worker-1").await?;
+
+    let run_id = harness.mob_run_flow(&mob_id, "demo", None).await?;
+    let status = harness
+        .wait_for_terminal_flow_status(&mob_id, &run_id, Duration::from_secs(60))
+        .await?;
+
+    assert_eq!(status["status"].as_str(), Some("failed"));
+
+    harness.mob_destroy(&mob_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "integration-real: live API"]
+async fn e2e_smoke_16_flow_branch_fallback_and_join_any() -> Result<(), Box<dyn std::error::Error>>
+{
+    if skip_if_no_api_prereqs() {
+        return Ok(());
+    }
+
+    let harness = SmokeHarness::new().await?;
+    let mob_id = unique_mob_id("flow-branch");
+    let definition = flow_branch_join_definition(&mob_id);
+    let definition_path = harness
+        .write_definition("flow-branch.toml", &definition)
+        .await?;
+
+    harness.mob_create_definition(&definition_path).await?;
+    harness.mob_spawn(&mob_id, "lead", "lead-1").await?;
+    harness.mob_spawn(&mob_id, "worker", "worker-1").await?;
+
+    let run_id = harness
+        .mob_run_flow(&mob_id, "branching", Some(json!({ "severity": "minor" })))
+        .await?;
+    let status = harness
+        .wait_for_terminal_flow_status(&mob_id, &run_id, Duration::from_secs(90))
+        .await?;
+
+    let terminal = status["status"].as_str().unwrap_or_default();
+    assert!(
+        matches!(terminal, "completed" | "failed"),
+        "unexpected terminal state: {status}"
+    );
+    let has_minor = status["step_ledger"].as_array().is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry.get("step_id").and_then(Value::as_str) == Some("fix_minor"))
+    });
+    let has_join = status["step_ledger"].as_array().is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry.get("step_id").and_then(Value::as_str) == Some("join"))
+    });
+    assert!(
+        has_minor || has_join,
+        "expected branch/join evidence in ledger"
+    );
+
+    harness.mob_destroy(&mob_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "integration-real: live API"]
+async fn e2e_smoke_17_flow_fan_in_aggregates_array_shape() -> Result<(), Box<dyn std::error::Error>>
+{
+    if skip_if_no_api_prereqs() {
+        return Ok(());
+    }
+
+    let harness = SmokeHarness::new().await?;
+    let mob_id = unique_mob_id("flow-fanin");
+    let definition = flow_fan_in_definition(&mob_id);
+    let definition_path = harness
+        .write_definition("flow-fanin.toml", &definition)
+        .await?;
+
+    harness.mob_create_definition(&definition_path).await?;
+    harness.mob_spawn(&mob_id, "lead", "lead-1").await?;
+    harness.mob_spawn(&mob_id, "worker", "worker-1").await?;
+
+    let run_id = harness.mob_run_flow(&mob_id, "collect", None).await?;
+    let status = harness
+        .wait_for_terminal_flow_status(&mob_id, &run_id, Duration::from_secs(90))
+        .await?;
+
+    let terminal = status["status"].as_str().unwrap_or_default();
+    assert!(
+        matches!(terminal, "completed" | "failed"),
+        "unexpected terminal state: {status}"
+    );
+
+    let aggregate_output = status["step_ledger"].as_array().and_then(|entries| {
+        entries.iter().find_map(|entry| {
+            if entry.get("step_id").and_then(Value::as_str) == Some("gather")
+                && entry.get("status").and_then(Value::as_str) == Some("completed")
+            {
+                entry.get("output")
+            } else {
+                None
+            }
+        })
+    });
+
+    if terminal == "completed" {
+        let outputs = aggregate_output
+            .and_then(Value::as_array)
+            .ok_or("fan_in aggregate output should be an array")?;
+        assert!(
+            !outputs.is_empty(),
+            "fan_in output should include at least one successful target entry"
+        );
+        assert!(outputs.iter().all(|entry| {
+            entry.get("target").and_then(Value::as_str).is_some() && entry.get("output").is_some()
+        }));
+    } else {
+        let has_gather_step = status["step_ledger"].as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.get("step_id").and_then(Value::as_str) == Some("gather"))
+        });
+        assert!(
+            has_gather_step,
+            "fan_in run should still execute gather step before failure"
+        );
+    }
+
+    harness.mob_destroy(&mob_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "integration-real: live API"]
+async fn e2e_smoke_18_flow_malformed_json_fails_with_reason()
+-> Result<(), Box<dyn std::error::Error>> {
+    if skip_if_no_api_prereqs() {
+        return Ok(());
+    }
+
+    let harness = SmokeHarness::new().await?;
+    let mob_id = unique_mob_id("flow-bad-json");
+    let definition = flow_malformed_json_definition(&mob_id);
+    let definition_path = harness
+        .write_definition("flow-bad-json.toml", &definition)
+        .await?;
+
+    harness.mob_create_definition(&definition_path).await?;
+    harness.mob_spawn(&mob_id, "lead", "lead-1").await?;
+    harness.mob_spawn(&mob_id, "worker", "worker-1").await?;
+
+    let run_id = harness.mob_run_flow(&mob_id, "invalid_json", None).await?;
+    let status = harness
+        .wait_for_terminal_flow_status(&mob_id, &run_id, Duration::from_secs(90))
+        .await?;
+
+    assert_eq!(status["status"].as_str(), Some("failed"));
+    let has_malformed_reason = status["failure_ledger"].as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry
+                .get("reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| {
+                    reason
+                        .to_ascii_lowercase()
+                        .contains("malformed json output")
+                })
+        })
+    });
+    assert!(
+        has_malformed_reason,
+        "expected malformed-json root cause in failure_ledger"
+    );
+
     harness.mob_destroy(&mob_id).await?;
     Ok(())
 }

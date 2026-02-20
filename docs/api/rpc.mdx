@@ -65,7 +65,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <redb|js
 | `config/patch` | Config | Merge-patch config (RFC 7396) |
 
 <Note>
-Current RPC contract does not include `mob_*` methods and does not auto-compose CLI-local mob tools. Mob lifecycle operations are exposed today via CLI (`rkat mob ...`) and CLI tool composition (`rkat run`/`rkat resume`).
+RPC uses generic session/turn methods as the control plane. Mob capability is added by composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which exposes `mob_*` tools to the running agent session.
 </Note>
 
 ## Protocol

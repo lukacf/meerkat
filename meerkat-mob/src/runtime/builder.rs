@@ -373,7 +373,6 @@ impl MobBuilder {
                 return Err(error.into());
             }
         }
-
         // Recreate missing sessions referenced by MeerkatSpawned events.
         for entry in &roster_entries {
             if entry
@@ -453,7 +452,6 @@ impl MobBuilder {
                 comms_b.add_trusted_peer(spec_a).await?;
             }
         }
-
         // Notify orchestrator that the mob resumed.
         if notify_orchestrator_on_resume
             && let Some(orchestrator) = &definition.orchestrator
@@ -465,28 +463,45 @@ impl MobBuilder {
                 .map(|entry| entry.wired_to.len())
                 .sum::<usize>()
                 / 2;
-            session_service
-                .start_turn(
-                    orchestrator_entry
-                        .session_id()
-                        .ok_or_else(|| {
-                            MobError::Internal(
-                                "orchestrator entry missing session-backed member ref".to_string(),
-                            )
-                        })?,
-                    meerkat_core::service::StartTurnRequest {
-                        prompt: format!(
-                            "Mob '{}' resumed with {} active meerkats and {} wiring links. Reconcile worker state and continue orchestration.",
-                            definition.id, active_count, wired_edges
-                        ),
-                        event_tx: None,
-                        host_mode: true,
-                        skill_references: None,
-                    },
-                )
-                .await?;
+            let session_id = orchestrator_entry.session_id().ok_or_else(|| {
+                MobError::Internal("orchestrator entry missing session-backed member ref".to_string())
+            })?;
+            let resume_message = format!(
+                "Mob '{}' resumed with {} active meerkats and {} wiring links. Reconcile worker state and continue orchestration.",
+                definition.id, active_count, wired_edges
+            );
+            match orchestrator_entry.runtime_mode {
+                crate::MobRuntimeMode::AutonomousHost => {
+                    let injector = session_service.event_injector(session_id).await.ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "orchestrator '{}' missing event injector during resume notification",
+                            orchestrator_entry.meerkat_id
+                        ))
+                    })?;
+                    injector
+                        .inject(resume_message, meerkat_core::PlainEventSource::Rpc)
+                        .map_err(|error| {
+                            MobError::Internal(format!(
+                                "orchestrator resume inject failed for '{}': {}",
+                                orchestrator_entry.meerkat_id, error
+                            ))
+                        })?;
+                }
+                crate::MobRuntimeMode::TurnDriven => {
+                    session_service
+                        .start_turn(
+                            session_id,
+                            meerkat_core::service::StartTurnRequest {
+                                prompt: resume_message,
+                                event_tx: None,
+                                host_mode: false,
+                                skill_references: None,
+                            },
+                        )
+                        .await?;
+                }
+            }
         }
-
         Ok(())
     }
 
@@ -602,6 +617,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             retired_event_index: Arc::new(RwLock::new(HashSet::new())),
+            autonomous_host_loops: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
         };
         tokio::spawn(actor.run(command_rx));
 

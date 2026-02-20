@@ -60,6 +60,7 @@ pub(super) enum MobCommand {
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
+        runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
         reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
     },
@@ -132,6 +133,6 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Shutdown {
-        reply_tx: oneshot::Sender<()>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
 }

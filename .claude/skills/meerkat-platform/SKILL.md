@@ -49,6 +49,7 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 - CLI `run`/`resume` compose `mob_*` tools through `meerkat-mob-mcp` dispatcher integration.
 - CLI `mob ...` is the explicit lifecycle surface for persisted mob registry operations.
 - RPC/REST/MCP server/Python SDK/TypeScript SDK expose mob capability via the same dispatcher composition model (`SessionBuildOptions.external_tools`) in host integrations.
+- Member runtime default is `autonomous_host` when `runtime_mode` is omitted; `turn_driven` is explicit opt-in for controlled dispatch paths.
 
 ### Mob lifecycle (standard/default usage)
 

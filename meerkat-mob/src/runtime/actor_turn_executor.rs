@@ -103,6 +103,40 @@ impl ActorFlowTurnExecutor {
         }
     }
 
+    fn spawn_subscription_bridge(
+        mut events: tokio::sync::mpsc::Receiver<AgentEvent>,
+        completion_tx: oneshot::Sender<FlowTurnOutcome>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut completion_tx = Some(completion_tx);
+            while let Some(event) = events.recv().await {
+                match event {
+                    AgentEvent::RunCompleted { result, .. }
+                    | AgentEvent::InteractionComplete { result, .. } => {
+                        if let Some(tx) = completion_tx.take() {
+                            let _ = tx.send(FlowTurnOutcome::Completed { output: result });
+                        }
+                        return;
+                    }
+                    AgentEvent::RunFailed { error, .. }
+                    | AgentEvent::InteractionFailed { error, .. } => {
+                        if let Some(tx) = completion_tx.take() {
+                            let _ = tx.send(FlowTurnOutcome::Failed { reason: error });
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(tx) = completion_tx {
+                let _ = tx.send(FlowTurnOutcome::Failed {
+                    reason: "turn event stream closed before terminal outcome".to_string(),
+                });
+            }
+        })
+    }
+
     async fn reserve_orphan_slot_for_run(&self, run_id: &RunId) -> bool {
         {
             let mut usage = self.per_run_orphans.lock().await;
@@ -201,53 +235,58 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
             .await
             .ok_or_else(|| MobError::MeerkatNotFound(target.clone()))?;
 
-        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(8);
         let (completion_tx, completion_rx) = oneshot::channel::<FlowTurnOutcome>();
+        let bridge_handle = match entry.runtime_mode {
+            crate::MobRuntimeMode::AutonomousHost => {
+                let session_id = entry.member_ref.session_id().ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "autonomous flow dispatch requires session-backed member ref for '{}'",
+                        target
+                    ))
+                })?;
+                let injector = self
+                    .provisioner
+                    .event_injector(session_id)
+                    .await
+                    .ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "missing event injector for autonomous flow target '{}'",
+                            target
+                        ))
+                    })?;
+                let subscription = injector
+                    .inject_with_subscription(message, meerkat_core::PlainEventSource::Rpc)
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "autonomous flow dispatch inject failed for '{}': {}",
+                            target, error
+                        ))
+                    })?;
+                Self::spawn_subscription_bridge(subscription.events, completion_tx)
+            }
+            crate::MobRuntimeMode::TurnDriven => {
+                let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(8);
+                let bridge_handle = Self::spawn_subscription_bridge(event_rx, completion_tx);
 
-        let bridge_handle = tokio::spawn(async move {
-            let mut completion_tx = Some(completion_tx);
-            while let Some(event) = event_rx.recv().await {
-                match event {
-                    AgentEvent::RunCompleted { result, .. } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Completed { output: result });
-                        }
-                        return;
-                    }
-                    AgentEvent::RunFailed { error, .. } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed { reason: error });
-                        }
-                        return;
-                    }
-                    _ => {}
+                if let Err(error) = self
+                    .provisioner
+                    .start_turn(
+                        &entry.member_ref,
+                        StartTurnRequest {
+                            prompt: message,
+                            event_tx: Some(event_tx),
+                            host_mode: false,
+                            skill_references: None,
+                        },
+                    )
+                    .await
+                {
+                    bridge_handle.abort();
+                    return Err(error);
                 }
+                bridge_handle
             }
-
-            if let Some(tx) = completion_tx {
-                let _ = tx.send(FlowTurnOutcome::Failed {
-                    reason: "turn event stream closed before terminal outcome".to_string(),
-                });
-            }
-        });
-
-        let start_result = self
-            .provisioner
-            .start_turn(
-                &entry.member_ref,
-                StartTurnRequest {
-                    prompt: message,
-                    event_tx: Some(event_tx),
-                    host_mode: false,
-                    skill_references: None,
-                },
-            )
-            .await;
-
-        if let Err(error) = start_result {
-            bridge_handle.abort();
-            return Err(error);
-        }
+        };
 
         Ok(FlowTurnTicket::Actor(Arc::new(ActorTurnTicket {
             run_id: run_id.clone(),

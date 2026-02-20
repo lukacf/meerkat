@@ -86,6 +86,7 @@ model = "claude-sonnet-4-5"
 skills = ["worker"]
 peer_description = "Execution worker"
 external_addressable = false
+runtime_mode = "autonomous_host"
 [profiles.worker.tools]
 builtins = true
 comms = true
@@ -185,6 +186,19 @@ async fn in_memory_demo() -> Result<(), Box<dyn std::error::Error>> {
 - **Wiring edge**: peer relationship controlling communication paths.
 - **Mob event stream**: append-only operational history.
 
+## Runtime modes (default path)
+
+Mob members now default to `autonomous_host` mode.
+
+- `autonomous_host` (default): long-lived host loop peer; collaboration arrives through comms/event injection.
+- `turn_driven` (explicit): member only runs when the mob runtime issues a direct turn.
+
+Selection rules:
+
+- Omitted `runtime_mode` -> `autonomous_host`
+- Override at profile level (`[profiles.<name>].runtime_mode`)
+- Override at spawn/tool-call level (`runtime_mode` argument)
+
 ## Backends and identity
 
 Mob members can run with different backend kinds:
@@ -234,6 +248,7 @@ rkat resume <session_id> "Retire worker-2, add worker-4, and summarize topology.
 ```bash
 rkat mob create --definition mob.toml
 rkat mob spawn team-mob lead lead-1
+rkat mob spawn team-mob worker worker-1 --runtime-mode turn_driven
 rkat mob wire team-mob lead-1 worker-1
 rkat mob status team-mob
 ```

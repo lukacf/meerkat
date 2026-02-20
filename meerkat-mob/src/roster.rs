@@ -5,6 +5,7 @@
 
 use crate::event::{MemberRef, MobEvent, MobEventKind};
 use crate::ids::{MeerkatId, ProfileName};
+use crate::runtime_mode::MobRuntimeMode;
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,6 +19,9 @@ pub struct RosterEntry {
     pub profile: ProfileName,
     /// Backend-neutral identity for this meerkat.
     pub member_ref: MemberRef,
+    /// Runtime mode for this member.
+    #[serde(default)]
+    pub runtime_mode: MobRuntimeMode,
     /// Set of peer meerkat IDs this meerkat is wired to.
     pub wired_to: BTreeSet<MeerkatId>,
 }
@@ -52,9 +56,15 @@ impl Roster {
             MobEventKind::MeerkatSpawned {
                 meerkat_id,
                 role,
+                runtime_mode,
                 member_ref,
             } => {
-                self.add(meerkat_id.clone(), role.clone(), member_ref.clone());
+                self.add(
+                    meerkat_id.clone(),
+                    role.clone(),
+                    *runtime_mode,
+                    member_ref.clone(),
+                );
             }
             MobEventKind::MeerkatRetired { meerkat_id, .. } => {
                 self.remove(meerkat_id);
@@ -74,6 +84,7 @@ impl Roster {
         &mut self,
         meerkat_id: MeerkatId,
         profile: ProfileName,
+        runtime_mode: MobRuntimeMode,
         member_ref: MemberRef,
     ) -> bool {
         self.entries
@@ -83,6 +94,7 @@ impl Roster {
                     meerkat_id,
                     profile,
                     member_ref,
+                    runtime_mode,
                     wired_to: BTreeSet::new(),
                 },
             )
@@ -210,6 +222,7 @@ mod tests {
         roster.add(
             MeerkatId::from("agent-1"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(sid.clone()),
         );
         assert_eq!(roster.len(), 1);
@@ -225,11 +238,13 @@ mod tests {
         roster.add(
             MeerkatId::from("agent-1"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("agent-2"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
         roster.wire(&MeerkatId::from("agent-1"), &MeerkatId::from("agent-2"));
@@ -256,6 +271,7 @@ mod tests {
         roster.add(
             MeerkatId::from("ext-1"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::BackendPeer {
                 peer_id: "peer-ext-1".to_string(),
                 address: "https://backend.example.invalid/mesh/ext-1".to_string(),
@@ -288,11 +304,13 @@ mod tests {
         roster.add(
             MeerkatId::from("a"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("b"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
 
@@ -317,11 +335,13 @@ mod tests {
         roster.add(
             MeerkatId::from("a"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("b"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
 
@@ -338,16 +358,19 @@ mod tests {
         roster.add(
             MeerkatId::from("w1"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("w2"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("lead"),
             ProfileName::from("orchestrator"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
 
@@ -366,11 +389,13 @@ mod tests {
         roster.add(
             MeerkatId::from("a"),
             ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
         roster.add(
             MeerkatId::from("b"),
             ProfileName::from("lead"),
+            MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(session_id()),
         );
 
@@ -388,6 +413,7 @@ mod tests {
                 MobEventKind::MeerkatSpawned {
                     meerkat_id: MeerkatId::from("a"),
                     role: ProfileName::from("worker"),
+                    runtime_mode: MobRuntimeMode::AutonomousHost,
                     member_ref: MemberRef::from_session_id(sid1),
                 },
             ),
@@ -396,6 +422,7 @@ mod tests {
                 MobEventKind::MeerkatSpawned {
                     meerkat_id: MeerkatId::from("b"),
                     role: ProfileName::from("worker"),
+                    runtime_mode: MobRuntimeMode::AutonomousHost,
                     member_ref: MemberRef::from_session_id(sid2),
                 },
             ),
@@ -423,6 +450,7 @@ mod tests {
                 MobEventKind::MeerkatSpawned {
                     meerkat_id: MeerkatId::from("a"),
                     role: ProfileName::from("worker"),
+                    runtime_mode: MobRuntimeMode::AutonomousHost,
                     member_ref: MemberRef::from_session_id(sid1.clone()),
                 },
             ),
@@ -431,6 +459,7 @@ mod tests {
                 MobEventKind::MeerkatSpawned {
                     meerkat_id: MeerkatId::from("b"),
                     role: ProfileName::from("worker"),
+                    runtime_mode: MobRuntimeMode::AutonomousHost,
                     member_ref: MemberRef::from_session_id(sid2.clone()),
                 },
             ),
@@ -465,6 +494,7 @@ mod tests {
             MobEventKind::MeerkatSpawned {
                 meerkat_id: MeerkatId::from("a"),
                 role: ProfileName::from("worker"),
+                runtime_mode: MobRuntimeMode::AutonomousHost,
                 member_ref: MemberRef::from_session_id(sid),
             },
         )];
@@ -483,6 +513,7 @@ mod tests {
             meerkat_id: MeerkatId::from("test"),
             profile: ProfileName::from("worker"),
             member_ref: MemberRef::from_session_id(session_id()),
+            runtime_mode: MobRuntimeMode::AutonomousHost,
             wired_to: {
                 let mut s = BTreeSet::new();
                 s.insert(MeerkatId::from("peer-1"));

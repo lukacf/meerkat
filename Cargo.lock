@@ -2541,13 +2541,16 @@ dependencies = [
 name = "meerkat-integration-tests"
 version = "0.3.4"
 dependencies = [
+ "async-trait",
  "meerkat",
  "meerkat-client",
  "meerkat-core",
+ "meerkat-mob",
  "meerkat-store",
  "meerkat-tools",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

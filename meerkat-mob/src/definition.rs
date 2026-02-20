@@ -473,6 +473,7 @@ path = "skills/reviewer.md"
                         peer_description: "The leader".to_string(),
                         external_addressable: true,
                         backend: None,
+                        runtime_mode: crate::MobRuntimeMode::AutonomousHost,
                     },
                 );
                 m

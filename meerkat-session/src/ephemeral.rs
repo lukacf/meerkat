@@ -59,9 +59,6 @@ enum SessionCommand {
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillId>>,
     },
-    Interrupt {
-        ack_tx: oneshot::Sender<Result<(), SessionError>>,
-    },
     ReadSnapshot {
         reply_tx: oneshot::Sender<SessionSnapshot>,
     },
@@ -95,6 +92,18 @@ struct SessionHandle {
     event_injector: Option<Arc<dyn meerkat_core::SubscribableInjector>>,
     /// Optional comms runtime for host-mode commands and stream attachment.
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    /// Out-of-band interrupt signal consumed by the running turn loop.
+    interrupt_requested: Arc<AtomicBool>,
+    /// Wakes the running turn loop when an interrupt is requested.
+    interrupt_notify: Arc<tokio::sync::Notify>,
+}
+
+struct SessionTaskControl {
+    state_tx: watch::Sender<SessionState>,
+    summary_tx: watch::Sender<SessionSummaryCache>,
+    turn_lock: Arc<AtomicBool>,
+    interrupt_requested: Arc<AtomicBool>,
+    interrupt_notify: Arc<tokio::sync::Notify>,
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +343,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             message_count: 0,
             total_tokens: 0,
         });
+        let interrupt_requested = Arc::new(AtomicBool::new(false));
+        let interrupt_notify = Arc::new(tokio::sync::Notify::new());
 
         // Spawn the session task
         let task_turn_lock = turn_lock.clone();
@@ -342,9 +353,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             agent_event_tx,
             agent_event_rx,
             command_rx,
-            state_tx,
-            summary_tx,
-            task_turn_lock,
+            SessionTaskControl {
+                state_tx,
+                summary_tx,
+                turn_lock: task_turn_lock,
+                interrupt_requested: interrupt_requested.clone(),
+                interrupt_notify: interrupt_notify.clone(),
+            },
         ));
 
         // Store the handle
@@ -357,6 +372,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             created_at,
             event_injector,
             comms_runtime,
+            interrupt_requested,
+            interrupt_notify,
         };
 
         // Acquire turn lock for the first turn (cannot fail — fresh session)
@@ -480,18 +497,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             return Err(SessionError::NotRunning { id: id.clone() });
         }
 
-        let (ack_tx, ack_rx) = oneshot::channel();
-        handle
-            .command_tx
-            .send(SessionCommand::Interrupt { ack_tx })
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task has exited".to_string(),
-                ))
-            })?;
-
-        let _ = ack_rx.await;
+        // Signal interrupt out-of-band so a running turn can observe it
+        // immediately (without waiting for command-channel polling).
+        handle.interrupt_requested.store(true, Ordering::Release);
+        handle.interrupt_notify.notify_waiters();
         Ok(())
     }
 
@@ -591,9 +600,7 @@ async fn session_task<A: SessionAgent>(
     agent_event_tx: mpsc::Sender<AgentEvent>,
     mut agent_event_rx: mpsc::Receiver<AgentEvent>,
     mut commands: mpsc::Receiver<SessionCommand>,
-    state_tx: watch::Sender<SessionState>,
-    summary_tx: watch::Sender<SessionSummaryCache>,
-    turn_lock: Arc<AtomicBool>,
+    control: SessionTaskControl,
 ) {
     while let Some(cmd) = commands.recv().await {
         match cmd {
@@ -605,7 +612,7 @@ async fn session_task<A: SessionAgent>(
                 skill_references,
             } => {
                 agent.set_skill_references(skill_references);
-                state_tx.send_replace(SessionState::Running);
+                control.state_tx.send_replace(SessionState::Running);
                 let mut event_stream_open = true;
 
                 // Scope the pinned future so its mutable borrow of `agent` is
@@ -625,10 +632,18 @@ async fn session_task<A: SessionAgent>(
                     };
                     // run_fut is already Pin<Box<...>>, no tokio::pin! needed.
                     let mut run_fut = run_fut;
+                    let mut interrupted = false;
 
                     let r = loop {
+                        let interrupt_wait = control.interrupt_notify.notified();
                         tokio::select! {
                             result = &mut run_fut => break result,
+                            _ = interrupt_wait => {
+                                if control.interrupt_requested.swap(false, Ordering::AcqRel) {
+                                    interrupted = true;
+                                    break Err(meerkat_core::error::AgentError::Cancelled);
+                                }
+                            }
                             Some(event) = agent_event_rx.recv() => {
                                 if event_stream_open
                                     && let Some(ref tx) = event_tx
@@ -640,6 +655,10 @@ async fn session_task<A: SessionAgent>(
                             }
                         }
                     };
+                    drop(run_fut);
+                    if interrupted {
+                        agent.cancel();
+                    }
 
                     // Drain any remaining events
                     while let Ok(event) = agent_event_rx.try_recv() {
@@ -659,21 +678,18 @@ async fn session_task<A: SessionAgent>(
 
                 // Update cached summary
                 let snap = agent.snapshot();
-                summary_tx.send_replace(SessionSummaryCache {
+                control.summary_tx.send_replace(SessionSummaryCache {
                     updated_at: snap.updated_at,
                     message_count: snap.message_count,
                     total_tokens: snap.total_tokens,
                 });
 
-                state_tx.send_replace(SessionState::Idle);
+                control.state_tx.send_replace(SessionState::Idle);
                 // Release the turn lock AFTER setting state to Idle and
                 // updating the summary, so the next caller sees consistent state.
-                turn_lock.store(false, Ordering::Release);
+                control.turn_lock.store(false, Ordering::Release);
+                control.interrupt_requested.store(false, Ordering::Release);
                 let _ = result_tx.send(result);
-            }
-            SessionCommand::Interrupt { ack_tx } => {
-                agent.cancel();
-                let _ = ack_tx.send(Ok(()));
             }
             SessionCommand::ReadSnapshot { reply_tx } => {
                 let _ = reply_tx.send(agent.snapshot());
@@ -682,7 +698,7 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(agent.session_clone());
             }
             SessionCommand::Shutdown => {
-                state_tx.send_replace(SessionState::ShuttingDown);
+                control.state_tx.send_replace(SessionState::ShuttingDown);
                 break;
             }
         }

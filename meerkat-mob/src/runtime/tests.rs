@@ -29,6 +29,7 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolResult, Usage};
+use meerkat_core::{EventInjector, EventInjectorError, InteractionSubscription, PlainEventSource, SubscribableInjector};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde_json::value::RawValue;
@@ -264,6 +265,7 @@ struct CreateSessionRecord {
 /// A mock session service that creates sessions with mock comms runtimes.
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
+    host_mode_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     session_counter: AtomicU64,
     /// Records (session_id, prompt) for each create_session call.
@@ -284,6 +286,11 @@ struct MockSessionService {
     /// Sent intents for sessions that were archived and removed.
     archived_sent_intents: RwLock<HashMap<SessionId, Vec<String>>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
+    start_turn_calls: AtomicU64,
+    host_mode_start_turn_calls: AtomicU64,
+    host_mode_prompts: RwLock<Vec<(SessionId, String)>>,
+    interrupt_calls: AtomicU64,
+    inject_calls: Arc<AtomicU64>,
     start_turn_delay_ms: AtomicU64,
     flow_turn_delay_ms: AtomicU64,
     flow_turn_never_terminal: std::sync::atomic::AtomicBool,
@@ -296,6 +303,7 @@ impl MockSessionService {
     fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            host_mode_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             session_counter: AtomicU64::new(0),
             prompts: RwLock::new(Vec::new()),
@@ -308,6 +316,11 @@ impl MockSessionService {
             archive_fail_comms_names: RwLock::new(HashSet::new()),
             archived_sent_intents: RwLock::new(HashMap::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
+            start_turn_calls: AtomicU64::new(0),
+            host_mode_start_turn_calls: AtomicU64::new(0),
+            host_mode_prompts: RwLock::new(Vec::new()),
+            interrupt_calls: AtomicU64::new(0),
+            inject_calls: Arc::new(AtomicU64::new(0)),
             start_turn_delay_ms: AtomicU64::new(0),
             flow_turn_delay_ms: AtomicU64::new(0),
             flow_turn_never_terminal: std::sync::atomic::AtomicBool::new(false),
@@ -411,6 +424,26 @@ impl MockSessionService {
     fn set_fail_start_turn(&self, enabled: bool) {
         self.fail_start_turn
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn start_turn_call_count(&self) -> u64 {
+        self.start_turn_calls.load(Ordering::Relaxed)
+    }
+
+    fn host_mode_start_turn_call_count(&self) -> u64 {
+        self.host_mode_start_turn_calls.load(Ordering::Relaxed)
+    }
+
+    async fn host_mode_prompts(&self) -> Vec<(SessionId, String)> {
+        self.host_mode_prompts.read().await.clone()
+    }
+
+    fn interrupt_call_count(&self) -> u64 {
+        self.interrupt_calls.load(Ordering::Relaxed)
+    }
+
+    fn inject_call_count(&self) -> u64 {
+        self.inject_calls.load(Ordering::Relaxed)
     }
 
     fn set_start_turn_delay_ms(&self, delay_ms: u64) {
@@ -526,6 +559,10 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .insert(session_id.clone(), comms);
+        self.host_mode_notifiers
+            .write()
+            .await
+            .insert(session_id.clone(), Arc::new(tokio::sync::Notify::new()));
         self.session_comms_names
             .write()
             .await
@@ -589,6 +626,15 @@ impl SessionService for MockSessionService {
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
+        self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
+        if req.host_mode {
+            self.host_mode_start_turn_calls
+                .fetch_add(1, Ordering::Relaxed);
+            self.host_mode_prompts
+                .write()
+                .await
+                .push((id.clone(), req.prompt.clone()));
+        }
         let start_turn_delay = self.start_turn_delay_ms.load(Ordering::Relaxed);
         if start_turn_delay > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(start_turn_delay)).await;
@@ -604,6 +650,19 @@ impl SessionService for MockSessionService {
         let sessions = self.sessions.read().await;
         if !sessions.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+
+        if req.host_mode {
+            let notifier = self
+                .host_mode_notifiers
+                .read()
+                .await
+                .get(id)
+                .cloned()
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            notifier.notified().await;
+            return Ok(mock_run_result(id.clone(), "Host loop interrupted".to_string()));
         }
 
         if let Some(event_tx) = req.event_tx {
@@ -650,9 +709,14 @@ impl SessionService for MockSessionService {
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.interrupt_calls.fetch_add(1, Ordering::Relaxed);
         let sessions = self.sessions.read().await;
         if !sessions.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+        if let Some(notifier) = self.host_mode_notifiers.read().await.get(id).cloned() {
+            notifier.notify_waiters();
         }
         Ok(())
     }
@@ -703,6 +767,9 @@ impl SessionService for MockSessionService {
         if let Some(runtime) = sessions.remove(id) {
             self.session_comms_names.write().await.remove(id);
             self.external_tools_by_session.write().await.remove(id);
+            if let Some(notifier) = self.host_mode_notifiers.write().await.remove(id) {
+                notifier.notify_waiters();
+            }
             let intents = runtime.sent_intents().await;
             self.archived_sent_intents
                 .write()
@@ -710,6 +777,63 @@ impl SessionService for MockSessionService {
                 .insert(id.clone(), intents);
         }
         Ok(())
+    }
+}
+
+struct CountingInjector {
+    calls: Arc<AtomicU64>,
+    delay_ms: u64,
+    never_terminal: bool,
+    fail: bool,
+    completed_result: String,
+}
+
+impl EventInjector for CountingInjector {
+    fn inject(&self, _body: String, _source: PlainEventSource) -> Result<(), EventInjectorError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+impl SubscribableInjector for CountingInjector {
+    fn inject_with_subscription(
+        &self,
+        body: String,
+        source: PlainEventSource,
+    ) -> Result<InteractionSubscription, EventInjectorError> {
+        self.inject(body, source)?;
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let interaction_id = InteractionId(uuid::Uuid::new_v4());
+        let delay_ms = self.delay_ms;
+        let never_terminal = self.never_terminal;
+        let fail = self.fail;
+        let completed_result = self.completed_result.clone();
+        let interaction_id_for_task = interaction_id.clone();
+        tokio::spawn(async move {
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            if never_terminal {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                return;
+            }
+            let event = if fail {
+                AgentEvent::InteractionFailed {
+                    interaction_id: interaction_id_for_task,
+                    error: "mock flow turn failure".to_string(),
+                }
+            } else {
+                AgentEvent::InteractionComplete {
+                    interaction_id: interaction_id_for_task,
+                    result: completed_result,
+                }
+            };
+            let _ = tx.send(event).await;
+        });
+        Ok(InteractionSubscription {
+            id: interaction_id,
+            events: rx,
+        })
     }
 }
 
@@ -728,6 +852,44 @@ impl MobSessionService for MockSessionService {
         sessions
             .get(session_id)
             .map(|comms| Arc::clone(comms) as Arc<dyn CoreCommsRuntime>)
+    }
+
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn SubscribableInjector>> {
+        if !self.sessions.read().await.contains_key(session_id) {
+            return None;
+        }
+        let delay_ms = self.flow_turn_delay_ms.load(Ordering::Relaxed);
+        let never_terminal = self
+            .flow_turn_never_terminal
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let fail = self
+            .flow_turn_fail
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || self.flow_turn_fail_sessions.read().await.contains(session_id);
+        let completed_result = self.flow_turn_completed_result.read().await.clone();
+        Some(Arc::new(CountingInjector {
+            calls: self.inject_calls.clone(),
+            delay_ms,
+            never_terminal,
+            fail,
+            completed_result,
+        }))
+    }
+
+    async fn subscribe_session_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
+        if !self.sessions.read().await.contains_key(session_id) {
+            return Err(meerkat_core::StreamError::NotFound(format!(
+                "session {}",
+                session_id
+            )));
+        }
+        Ok(Box::pin(futures::stream::empty::<AgentEvent>()))
     }
 
     fn supports_persistent_sessions(&self) -> bool {
@@ -1005,6 +1167,7 @@ fn sample_definition() -> MobDefinition {
             peer_description: "The lead".into(),
             external_addressable: true,
             backend: None,
+            runtime_mode: crate::MobRuntimeMode::AutonomousHost,
         },
     );
     profiles.insert(
@@ -1019,6 +1182,7 @@ fn sample_definition() -> MobDefinition {
             peer_description: "A worker".into(),
             external_addressable: false,
             backend: None,
+            runtime_mode: crate::MobRuntimeMode::AutonomousHost,
         },
     );
 
@@ -1958,7 +2122,13 @@ message = "x"
 async fn test_mob_builder_accepts_persistent_session_service() {
     let handle = create_test_mob_with_persistent_service(sample_definition()).await;
     handle
-        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .spawn_member_ref_with_runtime_mode_and_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-1"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
         .await
         .expect("spawn with persistent session service");
     assert!(
@@ -2686,7 +2856,13 @@ async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
         .await
         .expect("create mob");
     handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .spawn_member_ref_with_runtime_mode_and_backend(
+            ProfileName::from("lead"),
+            MeerkatId::from("lead-1"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
         .await
         .expect("spawn orchestrator");
     handle.stop().await.expect("stop");
@@ -5219,6 +5395,235 @@ async fn test_internal_turn_unknown_meerkat_fails() {
     assert!(matches!(result, Err(MobError::MeerkatNotFound(_))));
 }
 
+// -----------------------------------------------------------------------
+// Phase 0 CHOKE-001 red test:
+// autonomous dispatch must route via injector (currently not wired yet).
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_external_turn_autonomous_mode_uses_injector_dispatch() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn_member_ref_with_runtime_mode_and_backend(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-autonomous"),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead");
+
+    handle
+        .external_turn(MeerkatId::from("l-autonomous"), "inject me".into())
+        .await
+        .expect("external turn should execute");
+
+    assert_eq!(
+        service.inject_call_count(),
+        1,
+        "autonomous dispatch must use event injector"
+    );
+    assert_eq!(
+        service.start_turn_call_count(),
+        service.host_mode_start_turn_call_count(),
+        "autonomous dispatch must not issue additional non-host start_turn calls"
+    );
+}
+
+#[tokio::test]
+async fn test_external_turn_turn_driven_mode_uses_start_turn_dispatch() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn_member_ref_with_runtime_mode_and_backend(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-turn-driven"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead");
+    let baseline_start_turn_calls = service.start_turn_call_count();
+
+    handle
+        .external_turn(MeerkatId::from("l-turn-driven"), "turn-driven message".into())
+        .await
+        .expect("external turn should execute");
+
+    assert_eq!(
+        service.inject_call_count(),
+        0,
+        "turn-driven external dispatch should not use injector"
+    );
+    assert_eq!(
+        service.start_turn_call_count(),
+        baseline_start_turn_calls + 1,
+        "turn-driven external dispatch should issue start_turn"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_start_turn() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_dispatch_mode(DispatchMode::OneToOne)).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let baseline_non_host_start_turn = service
+        .start_turn_call_count()
+        .saturating_sub(service.host_mode_start_turn_call_count());
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let non_host_start_turn = service
+        .start_turn_call_count()
+        .saturating_sub(service.host_mode_start_turn_call_count());
+    assert_eq!(
+        non_host_start_turn,
+        baseline_non_host_start_turn,
+        "autonomous flow dispatch should avoid non-host start_turn calls"
+    );
+    assert!(
+        service.inject_call_count() > 0,
+        "autonomous flow dispatch should use injector routing"
+    );
+}
+
+#[tokio::test]
+async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_turn_for_turn_driven() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-auto"), None)
+        .await
+        .expect("spawn autonomous lead");
+    handle
+        .spawn_member_ref_with_runtime_mode_and_backend(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-turn"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead");
+    let baseline_start_turn = service.start_turn_call_count();
+
+    handle
+        .internal_turn(MeerkatId::from("l-auto"), "internal autonomous".into())
+        .await
+        .expect("autonomous internal turn");
+    handle
+        .internal_turn(MeerkatId::from("l-turn"), "internal turn-driven".into())
+        .await
+        .expect("turn-driven internal turn");
+
+    assert_eq!(
+        service.inject_call_count(),
+        1,
+        "autonomous internal turn should route via injector"
+    );
+    assert_eq!(
+        service.start_turn_call_count(),
+        baseline_start_turn + 1,
+        "turn-driven internal turn should route via start_turn"
+    );
+}
+
+#[tokio::test]
+async fn test_external_backend_turn_driven_mode_uses_start_turn_dispatch() {
+    let (handle, service) = create_test_mob(sample_definition_with_external_backend()).await;
+    handle
+        .spawn_member_ref_with_runtime_mode_and_backend(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-ext-turn"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            Some(MobBackendKind::External),
+        )
+        .await
+        .expect("spawn external turn-driven lead");
+    let baseline_start_turn = service.start_turn_call_count();
+
+    handle
+        .external_turn(MeerkatId::from("l-ext-turn"), "external turn-driven".into())
+        .await
+        .expect("external turn should execute");
+
+    assert_eq!(
+        service.inject_call_count(),
+        0,
+        "turn-driven external backend dispatch should not use injector"
+    );
+    assert_eq!(
+        service.start_turn_call_count(),
+        baseline_start_turn + 1,
+        "turn-driven external backend dispatch should issue start_turn"
+    );
+}
+
+#[tokio::test]
+async fn test_external_backend_autonomous_flow_dispatch_uses_injector_routing() {
+    let mut definition = sample_definition_with_dispatch_mode(DispatchMode::OneToOne);
+    definition.backend.external = Some(crate::definition::ExternalBackendConfig {
+        address_base: "https://backend.example.invalid/mesh".to_string(),
+    });
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn_member_ref_with_runtime_mode_and_backend(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-ext-auto"),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            Some(MobBackendKind::External),
+        )
+        .await
+        .expect("spawn external autonomous lead");
+    handle
+        .spawn_member_ref_with_runtime_mode_and_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext-auto"),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            Some(MobBackendKind::External),
+        )
+        .await
+        .expect("spawn external autonomous worker");
+    let baseline_non_host_start_turn = service
+        .start_turn_call_count()
+        .saturating_sub(service.host_mode_start_turn_call_count());
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let non_host_start_turn = service
+        .start_turn_call_count()
+        .saturating_sub(service.host_mode_start_turn_call_count());
+    assert_eq!(
+        non_host_start_turn,
+        baseline_non_host_start_turn,
+        "external autonomous flow dispatch should avoid non-host start_turn calls"
+    );
+    assert!(
+        service.inject_call_count() > 0,
+        "external autonomous flow dispatch should use injector routing"
+    );
+}
+
 #[tokio::test]
 async fn test_external_backend_lifecycle_and_turn_policy() {
     let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
@@ -6841,7 +7246,13 @@ async fn test_supervisor_escalation_forces_reset_via_retire_path() {
 
 #[tokio::test]
 async fn test_supervisor_escalation_times_out_when_turn_hangs() {
-    let (handle, service) = create_test_mob(sample_definition_with_supervisor_threshold(1)).await;
+    let mut definition = sample_definition_with_supervisor_threshold(1);
+    let lead = definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile");
+    lead.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob(definition).await;
     handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
@@ -7062,6 +7473,22 @@ async fn test_spawn_with_custom_initial_message() {
         prompts[0].1, custom_msg,
         "spawn should use the custom initial_message, not the default"
     );
+
+    let host_mode_prompts = service.host_mode_prompts().await;
+    assert_eq!(
+        host_mode_prompts.len(),
+        1,
+        "autonomous spawn must start exactly one host loop"
+    );
+    assert_eq!(
+        host_mode_prompts[0].1, custom_msg,
+        "first autonomous host-loop prompt must use initial_message when provided"
+    );
+    assert_eq!(
+        service.host_mode_start_turn_call_count(),
+        1,
+        "spawn must start exactly one autonomous host loop"
+    );
 }
 
 #[tokio::test]
@@ -7090,6 +7517,229 @@ async fn test_spawn_without_initial_message_uses_default() {
         "default message should contain mob id, got: '{}'",
         prompts[0].1
     );
+
+    let host_mode_prompts = service.host_mode_prompts().await;
+    assert_eq!(
+        host_mode_prompts.len(),
+        1,
+        "autonomous spawn must start exactly one host loop"
+    );
+    assert!(
+        host_mode_prompts[0].1.contains("You have been spawned as 'w-1'"),
+        "host-loop fallback prompt should contain meerkat id, got: '{}'",
+        host_mode_prompts[0].1
+    );
+    assert!(
+        host_mode_prompts[0].1.contains("role: worker"),
+        "host-loop fallback prompt should contain role, got: '{}'",
+        host_mode_prompts[0].1
+    );
+    assert!(
+        host_mode_prompts[0].1.contains("mob 'test-mob'"),
+        "host-loop fallback prompt should contain mob id, got: '{}'",
+        host_mode_prompts[0].1
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_autonomous_surfaces_immediate_host_loop_start_failure() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_fail_start_turn(true);
+
+    let result = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-fail"), None)
+        .await;
+
+    assert!(
+        matches!(result, Err(MobError::SessionError(SessionError::Store(_)))),
+        "autonomous spawn must surface immediate host-loop start_turn failures"
+    );
+    assert!(
+        handle.get_meerkat(&MeerkatId::from("w-fail")).await.is_none(),
+        "failed autonomous spawn must roll back projected roster entry"
+    );
+}
+
+#[tokio::test]
+async fn test_retire_interrupts_autonomous_host_loop() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    assert_eq!(
+        service.host_mode_start_turn_call_count(),
+        1,
+        "spawn should start autonomous host loop"
+    );
+
+    handle
+        .retire(MeerkatId::from("w-1"))
+        .await
+        .expect("retire worker");
+    assert_eq!(
+        service.interrupt_call_count(),
+        1,
+        "retire must terminate autonomous host loop deterministically"
+    );
+}
+
+#[tokio::test]
+async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn autonomous lead");
+    handle
+        .spawn_member_ref_with_runtime_mode_and_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-td"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    assert_eq!(
+        service.host_mode_start_turn_call_count(),
+        1,
+        "only autonomous members should start host loops"
+    );
+
+    handle.stop().await.expect("stop");
+    assert_eq!(
+        service.interrupt_call_count(),
+        1,
+        "stop should terminate all active autonomous host loops"
+    );
+
+    handle.resume().await.expect("resume");
+    assert_eq!(
+        service.host_mode_start_turn_call_count(),
+        2,
+        "resume should restart autonomous host loops from projected runtime_mode"
+    );
+}
+
+#[tokio::test]
+async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    assert_eq!(
+        service.host_mode_start_turn_call_count(),
+        2,
+        "both autonomous members should start host loops"
+    );
+
+    handle.destroy().await.expect("destroy");
+    assert_eq!(
+        service.interrupt_call_count(),
+        2,
+        "destroy must terminate all autonomous host loops deterministically"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_from_events_restarts_autonomous_host_loops_from_runtime_mode() {
+    let storage = MobStorage::in_memory();
+    let storage_for_resume = MobStorage {
+        events: storage.events.clone(),
+        runs: storage.runs.clone(),
+        specs: storage.specs.clone(),
+    };
+    let service = Arc::new(MockSessionService::new());
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn_member_ref_with_runtime_mode_and_backend(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-td"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop original runtime timed out")
+        .expect("stop original runtime");
+
+    let resumed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        MobBuilder::for_resume(storage_for_resume)
+            .with_session_service(service.clone())
+            .notify_orchestrator_on_resume(false)
+            .resume(),
+    )
+    .await
+    .expect("resume mob timed out")
+    .expect("resume mob");
+
+    assert_eq!(
+        resumed.status(),
+        MobState::Running,
+        "resumed runtime should be Running"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(
+        service.host_mode_start_turn_call_count(),
+        2,
+        "resume should restart only autonomous host loops from projected runtime_mode"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_startup_host_loop_failure_enters_stopped_state() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn autonomous lead");
+    handle.stop().await.expect("stop");
+    service.set_fail_start_turn(true);
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("resume handle should still be constructed");
+
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(
+        resumed.status(),
+        MobState::Stopped,
+        "startup host-loop failure should force runtime into Stopped state"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -7105,6 +7755,7 @@ async fn test_spawn_without_initial_message_uses_default() {
 /// actual PeerRequest delivery between wired meerkats.
 struct RealCommsSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<meerkat_comms::CommsRuntime>>>,
+    host_mode_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     session_counter: AtomicU64,
 }
@@ -7113,6 +7764,7 @@ impl RealCommsSessionService {
     fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            host_mode_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             session_counter: AtomicU64::new(0),
         }
@@ -7137,6 +7789,10 @@ impl SessionService for RealCommsSessionService {
             .write()
             .await
             .insert(session_id.clone(), Arc::new(comms));
+        self.host_mode_notifiers
+            .write()
+            .await
+            .insert(session_id.clone(), Arc::new(tokio::sync::Notify::new()));
         self.session_comms_names
             .write()
             .await
@@ -7148,11 +7804,23 @@ impl SessionService for RealCommsSessionService {
     async fn start_turn(
         &self,
         id: &SessionId,
-        _req: StartTurnRequest,
+        req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
         let sessions = self.sessions.read().await;
         if !sessions.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+        if req.host_mode {
+            let notifier = self
+                .host_mode_notifiers
+                .read()
+                .await
+                .get(id)
+                .cloned()
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            notifier.notified().await;
+            return Ok(mock_run_result(id.clone(), "Host loop interrupted".to_string()));
         }
         Ok(mock_run_result(id.clone(), "Turn completed".to_string()))
     }
@@ -7161,6 +7829,10 @@ impl SessionService for RealCommsSessionService {
         let sessions = self.sessions.read().await;
         if !sessions.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+        if let Some(notifier) = self.host_mode_notifiers.read().await.get(id).cloned() {
+            notifier.notify_waiters();
         }
         Ok(())
     }
@@ -7204,6 +7876,9 @@ impl SessionService for RealCommsSessionService {
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
         let mut sessions = self.sessions.write().await;
         sessions.remove(id);
+        if let Some(notifier) = self.host_mode_notifiers.write().await.remove(id) {
+            notifier.notify_waiters();
+        }
         self.session_comms_names.write().await.remove(id);
         Ok(())
     }
@@ -7252,6 +7927,36 @@ async fn create_test_mob_with_real_comms(
         .expect("create mob");
 
     (handle, service)
+}
+
+#[tokio::test]
+async fn test_mob_session_service_exposes_event_injector_for_session() {
+    let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
+    let sid = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    let injector = service.event_injector(&sid).await;
+    assert!(
+        injector.is_some(),
+        "expected event injector for live comms-backed session"
+    );
+}
+
+#[tokio::test]
+async fn test_mob_session_service_subscribe_session_events_available() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    let stream_result = service.subscribe_session_events(&sid).await;
+    assert!(
+        stream_result.is_ok(),
+        "expected session-wide event stream contract from mob session service"
+    );
 }
 
 fn has_request_intent_for_peer(

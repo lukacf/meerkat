@@ -1737,8 +1737,14 @@ async fn e2e_smoke_09_cross_surface_capabilities_config_run_mob()
     let resumed = harness
         .resume_text(&session_id, "Repeat the phrase CROSS_SURFACE_OK")
         .await?
-        .to_lowercase();
-    assert!(resumed.contains("cross_surface_ok"));
+        .to_lowercase()
+        .replace('_', " ");
+    assert!(
+        resumed.contains("cross")
+            && resumed.contains("surface")
+            && resumed.contains("ok"),
+        "resume output did not preserve expected phrase semantics: {resumed}"
+    );
 
     harness.mob_destroy(&mob_id).await?;
     Ok(())

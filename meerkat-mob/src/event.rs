@@ -5,6 +5,7 @@
 
 use crate::definition::MobDefinition;
 use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
+use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
@@ -171,6 +172,8 @@ pub enum MobEventKindCompat {
         meerkat_id: MeerkatId,
         role: ProfileName,
         #[serde(default)]
+        runtime_mode: MobRuntimeMode,
+        #[serde(default)]
         session_id: Option<SessionId>,
         #[serde(default)]
         member_ref: Option<MemberRef>,
@@ -317,6 +320,7 @@ impl TryFrom<MobEventCompat> for MobEvent {
             MobEventKindCompat::MeerkatSpawned {
                 meerkat_id,
                 role,
+                runtime_mode,
                 session_id,
                 member_ref,
             } => MobEventKind::MeerkatSpawned {
@@ -328,6 +332,7 @@ impl TryFrom<MobEventCompat> for MobEvent {
                 )?,
                 meerkat_id,
                 role,
+                runtime_mode,
             },
             MobEventKindCompat::MeerkatRetired {
                 meerkat_id,
@@ -480,6 +485,9 @@ pub enum MobEventKind {
         meerkat_id: MeerkatId,
         /// Profile name used to spawn.
         role: ProfileName,
+        /// Runtime mode for this spawned member.
+        #[serde(default)]
+        runtime_mode: MobRuntimeMode,
         /// Backend-neutral member identity created for this meerkat.
         member_ref: MemberRef,
     },
@@ -616,6 +624,7 @@ mod tests {
                         peer_description: "A worker".to_string(),
                         external_addressable: false,
                         backend: None,
+                        runtime_mode: MobRuntimeMode::AutonomousHost,
                     },
                 );
                 m
@@ -654,8 +663,31 @@ mod tests {
         roundtrip(&MobEventKind::MeerkatSpawned {
             meerkat_id: MeerkatId::from("agent-1"),
             role: ProfileName::from("worker"),
+            runtime_mode: MobRuntimeMode::AutonomousHost,
             member_ref: MemberRef::from_session_id(SessionId::from_uuid(Uuid::nil())),
         });
+    }
+
+    #[test]
+    fn test_legacy_meerkat_spawned_defaults_runtime_mode() {
+        let event: MobEvent = serde_json::from_value(json!({
+            "cursor": 1,
+            "timestamp": "2026-02-19T00:00:00Z",
+            "mob_id": "test-mob",
+            "kind": {
+                "type": "meerkat_spawned",
+                "meerkat_id": "a",
+                "role": "worker",
+                "session_id": SessionId::from_uuid(Uuid::nil()),
+            },
+        }))
+        .expect("legacy event should parse");
+        match event.kind {
+            MobEventKind::MeerkatSpawned { runtime_mode, .. } => {
+                assert_eq!(runtime_mode, MobRuntimeMode::AutonomousHost);
+            }
+            other => panic!("expected MeerkatSpawned, got {other:?}"),
+        }
     }
 
     #[test]

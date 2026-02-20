@@ -322,11 +322,23 @@ impl MobActor {
         // Ensure stop semantics are strong: do not report completion while the
         // session still appears active, otherwise immediate resume can race into
         // SessionError::Busy.
+        let mut still_active = false;
         for _ in 0..40 {
             match self.provisioner.is_member_active(member_ref).await? {
                 Some(true) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
-                _ => break,
+                _ => {
+                    still_active = false;
+                    break;
+                }
             }
+            still_active = true;
+        }
+        if still_active {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                meerkat_id = %meerkat_id,
+                "autonomous host loop stop polling exhausted before member became idle"
+            );
         }
         Ok(())
     }

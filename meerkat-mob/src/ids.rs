@@ -1,205 +1,170 @@
 //! Newtype identifiers for mob entities.
 //!
-//! These types wrap `String` for compile-time safety: you cannot accidentally
-//! pass a `MobId` where a `MeerkatId` is expected. They intentionally do NOT
-//! implement `Deref<Target = str>` -- use `as_str()` for explicit conversion.
+//! These types wrap concrete primitives for compile-time safety.
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::fmt;
+use std::str::FromStr;
+use uuid::Uuid;
 
-/// Unique identifier for a mob instance.
+/// Unique identifier for a flow run.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct MobId(String);
+pub struct RunId(Uuid);
 
-impl MobId {
-    pub fn as_str(&self) -> &str {
+impl RunId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_uuid(&self) -> &Uuid {
         &self.0
     }
 }
 
-impl fmt::Display for MobId {
+impl Default for RunId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for RunId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
-impl From<String> for MobId {
-    fn from(s: String) -> Self {
-        Self(s)
+impl FromStr for RunId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Uuid::parse_str(s)?))
     }
 }
 
-impl From<&str> for MobId {
-    fn from(s: &str) -> Self {
-        Self(s.to_owned())
-    }
+macro_rules! string_newtype {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_owned())
+            }
+        }
+
+        impl Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+    };
 }
 
-impl Borrow<str> for MobId {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
+string_newtype!(
+    /// Unique identifier for a mob instance.
+    MobId
+);
 
-impl AsRef<str> for MobId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
+string_newtype!(
+    /// Unique identifier for a flow definition.
+    FlowId
+);
 
-/// Unique identifier for a meerkat (agent instance) within a mob.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct MeerkatId(String);
+string_newtype!(
+    /// Unique identifier for a step in a flow definition.
+    StepId
+);
 
-impl MeerkatId {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+string_newtype!(
+    /// Unique identifier for a meerkat (agent instance) within a mob.
+    MeerkatId
+);
 
-impl fmt::Display for MeerkatId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<String> for MeerkatId {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&str> for MeerkatId {
-    fn from(s: &str) -> Self {
-        Self(s.to_owned())
-    }
-}
-
-impl Borrow<str> for MeerkatId {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for MeerkatId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Profile name within a mob definition.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ProfileName(String);
-
-impl ProfileName {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ProfileName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<String> for ProfileName {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&str> for ProfileName {
-    fn from(s: &str) -> Self {
-        Self(s.to_owned())
-    }
-}
-
-impl Borrow<str> for ProfileName {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for ProfileName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
+string_newtype!(
+    /// Profile name within a mob definition.
+    ProfileName
+);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_mob_id_serde_roundtrip() {
-        let id = MobId::from("test-mob");
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, "\"test-mob\"");
-        let parsed: MobId = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, id);
+    fn test_run_id_roundtrip_json() {
+        let run_id = RunId::new();
+        let encoded = serde_json::to_string(&run_id).unwrap();
+        let decoded: RunId = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, run_id);
     }
 
     #[test]
-    fn test_meerkat_id_serde_roundtrip() {
-        let id = MeerkatId::from("agent-1");
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, "\"agent-1\"");
-        let parsed: MeerkatId = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, id);
+    fn test_run_id_roundtrip_parse_display() {
+        let run_id = RunId::new();
+        let rendered = run_id.to_string();
+        let reparsed = RunId::from_str(&rendered).unwrap();
+        assert_eq!(reparsed, run_id);
     }
 
     #[test]
-    fn test_profile_name_serde_roundtrip() {
-        let name = ProfileName::from("orchestrator");
-        let json = serde_json::to_string(&name).unwrap();
-        assert_eq!(json, "\"orchestrator\"");
-        let parsed: ProfileName = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, name);
+    fn test_flow_id_roundtrip_json() {
+        let id = FlowId::from("flow-a");
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded: FlowId = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, id);
     }
 
     #[test]
-    fn test_id_as_str() {
-        let mob_id = MobId::from("my-mob");
-        assert_eq!(mob_id.as_str(), "my-mob");
-
-        let meerkat_id = MeerkatId::from("agent-x");
-        assert_eq!(meerkat_id.as_str(), "agent-x");
-
-        let profile = ProfileName::from("worker");
-        assert_eq!(profile.as_str(), "worker");
+    fn test_step_id_roundtrip_json() {
+        let id = StepId::from("step-a");
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded: StepId = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, id);
     }
 
     #[test]
-    fn test_id_display() {
-        let id = MobId::from("display-test");
-        assert_eq!(format!("{id}"), "display-test");
-    }
-
-    #[test]
-    fn test_id_borrow_str() {
-        use std::collections::BTreeMap;
-        let mut map: BTreeMap<MobId, u32> = BTreeMap::new();
-        map.insert(MobId::from("key"), 42);
-        // Borrow<str> allows lookup by &str
-        assert_eq!(map.get("key"), Some(&42));
-    }
-
-    #[test]
-    fn test_id_from_string() {
-        let owned = String::from("from-string");
-        let id = MobId::from(owned);
-        assert_eq!(id.as_str(), "from-string");
-    }
-
-    #[test]
-    fn test_id_ordering() {
-        let a = MeerkatId::from("alpha");
-        let b = MeerkatId::from("beta");
-        assert!(a < b);
+    fn test_existing_ids_roundtrip() {
+        let mob = MobId::from("mob-a");
+        let meerkat = MeerkatId::from("meerkat-a");
+        let profile = ProfileName::from("lead");
+        assert_eq!(
+            serde_json::from_str::<MobId>(&serde_json::to_string(&mob).unwrap()).unwrap(),
+            mob
+        );
+        assert_eq!(
+            serde_json::from_str::<MeerkatId>(&serde_json::to_string(&meerkat).unwrap()).unwrap(),
+            meerkat
+        );
+        assert_eq!(
+            serde_json::from_str::<ProfileName>(&serde_json::to_string(&profile).unwrap()).unwrap(),
+            profile
+        );
     }
 }

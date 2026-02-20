@@ -38,6 +38,11 @@ tracing = { workspace = true }
 # Utilities
 uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
+redb = { workspace = true }
+indexmap = { workspace = true }
+jsonschema = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

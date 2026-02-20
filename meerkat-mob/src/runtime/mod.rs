@@ -9,10 +9,11 @@ use crate::build;
 use crate::definition::MobDefinition;
 use crate::error::MobError;
 use crate::event::{MemberRef, MobEventKind, NewMobEvent};
-use crate::ids::{MeerkatId, MobId, ProfileName};
+use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId};
+use crate::run::{FlowRunConfig, MobRun, MobRunStatus};
 use crate::roster::{Roster, RosterEntry};
 use crate::storage::MobStorage;
-use crate::store::MobEventStore;
+use crate::store::{MobEventStore, MobRunStore};
 use crate::tasks::{MobTask, TaskBoard, TaskStatus};
 use meerkat_client::LlmClient;
 use meerkat_core::ToolGatewayBuilder;
@@ -30,18 +31,27 @@ use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, mpsc, oneshot};
 
 mod actor;
+mod actor_turn_executor;
 mod builder;
+pub mod conditions;
+mod events;
+mod flow;
 mod handle;
 mod provisioner;
 mod session_service;
 mod state;
+mod supervisor;
 mod tools;
+pub mod topology;
+pub mod turn_executor;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
 
 use actor::MobActor;
+use actor_turn_executor::ActorFlowTurnExecutor;
+use flow::FlowEngine;
 use provisioner::{MobProvisioner, MultiBackendProvisioner, ProvisionMemberRequest};
 use state::MobCommand;
 use tools::compose_external_tools_for_profile;
@@ -50,3 +60,4 @@ pub use builder::MobBuilder;
 pub use handle::{MobEventsView, MobHandle};
 pub use session_service::MobSessionService;
 pub use state::MobState;
+pub use turn_executor::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};

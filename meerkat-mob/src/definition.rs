@@ -7,6 +7,7 @@
 use crate::MobBackendKind;
 use crate::ids::{MobId, ProfileName};
 use crate::profile::Profile;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -85,6 +86,142 @@ pub struct BackendConfig {
     pub external: Option<ExternalBackendConfig>,
 }
 
+/// Runtime dispatch mode for a step.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchMode {
+    #[default]
+    FanOut,
+    OneToOne,
+    FanIn,
+}
+
+/// Aggregation policy for step outcomes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CollectionPolicy {
+    All,
+    Any,
+    Quorum { n: u8 },
+}
+
+impl Default for CollectionPolicy {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+/// Dependency interpretation for a step.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyMode {
+    #[default]
+    All,
+    Any,
+}
+
+/// Predicate expression for a step guard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ConditionExpr {
+    Eq {
+        path: String,
+        value: serde_json::Value,
+    },
+    In {
+        path: String,
+        values: Vec<serde_json::Value>,
+    },
+    Gt {
+        path: String,
+        value: serde_json::Value,
+    },
+    Lt {
+        path: String,
+        value: serde_json::Value,
+    },
+    And {
+        exprs: Vec<ConditionExpr>,
+    },
+    Or {
+        exprs: Vec<ConditionExpr>,
+    },
+    Not {
+        expr: Box<ConditionExpr>,
+    },
+}
+
+/// Per-step flow execution configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowStepSpec {
+    pub role: String,
+    pub message: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub dispatch_mode: DispatchMode,
+    #[serde(default)]
+    pub collection_policy: CollectionPolicy,
+    #[serde(default)]
+    pub condition: Option<ConditionExpr>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub expected_schema_ref: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub depends_on_mode: DependencyMode,
+}
+
+/// Flow definition for a named workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowSpec {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub steps: IndexMap<String, FlowStepSpec>,
+}
+
+/// Topology enforcement mode.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyMode {
+    #[default]
+    Advisory,
+    Strict,
+}
+
+/// Directed topology rule between roles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyRule {
+    pub from_role: String,
+    pub to_role: String,
+    pub allowed: bool,
+}
+
+/// Topology policy configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologySpec {
+    pub mode: PolicyMode,
+    pub rules: Vec<TopologyRule>,
+}
+
+/// Supervisor configuration for escalation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorSpec {
+    pub role: String,
+    pub escalation_threshold: u32,
+}
+
+/// Runtime guardrails for flow execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimitsSpec {
+    pub max_flow_duration_ms: Option<u64>,
+    pub max_step_retries: Option<u32>,
+    pub max_orphaned_turns: Option<u32>,
+}
+
 /// Complete mob definition.
 ///
 /// Describes profiles, MCP servers, wiring rules, and skill sources.
@@ -113,6 +250,18 @@ pub struct MobDefinition {
     /// Backend selection defaults and backend-specific config.
     #[serde(default)]
     pub backend: BackendConfig,
+    /// Named flow definitions.
+    #[serde(default)]
+    pub flows: BTreeMap<String, FlowSpec>,
+    /// Optional topology policy for role dispatch.
+    #[serde(default)]
+    pub topology: Option<TopologySpec>,
+    /// Optional supervisor escalation settings.
+    #[serde(default)]
+    pub supervisor: Option<SupervisorSpec>,
+    /// Optional runtime limits for flows.
+    #[serde(default)]
+    pub limits: Option<LimitsSpec>,
 }
 
 /// Helper struct for TOML deserialization of the `[mob]` section.
@@ -143,6 +292,14 @@ struct TomlDefinition {
     skills: BTreeMap<String, SkillSource>,
     #[serde(default)]
     backend: BackendConfig,
+    #[serde(default)]
+    flows: BTreeMap<String, FlowSpec>,
+    #[serde(default)]
+    topology: Option<TopologySpec>,
+    #[serde(default)]
+    supervisor: Option<SupervisorSpec>,
+    #[serde(default)]
+    limits: Option<LimitsSpec>,
 }
 
 impl MobDefinition {
@@ -163,6 +320,10 @@ impl MobDefinition {
             wiring: raw.wiring,
             skills: raw.skills,
             backend: raw.backend,
+            flows: raw.flows,
+            topology: raw.topology,
+            supervisor: raw.supervisor,
+            limits: raw.limits,
         })
     }
 }
@@ -318,6 +479,10 @@ path = "skills/reviewer.md"
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
             backend: BackendConfig::default(),
+            flows: BTreeMap::new(),
+            topology: None,
+            supervisor: None,
+            limits: None,
         };
         let json = serde_json::to_string_pretty(&def).unwrap();
         let parsed: MobDefinition = serde_json::from_str(&json).unwrap();
@@ -340,6 +505,10 @@ id = "minimal"
         assert!(def.skills.is_empty());
         assert_eq!(def.backend.default, MobBackendKind::Subagent);
         assert!(def.backend.external.is_none());
+        assert!(def.flows.is_empty());
+        assert!(def.topology.is_none());
+        assert!(def.supervisor.is_none());
+        assert!(def.limits.is_none());
     }
 
     #[test]
@@ -401,5 +570,115 @@ orchestrator = { profile = "lead" }
         let json = serde_json::to_string(&path).unwrap();
         let parsed: SkillSource = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, path);
+    }
+
+    #[test]
+    fn test_flow_spec_toml_parse_preserves_author_order() {
+        let toml = r#"
+[mob]
+id = "flow-mob"
+
+[profiles.lead]
+model = "claude-sonnet-4-5"
+
+[flows.demo]
+description = "demo"
+
+[flows.demo.steps.first]
+role = "lead"
+message = "first"
+
+[flows.demo.steps.second]
+role = "lead"
+message = "second"
+"#;
+        let definition = MobDefinition::from_toml(toml).unwrap();
+        let flow = definition.flows.get("demo").expect("flow exists");
+        let step_order = flow.steps.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(step_order, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn test_flow_and_topology_roundtrip() {
+        let toml = r#"
+[mob]
+id = "flow-mob"
+
+[profiles.lead]
+model = "claude-sonnet-4-5"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+
+[flows.pipeline]
+description = "pipeline flow"
+
+[flows.pipeline.steps.start]
+role = "lead"
+message = "go"
+dispatch_mode = "one_to_one"
+depends_on_mode = "all"
+
+[flows.pipeline.steps.branch_a]
+role = "worker"
+message = "a"
+depends_on = ["start"]
+branch = "choose"
+condition = { op = "eq", path = "params.choice", value = "a" }
+
+[flows.pipeline.steps.branch_b]
+role = "worker"
+message = "b"
+depends_on = ["start"]
+branch = "choose"
+condition = { op = "eq", path = "params.choice", value = "b" }
+
+[flows.pipeline.steps.join]
+role = "lead"
+message = "join"
+depends_on = ["branch_a", "branch_b"]
+depends_on_mode = "any"
+collection_policy = { type = "quorum", n = 1 }
+timeout_ms = 1000
+expected_schema_ref = "schemas/join.json"
+
+[topology]
+mode = "strict"
+rules = [{ from_role = "lead", to_role = "worker", allowed = true }]
+
+[supervisor]
+role = "lead"
+escalation_threshold = 2
+
+[limits]
+max_flow_duration_ms = 30000
+max_step_retries = 1
+max_orphaned_turns = 8
+"#;
+
+        let definition = MobDefinition::from_toml(toml).unwrap();
+        assert!(definition.flows.contains_key("pipeline"));
+        assert_eq!(
+            definition.topology.as_ref().map(|t| t.mode.clone()),
+            Some(PolicyMode::Strict)
+        );
+        assert_eq!(
+            definition
+                .supervisor
+                .as_ref()
+                .map(|s| s.escalation_threshold),
+            Some(2)
+        );
+        assert_eq!(
+            definition
+                .limits
+                .as_ref()
+                .and_then(|l| l.max_orphaned_turns),
+            Some(8)
+        );
+
+        let encoded = serde_json::to_string(&definition).unwrap();
+        let decoded: MobDefinition = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, definition);
     }
 }

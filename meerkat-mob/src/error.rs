@@ -2,6 +2,7 @@
 
 use crate::runtime::MobState;
 use crate::validate::Diagnostic;
+use crate::{MobId, RunId, StepId};
 
 /// Errors returned by mob operations.
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +34,58 @@ pub enum MobError {
     /// The mob definition failed validation.
     #[error("definition error: {}", format_diagnostics(.0))]
     DefinitionError(Vec<Diagnostic>),
+
+    /// Referenced flow does not exist.
+    #[error("flow not found: {0}")]
+    FlowNotFound(String),
+
+    /// Run failed with a reason.
+    #[error("flow failed for run {run_id}: {reason}")]
+    FlowFailed { run_id: RunId, reason: String },
+
+    /// Referenced run does not exist.
+    #[error("run not found: {0}")]
+    RunNotFound(RunId),
+
+    /// Run was canceled.
+    #[error("run canceled: {0}")]
+    RunCanceled(RunId),
+
+    /// Flow turn timed out while awaiting terminal transport outcome.
+    #[error("flow turn timed out")]
+    FlowTurnTimedOut,
+
+    /// Spec revision compare-and-swap failed.
+    #[error("spec revision conflict for mob {mob_id}: expected {expected:?}, actual {actual}")]
+    SpecRevisionConflict {
+        mob_id: MobId,
+        expected: Option<u64>,
+        actual: u64,
+    },
+
+    /// Schema validation failed for a step output.
+    #[error("schema validation failed for step {step_id}: {message}")]
+    SchemaValidation { step_id: StepId, message: String },
+
+    /// Not enough targets to satisfy dispatch/collection policy.
+    #[error("insufficient targets for step {step_id}: required {required}, available {available}")]
+    InsufficientTargets {
+        step_id: StepId,
+        required: u8,
+        available: usize,
+    },
+
+    /// Topology policy denied a dispatch edge.
+    #[error("topology violation: {from_role} -> {to_role}")]
+    TopologyViolation { from_role: String, to_role: String },
+
+    /// Supervisor escalation happened.
+    #[error("supervisor escalation: {0}")]
+    SupervisorEscalation(String),
+
+    /// Operation blocked by reset barrier.
+    #[error("reset barrier active")]
+    ResetBarrier,
 
     /// A storage operation failed.
     #[error("storage error: {0}")]
@@ -68,7 +121,7 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for MobError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validate::{Diagnostic, DiagnosticCode};
+    use crate::validate::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
 
     #[test]
     fn test_profile_not_found_display() {
@@ -94,11 +147,13 @@ mod tests {
                 code: DiagnosticCode::MissingSkillRef,
                 message: "skill 'foo' not found".to_string(),
                 location: Some("profiles.worker.skills[0]".to_string()),
+                severity: DiagnosticSeverity::Error,
             },
             Diagnostic {
                 code: DiagnosticCode::MissingMcpRef,
                 message: "mcp 'bar' not defined".to_string(),
                 location: Some("profiles.worker.tools.mcp[0]".to_string()),
+                severity: DiagnosticSeverity::Error,
             },
         ]);
         let msg = format!("{err}");
@@ -133,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_all_variants_exist() {
-        // Ensures all 11 variants are constructible
+        // Ensures all variants are constructible.
         let _variants: Vec<MobError> = vec![
             MobError::ProfileNotFound("p".to_string()),
             MobError::MeerkatNotFound("m".to_string()),
@@ -145,6 +200,34 @@ mod tests {
             },
             MobError::WiringError("w".to_string()),
             MobError::DefinitionError(vec![]),
+            MobError::FlowNotFound("f".to_string()),
+            MobError::FlowFailed {
+                run_id: RunId::new(),
+                reason: "r".to_string(),
+            },
+            MobError::RunNotFound(RunId::new()),
+            MobError::RunCanceled(RunId::new()),
+            MobError::FlowTurnTimedOut,
+            MobError::SpecRevisionConflict {
+                mob_id: MobId::from("mob"),
+                expected: Some(2),
+                actual: 3,
+            },
+            MobError::SchemaValidation {
+                step_id: StepId::from("step"),
+                message: "invalid".to_string(),
+            },
+            MobError::InsufficientTargets {
+                step_id: StepId::from("step"),
+                required: 2,
+                available: 1,
+            },
+            MobError::TopologyViolation {
+                from_role: "lead".to_string(),
+                to_role: "worker".to_string(),
+            },
+            MobError::SupervisorEscalation("boom".to_string()),
+            MobError::ResetBarrier,
             MobError::StorageError(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "e",

@@ -14,7 +14,12 @@ pub(super) struct MobActor {
     pub(super) task_board: Arc<RwLock<TaskBoard>>,
     pub(super) state: Arc<AtomicU8>,
     pub(super) events: Arc<dyn MobEventStore>,
+    pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) provisioner: Arc<dyn MobProvisioner>,
+    pub(super) flow_engine: FlowEngine,
+    pub(super) run_tasks: tokio::sync::Mutex<BTreeMap<RunId, tokio::task::JoinHandle<()>>>,
+    pub(super) run_cancel_tokens:
+        tokio::sync::Mutex<BTreeMap<RunId, (tokio_util::sync::CancellationToken, FlowId)>>,
     pub(super) mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
     pub(super) mcp_processes: Arc<tokio::sync::Mutex<BTreeMap<String, Child>>>,
     pub(super) command_tx: mpsc::Sender<MobCommand>,
@@ -100,7 +105,8 @@ impl MobActor {
     }
 
     fn retire_event_key(meerkat_id: &MeerkatId, member_ref: &MemberRef) -> String {
-        let member = serde_json::to_string(member_ref).unwrap_or_else(|_| format!("{member_ref:?}"));
+        let member =
+            serde_json::to_string(member_ref).unwrap_or_else(|_| format!("{member_ref:?}"));
         format!("{meerkat_id}|{member}")
     }
 
@@ -249,6 +255,38 @@ impl MobActor {
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
+                }
+                MobCommand::RunFlow {
+                    flow_id,
+                    activation_params,
+                    reply_tx,
+                } => {
+                    let result = match self.expect_state(&[MobState::Running], MobState::Running) {
+                        Ok(()) => self.handle_run_flow(flow_id, activation_params).await,
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::CancelFlow { run_id, reply_tx } => {
+                    let result = match self.expect_state(&[MobState::Running], MobState::Running) {
+                        Ok(()) => self.handle_cancel_flow(run_id).await,
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::FlowStatus { run_id, reply_tx } => {
+                    let result = self.run_store.get_run(&run_id).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::FlowFinished { run_id } => {
+                    self.run_tasks.lock().await.remove(&run_id);
+                    self.run_cancel_tokens.lock().await.remove(&run_id);
+                }
+                #[cfg(test)]
+                MobCommand::FlowTrackerCounts { reply_tx } => {
+                    let tasks = self.run_tasks.lock().await.len();
+                    let tokens = self.run_cancel_tokens.lock().await.len();
+                    let _ = reply_tx.send((tasks, tokens));
                 }
                 MobCommand::Stop { reply_tx } => {
                     let result = match self.expect_state(&[MobState::Running], MobState::Stopped) {
@@ -855,6 +893,7 @@ impl MobActor {
     }
 
     async fn handle_complete(&self) -> Result<(), MobError> {
+        self.cancel_all_flow_tasks().await;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is completing.", self.definition.id))
             .await;
         let ids = {
@@ -882,6 +921,7 @@ impl MobActor {
     }
 
     async fn handle_destroy(&self) -> Result<(), MobError> {
+        self.cancel_all_flow_tasks().await;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is destroying.", self.definition.id))
             .await;
         let ids = {
@@ -1038,6 +1078,226 @@ impl MobActor {
         };
         self.provisioner.start_turn(&entry.member_ref, req).await?;
         Ok(())
+    }
+
+    async fn handle_run_flow(
+        &self,
+        flow_id: FlowId,
+        activation_params: serde_json::Value,
+    ) -> Result<RunId, MobError> {
+        let run_id = RunId::new();
+        let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
+
+        let initial_run = MobRun {
+            run_id: run_id.clone(),
+            mob_id: self.definition.id.clone(),
+            flow_id: config.flow_id.clone(),
+            status: MobRunStatus::Pending,
+            activation_params: activation_params.clone(),
+            created_at: chrono::Utc::now(),
+            completed_at: None,
+            step_ledger: Vec::new(),
+            failure_ledger: Vec::new(),
+        };
+        self.run_store.create_run(initial_run).await?;
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.run_cancel_tokens.lock().await.insert(
+            run_id.clone(),
+            (cancel_token.clone(), config.flow_id.clone()),
+        );
+
+        let engine = self.flow_engine.clone();
+        let cleanup_tx = self.command_tx.clone();
+        let run_store = self.run_store.clone();
+        let events = self.events.clone();
+        let mob_id = self.definition.id.clone();
+        let flow_run_id = run_id.clone();
+        let flow_id_for_task = config.flow_id.clone();
+        let cleanup_run_id = run_id.clone();
+        let handle = tokio::spawn(async move {
+            let run_id_for_execute = flow_run_id.clone();
+            if let Err(error) = engine
+                .execute_flow(run_id_for_execute, config, activation_params, cancel_token)
+                .await
+            {
+                tracing::error!(
+                    run_id = %flow_run_id,
+                    flow_id = %flow_id_for_task,
+                    error = %error,
+                    "flow task execution failed; applying actor fallback finalization"
+                );
+                if let Err(finalize_error) = Self::finalize_run_failed(
+                    run_store,
+                    events,
+                    mob_id,
+                    flow_run_id.clone(),
+                    flow_id_for_task,
+                    error.to_string(),
+                )
+                .await
+                {
+                    tracing::error!(
+                        run_id = %flow_run_id,
+                        error = %finalize_error,
+                        "failed to finalize run after flow task error"
+                    );
+                }
+            }
+            if cleanup_tx
+                .send(MobCommand::FlowFinished {
+                    run_id: cleanup_run_id,
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    run_id = %flow_run_id,
+                    "failed to send FlowFinished cleanup command"
+                );
+            }
+        });
+        self.run_tasks.lock().await.insert(run_id.clone(), handle);
+
+        Ok(run_id)
+    }
+
+    async fn handle_cancel_flow(&self, run_id: RunId) -> Result<(), MobError> {
+        let Some((cancel_token, flow_id)) = self.run_cancel_tokens.lock().await.remove(&run_id) else {
+            return Ok(());
+        };
+        cancel_token.cancel();
+
+        let Some(mut handle) = self.run_tasks.lock().await.remove(&run_id) else {
+            return Ok(());
+        };
+
+        let run_store = self.run_store.clone();
+        let events = self.events.clone();
+        let mob_id = self.definition.id.clone();
+        tokio::spawn(async move {
+            let completed = tokio::select! {
+                _ = &mut handle => true,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => false,
+            };
+            if completed {
+                return;
+            }
+
+            handle.abort();
+            if let Err(error) = Self::finalize_run_canceled(
+                run_store, events, mob_id, run_id, flow_id,
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %error,
+                    "failed actor fallback cancellation finalization"
+                );
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn finalize_run_failed(
+        run_store: Arc<dyn MobRunStore>,
+        events: Arc<dyn MobEventStore>,
+        mob_id: MobId,
+        run_id: RunId,
+        flow_id: FlowId,
+        reason: String,
+    ) -> Result<(), MobError> {
+        let mut finalized = run_store
+            .cas_run_status(&run_id, MobRunStatus::Running, MobRunStatus::Failed)
+            .await?;
+        if !finalized {
+            let promoted = run_store
+                .cas_run_status(&run_id, MobRunStatus::Pending, MobRunStatus::Running)
+                .await?;
+            if promoted {
+                finalized = run_store
+                    .cas_run_status(&run_id, MobRunStatus::Running, MobRunStatus::Failed)
+                    .await?;
+            }
+        }
+        if finalized {
+            events
+                .append(NewMobEvent {
+                    mob_id,
+                    timestamp: None,
+                    kind: MobEventKind::FlowFailed {
+                        run_id,
+                        flow_id,
+                        reason,
+                    },
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn finalize_run_canceled(
+        run_store: Arc<dyn MobRunStore>,
+        events: Arc<dyn MobEventStore>,
+        mob_id: MobId,
+        run_id: RunId,
+        flow_id: FlowId,
+    ) -> Result<(), MobError> {
+        let mut finalized = run_store
+            .cas_run_status(&run_id, MobRunStatus::Running, MobRunStatus::Canceled)
+            .await?;
+        if !finalized {
+            let promoted = run_store
+                .cas_run_status(&run_id, MobRunStatus::Pending, MobRunStatus::Running)
+                .await?;
+            if promoted {
+                finalized = run_store
+                    .cas_run_status(&run_id, MobRunStatus::Running, MobRunStatus::Canceled)
+                    .await?;
+            }
+        }
+        if finalized {
+            events
+                .append(NewMobEvent {
+                    mob_id,
+                    timestamp: None,
+                    kind: MobEventKind::FlowCanceled { run_id, flow_id },
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn cancel_all_flow_tasks(&self) {
+        let mut run_cancel_tokens = self.run_cancel_tokens.lock().await;
+        let cancel_tokens = std::mem::take(&mut *run_cancel_tokens);
+        drop(run_cancel_tokens);
+        let mut run_tasks = self.run_tasks.lock().await;
+        let tasks = std::mem::take(&mut *run_tasks);
+        drop(run_tasks);
+        for (_, handle) in tasks {
+            handle.abort();
+        }
+        for (run_id, (token, flow_id)) in cancel_tokens {
+            token.cancel();
+            if let Err(error) = Self::finalize_run_canceled(
+                self.run_store.clone(),
+                self.events.clone(),
+                self.definition.id.clone(),
+                run_id.clone(),
+                flow_id.clone(),
+            )
+            .await
+            {
+                tracing::error!(
+                    run_id = %run_id,
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to finalize run cancellation during lifecycle shutdown"
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

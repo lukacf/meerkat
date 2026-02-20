@@ -91,6 +91,55 @@ impl MobHandle {
         self.mcp_running.read().await.clone()
     }
 
+    /// Start a flow run and return its run ID.
+    pub async fn run_flow(
+        &self,
+        flow_id: FlowId,
+        params: serde_json::Value,
+    ) -> Result<RunId, MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::RunFlow {
+                flow_id,
+                activation_params: params,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+    }
+
+    /// Request cancellation of an in-flight flow run.
+    pub async fn cancel_flow(&self, run_id: RunId) -> Result<(), MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::CancelFlow { run_id, reply_tx })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+    }
+
+    /// Fetch a flow run snapshot from the run store.
+    pub async fn flow_status(&self, run_id: RunId) -> Result<Option<MobRun>, MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::FlowStatus { run_id, reply_tx })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+    }
+
+    /// List all configured flow IDs in this mob definition.
+    pub fn list_flows(&self) -> Vec<String> {
+        self.definition.flows.keys().cloned().collect()
+    }
+
     /// Spawn a new meerkat from a profile and return its member reference.
     pub async fn spawn_member_ref(
         &self,
@@ -324,6 +373,18 @@ impl MobHandle {
     /// Get a task by ID from the in-memory task board projection.
     pub async fn task_get(&self, task_id: &str) -> Result<Option<MobTask>, MobError> {
         Ok(self.task_board.read().await.get(task_id).cloned())
+    }
+
+    #[cfg(test)]
+    pub async fn debug_flow_tracker_counts(&self) -> Result<(usize, usize), MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::FlowTrackerCounts { reply_tx })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))
     }
 
     /// Shut down the actor. After this, no more commands are accepted.

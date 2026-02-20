@@ -16,9 +16,13 @@ Surface defaults when no realm is provided:
 
 Mob contract notes:
 
-- CLI `run`/`resume` include CLI-local `mob_*` tools.
+- CLI `run`/`resume` include `mob_*` tools via `meerkat-mob-mcp` dispatcher composition.
 - CLI `mob ...` commands provide explicit mob lifecycle operations.
-- RPC/REST/MCP/SDK surfaces do not auto-inject `mob_*` tools (roadmap/in-progress for parity).
+- RPC/REST/MCP/SDK surfaces gain mob capability by composing `meerkat-mob-mcp`
+  (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`.
+
+For full mob behavior details (runtime model, flows, and surface matrix), also load:
+`references/mobs.md`
 
 ---
 
@@ -40,10 +44,40 @@ rkat resume <SESSION-ID> <PROMPT>
 rkat sessions list [--limit N]
 rkat sessions show <ID>
 rkat sessions delete <ID>
-rkat mob prefabs|create|list|status|spawn|retire|wire|unwire|turn|stop|resume|complete|destroy
+rkat mob prefabs|create|list|status|spawn|retire|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|destroy
 rkat config get|set|patch ...
 rkat-rpc
 ```
+
+Flow command details:
+
+```bash
+rkat mob flows <MOB_ID>
+rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params '{"k":"v"}']
+rkat mob flow-status <MOB_ID> <RUN_ID>
+```
+
+- `run-flow` returns `RUN_ID` and waits for terminal run state.
+- `flow-status` returns serialized `MobRun` JSON or `null`.
+- status values: `pending`, `running`, `completed`, `failed`, `canceled`.
+- run records include `step_ledger` + `failure_ledger`.
+
+Primary CLI mob usage is tool-driven from `run`/`resume` prompts using `mob_*` tools.
+Mob lifecycle (non-flow) commands remain available as explicit operational/compatibility controls:
+
+- `prefabs`
+- `create`
+- `list`
+- `status`
+- `spawn`
+- `retire`
+- `wire`
+- `unwire`
+- `turn`
+- `stop`
+- `resume`
+- `complete`
+- `destroy`
 
 ---
 
@@ -236,3 +270,29 @@ let mut agent = factory.build_agent(build, &config).await?;
 - Inproc comms is namespace-scoped; realm namespace isolates peer discovery/sends.
 - Hooks and skills resolve from runtime root. Workspace-default CLI realms preserve project ergonomics.
 - Sub-agents with comms enabled inherit parent realm namespace for inproc communication.
+
+---
+
+## Flow spec essentials (mob definition)
+
+Flow declarations live under `[flows.<flow_id>]`.
+Step declarations live under `[flows.<flow_id>.steps.<step_id>]`.
+
+Key step fields:
+
+- `role`
+- `message`
+- `depends_on`
+- `depends_on_mode = "all"|"any"`
+- `dispatch_mode = "one_to_one"|"fan_out"|"fan_in"`
+- `collection_policy = { type = "any"|"all"|"quorum", ... }`
+- `branch` (optional)
+- `condition` (optional)
+- `timeout_ms`
+- `expected_schema_ref` (optional)
+
+Topology contract:
+
+- `[topology] mode = "strict"|"permissive"`
+- `rules = [{ from_role = "...", to_role = "...", allowed = true|false }]`
+- wildcard `"*"` role matching is supported.

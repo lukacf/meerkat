@@ -1,13 +1,20 @@
 use super::*;
 use crate::definition::{
-    BackendConfig, MobDefinition, OrchestratorConfig, RoleWiringRule, WiringRules,
+    BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowSpec,
+    FlowStepSpec, LimitsSpec, MobDefinition, OrchestratorConfig, PolicyMode, RoleWiringRule,
+    TopologyRule, TopologySpec, WiringRules,
 };
 use crate::event::MobEvent;
 use crate::profile::{Profile, ToolConfig};
+use crate::run::MobRunStatus;
+use crate::run::{FailureLedgerEntry, MobRun, StepLedgerEntry, StepRunStatus};
 use crate::storage::MobStorage;
-use crate::store::MobEventStore;
+use crate::store::{
+    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
+};
 use async_trait::async_trait;
 use chrono::Utc;
+use indexmap::IndexMap;
 use meerkat_core::Session;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
@@ -26,9 +33,11 @@ use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
+use tempfile::NamedTempFile;
 
 // -----------------------------------------------------------------------
 // Mock CommsRuntime
@@ -275,6 +284,12 @@ struct MockSessionService {
     /// Sent intents for sessions that were archived and removed.
     archived_sent_intents: RwLock<HashMap<SessionId, Vec<String>>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
+    start_turn_delay_ms: AtomicU64,
+    flow_turn_delay_ms: AtomicU64,
+    flow_turn_never_terminal: std::sync::atomic::AtomicBool,
+    flow_turn_fail: std::sync::atomic::AtomicBool,
+    flow_turn_fail_sessions: RwLock<HashSet<SessionId>>,
+    flow_turn_completed_result: RwLock<String>,
 }
 
 impl MockSessionService {
@@ -293,6 +308,12 @@ impl MockSessionService {
             archive_fail_comms_names: RwLock::new(HashSet::new()),
             archived_sent_intents: RwLock::new(HashMap::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
+            start_turn_delay_ms: AtomicU64::new(0),
+            flow_turn_delay_ms: AtomicU64::new(0),
+            flow_turn_never_terminal: std::sync::atomic::AtomicBool::new(false),
+            flow_turn_fail: std::sync::atomic::AtomicBool::new(false),
+            flow_turn_fail_sessions: RwLock::new(HashSet::new()),
+            flow_turn_completed_result: RwLock::new("\"Turn completed\"".to_string()),
         }
     }
 
@@ -390,6 +411,39 @@ impl MockSessionService {
     fn set_fail_start_turn(&self, enabled: bool) {
         self.fail_start_turn
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn set_start_turn_delay_ms(&self, delay_ms: u64) {
+        self.start_turn_delay_ms
+            .store(delay_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn set_flow_turn_delay_ms(&self, delay_ms: u64) {
+        self.flow_turn_delay_ms
+            .store(delay_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn set_flow_turn_never_terminal(&self, enabled: bool) {
+        self.flow_turn_never_terminal
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn set_flow_turn_fail(&self, enabled: bool) {
+        self.flow_turn_fail
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn set_flow_turn_fail_for_session(&self, session_id: &SessionId, enabled: bool) {
+        let mut set = self.flow_turn_fail_sessions.write().await;
+        if enabled {
+            set.insert(session_id.clone());
+        } else {
+            set.remove(session_id);
+        }
+    }
+
+    async fn set_flow_turn_completed_result(&self, result: impl Into<String>) {
+        *self.flow_turn_completed_result.write().await = result.into();
     }
 
     async fn trusted_peer_names(&self, session_id: &SessionId) -> Vec<String> {
@@ -533,8 +587,12 @@ impl SessionService for MockSessionService {
     async fn start_turn(
         &self,
         id: &SessionId,
-        _req: StartTurnRequest,
+        req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
+        let start_turn_delay = self.start_turn_delay_ms.load(Ordering::Relaxed);
+        if start_turn_delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(start_turn_delay)).await;
+        }
         if self
             .fail_start_turn
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -547,6 +605,47 @@ impl SessionService for MockSessionService {
         if !sessions.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
         }
+
+        if let Some(event_tx) = req.event_tx {
+            let delay_ms = self
+                .flow_turn_delay_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let never_terminal = self
+                .flow_turn_never_terminal
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let fail_flow_turn_global = self
+                .flow_turn_fail
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let fail_flow_turn_session = self.flow_turn_fail_sessions.read().await.contains(id);
+            let completed_result = self.flow_turn_completed_result.read().await.clone();
+            let session_id = id.clone();
+            tokio::spawn(async move {
+                if delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                if never_terminal {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    return;
+                }
+                if fail_flow_turn_global || fail_flow_turn_session {
+                    let _ = event_tx
+                        .send(AgentEvent::RunFailed {
+                            session_id,
+                            error: "mock flow turn failure".to_string(),
+                        })
+                        .await;
+                } else {
+                    let _ = event_tx
+                        .send(AgentEvent::RunCompleted {
+                            session_id,
+                            result: completed_result,
+                            usage: Usage::default(),
+                        })
+                        .await;
+                }
+            });
+        }
+
         Ok(mock_run_result(id.clone(), "Turn completed".to_string()))
     }
 
@@ -677,6 +776,18 @@ impl FaultInjectedMobEventStore {
             MobEventKind::PeersUnwired { .. } => "PeersUnwired",
             MobEventKind::TaskCreated { .. } => "TaskCreated",
             MobEventKind::TaskUpdated { .. } => "TaskUpdated",
+            MobEventKind::FlowStarted { .. } => "FlowStarted",
+            MobEventKind::FlowCompleted { .. } => "FlowCompleted",
+            MobEventKind::FlowFailed { .. } => "FlowFailed",
+            MobEventKind::FlowCanceled { .. } => "FlowCanceled",
+            MobEventKind::StepDispatched { .. } => "StepDispatched",
+            MobEventKind::StepTargetCompleted { .. } => "StepTargetCompleted",
+            MobEventKind::StepTargetFailed { .. } => "StepTargetFailed",
+            MobEventKind::StepCompleted { .. } => "StepCompleted",
+            MobEventKind::StepFailed { .. } => "StepFailed",
+            MobEventKind::StepSkipped { .. } => "StepSkipped",
+            MobEventKind::TopologyViolation { .. } => "TopologyViolation",
+            MobEventKind::SupervisorEscalation { .. } => "SupervisorEscalation",
         }
     }
 }
@@ -787,6 +898,89 @@ impl MobEventStore for CompatFixtureEventStore {
     }
 }
 
+struct RecordingRunStore {
+    inner: InMemoryMobRunStore,
+    cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
+}
+
+impl RecordingRunStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryMobRunStore::new(),
+            cas_history: RwLock::new(Vec::new()),
+        }
+    }
+
+    async fn cas_history(&self) -> Vec<(RunId, MobRunStatus, MobRunStatus)> {
+        self.cas_history.read().await.clone()
+    }
+}
+
+#[async_trait]
+impl MobRunStore for RecordingRunStore {
+    async fn create_run(&self, run: MobRun) -> Result<(), MobError> {
+        self.inner.create_run(run).await
+    }
+
+    async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobError> {
+        self.inner.get_run(run_id).await
+    }
+
+    async fn list_runs(
+        &self,
+        mob_id: &MobId,
+        flow_id: Option<&crate::FlowId>,
+    ) -> Result<Vec<MobRun>, MobError> {
+        self.inner.list_runs(mob_id, flow_id).await
+    }
+
+    async fn cas_run_status(
+        &self,
+        run_id: &RunId,
+        expected: MobRunStatus,
+        next: MobRunStatus,
+    ) -> Result<bool, MobError> {
+        self.cas_history
+            .write()
+            .await
+            .push((run_id.clone(), expected.clone(), next.clone()));
+        self.inner.cas_run_status(run_id, expected, next).await
+    }
+
+    async fn append_step_entry(
+        &self,
+        run_id: &RunId,
+        entry: StepLedgerEntry,
+    ) -> Result<(), MobError> {
+        self.inner.append_step_entry(run_id, entry).await
+    }
+
+    async fn append_step_entry_if_absent(
+        &self,
+        run_id: &RunId,
+        entry: StepLedgerEntry,
+    ) -> Result<bool, MobError> {
+        self.inner.append_step_entry_if_absent(run_id, entry).await
+    }
+
+    async fn put_step_output(
+        &self,
+        run_id: &RunId,
+        step_id: &crate::StepId,
+        output: serde_json::Value,
+    ) -> Result<(), MobError> {
+        self.inner.put_step_output(run_id, step_id, output).await
+    }
+
+    async fn append_failure_entry(
+        &self,
+        run_id: &RunId,
+        entry: FailureLedgerEntry,
+    ) -> Result<(), MobError> {
+        self.inner.append_failure_entry(run_id, entry).await
+    }
+}
+
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
@@ -838,6 +1032,10 @@ fn sample_definition() -> MobDefinition {
         wiring: WiringRules::default(),
         skills: BTreeMap::new(),
         backend: BackendConfig::default(),
+        flows: BTreeMap::new(),
+        topology: None,
+        supervisor: None,
+        limits: None,
     }
 }
 
@@ -919,6 +1117,385 @@ fn sample_definition_with_mcp_servers() -> MobDefinition {
     def
 }
 
+fn flow_step(role: impl Into<crate::ids::ProfileName>, message: &str) -> FlowStepSpec {
+    FlowStepSpec {
+        role: role.into(),
+        message: message.to_string(),
+        depends_on: Vec::new(),
+        dispatch_mode: DispatchMode::FanOut,
+        collection_policy: CollectionPolicy::All,
+        condition: None,
+        timeout_ms: None,
+        expected_schema_ref: None,
+        branch: None,
+        depends_on_mode: DependencyMode::All,
+    }
+}
+
+fn flow_id(value: &str) -> crate::FlowId {
+    crate::FlowId::from(value)
+}
+
+fn step_id(value: &str) -> crate::StepId {
+    crate::StepId::from(value)
+}
+
+fn sample_definition_with_single_step_flow(
+    timeout_ms: u64,
+    max_orphaned_turns: u32,
+) -> MobDefinition {
+    let mut def = sample_definition();
+    let mut steps = IndexMap::new();
+    let mut step = flow_step("worker", "Execute step");
+    step.timeout_ms = Some(timeout_ms);
+    steps.insert(step_id("start"), step);
+
+    let mut flows = BTreeMap::new();
+    flows.insert(
+        flow_id("demo"),
+        FlowSpec {
+            description: Some("single step demo flow".to_string()),
+            steps,
+        },
+    );
+    def.flows = flows;
+    def.limits = Some(LimitsSpec {
+        max_flow_duration_ms: None,
+        max_step_retries: None,
+        max_orphaned_turns: Some(max_orphaned_turns),
+        cancel_grace_timeout_ms: None,
+    });
+    def
+}
+
+fn sample_definition_with_branch_flow() -> MobDefinition {
+    let mut def = sample_definition();
+    let mut steps = IndexMap::new();
+    steps.insert(step_id("start"), flow_step("worker", "Start"));
+
+    let mut fix_critical = flow_step("worker", "Fix critical");
+    fix_critical.depends_on = vec![step_id("start")];
+    fix_critical.condition = Some(ConditionExpr::Eq {
+        path: "params.severity".to_string(),
+        value: serde_json::json!("critical"),
+    });
+    fix_critical.branch = Some(crate::ids::BranchId::from("repair"));
+    steps.insert(step_id("fix_critical"), fix_critical);
+
+    let mut fix_minor = flow_step("worker", "Fix minor");
+    fix_minor.depends_on = vec![step_id("start")];
+    fix_minor.condition = Some(ConditionExpr::Eq {
+        path: "params.severity".to_string(),
+        value: serde_json::json!("minor"),
+    });
+    fix_minor.branch = Some(crate::ids::BranchId::from("repair"));
+    steps.insert(step_id("fix_minor"), fix_minor);
+
+    let mut summarize = flow_step("worker", "Summarize {{steps.fix_critical}}");
+    summarize.depends_on = vec![step_id("fix_critical"), step_id("fix_minor")];
+    summarize.depends_on_mode = DependencyMode::Any;
+    steps.insert(step_id("summarize"), summarize);
+
+    let mut flows = BTreeMap::new();
+    flows.insert(
+        flow_id("branching"),
+        FlowSpec {
+            description: Some("branch winner flow".to_string()),
+            steps,
+        },
+    );
+    def.flows = flows;
+    def
+}
+
+fn sample_definition_with_strict_topology_deny() -> MobDefinition {
+    let mut def = sample_definition_with_single_step_flow(500, 8);
+    def.topology = Some(TopologySpec {
+        mode: PolicyMode::Strict,
+        rules: vec![TopologyRule {
+            from_role: ProfileName::from("lead"),
+            to_role: ProfileName::from("worker"),
+            allowed: false,
+        }],
+    });
+    def
+}
+
+fn sample_definition_with_advisory_topology_deny() -> MobDefinition {
+    let mut def = sample_definition_with_single_step_flow(500, 8);
+    def.topology = Some(TopologySpec {
+        mode: PolicyMode::Advisory,
+        rules: vec![TopologyRule {
+            from_role: ProfileName::from("lead"),
+            to_role: ProfileName::from("worker"),
+            allowed: false,
+        }],
+    });
+    def
+}
+
+fn sample_definition_with_strict_topology_wildcard_deny() -> MobDefinition {
+    let mut def = sample_definition_with_single_step_flow(500, 8);
+    def.topology = Some(TopologySpec {
+        mode: PolicyMode::Strict,
+        rules: vec![TopologyRule {
+            from_role: ProfileName::from("*"),
+            to_role: ProfileName::from("worker"),
+            allowed: false,
+        }],
+    });
+    def
+}
+
+fn sample_definition_with_advisory_topology_wildcard_deny() -> MobDefinition {
+    let mut def = sample_definition_with_single_step_flow(500, 8);
+    def.topology = Some(TopologySpec {
+        mode: PolicyMode::Advisory,
+        rules: vec![TopologyRule {
+            from_role: ProfileName::from("*"),
+            to_role: ProfileName::from("worker"),
+            allowed: false,
+        }],
+    });
+    def
+}
+
+fn sample_definition_with_collection_policy(policy: CollectionPolicy) -> MobDefinition {
+    let mut def = sample_definition();
+    let mut steps = IndexMap::new();
+    let mut step = flow_step("worker", "Collect results");
+    step.dispatch_mode = DispatchMode::FanOut;
+    step.collection_policy = policy;
+    step.timeout_ms = Some(500);
+    steps.insert(step_id("collect"), step);
+
+    let mut flows = BTreeMap::new();
+    flows.insert(
+        flow_id("collect"),
+        FlowSpec {
+            description: Some("collection policy flow".to_string()),
+            steps,
+        },
+    );
+    def.flows = flows;
+    def
+}
+
+fn sample_definition_with_dispatch_mode(mode: DispatchMode) -> MobDefinition {
+    let mut def = sample_definition();
+    let mut steps = IndexMap::new();
+    let mut step = flow_step("worker", "Dispatch mode");
+    step.dispatch_mode = mode;
+    step.collection_policy = CollectionPolicy::Any;
+    step.timeout_ms = Some(500);
+    steps.insert(step_id("dispatch"), step);
+
+    let mut flows = BTreeMap::new();
+    flows.insert(
+        flow_id("dispatch"),
+        FlowSpec {
+            description: Some("dispatch mode flow".to_string()),
+            steps,
+        },
+    );
+    def.flows = flows;
+    def
+}
+
+fn sample_definition_with_dispatch_mode_and_policy(
+    mode: DispatchMode,
+    policy: CollectionPolicy,
+) -> MobDefinition {
+    let mut def = sample_definition();
+    let mut steps = IndexMap::new();
+    let mut step = flow_step("worker", "Dispatch mode");
+    step.dispatch_mode = mode;
+    step.collection_policy = policy;
+    step.timeout_ms = Some(500);
+    steps.insert(step_id("dispatch"), step);
+
+    let mut flows = BTreeMap::new();
+    flows.insert(
+        flow_id("dispatch"),
+        FlowSpec {
+            description: Some("dispatch mode flow".to_string()),
+            steps,
+        },
+    );
+    def.flows = flows;
+    def
+}
+
+fn sample_definition_with_retry_flow(max_step_retries: u32) -> MobDefinition {
+    let mut def = sample_definition_with_single_step_flow(250, 8);
+    def.limits = Some(LimitsSpec {
+        max_flow_duration_ms: None,
+        max_step_retries: Some(max_step_retries),
+        max_orphaned_turns: Some(8),
+        cancel_grace_timeout_ms: None,
+    });
+    def
+}
+
+fn sample_definition_with_branch_fallback_flow() -> MobDefinition {
+    let mut def = sample_definition();
+    let worker_template = def
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .cloned()
+        .expect("worker profile exists");
+    def.profiles
+        .insert(ProfileName::from("worker_fail"), worker_template.clone());
+    def.profiles
+        .insert(ProfileName::from("worker_ok"), worker_template);
+
+    let mut steps = IndexMap::new();
+    steps.insert(step_id("start"), flow_step("worker_ok", "Start"));
+
+    let mut first = flow_step("worker_fail", "First branch candidate");
+    first.depends_on = vec![step_id("start")];
+    first.condition = Some(ConditionExpr::Eq {
+        path: "params.try_fallback".to_string(),
+        value: serde_json::json!(true),
+    });
+    first.branch = Some(crate::ids::BranchId::from("repair"));
+    steps.insert(step_id("candidate_first"), first);
+
+    let mut second = flow_step("worker_ok", "Second branch candidate");
+    second.depends_on = vec![step_id("start")];
+    second.condition = Some(ConditionExpr::Eq {
+        path: "params.try_fallback".to_string(),
+        value: serde_json::json!(true),
+    });
+    second.branch = Some(crate::ids::BranchId::from("repair"));
+    steps.insert(step_id("candidate_second"), second);
+
+    let mut join = flow_step("worker_ok", "Join");
+    join.depends_on = vec![step_id("candidate_first"), step_id("candidate_second")];
+    join.depends_on_mode = DependencyMode::Any;
+    steps.insert(step_id("join"), join);
+
+    let mut flows = BTreeMap::new();
+    flows.insert(
+        flow_id("branch_fallback"),
+        FlowSpec {
+            description: Some("branch fallback flow".to_string()),
+            steps,
+        },
+    );
+    def.flows = flows;
+    def
+}
+
+fn sample_definition_with_template_message(template: &str) -> MobDefinition {
+    let mut def = sample_definition_with_single_step_flow(500, 8);
+    let step = def
+        .flows
+        .get_mut(&flow_id("demo"))
+        .and_then(|flow| flow.steps.get_mut(&step_id("start")))
+        .expect("demo.start step exists");
+    step.message = template.to_string();
+    def
+}
+
+fn sample_definition_with_shared_path_resolution_flow() -> MobDefinition {
+    let mut def = sample_definition();
+    let mut steps = IndexMap::new();
+    let mut start = flow_step("worker", "Start");
+    start.dispatch_mode = DispatchMode::OneToOne;
+    start.collection_policy = CollectionPolicy::Any;
+    steps.insert(step_id("start"), start);
+
+    let mut follow = flow_step("worker", "Follow {{steps.start.output}}");
+    follow.depends_on = vec![step_id("start")];
+    follow.condition = Some(ConditionExpr::Eq {
+        path: "steps.start".to_string(),
+        value: serde_json::json!("Turn completed"),
+    });
+    steps.insert(step_id("follow"), follow);
+
+    let mut flows = BTreeMap::new();
+    flows.insert(
+        flow_id("shared_paths"),
+        FlowSpec {
+            description: Some("shared path resolver flow".to_string()),
+            steps,
+        },
+    );
+    def.flows = flows;
+    def
+}
+
+fn sample_definition_with_schema_ref(schema_ref: &str) -> MobDefinition {
+    let mut def = sample_definition_with_single_step_flow(500, 8);
+    let step = def
+        .flows
+        .get_mut(&flow_id("demo"))
+        .expect("demo flow exists")
+        .steps
+        .get_mut(&step_id("start"))
+        .expect("start step exists");
+    step.expected_schema_ref = Some(schema_ref.to_string());
+    def
+}
+
+fn sample_definition_with_supervisor_threshold(threshold: u32) -> MobDefinition {
+    let mut def = sample_definition_with_single_step_flow(500, 8);
+    def.supervisor = Some(crate::definition::SupervisorSpec {
+        role: ProfileName::from("lead"),
+        escalation_threshold: threshold,
+    });
+    def
+}
+
+fn sample_definition_with_two_step_flow(timeout_ms: u64) -> MobDefinition {
+    let mut def = sample_definition();
+    let mut steps = IndexMap::new();
+    let mut first = flow_step("worker", "First");
+    first.timeout_ms = Some(timeout_ms);
+    steps.insert(step_id("first"), first);
+
+    let mut second = flow_step("worker", "Second");
+    second.depends_on = vec![step_id("first")];
+    second.timeout_ms = Some(timeout_ms);
+    steps.insert(step_id("second"), second);
+
+    let mut flows = BTreeMap::new();
+    flows.insert(
+        flow_id("two_step"),
+        FlowSpec {
+            description: Some("cooperative cancel flow".to_string()),
+            steps,
+        },
+    );
+    def.flows = flows;
+    def
+}
+
+async fn wait_for_run_terminal(
+    handle: &MobHandle,
+    run_id: &RunId,
+    timeout: Duration,
+) -> crate::run::MobRun {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let run = handle
+            .flow_status(run_id.clone())
+            .await
+            .expect("flow_status should succeed")
+            .expect("run should exist");
+        if run.status.is_terminal() {
+            return run;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for run {run_id} terminal state; last status: {:?}",
+            run.status
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Create a MobHandle using the mock session service.
 async fn create_test_mob(definition: MobDefinition) -> (MobHandle, Arc<MockSessionService>) {
     let service = Arc::new(MockSessionService::new());
@@ -937,7 +1514,26 @@ async fn create_test_mob_with_events(
     events: Arc<dyn MobEventStore>,
 ) -> (MobHandle, Arc<MockSessionService>) {
     let service = Arc::new(MockSessionService::new());
-    let handle = MobBuilder::new(definition, MobStorage { events })
+    let handle = MobBuilder::new(definition, MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    (handle, service)
+}
+
+async fn create_test_mob_with_run_store(
+    definition: MobDefinition,
+    run_store: Arc<dyn MobRunStore>,
+) -> (MobHandle, Arc<MockSessionService>) {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage {
+        events: Arc::new(InMemoryMobEventStore::new()),
+        runs: run_store,
+        specs: Arc::new(InMemoryMobSpecStore::new()),
+    };
+    let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
         .create()
         .await
@@ -1074,6 +1670,288 @@ async fn test_mob_create_returns_handle() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     assert_eq!(handle.status(), MobState::Running);
     assert_eq!(handle.mob_id().as_str(), "test-mob");
+}
+
+#[tokio::test]
+async fn test_mob_builder_runs_with_shared_redb_storage_bundle() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("mob.redb");
+    let storage = MobStorage::redb(&db_path).expect("construct redb-backed storage");
+    let service = Arc::new(MockSessionService::new());
+    let handle = MobBuilder::new(sample_definition_with_single_step_flow(500, 8), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob with redb-backed storage");
+
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_mob_builder_create_rejects_mismatched_spec_store_definition() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let definition = sample_definition();
+    let mut mismatched = definition.clone();
+    mismatched
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile exists")
+        .peer_description = "mismatched worker profile".to_string();
+    storage
+        .specs
+        .put_spec(&definition.id, &mismatched, None)
+        .await
+        .expect("preseed mismatched spec");
+
+    let error = match MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+    {
+        Ok(_) => panic!("create should fail when persisted spec mismatches runtime definition"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("persisted spec store definition does not match"),
+        "error should explain spec-store mismatch"
+    );
+}
+
+#[tokio::test]
+async fn test_mob_builder_persists_spec_and_resume_requires_consistency() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let definition = sample_definition();
+    let mob_id = definition.id.clone();
+    let storage_for_resume = MobStorage {
+        events: storage.events.clone(),
+        runs: storage.runs.clone(),
+        specs: storage.specs.clone(),
+    };
+
+    let _handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let (persisted_definition, _revision) = storage_for_resume
+        .specs
+        .get_spec(&mob_id)
+        .await
+        .expect("get persisted spec")
+        .expect("spec should be persisted on create");
+    assert_eq!(
+        persisted_definition, definition,
+        "create should persist runtime definition into spec store"
+    );
+
+    let mut mismatched = definition.clone();
+    mismatched
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile exists")
+        .peer_description = "resume mismatch".to_string();
+    let _ = storage_for_resume
+        .specs
+        .put_spec(&mob_id, &mismatched, None)
+        .await
+        .expect("overwrite persisted spec with mismatch");
+
+    let error = match MobBuilder::for_resume(storage_for_resume)
+        .with_session_service(service)
+        .resume()
+        .await
+    {
+        Ok(_) => panic!("resume should fail when persisted spec mismatches runtime definition"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("persisted spec store definition does not match"),
+        "resume should enforce spec-store consistency"
+    );
+}
+
+#[tokio::test]
+async fn test_mob_builder_allows_spec_warnings() {
+    let definition = MobDefinition::from_toml(
+        r#"
+[mob]
+id = "warn-mob"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+
+[flows.demo]
+
+[flows.demo.steps.start]
+role = "lead"
+message = "start"
+
+[flows.demo.steps.join]
+role = "lead"
+message = "join"
+depends_on = ["start"]
+depends_on_mode = "any"
+"#,
+    )
+    .expect("parse warning definition");
+
+    let service = Arc::new(MockSessionService::new());
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("warning diagnostics should not block create");
+    assert_eq!(handle.status(), MobState::Running);
+}
+
+#[tokio::test]
+async fn test_mob_builder_blocks_spec_errors() {
+    let definition = MobDefinition::from_toml(
+        r#"
+[mob]
+id = "error-mob"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+
+[flows.demo]
+
+[flows.demo.steps.start]
+role = "ghost"
+message = "x"
+"#,
+    )
+    .expect("parse error definition");
+
+    let service = Arc::new(MockSessionService::new());
+    let result = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service)
+        .create()
+        .await;
+
+    let diagnostics = match result {
+        Ok(_) => panic!("spec errors should block create"),
+        Err(MobError::DefinitionError(diagnostics)) => diagnostics,
+        Err(other) => panic!("expected DefinitionError, got {other}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diag| diag.code == crate::DiagnosticCode::FlowUnknownRole),
+        "expected flow unknown role diagnostic"
+    );
+}
+
+#[tokio::test]
+async fn test_mob_resume_allows_spec_warnings() {
+    let definition = MobDefinition::from_toml(
+        r#"
+[mob]
+id = "warn-resume-mob"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+
+[flows.demo]
+
+[flows.demo.steps.start]
+role = "lead"
+message = "start"
+
+[flows.demo.steps.join]
+role = "lead"
+message = "join"
+depends_on = ["start"]
+depends_on_mode = "any"
+"#,
+    )
+    .expect("parse warning definition");
+
+    let events: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+    events
+        .append(NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MobCreated {
+                definition: definition.clone(),
+            },
+        })
+        .await
+        .expect("append mob created");
+
+    let service = Arc::new(MockSessionService::new());
+    let handle = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service)
+        .resume()
+        .await
+        .expect("warning diagnostics should not block resume");
+    assert_eq!(handle.status(), MobState::Running);
+}
+
+#[tokio::test]
+async fn test_mob_resume_blocks_spec_errors() {
+    let definition = MobDefinition::from_toml(
+        r#"
+[mob]
+id = "error-resume-mob"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+
+[flows.demo]
+
+[flows.demo.steps.start]
+role = "ghost"
+message = "x"
+"#,
+    )
+    .expect("parse error definition");
+
+    let events: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+    events
+        .append(NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MobCreated {
+                definition: definition.clone(),
+            },
+        })
+        .await
+        .expect("append mob created");
+
+    let service = Arc::new(MockSessionService::new());
+    let result = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service)
+        .resume()
+        .await;
+
+    let diagnostics = match result {
+        Ok(_) => panic!("spec errors should block resume"),
+        Err(MobError::DefinitionError(diagnostics)) => diagnostics,
+        Err(other) => panic!("expected DefinitionError, got {other}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diag| diag.code == crate::DiagnosticCode::FlowUnknownRole),
+        "expected flow unknown role diagnostic"
+    );
 }
 
 #[tokio::test]
@@ -1385,6 +2263,133 @@ async fn test_mob_management_tools_dispatch_to_handle() {
 }
 
 #[tokio::test]
+async fn test_mob_flow_tools_dispatch_mutate_and_query_real_run_state() {
+    let mut definition = sample_definition_with_single_step_flow(60_000, 8);
+    let worker = definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile exists");
+    worker.tools.mob = true;
+    worker.tools.comms = true;
+
+    let (handle, service) = create_test_mob(definition).await;
+    let sid_1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    service.set_flow_turn_delay_ms(60_000);
+    service.set_flow_turn_never_terminal(true);
+
+    let tool_names = service.external_tool_names(&sid_1).await;
+    for required in [
+        "mob_list_flows",
+        "mob_run_flow",
+        "mob_flow_status",
+        "mob_cancel_flow",
+    ] {
+        assert!(
+            tool_names.contains(&required.to_string()),
+            "expected flow tool '{required}' to be present"
+        );
+    }
+
+    let listed = service
+        .dispatch_external_tool(&sid_1, "mob_list_flows", serde_json::json!({}))
+        .await
+        .expect("mob_list_flows");
+    let listed_json: serde_json::Value =
+        serde_json::from_str(&listed.content).expect("flows payload json");
+    assert_eq!(listed_json["flows"], serde_json::json!(["demo"]));
+
+    let started = service
+        .dispatch_external_tool(
+            &sid_1,
+            "mob_run_flow",
+            serde_json::json!({
+                "flow_id": "demo",
+                "params": {"ticket": "REQ-017"}
+            }),
+        )
+        .await
+        .expect("mob_run_flow");
+    let started_json: serde_json::Value =
+        serde_json::from_str(&started.content).expect("run payload json");
+    let run_id_str = started_json["run_id"]
+        .as_str()
+        .expect("run_id should be a string");
+    let run_id = run_id_str.parse::<RunId>().expect("run_id should parse");
+
+    let status = service
+        .dispatch_external_tool(
+            &sid_1,
+            "mob_flow_status",
+            serde_json::json!({"run_id": run_id_str}),
+        )
+        .await
+        .expect("mob_flow_status");
+    let status_json: serde_json::Value =
+        serde_json::from_str(&status.content).expect("status payload json");
+    assert_eq!(status_json["run"]["run_id"], run_id_str);
+    assert_eq!(status_json["run"]["flow_id"], "demo");
+
+    service
+        .dispatch_external_tool(
+            &sid_1,
+            "mob_cancel_flow",
+            serde_json::json!({"run_id": run_id_str}),
+        )
+        .await
+        .expect("mob_cancel_flow");
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(
+        terminal.status,
+        MobRunStatus::Canceled,
+        "cancel dispatch should drive the run to canceled"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::FlowCanceled { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "cancel dispatch should emit FlowCanceled"
+    );
+}
+
+#[tokio::test]
+async fn test_mob_flow_tools_reject_invalid_run_id_arguments() {
+    let mut definition = sample_definition_with_single_step_flow(500, 8);
+    let worker = definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile exists");
+    worker.tools.mob = true;
+
+    let (handle, service) = create_test_mob(definition).await;
+    let sid_1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+
+    let error = service
+        .dispatch_external_tool(
+            &sid_1,
+            "mob_flow_status",
+            serde_json::json!({"run_id":"not-a-uuid"}),
+        )
+        .await
+        .expect_err("invalid run_id should fail");
+    assert!(
+        matches!(error, ToolError::InvalidArguments { .. }),
+        "flow status should surface invalid run_id as invalid arguments"
+    );
+}
+
+#[tokio::test]
 async fn test_spawn_meerkat_tool_dispatches_backend_selection() {
     let mut definition = sample_definition_with_mob_tools();
     definition.backend.external = Some(crate::definition::ExternalBackendConfig {
@@ -1614,13 +2619,11 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
         .await
         .expect("wire");
 
-    let resumed = MobBuilder::for_resume(MobStorage {
-        events: events.clone(),
-    })
-    .with_session_service(service.clone())
-    .resume()
-    .await
-    .expect("resume");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events.clone()))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume");
 
     assert_eq!(resumed.mob_id().as_str(), "test-mob");
     let entry_1 = resumed.get_meerkat(&MeerkatId::from("w-1")).await.unwrap();
@@ -1657,7 +2660,7 @@ async fn test_resume_replays_legacy_fixture_events_via_compat_path() {
     ];
     let events = Arc::new(CompatFixtureEventStore::from_rows(fixture));
 
-    let resumed = MobBuilder::for_resume(MobStorage { events })
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
         .with_session_service(service)
         .allow_ephemeral_sessions(true)
         .resume()
@@ -1689,7 +2692,7 @@ async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
     handle.stop().await.expect("stop");
     service.set_fail_start_turn(true);
 
-    let result = MobBuilder::for_resume(MobStorage { events })
+    let result = MobBuilder::for_resume(MobStorage::with_events(events))
         .with_session_service(service)
         .resume()
         .await;
@@ -1729,7 +2732,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
         .expect("create orphan");
     assert_eq!(service.active_session_count().await, 1);
 
-    let _resumed = MobBuilder::for_resume(MobStorage { events })
+    let _resumed = MobBuilder::for_resume(MobStorage::with_events(events))
         .with_session_service(service.clone())
         .resume()
         .await
@@ -1773,7 +2776,7 @@ async fn test_resume_recreates_missing_sessions() {
         .await
         .expect("archive missing session");
 
-    let resumed = MobBuilder::for_resume(MobStorage { events })
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
         .with_session_service(service.clone())
         .resume()
         .await
@@ -1826,7 +2829,7 @@ async fn test_resume_recreates_missing_sessions_with_tool_wiring() {
         .await
         .expect("archive missing session");
 
-    let resumed = MobBuilder::for_resume(MobStorage { events })
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
         .with_session_service(service.clone())
         .register_tool_bundle("bundle-a", Arc::new(EchoBundleDispatcher))
         .resume()
@@ -1899,7 +2902,7 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
         .await
         .expect("archive external bridge session");
 
-    let resumed = MobBuilder::for_resume(MobStorage { events })
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
         .with_session_service(service.clone())
         .resume()
         .await
@@ -1980,7 +2983,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
         .await
         .expect("archive external bridge session");
 
-    let resumed = MobBuilder::for_resume(MobStorage { events })
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
         .with_session_service(service.clone())
         .resume()
         .await
@@ -2053,7 +3056,7 @@ async fn test_resume_reestablishes_missing_trust() {
     service.force_remove_trust(&sid_1, &sid_2).await;
     service.force_remove_trust(&sid_2, &sid_1).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage { events })
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
         .with_session_service(service.clone())
         .resume()
         .await
@@ -2671,7 +3674,7 @@ async fn test_retire_fails_when_peer_retired_notification_fails_without_side_eff
     let (handle, service) = create_test_mob(sample_definition()).await;
     service
         .set_comms_behavior(
-            &test_comms_name("worker", "w-1"),
+            &test_comms_name("worker", "w-2"),
             MockCommsBehavior {
                 fail_send_peer_retired: true,
                 ..MockCommsBehavior::default()
@@ -2694,21 +3697,20 @@ async fn test_retire_fails_when_peer_retired_notification_fails_without_side_eff
 
     let result = handle.retire(MeerkatId::from("w-1")).await;
     assert!(
-        matches!(result, Err(MobError::CommsError(_))),
-        "retire should fail when required notification fails"
+        result.is_ok(),
+        "retire should remain best-effort under notification failure"
     );
-
     assert!(
-        handle.get_meerkat(&MeerkatId::from("w-1")).await.is_some(),
-        "failed retire must keep roster entry"
+        handle.get_meerkat(&MeerkatId::from("w-1")).await.is_none(),
+        "retired meerkat should be removed from roster"
     );
     let entry_w2 = handle
         .get_meerkat(&MeerkatId::from("w-2"))
         .await
         .expect("w-2 should stay in roster");
     assert!(
-        entry_w2.wired_to.contains(&MeerkatId::from("w-1")),
-        "failed retire must preserve wiring"
+        !entry_w2.wired_to.contains(&MeerkatId::from("w-1")),
+        "retire should remove wiring from remaining peers"
     );
 
     let events = handle.events().replay_all().await.expect("replay");
@@ -3857,6 +4859,141 @@ async fn test_spawn_rollback_archive_failure_keeps_spawned_entry_and_persists_re
     );
 }
 
+#[tokio::test]
+async fn test_fault_injected_lifecycle_operations_preserve_transactional_invariants() {
+    // Spawn rollback invariants.
+    let (spawn_handle, spawn_service) = create_test_mob(sample_definition_with_auto_wire()).await;
+    spawn_service
+        .set_comms_behavior(
+            &test_comms_name("worker", "w-1"),
+            MockCommsBehavior {
+                missing_public_key: true,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+    let sid_l = spawn_handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    let spawn_err = spawn_handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect_err("spawn should fail under injected auto-wire fault");
+    assert!(
+        matches!(spawn_err, MobError::WiringError(_) | MobError::Internal(_)),
+        "spawn fault should surface as wiring/internal error"
+    );
+    assert!(
+        spawn_handle
+            .get_meerkat(&MeerkatId::from("w-1"))
+            .await
+            .is_none(),
+        "spawn rollback should keep failed member out of roster"
+    );
+    assert!(
+        !spawn_service
+            .trusted_peer_names(&sid_l)
+            .await
+            .contains(&test_comms_name("worker", "w-1")),
+        "spawn rollback should remove leaked trust edges"
+    );
+
+    // Unwire rollback invariants.
+    let unwire_events = Arc::new(FaultInjectedMobEventStore::new());
+    unwire_events.fail_appends_for("PeersUnwired").await;
+    let (unwire_handle, unwire_service) =
+        create_test_mob_with_events(sample_definition(), unwire_events).await;
+    let sid_u1 = unwire_handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("u-1"), None)
+        .await
+        .expect("spawn u-1");
+    let sid_u2 = unwire_handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("u-2"), None)
+        .await
+        .expect("spawn u-2");
+    unwire_handle
+        .wire(MeerkatId::from("u-1"), MeerkatId::from("u-2"))
+        .await
+        .expect("wire");
+    let unwire_err = unwire_handle
+        .unwire(MeerkatId::from("u-1"), MeerkatId::from("u-2"))
+        .await
+        .expect_err("unwire should fail when event append is fault-injected");
+    assert!(
+        matches!(unwire_err, MobError::Internal(_)),
+        "unwire append fault should surface"
+    );
+    let u1 = unwire_handle
+        .get_meerkat(&MeerkatId::from("u-1"))
+        .await
+        .expect("u-1 remains in roster");
+    let u2 = unwire_handle
+        .get_meerkat(&MeerkatId::from("u-2"))
+        .await
+        .expect("u-2 remains in roster");
+    assert!(
+        u1.wired_to.contains(&MeerkatId::from("u-2"))
+            && u2.wired_to.contains(&MeerkatId::from("u-1")),
+        "unwire rollback should preserve roster wiring on failure"
+    );
+    assert!(
+        unwire_service
+            .trusted_peer_names(&sid_u1)
+            .await
+            .contains(&test_comms_name("worker", "u-2"))
+            && unwire_service
+                .trusted_peer_names(&sid_u2)
+                .await
+                .contains(&test_comms_name("worker", "u-1")),
+        "unwire rollback should restore comms trust edges on failure"
+    );
+
+    // Retire rollback invariants.
+    let (retire_handle, retire_service) = create_test_mob(sample_definition()).await;
+    let sid_r1 = retire_handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("r-1"), None)
+        .await
+        .expect("spawn r-1");
+    let sid_r2 = retire_handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("r-2"), None)
+        .await
+        .expect("spawn r-2");
+    retire_handle
+        .wire(MeerkatId::from("r-1"), MeerkatId::from("r-2"))
+        .await
+        .expect("wire");
+    retire_service.set_archive_failure(&sid_r1).await;
+    let retire_err = retire_handle
+        .retire(MeerkatId::from("r-1"))
+        .await
+        .expect_err("retire should fail when archive is fault-injected");
+    assert!(
+        matches!(retire_err, MobError::SessionError(_)),
+        "retire archive fault should surface as session error"
+    );
+    let r1 = retire_handle
+        .get_meerkat(&MeerkatId::from("r-1"))
+        .await
+        .expect("r-1 remains for retry");
+    let r2 = retire_handle
+        .get_meerkat(&MeerkatId::from("r-2"))
+        .await
+        .expect("r-2 remains for retry");
+    assert!(
+        r1.wired_to.contains(&MeerkatId::from("r-2"))
+            && r2.wired_to.contains(&MeerkatId::from("r-1")),
+        "retire rollback should keep roster wiring coherent when archive fails"
+    );
+    assert!(
+        retire_service
+            .trusted_peer_names(&sid_r2)
+            .await
+            .contains(&test_comms_name("worker", "r-1")),
+        "retire rollback should restore removed trust when operation aborts"
+    );
+}
+
 // -----------------------------------------------------------------------
 // P1-T09: role_wiring fan-out on spawn
 // -----------------------------------------------------------------------
@@ -4253,6 +5390,1611 @@ async fn test_concurrent_spawn_and_retire_same_meerkat_is_serialized() {
     assert!(
         roster.is_empty() || (roster.len() == 1 && roster[0].meerkat_id.as_str() == "w-1"),
         "serialized spawn/retire should never corrupt roster"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Flow runtime lifecycle and orchestration behavior
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_run_flow_persists_before_reply_and_is_queryable() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(2_000, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(200);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({ "input": "x" }))
+        .await
+        .expect("run flow");
+
+    let immediate = handle
+        .flow_status(run_id.clone())
+        .await
+        .expect("flow status call should succeed");
+    assert!(
+        immediate.is_some(),
+        "run must be persisted before run_flow returns"
+    );
+    let run = immediate.expect("run should exist");
+    assert_eq!(run.flow_id, FlowId::from("demo"));
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+    assert!(
+        terminal
+            .step_ledger
+            .iter()
+            .any(|entry| entry.status == crate::run::StepRunStatus::Dispatched),
+        "runtime flow path should persist dispatched ledger entries"
+    );
+    assert!(
+        terminal.step_ledger.iter().any(|entry| {
+            entry.step_id.as_str() == "start"
+                && entry.status == crate::run::StepRunStatus::Completed
+        }),
+        "runtime flow path should persist completed step ledger entries"
+    );
+    assert!(
+        terminal.failure_ledger.is_empty(),
+        "successful flow should not persist failure ledger entries"
+    );
+}
+
+#[tokio::test]
+async fn test_parallel_targets_complete_concurrently() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(5_000, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(400);
+
+    let start = Instant::now();
+    let run_id = handle
+        .run_flow(
+            FlowId::from("demo"),
+            serde_json::json!({ "mode": "parallel" }),
+        )
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    let elapsed = start.elapsed();
+
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+    assert!(
+        elapsed < Duration::from_millis(700),
+        "two 400ms target turns should complete in parallel; observed {:?}",
+        elapsed
+    );
+}
+
+#[tokio::test]
+async fn test_fanout_emits_per_target_and_aggregate_completion_events() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_single_step_flow(2_000, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("demo"),
+            serde_json::json!({ "case": "fanout-events" }),
+        )
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let per_target_completed = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepTargetCompleted { run_id: id, step_id, .. }
+                    if id == &run_id && step_id.as_str() == "start"
+            )
+        })
+        .count();
+    let aggregate_completed = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepCompleted { run_id: id, step_id }
+                    if id == &run_id && step_id.as_str() == "start"
+            )
+        })
+        .count();
+
+    assert_eq!(
+        per_target_completed, 2,
+        "fanout should emit one StepTargetCompleted per target"
+    );
+    assert_eq!(
+        aggregate_completed, 1,
+        "fanout should emit a single aggregate StepCompleted event"
+    );
+}
+
+#[tokio::test]
+async fn test_run_snapshots_are_captured_per_run_and_remain_immutable() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(5_000, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(400);
+
+    let run_a = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({"ticket":"A"}))
+        .await
+        .expect("run A");
+    let snap_a_initial = handle
+        .flow_status(run_a.clone())
+        .await
+        .expect("status A")
+        .expect("run A exists");
+    assert_eq!(
+        snap_a_initial.activation_params,
+        serde_json::json!({"ticket":"A"})
+    );
+
+    let run_b = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({"ticket":"B"}))
+        .await
+        .expect("run B");
+    let snap_b = handle
+        .flow_status(run_b.clone())
+        .await
+        .expect("status B")
+        .expect("run B exists");
+    assert_eq!(snap_b.activation_params, serde_json::json!({"ticket":"B"}));
+
+    let snap_a_after = handle
+        .flow_status(run_a.clone())
+        .await
+        .expect("status A after")
+        .expect("run A still exists");
+    assert_eq!(
+        snap_a_after.activation_params,
+        serde_json::json!({"ticket":"A"}),
+        "run A activation snapshot must remain unchanged by run B"
+    );
+
+    let _ = handle.cancel_flow(run_a).await;
+    let _ = handle.cancel_flow(run_b).await;
+}
+
+#[tokio::test]
+async fn test_handle_list_flows_returns_definition_flow_ids() {
+    let mut definition = sample_definition_with_single_step_flow(500, 8);
+    let mut extra_steps = IndexMap::new();
+    extra_steps.insert(step_id("start"), flow_step("worker", "Secondary"));
+    definition.flows.insert(
+        flow_id("secondary"),
+        FlowSpec {
+            description: Some("secondary flow".to_string()),
+            steps: extra_steps,
+        },
+    );
+
+    let (handle, _service) = create_test_mob(definition).await;
+    let flows = handle.list_flows();
+    assert_eq!(flows, vec![flow_id("demo"), flow_id("secondary")]);
+}
+
+#[tokio::test]
+async fn test_dispatch_mode_one_to_one_dispatches_single_target() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_dispatch_mode(DispatchMode::OneToOne)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let dispatched = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepDispatched { run_id: id, .. } if id == &run_id
+            )
+        })
+        .count();
+    assert_eq!(dispatched, 1, "one_to_one should dispatch one target");
+}
+
+#[tokio::test]
+async fn test_dispatch_mode_fan_in_dispatches_all_targets() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_dispatch_mode(DispatchMode::FanIn)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let dispatched = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepDispatched { run_id: id, .. } if id == &run_id
+            )
+        })
+        .count();
+    assert_eq!(dispatched, 2, "fan_in should dispatch all matching targets");
+}
+
+#[tokio::test]
+async fn test_fan_in_aggregate_output_is_deterministic_array_shape() {
+    let (handle, _service) = create_test_mob(sample_definition_with_dispatch_mode_and_policy(
+        DispatchMode::FanIn,
+        CollectionPolicy::All,
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let aggregate_output = terminal
+        .step_ledger
+        .iter()
+        .find(|entry| {
+            entry.step_id.as_str() == "dispatch"
+                && entry.meerkat_id == crate::runtime::flow_system_member_id()
+                && entry.status == StepRunStatus::Completed
+        })
+        .and_then(|entry| entry.output.clone())
+        .expect("aggregate dispatch output should be persisted");
+    assert_eq!(
+        aggregate_output,
+        serde_json::json!([
+            {"target":"w-1","output":"Turn completed"},
+            {"target":"w-2","output":"Turn completed"}
+        ]),
+        "fan_in aggregate shape and ordering should be deterministic"
+    );
+}
+
+#[tokio::test]
+async fn test_max_step_retries_controls_dispatch_attempts() {
+    let (handle, service) = create_test_mob(sample_definition_with_retry_flow(2)).await;
+    let sid_w1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    service.set_flow_turn_fail_for_session(&sid_w1, true).await;
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let dispatched = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepDispatched { run_id: id, step_id, meerkat_id }
+                    if id == &run_id && step_id.as_str() == "start" && meerkat_id.as_str() == "w-1"
+            )
+        })
+        .count();
+    assert_eq!(
+        dispatched, 3,
+        "max_step_retries=2 should dispatch three attempts"
+    );
+}
+
+#[tokio::test]
+async fn test_orphan_budget_fairness_prevents_single_run_monopoly() {
+    let (handle, service) = create_test_mob(sample_definition_with_single_step_flow(20, 2)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id_1 = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({"run": 1}))
+        .await
+        .expect("run flow 1");
+    let _terminal_1 = wait_for_run_terminal(&handle, &run_id_1, Duration::from_secs(3)).await;
+
+    let run_id_2 = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({"run": 2}))
+        .await
+        .expect("run flow 2");
+    let terminal_2 = wait_for_run_terminal(&handle, &run_id_2, Duration::from_secs(3)).await;
+    assert_eq!(terminal_2.status, MobRunStatus::Failed);
+    assert!(
+        terminal_2
+            .failure_ledger
+            .iter()
+            .any(|entry| entry.reason.contains("timeout after")),
+        "second run should still obtain timeout orphan capacity instead of complete starvation"
+    );
+}
+
+#[tokio::test]
+async fn test_branch_winner_is_selected_only_after_success_allowing_fallback() {
+    let (handle, service) = create_test_mob(sample_definition_with_branch_fallback_flow()).await;
+    let sid_fail = handle
+        .spawn(
+            ProfileName::from("worker_fail"),
+            MeerkatId::from("w-fail"),
+            None,
+        )
+        .await
+        .expect("spawn failing worker");
+    handle
+        .spawn(
+            ProfileName::from("worker_ok"),
+            MeerkatId::from("w-ok"),
+            None,
+        )
+        .await
+        .expect("spawn healthy worker");
+    service
+        .set_flow_turn_fail_for_session(&sid_fail, true)
+        .await;
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("branch_fallback"),
+            serde_json::json!({"try_fallback": true}),
+        )
+        .await
+        .expect("run branch fallback flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepFailed { run_id: id, step_id, .. }
+                    if id == &run_id && step_id.as_str() == "candidate_first"
+            )
+        }),
+        "first branch candidate should fail"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepCompleted { run_id: id, step_id }
+                    if id == &run_id && step_id.as_str() == "candidate_second"
+            )
+        }),
+        "fallback branch candidate should execute and complete"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepCompleted { run_id: id, step_id }
+                    if id == &run_id && step_id.as_str() == "join"
+            )
+        }),
+        "downstream join should complete after fallback branch success"
+    );
+}
+
+#[tokio::test]
+async fn test_malformed_templates_fail_flow_explicitly() {
+    for template in ["Bad {{", "Bad }}", "{{   }}"] {
+        let (handle, _service) =
+            create_test_mob(sample_definition_with_template_message(template)).await;
+        handle
+            .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+            .await
+            .expect("spawn worker");
+
+        let run_id = handle
+            .run_flow(FlowId::from("demo"), serde_json::json!({}))
+            .await
+            .expect("run flow");
+        let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+        assert_eq!(terminal.status, MobRunStatus::Failed);
+        assert!(
+            terminal.failure_ledger.iter().any(|entry| {
+                entry.reason.contains("invalid template syntax")
+                    && entry.reason.contains("line")
+                    && entry.reason.contains("column")
+                    && entry.reason.contains("byte")
+            }),
+            "malformed template '{template}' should fail with deterministic syntax diagnostics"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_template_syntax_diagnostics_are_deterministic_for_multiline_inputs() {
+    let bad_template = "line1\nline2 }}";
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_template_message(bad_template)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+
+    let reason = terminal
+        .failure_ledger
+        .iter()
+        .find(|entry| entry.reason.contains("invalid template syntax"))
+        .map(|entry| entry.reason.clone())
+        .expect("template error reason");
+    assert!(
+        reason.contains("line 2, column 7"),
+        "diagnostic location should be deterministic for multiline templates: {reason}"
+    );
+}
+
+#[tokio::test]
+async fn test_shared_path_resolver_is_used_for_conditions_and_templates() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_shared_path_resolution_flow()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("shared_paths"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+    assert!(
+        terminal.step_ledger.iter().any(|entry| {
+            entry.step_id.as_str() == "follow" && entry.status == StepRunStatus::Completed
+        }),
+        "follow step should execute using shared path semantics in both condition and template"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_finished_cleans_tracking_maps() {
+    let (handle, _service) = create_test_mob(sample_definition_with_single_step_flow(500, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let (tasks, tokens) = handle
+            .debug_flow_tracker_counts()
+            .await
+            .expect("tracker counts");
+        if tasks == 0 && tokens == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for flow trackers to drain (tasks={tasks}, tokens={tokens})"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn test_flow_tracker_maps_remain_coherent_under_concurrent_run_and_cancel_commands() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(5_000, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let mut run_ids = Vec::new();
+    for _ in 0..8 {
+        run_ids.push(
+            handle
+                .run_flow(FlowId::from("demo"), serde_json::json!({}))
+                .await
+                .expect("run flow"),
+        );
+    }
+
+    let mut cancel_tasks = Vec::new();
+    for run_id in run_ids.clone() {
+        let handle = handle.clone();
+        cancel_tasks.push(tokio::spawn(async move {
+            handle.cancel_flow(run_id).await.expect("cancel flow");
+        }));
+    }
+    for task in cancel_tasks {
+        task.await.expect("cancel join");
+    }
+
+    for run_id in &run_ids {
+        let terminal = wait_for_run_terminal(&handle, run_id, Duration::from_secs(8)).await;
+        assert!(
+            matches!(
+                terminal.status,
+                MobRunStatus::Canceled | MobRunStatus::Failed | MobRunStatus::Completed
+            ),
+            "concurrent run/cancel pressure must still converge to terminal runs"
+        );
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let (tasks, tokens) = handle
+            .debug_flow_tracker_counts()
+            .await
+            .expect("tracker counts");
+        if tasks == 0 && tokens == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for actor-owned flow trackers to drain (tasks={tasks}, tokens={tokens})"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn test_complete_cancels_inflight_flow_run() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    handle.complete().await.expect("complete mob");
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+}
+
+#[tokio::test]
+async fn test_destroy_cancels_inflight_flow_run() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    handle.destroy().await.expect("destroy mob");
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+}
+
+#[tokio::test]
+async fn test_cancel_flow_cooperative_path_finishes_before_fallback_window() {
+    let (handle, service) = create_test_mob(sample_definition_with_two_step_flow(5_000)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(200);
+
+    let run_id = handle
+        .run_flow(FlowId::from("two_step"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow");
+
+    let start = Instant::now();
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "cooperative cancel path should finalize before fallback timeout window"
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_flow_fallback_marks_run_canceled_when_turn_stalls() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow");
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::FlowCanceled { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "expected FlowCanceled event for canceled run"
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_flow_fallback_uses_configured_grace_timeout() {
+    let mut definition = sample_definition_with_single_step_flow(60_000, 8);
+    definition.limits = Some(LimitsSpec {
+        max_flow_duration_ms: None,
+        max_step_retries: None,
+        max_orphaned_turns: Some(8),
+        cancel_grace_timeout_ms: Some(25),
+    });
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow");
+
+    let start = Instant::now();
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "configured cancel grace timeout should be honored by fallback cancellation"
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts() {
+    let run_store = Arc::new(RecordingRunStore::new());
+    let (handle, service) = create_test_mob_with_run_store(
+        sample_definition_with_single_step_flow(60_000, 8),
+        run_store.clone(),
+    )
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+
+    let history = run_store.cas_history().await;
+    assert!(
+        history.iter().any(|(_, from, to)| {
+            *from == MobRunStatus::Pending && *to == MobRunStatus::Canceled
+        }),
+        "fallback should attempt direct Pending->Canceled CAS transitions"
+    );
+    assert!(
+        history.iter().any(|(_, from, to)| {
+            *from == MobRunStatus::Pending
+                && matches!(
+                    to,
+                    MobRunStatus::Completed | MobRunStatus::Failed | MobRunStatus::Canceled
+                )
+        }),
+        "terminalization authority must use direct Pending->terminal CAS semantics"
+    );
+}
+
+#[tokio::test]
+async fn test_concurrent_fail_and_cancel_resolve_single_terminal_state_with_event_or_ledger() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    events.fail_appends_for("FlowFailed").await;
+    events.fail_appends_for("FlowCanceled").await;
+    let (handle, service) = create_test_mob_with_events(
+        sample_definition_with_single_step_flow(60_000, 8),
+        events.clone(),
+    )
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_fail(true);
+    service.set_flow_turn_delay_ms(120);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let cancel_handle = {
+        let handle = handle.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            handle
+                .cancel_flow(run_id)
+                .await
+                .expect("cancel flow should be accepted");
+        })
+    };
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    cancel_handle.await.expect("cancel join");
+    assert!(
+        matches!(
+            terminal.status,
+            MobRunStatus::Canceled | MobRunStatus::Failed
+        ),
+        "concurrent fail/cancel race should resolve to one terminal status"
+    );
+
+    let recorded_events = handle.events().replay_all().await.expect("replay");
+    let terminal_events = recorded_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::FlowCompleted { run_id: id, .. }
+                    | MobEventKind::FlowFailed { run_id: id, .. }
+                    | MobEventKind::FlowCanceled { run_id: id, .. }
+                    if id == &run_id
+            )
+        })
+        .count();
+    assert!(
+        terminal_events <= 1,
+        "terminal race must never produce multiple terminal events for one run"
+    );
+
+    if terminal_events == 0 {
+        assert!(
+            terminal.failure_ledger.iter().any(|entry| {
+                entry.step_id == crate::runtime::flow_system_step_id()
+                    && entry.reason.contains("append failed")
+            }),
+            "when terminal append is fault-injected, a durable coherence ledger entry is required"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_timeout_maps_to_step_failed_reason_and_run_failed() {
+    let (handle, service) = create_test_mob(sample_definition_with_single_step_flow(20, 1)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    assert!(
+        terminal
+            .failure_ledger
+            .iter()
+            .any(|entry| entry.reason.contains("timeout after")),
+        "timeout path should persist failure ledger reason"
+    );
+    assert!(
+        terminal
+            .step_ledger
+            .iter()
+            .any(|entry| entry.status == crate::run::StepRunStatus::Failed),
+        "timeout path should persist failed step ledger entries"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepTargetFailed { run_id: id, reason, .. }
+                    if id == &run_id && reason.contains("timeout after")
+            )
+        }),
+        "expected timeout StepTargetFailed reason"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::FlowFailed { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "expected FlowFailed event for timed out run"
+    );
+}
+
+#[tokio::test]
+async fn test_timeout_budget_exhaustion_fails_run() {
+    let (handle, service) = create_test_mob(sample_definition_with_single_step_flow(20, 0)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::FlowFailed { run_id: id, reason, .. }
+                    if id == &run_id && reason.contains("orphan budget")
+            )
+        }),
+        "expected FlowFailed reason from orphan budget exhaustion"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_turn_failure_records_target_failure_reason() {
+    let (handle, service) = create_test_mob(sample_definition_with_single_step_flow(500, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_fail(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepTargetFailed { run_id: id, reason, .. }
+                    if id == &run_id && reason.contains("mock flow turn failure")
+            )
+        }),
+        "expected StepTargetFailed to include provisioner failure reason"
+    );
+}
+
+#[tokio::test]
+async fn test_malformed_turn_output_fails_without_json_coercion() {
+    let (handle, service) = create_test_mob(sample_definition_with_single_step_flow(500, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_completed_result("not-json").await;
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    assert!(
+        terminal.failure_ledger.iter().any(|entry| {
+            entry.reason.contains("malformed JSON output")
+                && entry.reason.contains("raw_output=\"not-json\"")
+        }),
+        "malformed output should fail run with parse diagnostics and raw payload excerpt"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_rejects_reserved_flow_system_member_prefix() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let reserved_meerkat_id = format!("{}test", crate::runtime::FLOW_SYSTEM_MEMBER_ID_PREFIX);
+    let err = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from(reserved_meerkat_id.as_str()),
+            None,
+        )
+        .await
+        .expect_err("reserved system member prefix should be rejected");
+    assert!(
+        err.to_string().contains("reserved system prefix"),
+        "error should clearly explain reserved id prefix: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_failed_append_failure_records_coherence_failure_ledger_entry() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    events.fail_appends_for("FlowFailed").await;
+    let (handle, service) =
+        create_test_mob_with_events(sample_definition_with_single_step_flow(500, 8), events).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_fail(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    assert!(
+        terminal.failure_ledger.iter().any(|entry| {
+            entry.step_id == crate::runtime::flow_system_step_id()
+                && entry.reason.contains("FlowFailed append failed")
+        }),
+        "failed terminal event append should be recorded in failure ledger"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_completed_append_failure_records_coherence_failure_ledger_entry() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    events.fail_appends_for("FlowCompleted").await;
+    let (handle, _service) =
+        create_test_mob_with_events(sample_definition_with_single_step_flow(500, 8), events).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+    assert!(
+        terminal.failure_ledger.iter().any(|entry| {
+            entry.step_id == crate::runtime::flow_system_step_id()
+                && entry.reason.contains("FlowCompleted append failed")
+        }),
+        "failed terminal event append should be recorded in failure ledger"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_canceled_append_failure_records_coherence_failure_ledger_entry() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    events.fail_appends_for("FlowCanceled").await;
+    let (handle, service) =
+        create_test_mob_with_events(sample_definition_with_single_step_flow(60_000, 8), events)
+            .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+    assert!(
+        terminal.failure_ledger.iter().any(|entry| {
+            entry.step_id == crate::runtime::flow_system_step_id()
+                && entry.reason.contains("FlowCanceled append failed")
+        }),
+        "failed terminal event append should be recorded in failure ledger"
+    );
+}
+
+#[tokio::test]
+async fn test_topology_strict_denial_fails_before_dispatch() {
+    let (handle, _service) = create_test_mob(sample_definition_with_strict_topology_deny()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::FlowFailed { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "expected FlowFailed event under strict topology denial"
+    );
+    assert!(
+        !events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepDispatched { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "strict topology denial should block dispatch"
+    );
+}
+
+#[tokio::test]
+async fn test_topology_advisory_emits_violation_and_continues() {
+    let (handle, _service) = create_test_mob(sample_definition_with_advisory_topology_deny()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events
+            .iter()
+            .any(|event| { matches!(event.kind, MobEventKind::TopologyViolation { .. }) }),
+        "advisory topology should emit violation event"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepDispatched { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "advisory topology should still dispatch steps"
+    );
+}
+
+#[tokio::test]
+async fn test_topology_strict_wildcard_denial_fails_before_dispatch() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_strict_topology_wildcard_deny()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::FlowFailed { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "expected FlowFailed event under strict wildcard topology denial"
+    );
+    assert!(
+        !events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepDispatched { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "strict wildcard topology denial should block dispatch"
+    );
+}
+
+#[tokio::test]
+async fn test_topology_advisory_wildcard_emits_violation_and_continues() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_advisory_topology_wildcard_deny()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events
+            .iter()
+            .any(|event| { matches!(event.kind, MobEventKind::TopologyViolation { .. }) }),
+        "advisory wildcard topology should emit violation event"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepDispatched { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "advisory wildcard topology should still dispatch steps"
+    );
+}
+
+#[tokio::test]
+async fn test_collection_policy_any_succeeds_with_single_target_success() {
+    let (handle, service) = create_test_mob(sample_definition_with_collection_policy(
+        CollectionPolicy::Any,
+    ))
+    .await;
+    let sid_w1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    let _sid_w2 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_fail_for_session(&sid_w1, true).await;
+
+    let run_id = handle
+        .run_flow(FlowId::from("collect"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_collection_policy_quorum_requires_threshold_successes() {
+    let (handle, service) = create_test_mob(sample_definition_with_collection_policy(
+        CollectionPolicy::Quorum { n: 2 },
+    ))
+    .await;
+    let sid_w1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    let _sid_w2 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_fail_for_session(&sid_w1, true).await;
+
+    let run_id = handle
+        .run_flow(FlowId::from("collect"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_collection_policy_all_uses_map_shape_for_single_target() {
+    let (handle, _service) = create_test_mob(sample_definition_with_collection_policy(
+        CollectionPolicy::All,
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+
+    let run_id = handle
+        .run_flow(FlowId::from("collect"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let aggregate_output = terminal
+        .step_ledger
+        .iter()
+        .find(|entry| {
+            entry.step_id.as_str() == "collect"
+                && entry.meerkat_id == crate::runtime::flow_system_member_id()
+                && entry.status == StepRunStatus::Completed
+        })
+        .and_then(|entry| entry.output.clone())
+        .expect("aggregate collect output should be persisted");
+    assert_eq!(
+        aggregate_output,
+        serde_json::json!({"w-1": "Turn completed"})
+    );
+}
+
+#[tokio::test]
+async fn test_max_flow_duration_limit_is_enforced() {
+    let mut definition = sample_definition_with_single_step_flow(60_000, 8);
+    definition.limits = Some(LimitsSpec {
+        max_flow_duration_ms: Some(25),
+        max_step_retries: None,
+        max_orphaned_turns: Some(8),
+        cancel_grace_timeout_ms: None,
+    });
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let start = Instant::now();
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "global flow duration limit should fail the run quickly"
+    );
+}
+
+#[tokio::test]
+async fn test_schema_ref_file_path_validation_passes_and_fails() {
+    let mut schema_ok = NamedTempFile::new().expect("create schema file");
+    write!(
+        schema_ok,
+        "{{\"type\":\"object\",\"additionalProperties\":{{\"type\":\"string\"}}}}"
+    )
+    .expect("write schema");
+    let ok_path = schema_ok.path().to_string_lossy().to_string();
+
+    let (ok_handle, _ok_service) =
+        create_test_mob(sample_definition_with_schema_ref(&ok_path)).await;
+    ok_handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let ok_run_id = ok_handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let ok_terminal = wait_for_run_terminal(&ok_handle, &ok_run_id, Duration::from_secs(2)).await;
+    assert_eq!(ok_terminal.status, MobRunStatus::Completed);
+
+    let mut schema_bad = NamedTempFile::new().expect("create schema file");
+    write!(
+        schema_bad,
+        "{{\"type\":\"object\",\"additionalProperties\":{{\"type\":\"integer\"}}}}"
+    )
+    .expect("write schema");
+    let bad_path = schema_bad.path().to_string_lossy().to_string();
+
+    let (bad_handle, _bad_service) =
+        create_test_mob(sample_definition_with_schema_ref(&bad_path)).await;
+    bad_handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let bad_run_id = bad_handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let bad_terminal =
+        wait_for_run_terminal(&bad_handle, &bad_run_id, Duration::from_secs(2)).await;
+    assert_eq!(bad_terminal.status, MobRunStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_supervisor_escalation_forces_reset_via_retire_path() {
+    let (handle, service) = create_test_mob(sample_definition_with_supervisor_threshold(1)).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead supervisor");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_fail(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::SupervisorEscalation { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "expected supervisor escalation event after threshold breach"
+    );
+
+    let remaining = handle.list_meerkats().await;
+    assert!(
+        remaining.is_empty(),
+        "force_reset should retire active meerkats via handle.retire()"
+    );
+}
+
+#[tokio::test]
+async fn test_supervisor_escalation_times_out_when_turn_hangs() {
+    let (handle, service) = create_test_mob(sample_definition_with_supervisor_threshold(1)).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead supervisor");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_fail(true);
+    service.set_start_turn_delay_ms(3_000);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        terminal
+            .failure_ledger
+            .iter()
+            .any(|entry| entry.reason.contains("supervisor escalation timed out"))
+            || events.iter().any(|event| {
+                matches!(
+                    &event.kind,
+                    MobEventKind::FlowFailed { run_id: id, reason, .. }
+                        if id == &run_id && reason.contains("supervisor escalation timed out")
+                )
+            }),
+        "supervisor escalation timeout should fail with explicit bounded-time reason"
+    );
+}
+
+#[tokio::test]
+async fn test_supervisor_force_reset_reports_aggregate_retire_errors() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    events.fail_appends_for("MeerkatRetired").await;
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    let supervisor = super::supervisor::Supervisor::new(
+        handle.clone(),
+        super::events::MobEventEmitter::new(
+            Arc::new(InMemoryMobEventStore::new()),
+            handle.mob_id().clone(),
+        ),
+    );
+    let error = supervisor
+        .force_reset()
+        .await
+        .expect_err("force_reset should aggregate retire errors");
+    assert!(
+        error
+            .to_string()
+            .contains("force_reset encountered 2 retirement error(s)"),
+        "force_reset should continue through all retire failures and return aggregate count"
+    );
+}
+
+#[tokio::test]
+async fn test_branch_winner_and_join_any_behavior() {
+    let (handle, _service) = create_test_mob(sample_definition_with_branch_flow()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("branching"),
+            serde_json::json!({ "severity": "critical" }),
+        )
+        .await
+        .expect("run branch flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepCompleted { run_id: id, step_id }
+                    if id == &run_id && step_id.as_str() == "fix_critical"
+            )
+        }),
+        "expected winning branch step to complete"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepSkipped { run_id: id, step_id, .. }
+                    if id == &run_id && step_id.as_str() == "fix_minor"
+            )
+        }),
+        "expected losing branch step to be skipped"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepCompleted { run_id: id, step_id }
+                    if id == &run_id && step_id.as_str() == "summarize"
+            )
+        }),
+        "expected join step to run with depends_on_mode=any"
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_after_completion_is_noop_without_flow_canceled_event() {
+    let (handle, _service) = create_test_mob(sample_definition_with_single_step_flow(500, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel completed run should be noop");
+    let status = handle
+        .flow_status(run_id.clone())
+        .await
+        .expect("flow status call")
+        .expect("run exists");
+    assert_eq!(status.status, MobRunStatus::Completed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        !events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::FlowCanceled { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "cancel after completion should not emit FlowCanceled"
     );
 }
 

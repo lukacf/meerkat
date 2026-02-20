@@ -74,15 +74,12 @@ Shell tools support allow/deny list security policies. Sub-agent tools enforce c
 
 Tools from different sources (custom, MCP, built-in) are composed into a single dispatcher. The agent sees one flat tool list regardless of where each tool comes from. Hooks can intercept tool calls before and after execution for guardrails, audit, or argument rewriting.
 
-## Mob tools (CLI-local surface)
+## Mob tools (`meerkat-mob-mcp`)
 
-The `rkat` CLI `run` and `resume` paths compose an additional CLI-local mob tool surface (`mob_*`) into the tool list.
-This is how "mob as tool" works today.
+Mob tools (`mob_*`) are provided by the `meerkat-mob-mcp` dispatcher and composed
+through `SessionBuildOptions.external_tools`.
 
-- `mob_*` tools are available in CLI `run`/`resume` sessions by default.
-- `rkat mob ...` is the explicit lifecycle surface for persisted registry operations.
-- JSON-RPC/REST/MCP server/SDK surfaces do not currently auto-inject `mob_*` tools.
-
-<Note>
-Surface parity for mob tools outside CLI is in progress and should be treated as roadmap work, not current contract.
-</Note>
+- CLI `run`/`resume` pre-compose this dispatcher by default.
+- `rkat mob ...` remains the explicit direct lifecycle surface.
+- Other session-driven surfaces (RPC/REST/MCP/SDK hosts) can expose the same `mob_*`
+  capability by composing `MobMcpDispatcher` into their session build path.

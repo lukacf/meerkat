@@ -6,22 +6,6 @@ use async_trait::async_trait;
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::service::{CreateSessionRequest, StartTurnRequest};
 
-fn mob_debug_enabled() -> bool {
-    std::env::var("RKAT_MOB_DEBUG")
-        .ok()
-        .map(|value| {
-            let value = value.to_ascii_lowercase();
-            matches!(value.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
-}
-
-fn mob_debug(message: impl AsRef<str>) {
-    if mob_debug_enabled() {
-        eprintln!("[mob-debug] {}", message.as_ref());
-    }
-}
-
 pub struct ProvisionMemberRequest {
     pub create_session: CreateSessionRequest,
     pub backend: MobBackendKind,
@@ -82,18 +66,19 @@ impl SubagentBackend {
 #[async_trait]
 impl MobProvisioner for SubagentBackend {
     async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError> {
-        mob_debug(format!(
-            "SubagentBackend::provision_member start backend={:?} peer_name={}",
-            req.backend, req.peer_name
-        ));
+        tracing::debug!(
+            backend = ?req.backend,
+            peer_name = %req.peer_name,
+            "SubagentBackend::provision_member start"
+        );
         let created = self
             .session_service
             .create_session(req.create_session)
             .await?;
-        mob_debug(format!(
-            "SubagentBackend::provision_member created session_id={}",
-            created.session_id
-        ));
+        tracing::debug!(
+            session_id = %created.session_id,
+            "SubagentBackend::provision_member created session"
+        );
         Ok(MemberRef::from_session_id(created.session_id))
     }
 
@@ -199,10 +184,10 @@ impl MultiBackendProvisioner {
                 peer_name
             )));
         }
-        mob_debug(format!(
-            "ExternalBackend::external_member_ref start peer_name={}",
-            peer_name
-        ));
+        tracing::debug!(
+            peer_name = %peer_name,
+            "ExternalBackend::external_member_ref start"
+        );
         let external = self
             .external
             .as_ref()
@@ -211,10 +196,10 @@ impl MultiBackendProvisioner {
             .session_service
             .create_session(create_session)
             .await?;
-        mob_debug(format!(
-            "ExternalBackend::external_member_ref created session_id={}",
-            created.session_id
-        ));
+        tracing::debug!(
+            session_id = %created.session_id,
+            "ExternalBackend::external_member_ref created session"
+        );
         let comms = external
             .session_service
             .comms_runtime(&created.session_id)
@@ -230,10 +215,11 @@ impl MultiBackendProvisioner {
             ))
         })?;
         let address = format!("{}/{}", external.address_base, peer_name);
-        mob_debug(format!(
-            "ExternalBackend::external_member_ref success peer_id={} address={}",
-            peer_id, address
-        ));
+        tracing::debug!(
+            peer_id = %peer_id,
+            address = %address,
+            "ExternalBackend::external_member_ref success"
+        );
         Ok(MemberRef::BackendPeer {
             peer_id,
             address,

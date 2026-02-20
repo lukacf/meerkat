@@ -103,6 +103,48 @@ impl MobToolDispatcher {
                     "properties": {}
                 }),
             ));
+            defs.push(tool_def(
+                TOOL_MOB_LIST_FLOWS,
+                "List all configured flow IDs for this mob.",
+                json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            ));
+            defs.push(tool_def(
+                TOOL_MOB_RUN_FLOW,
+                "Run a configured flow by ID with optional activation params. Returns run_id.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "flow_id": {"type": "string"},
+                        "params": {"type": "object"}
+                    },
+                    "required": ["flow_id"]
+                }),
+            ));
+            defs.push(tool_def(
+                TOOL_MOB_FLOW_STATUS,
+                "Get persisted status and ledgers for a flow run.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string"}
+                    },
+                    "required": ["run_id"]
+                }),
+            ));
+            defs.push(tool_def(
+                TOOL_MOB_CANCEL_FLOW,
+                "Cancel an in-flight flow run by run_id.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string"}
+                    },
+                    "required": ["run_id"]
+                }),
+            ));
         }
         if enable_mob_tasks {
             defs.push(tool_def(
@@ -211,19 +253,31 @@ struct TaskCreateArgs {
     subject: String,
     description: String,
     #[serde(default)]
-    blocked_by: Vec<String>,
+    blocked_by: Vec<TaskId>,
 }
 
 #[derive(Deserialize)]
 struct TaskUpdateArgs {
-    task_id: String,
+    task_id: TaskId,
     status: TaskStatus,
     owner: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TaskGetArgs {
-    task_id: String,
+    task_id: TaskId,
+}
+
+#[derive(Deserialize)]
+struct RunFlowArgs {
+    flow_id: String,
+    #[serde(default)]
+    params: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct FlowStatusArgs {
+    run_id: String,
 }
 
 #[async_trait::async_trait]
@@ -302,6 +356,48 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .collect::<Vec<_>>();
                 Self::encode_result(call, json!({ "meerkats": meerkats }))
             }
+            TOOL_MOB_LIST_FLOWS => {
+                let flows = self.handle.list_flows();
+                Self::encode_result(call, json!({ "flows": flows }))
+            }
+            TOOL_MOB_RUN_FLOW => {
+                let args: RunFlowArgs = call
+                    .parse_args()
+                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let run_id = self
+                    .handle
+                    .run_flow(FlowId::from(args.flow_id), args.params)
+                    .await
+                    .map_err(|error| Self::map_mob_error(call, error))?;
+                Self::encode_result(call, json!({ "run_id": run_id }))
+            }
+            TOOL_MOB_FLOW_STATUS => {
+                let args: FlowStatusArgs = call
+                    .parse_args()
+                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let run_id = args.run_id.parse::<RunId>().map_err(|error| {
+                    ToolError::invalid_arguments(call.name, format!("invalid run_id: {error}"))
+                })?;
+                let run = self
+                    .handle
+                    .flow_status(run_id)
+                    .await
+                    .map_err(|error| Self::map_mob_error(call, error))?;
+                Self::encode_result(call, json!({ "run": run }))
+            }
+            TOOL_MOB_CANCEL_FLOW => {
+                let args: FlowStatusArgs = call
+                    .parse_args()
+                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let run_id = args.run_id.parse::<RunId>().map_err(|error| {
+                    ToolError::invalid_arguments(call.name, format!("invalid run_id: {error}"))
+                })?;
+                self.handle
+                    .cancel_flow(run_id)
+                    .await
+                    .map_err(|error| Self::map_mob_error(call, error))?;
+                Self::encode_result(call, json!({"ok": true}))
+            }
             TOOL_MOB_TASK_CREATE => {
                 let args: TaskCreateArgs = call
                     .parse_args()
@@ -352,6 +448,10 @@ const TOOL_RETIRE_MEERKAT: &str = "retire_meerkat";
 const TOOL_WIRE_PEERS: &str = "wire_peers";
 const TOOL_UNWIRE_PEERS: &str = "unwire_peers";
 const TOOL_LIST_MEERKATS: &str = "list_meerkats";
+const TOOL_MOB_LIST_FLOWS: &str = "mob_list_flows";
+const TOOL_MOB_RUN_FLOW: &str = "mob_run_flow";
+const TOOL_MOB_FLOW_STATUS: &str = "mob_flow_status";
+const TOOL_MOB_CANCEL_FLOW: &str = "mob_cancel_flow";
 const TOOL_MOB_TASK_CREATE: &str = "mob_task_create";
 const TOOL_MOB_TASK_LIST: &str = "mob_task_list";
 const TOOL_MOB_TASK_UPDATE: &str = "mob_task_update";

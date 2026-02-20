@@ -120,9 +120,19 @@ impl MobBuilder {
                 ));
             }
         };
-        let diagnostics = crate::validate::validate_definition(&definition);
-        if !diagnostics.is_empty() {
-            return Err(MobError::DefinitionError(diagnostics));
+        let mut diagnostics = crate::validate::validate_definition(&definition);
+        diagnostics.extend(crate::spec::SpecValidator::validate(&definition));
+        let (errors, warnings) = crate::validate::partition_diagnostics(diagnostics);
+        if !errors.is_empty() {
+            return Err(MobError::DefinitionError(errors));
+        }
+        for warning in warnings {
+            tracing::warn!(
+                code = %warning.code,
+                location = ?warning.location,
+                "{}",
+                warning.message
+            );
         }
         let session_service = session_service
             .ok_or_else(|| MobError::Internal("session_service is required".into()))?;
@@ -145,6 +155,12 @@ impl MobBuilder {
                 },
             })
             .await?;
+        Self::sync_definition_with_spec_store(
+            storage.specs.clone(),
+            definition.id.clone(),
+            definition.as_ref(),
+        )
+        .await?;
 
         Ok(Self::start_runtime(
             definition,
@@ -152,6 +168,7 @@ impl MobBuilder {
             TaskBoard::default(),
             MobState::Running,
             storage.events.clone(),
+            storage.runs.clone(),
             session_service,
             tool_bundles,
             default_llm_client,
@@ -202,11 +219,27 @@ impl MobBuilder {
                     "cannot resume mob: no MobCreated event found in storage".to_string(),
                 )
             })?;
+        Self::sync_definition_with_spec_store(
+            storage.specs.clone(),
+            definition.id.clone(),
+            &definition,
+        )
+        .await?;
 
         let definition = Arc::new(definition);
-        let diagnostics = crate::validate::validate_definition(&definition);
-        if !diagnostics.is_empty() {
-            return Err(MobError::DefinitionError(diagnostics));
+        let mut diagnostics = crate::validate::validate_definition(&definition);
+        diagnostics.extend(crate::spec::SpecValidator::validate(definition.as_ref()));
+        let (errors, warnings) = crate::validate::partition_diagnostics(diagnostics);
+        if !errors.is_empty() {
+            return Err(MobError::DefinitionError(errors));
+        }
+        for warning in warnings {
+            tracing::warn!(
+                code = %warning.code,
+                location = ?warning.location,
+                "{}",
+                warning.message
+            );
         }
         let mob_events: Vec<_> = all_events
             .into_iter()
@@ -277,10 +310,29 @@ impl MobBuilder {
             definition,
             wiring,
             storage.events.clone(),
+            storage.runs.clone(),
             session_service,
             tool_bundles,
             default_llm_client,
         ))
+    }
+
+    async fn sync_definition_with_spec_store(
+        specs: Arc<dyn crate::store::MobSpecStore>,
+        mob_id: MobId,
+        definition: &MobDefinition,
+    ) -> Result<(), MobError> {
+        match specs.get_spec(&mob_id).await? {
+            Some((stored, _revision)) if stored != *definition => Err(MobError::Internal(
+                "persisted spec store definition does not match MobCreated runtime definition"
+                    .to_string(),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                let _ = specs.put_spec(&mob_id, definition, None).await?;
+                Ok(())
+            }
+        }
     }
 
     async fn reconcile_resume(
@@ -333,7 +385,7 @@ impl MobBuilder {
             let profile = definition
                 .profiles
                 .get(&entry.profile)
-                .ok_or_else(|| MobError::ProfileNotFound(entry.profile.to_string()))?;
+                .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
             let mut config = build::build_agent_config(
                 &definition.id,
                 &entry.profile,
@@ -445,6 +497,7 @@ impl MobBuilder {
         initial_task_board: TaskBoard,
         initial_state: MobState,
         events: Arc<dyn MobEventStore>,
+        run_store: Arc<dyn MobRunStore>,
         session_service: Arc<dyn MobSessionService>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
@@ -476,6 +529,7 @@ impl MobBuilder {
             definition,
             wiring,
             events,
+            run_store,
             session_service,
             tool_bundles,
             default_llm_client,
@@ -486,6 +540,7 @@ impl MobBuilder {
         definition: Arc<MobDefinition>,
         wiring: RuntimeWiring,
         events: Arc<dyn MobEventStore>,
+        run_store: Arc<dyn MobRunStore>,
         session_service: Arc<dyn MobSessionService>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
@@ -509,6 +564,26 @@ impl MobBuilder {
             mcp_running: mcp_running.clone(),
         };
         let external_backend = definition.backend.external.clone();
+        let provisioner: Arc<dyn MobProvisioner> = Arc::new(MultiBackendProvisioner::new(
+            session_service,
+            external_backend,
+        ));
+        let max_orphaned_turns = definition
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.max_orphaned_turns)
+            .unwrap_or(8) as usize;
+        let flow_executor: Arc<dyn FlowTurnExecutor> = Arc::new(ActorFlowTurnExecutor::new(
+            handle.clone(),
+            provisioner.clone(),
+            max_orphaned_turns,
+        ));
+        let flow_engine = FlowEngine::new(
+            flow_executor,
+            handle.clone(),
+            run_store.clone(),
+            events.clone(),
+        );
 
         let actor = MobActor {
             definition,
@@ -516,10 +591,11 @@ impl MobBuilder {
             task_board,
             state,
             events,
-            provisioner: Arc::new(MultiBackendProvisioner::new(
-                session_service,
-                external_backend,
-            )),
+            run_store,
+            provisioner,
+            flow_engine,
+            run_tasks: BTreeMap::new(),
+            run_cancel_tokens: BTreeMap::new(),
             mcp_running,
             mcp_processes,
             command_tx,

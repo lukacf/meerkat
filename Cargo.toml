@@ -66,6 +66,8 @@ humantime = "2.1"
 humantime-serde = "1.1"
 parking_lot = "0.12"
 redb = "2"
+indexmap = { version = "2", features = ["serde"] }
+tokio-util = "0.7"
 
 # JSON Schema validation
 jsonschema = "0.26"

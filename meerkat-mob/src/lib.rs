@@ -26,7 +26,9 @@ pub mod ids;
 pub mod prefab;
 pub mod profile;
 pub mod roster;
+pub mod run;
 pub mod runtime;
+pub mod spec;
 pub mod storage;
 pub mod store;
 pub mod tasks;
@@ -40,15 +42,26 @@ pub use event::{
     MemberRef, MobEvent, MobEventCompat, MobEventCompatError, MobEventKind, MobEventKindCompat,
     NewMobEvent,
 };
-pub use ids::{MeerkatId, MobId, ProfileName};
+pub use ids::{BranchId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 pub use prefab::Prefab;
 pub use profile::{Profile, ToolConfig};
 pub use roster::{Roster, RosterEntry};
+pub use run::{
+    FailureLedgerEntry, FlowContext, FlowRunConfig, MobRun, MobRunStatus, StepLedgerEntry,
+    StepRunStatus,
+};
+pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime::{MobBuilder, MobHandle, MobSessionService, MobState};
+pub use spec::SpecValidator;
 pub use storage::MobStorage;
-pub use store::{InMemoryMobEventStore, MobEventStore};
+pub use store::{
+    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
+    MobSpecStore, RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore, RedbMobStores,
+};
 pub use tasks::{MobTask, TaskBoard, TaskStatus};
-pub use validate::{Diagnostic, DiagnosticCode, validate_definition};
+pub use validate::{
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,
+};
 
 #[cfg(test)]
 mod tests;

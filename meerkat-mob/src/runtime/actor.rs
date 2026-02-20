@@ -1,3 +1,5 @@
+use super::terminalization::{FlowTerminalizationAuthority, TerminalizationTarget};
+use super::transaction::LifecycleRollback;
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -14,7 +16,11 @@ pub(super) struct MobActor {
     pub(super) task_board: Arc<RwLock<TaskBoard>>,
     pub(super) state: Arc<AtomicU8>,
     pub(super) events: Arc<dyn MobEventStore>,
+    pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) provisioner: Arc<dyn MobProvisioner>,
+    pub(super) flow_engine: FlowEngine,
+    pub(super) run_tasks: BTreeMap<RunId, tokio::task::JoinHandle<()>>,
+    pub(super) run_cancel_tokens: BTreeMap<RunId, (tokio_util::sync::CancellationToken, FlowId)>,
     pub(super) mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
     pub(super) mcp_processes: Arc<tokio::sync::Mutex<BTreeMap<String, Child>>>,
     pub(super) command_tx: mpsc::Sender<MobCommand>,
@@ -24,22 +30,6 @@ pub(super) struct MobActor {
 }
 
 impl MobActor {
-    fn mob_debug_enabled() -> bool {
-        std::env::var("RKAT_MOB_DEBUG")
-            .ok()
-            .map(|value| {
-                let value = value.to_ascii_lowercase();
-                matches!(value.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(false)
-    }
-
-    fn mob_debug(message: impl AsRef<str>) {
-        if Self::mob_debug_enabled() {
-            eprintln!("[mob-debug] {}", message.as_ref());
-        }
-    }
-
     fn state(&self) -> MobState {
         MobState::from_u8(self.state.load(Ordering::Acquire))
     }
@@ -100,7 +90,8 @@ impl MobActor {
     }
 
     fn retire_event_key(meerkat_id: &MeerkatId, member_ref: &MemberRef) -> String {
-        let member = serde_json::to_string(member_ref).unwrap_or_else(|_| format!("{member_ref:?}"));
+        let member =
+            serde_json::to_string(member_ref).unwrap_or_else(|_| format!("{member_ref:?}"));
         format!("{meerkat_id}|{member}")
     }
 
@@ -164,7 +155,7 @@ impl MobActor {
     }
 
     /// Main actor loop: process commands sequentially until Shutdown.
-    pub(super) async fn run(self, mut command_rx: mpsc::Receiver<MobCommand>) {
+    pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<MobCommand>) {
         if matches!(self.state(), MobState::Running)
             && let Err(error) = self.start_mcp_servers().await
         {
@@ -249,6 +240,38 @@ impl MobActor {
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
+                }
+                MobCommand::RunFlow {
+                    flow_id,
+                    activation_params,
+                    reply_tx,
+                } => {
+                    let result = match self.expect_state(&[MobState::Running], MobState::Running) {
+                        Ok(()) => self.handle_run_flow(flow_id, activation_params).await,
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::CancelFlow { run_id, reply_tx } => {
+                    let result = match self.expect_state(&[MobState::Running], MobState::Running) {
+                        Ok(()) => self.handle_cancel_flow(run_id).await,
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::FlowStatus { run_id, reply_tx } => {
+                    let result = self.run_store.get_run(&run_id).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::FlowFinished { run_id } => {
+                    self.run_tasks.remove(&run_id);
+                    self.run_cancel_tokens.remove(&run_id);
+                }
+                #[cfg(test)]
+                MobCommand::FlowTrackerCounts { reply_tx } => {
+                    let tasks = self.run_tasks.len();
+                    let tokens = self.run_cancel_tokens.len();
+                    let _ = reply_tx.send((tasks, tokens));
                 }
                 MobCommand::Stop { reply_tx } => {
                     let result = match self.expect_state(&[MobState::Running], MobState::Stopped) {
@@ -353,15 +376,26 @@ impl MobActor {
         initial_message: Option<String>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
-        Self::mob_debug(format!(
-            "MobActor::handle_spawn start mob_id={} meerkat_id={} profile={}",
-            self.definition.id, meerkat_id, profile_name
-        ));
+        if meerkat_id
+            .as_str()
+            .starts_with(FLOW_SYSTEM_MEMBER_ID_PREFIX)
+        {
+            return Err(MobError::WiringError(format!(
+                "meerkat id '{}' uses reserved system prefix '{}'",
+                meerkat_id, FLOW_SYSTEM_MEMBER_ID_PREFIX
+            )));
+        }
+        tracing::debug!(
+            mob_id = %self.definition.id,
+            meerkat_id = %meerkat_id,
+            profile = %profile_name,
+            "MobActor::handle_spawn start"
+        );
         // Check meerkat doesn't already exist
         {
             let roster = self.roster.read().await;
             if roster.get(&meerkat_id).is_some() {
-                return Err(MobError::MeerkatAlreadyExists(meerkat_id.to_string()));
+                return Err(MobError::MeerkatAlreadyExists(meerkat_id));
             }
         }
 
@@ -370,7 +404,7 @@ impl MobActor {
             .definition
             .profiles
             .get(&profile_name)
-            .ok_or_else(|| MobError::ProfileNotFound(profile_name.to_string()))?;
+            .ok_or_else(|| MobError::ProfileNotFound(profile_name.clone()))?;
 
         // Build agent config
         let external_tools = self.external_tools_for_profile(profile)?;
@@ -401,10 +435,11 @@ impl MobActor {
             .or(profile.backend)
             .unwrap_or(self.definition.backend.default);
         let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
-        Self::mob_debug(format!(
-            "MobActor::handle_spawn provisioning selected_backend={:?} peer_name={}",
-            selected_backend, peer_name
-        ));
+        tracing::debug!(
+            selected_backend = ?selected_backend,
+            peer_name = %peer_name,
+            "MobActor::handle_spawn provisioning member"
+        );
         let member_ref = self
             .provisioner
             .provision_member(ProvisionMemberRequest {
@@ -413,9 +448,10 @@ impl MobActor {
                 peer_name,
             })
             .await?;
-        Self::mob_debug(format!(
-            "MobActor::handle_spawn provisioned member_ref={member_ref:?}"
-        ));
+        tracing::debug!(
+            member_ref = ?member_ref,
+            "MobActor::handle_spawn provisioned member"
+        );
 
         // Emit MeerkatSpawned event
         if let Err(append_error) = self
@@ -448,10 +484,10 @@ impl MobActor {
                 "duplicate meerkat insert should be prevented before add()"
             );
         }
-        Self::mob_debug(format!(
-            "MobActor::handle_spawn roster updated meerkat_id={}",
-            meerkat_id
-        ));
+        tracing::debug!(
+            meerkat_id = %meerkat_id,
+            "MobActor::handle_spawn roster updated"
+        );
 
         let planned_wiring_targets = self.spawn_wiring_targets(&profile_name, &meerkat_id).await;
 
@@ -472,10 +508,10 @@ impl MobActor {
             return Err(wiring_error);
         }
 
-        Self::mob_debug(format!(
-            "MobActor::handle_spawn done meerkat_id={}",
-            meerkat_id
-        ));
+        tracing::debug!(
+            meerkat_id = %meerkat_id,
+            "MobActor::handle_spawn done"
+        );
         Ok(member_ref)
     }
 
@@ -609,11 +645,46 @@ impl MobActor {
                 roster.remove(&meerkat_id);
                 return Ok(());
             };
+            let retiring_comms_name = self.comms_name_for(&entry);
+            let retiring_spec = self
+                .provisioner
+                .trusted_peer_spec(&entry.member_ref, &retiring_comms_name, &retiring_key)
+                .await?;
+            let mut rollback = LifecycleRollback::new("retire");
 
             // Notify wired peers about retirement (required for successful retire).
             for peer_id in &entry.wired_to {
+                let peer_comms_name = {
+                    let roster = self.roster.read().await;
+                    roster
+                        .get(peer_id)
+                        .map(|peer_entry| self.comms_name_for(peer_entry))
+                        .ok_or_else(|| {
+                            MobError::WiringError(format!(
+                                "retire requires roster entry for wired peer '{peer_id}'"
+                            ))
+                        })?
+                };
                 self.notify_peer_retired(peer_id, &meerkat_id, &entry, &retiring_comms)
                     .await?;
+                rollback.defer(
+                    format!("compensating mob.peer_added '{meerkat_id}' -> '{peer_id}'"),
+                    {
+                        let retiring_comms = retiring_comms.clone();
+                        let peer_comms_name = peer_comms_name.clone();
+                        let entry = entry.clone();
+                        let meerkat_id = meerkat_id.clone();
+                        move || async move {
+                            self.notify_peer_added(
+                                &retiring_comms,
+                                &peer_comms_name,
+                                &meerkat_id,
+                                &entry,
+                            )
+                            .await
+                        }
+                    },
+                );
             }
 
             // Remove trust from wired peers
@@ -634,12 +705,31 @@ impl MobActor {
                             "retire cannot remove trust for '{meerkat_id}': comms runtime missing for peer '{peer_meerkat_id}'"
                         ))
                     })?;
-                peer_comms.remove_trusted_peer(&retiring_key).await?;
+                if let Err(error) = peer_comms.remove_trusted_peer(&retiring_key).await {
+                    return Err(rollback.fail(error.into()).await);
+                }
+                rollback.defer(
+                    format!("restore trust '{peer_meerkat_id}' -> '{meerkat_id}'"),
+                    {
+                        let peer_comms = peer_comms.clone();
+                        let retiring_spec = retiring_spec.clone();
+                        move || async move {
+                            peer_comms.add_trusted_peer(retiring_spec).await?;
+                            Ok(())
+                        }
+                    },
+                );
             }
-        }
 
-        // Archive session (required)
-        if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
+            if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
+                && !matches!(
+                    error,
+                    MobError::SessionError(meerkat_core::service::SessionError::NotFound { .. })
+                )
+            {
+                return Err(rollback.fail(error).await);
+            }
+        } else if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
             && !matches!(
                 error,
                 MobError::SessionError(meerkat_core::service::SessionError::NotFound { .. })
@@ -663,10 +753,10 @@ impl MobActor {
         {
             let roster = self.roster.read().await;
             if roster.get(&a).is_none() {
-                return Err(MobError::MeerkatNotFound(a.to_string()));
+                return Err(MobError::MeerkatNotFound(a.clone()));
             }
             if roster.get(&b).is_none() {
-                return Err(MobError::MeerkatNotFound(b.to_string()));
+                return Err(MobError::MeerkatNotFound(b.clone()));
             }
         }
 
@@ -681,11 +771,11 @@ impl MobActor {
             let ea = roster
                 .get(&a)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(a.to_string()))?;
+                .ok_or_else(|| MobError::MeerkatNotFound(a.clone()))?;
             let eb = roster
                 .get(&b)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(b.to_string()))?;
+                .ok_or_else(|| MobError::MeerkatNotFound(b.clone()))?;
             (ea, eb)
         };
 
@@ -718,83 +808,62 @@ impl MobActor {
             .provisioner
             .trusted_peer_spec(&entry_b.member_ref, &comms_name_b, &key_b)
             .await?;
+        let mut rollback = LifecycleRollback::new("unwire");
 
         // Notify both peers BEFORE removing trust (need trust to send).
         // Send FROM a TO b: notify b that a is being unwired
         self.notify_peer_unwired(&b, &a, &entry_a, &comms_a).await?;
+        rollback.defer(format!("compensating mob.peer_added '{a}' -> '{b}'"), {
+            let comms_a = comms_a.clone();
+            let comms_name_b = comms_name_b.clone();
+            let a = a.clone();
+            let entry_a = entry_a.clone();
+            move || async move {
+                self.notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a)
+                    .await
+            }
+        });
         // Send FROM b TO a: notify a that b is being unwired
         if let Err(second_notification_error) =
             self.notify_peer_unwired(&a, &b, &entry_b, &comms_b).await
         {
-            if let Err(compensation_error) = self
-                .notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a)
-                .await
-            {
-                return Err(MobError::Internal(format!(
-                    "unwire second notification failed for '{b}' -> '{a}': {second_notification_error}; compensating mob.peer_added '{a}' -> '{b}' failed: {compensation_error}"
-                )));
-            }
-            return Err(second_notification_error);
+            return Err(rollback.fail(second_notification_error).await);
         }
+        rollback.defer(format!("compensating mob.peer_added '{b}' -> '{a}'"), {
+            let comms_b = comms_b.clone();
+            let comms_name_a = comms_name_a.clone();
+            let b = b.clone();
+            let entry_b = entry_b.clone();
+            move || async move {
+                self.notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b)
+                    .await
+            }
+        });
 
         // Remove trust on both sides (required)
         if let Err(remove_a_error) = comms_a.remove_trusted_peer(&key_b).await {
-            let mut cleanup_errors = Vec::new();
-            if let Err(compensation_error) = self
-                .notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b)
-                .await
-            {
-                cleanup_errors.push(format!(
-                    "compensating mob.peer_added '{b}' -> '{a}' failed: {compensation_error}"
-                ));
-            }
-            if let Err(compensation_error) = self
-                .notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a)
-                .await
-            {
-                cleanup_errors.push(format!(
-                    "compensating mob.peer_added '{a}' -> '{b}' failed: {compensation_error}"
-                ));
-            }
-            if !cleanup_errors.is_empty() {
-                return Err(MobError::Internal(format!(
-                    "unwire failed removing trust '{a}' -> '{b}': {remove_a_error}; rollback failures: {}",
-                    cleanup_errors.join("; ")
-                )));
-            }
-            return Err(remove_a_error.into());
+            return Err(rollback.fail(remove_a_error.into()).await);
         }
+        rollback.defer(format!("restore trust '{a}' -> '{b}'"), {
+            let comms_a = comms_a.clone();
+            let spec_b = spec_b.clone();
+            move || async move {
+                comms_a.add_trusted_peer(spec_b).await?;
+                Ok(())
+            }
+        });
+
         if let Err(remove_b_error) = comms_b.remove_trusted_peer(&key_a).await {
-            let mut cleanup_errors = Vec::new();
-            if let Err(restore_error) = comms_a.add_trusted_peer(spec_b.clone()).await {
-                cleanup_errors.push(format!(
-                    "restore trust '{a}' -> '{b}' failed after second removal failure: {restore_error}"
-                ));
-            }
-            if let Err(compensation_error) = self
-                .notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b)
-                .await
-            {
-                cleanup_errors.push(format!(
-                    "compensating mob.peer_added '{b}' -> '{a}' failed: {compensation_error}"
-                ));
-            }
-            if let Err(compensation_error) = self
-                .notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a)
-                .await
-            {
-                cleanup_errors.push(format!(
-                    "compensating mob.peer_added '{a}' -> '{b}' failed: {compensation_error}"
-                ));
-            }
-            if !cleanup_errors.is_empty() {
-                return Err(MobError::Internal(format!(
-                    "unwire failed removing trust '{b}' -> '{a}': {remove_b_error}; rollback failures: {}",
-                    cleanup_errors.join("; ")
-                )));
-            }
-            return Err(remove_b_error.into());
+            return Err(rollback.fail(remove_b_error.into()).await);
         }
+        rollback.defer(format!("restore trust '{b}' -> '{a}'"), {
+            let comms_b = comms_b.clone();
+            let spec_a = spec_a.clone();
+            move || async move {
+                comms_b.add_trusted_peer(spec_a).await?;
+                Ok(())
+            }
+        });
 
         // Emit PeersUnwired event
         if let Err(append_error) = self
@@ -809,40 +878,7 @@ impl MobActor {
             })
             .await
         {
-            let mut cleanup_errors = Vec::new();
-            if let Err(error) = comms_a.add_trusted_peer(spec_b).await {
-                cleanup_errors.push(format!(
-                    "restore trust '{a}' -> '{b}' failed during append rollback: {error}"
-                ));
-            }
-            if let Err(error) = comms_b.add_trusted_peer(spec_a).await {
-                cleanup_errors.push(format!(
-                    "restore trust '{b}' -> '{a}' failed during append rollback: {error}"
-                ));
-            }
-            if let Err(error) = self
-                .notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b)
-                .await
-            {
-                cleanup_errors.push(format!(
-                    "compensating mob.peer_added '{b}' -> '{a}' failed during append rollback: {error}"
-                ));
-            }
-            if let Err(error) = self
-                .notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a)
-                .await
-            {
-                cleanup_errors.push(format!(
-                    "compensating mob.peer_added '{a}' -> '{b}' failed during append rollback: {error}"
-                ));
-            }
-            if !cleanup_errors.is_empty() {
-                return Err(MobError::Internal(format!(
-                    "unwire append failed for '{a}' <-> '{b}': {append_error}; rollback failures: {}",
-                    cleanup_errors.join("; ")
-                )));
-            }
-            return Err(append_error);
+            return Err(rollback.fail(append_error).await);
         }
 
         // Update roster
@@ -854,7 +890,8 @@ impl MobActor {
         Ok(())
     }
 
-    async fn handle_complete(&self) -> Result<(), MobError> {
+    async fn handle_complete(&mut self) -> Result<(), MobError> {
+        self.cancel_all_flow_tasks().await;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is completing.", self.definition.id))
             .await;
         let ids = {
@@ -881,7 +918,8 @@ impl MobActor {
         Ok(())
     }
 
-    async fn handle_destroy(&self) -> Result<(), MobError> {
+    async fn handle_destroy(&mut self) -> Result<(), MobError> {
+        self.cancel_all_flow_tasks().await;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is destroying.", self.definition.id))
             .await;
         let ids = {
@@ -906,15 +944,15 @@ impl MobActor {
         &self,
         subject: String,
         description: String,
-        blocked_by: Vec<String>,
-    ) -> Result<String, MobError> {
+        blocked_by: Vec<TaskId>,
+    ) -> Result<TaskId, MobError> {
         if subject.trim().is_empty() {
             return Err(MobError::Internal(
                 "task subject cannot be empty".to_string(),
             ));
         }
 
-        let task_id = uuid::Uuid::new_v4().to_string();
+        let task_id = TaskId::from(uuid::Uuid::new_v4().to_string());
 
         let appended = self
             .events
@@ -935,7 +973,7 @@ impl MobActor {
 
     async fn handle_task_update(
         &self,
-        task_id: String,
+        task_id: TaskId,
         status: TaskStatus,
         owner: Option<MeerkatId>,
     ) -> Result<(), MobError> {
@@ -990,7 +1028,7 @@ impl MobActor {
             roster
                 .get(&meerkat_id)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.to_string()))?
+                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
         };
 
         // Check external_addressable
@@ -998,10 +1036,10 @@ impl MobActor {
             .definition
             .profiles
             .get(&entry.profile)
-            .ok_or_else(|| MobError::ProfileNotFound(entry.profile.to_string()))?;
+            .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
 
         if !profile.external_addressable {
-            return Err(MobError::NotExternallyAddressable(meerkat_id.to_string()));
+            return Err(MobError::NotExternallyAddressable(meerkat_id));
         }
 
         // Start a turn on the session
@@ -1027,7 +1065,7 @@ impl MobActor {
             roster
                 .get(&meerkat_id)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.to_string()))?
+                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
         };
 
         let req = meerkat_core::service::StartTurnRequest {
@@ -1038,6 +1076,185 @@ impl MobActor {
         };
         self.provisioner.start_turn(&entry.member_ref, req).await?;
         Ok(())
+    }
+
+    async fn handle_run_flow(
+        &mut self,
+        flow_id: FlowId,
+        activation_params: serde_json::Value,
+    ) -> Result<RunId, MobError> {
+        let run_id = RunId::new();
+        let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
+
+        let initial_run = MobRun {
+            run_id: run_id.clone(),
+            mob_id: self.definition.id.clone(),
+            flow_id: config.flow_id.clone(),
+            status: MobRunStatus::Pending,
+            activation_params: activation_params.clone(),
+            created_at: chrono::Utc::now(),
+            completed_at: None,
+            step_ledger: Vec::new(),
+            failure_ledger: Vec::new(),
+        };
+        self.run_store.create_run(initial_run).await?;
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.run_cancel_tokens.insert(
+            run_id.clone(),
+            (cancel_token.clone(), config.flow_id.clone()),
+        );
+
+        let engine = self.flow_engine.clone();
+        let cleanup_tx = self.command_tx.clone();
+        let run_store = self.run_store.clone();
+        let events = self.events.clone();
+        let mob_id = self.definition.id.clone();
+        let flow_run_id = run_id.clone();
+        let flow_id_for_task = config.flow_id.clone();
+        let cleanup_run_id = run_id.clone();
+        let handle = tokio::spawn(async move {
+            let run_id_for_execute = flow_run_id.clone();
+            if let Err(error) = engine
+                .execute_flow(run_id_for_execute, config, activation_params, cancel_token)
+                .await
+            {
+                tracing::error!(
+                    run_id = %flow_run_id,
+                    flow_id = %flow_id_for_task,
+                    error = %error,
+                    "flow task execution failed; applying actor fallback finalization"
+                );
+                if let Err(finalize_error) = Self::finalize_run_failed(
+                    run_store,
+                    events,
+                    mob_id,
+                    flow_run_id.clone(),
+                    flow_id_for_task,
+                    error.to_string(),
+                )
+                .await
+                {
+                    tracing::error!(
+                        run_id = %flow_run_id,
+                        error = %finalize_error,
+                        "failed to finalize run after flow task error"
+                    );
+                }
+            }
+            if cleanup_tx
+                .send(MobCommand::FlowFinished {
+                    run_id: cleanup_run_id,
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    run_id = %flow_run_id,
+                    "failed to send FlowFinished cleanup command"
+                );
+            }
+        });
+        self.run_tasks.insert(run_id.clone(), handle);
+
+        Ok(run_id)
+    }
+
+    async fn handle_cancel_flow(&mut self, run_id: RunId) -> Result<(), MobError> {
+        let Some((cancel_token, flow_id)) = self.run_cancel_tokens.remove(&run_id) else {
+            return Ok(());
+        };
+        cancel_token.cancel();
+
+        let Some(mut handle) = self.run_tasks.remove(&run_id) else {
+            return Ok(());
+        };
+
+        let run_store = self.run_store.clone();
+        let events = self.events.clone();
+        let mob_id = self.definition.id.clone();
+        let cancel_grace_timeout = self
+            .definition
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.cancel_grace_timeout_ms)
+            .map(std::time::Duration::from_millis)
+            .unwrap_or_else(|| std::time::Duration::from_secs(5));
+        tokio::spawn(async move {
+            let completed = tokio::select! {
+                _ = &mut handle => true,
+                _ = tokio::time::sleep(cancel_grace_timeout) => false,
+            };
+            if completed {
+                return;
+            }
+
+            handle.abort();
+            if let Err(error) =
+                Self::finalize_run_canceled(run_store, events, mob_id, run_id, flow_id).await
+            {
+                tracing::error!(
+                    error = %error,
+                    "failed actor fallback cancellation finalization"
+                );
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn finalize_run_failed(
+        run_store: Arc<dyn MobRunStore>,
+        events: Arc<dyn MobEventStore>,
+        mob_id: MobId,
+        run_id: RunId,
+        flow_id: FlowId,
+        reason: String,
+    ) -> Result<(), MobError> {
+        FlowTerminalizationAuthority::new(run_store, events, mob_id)
+            .terminalize(run_id, flow_id, TerminalizationTarget::Failed { reason })
+            .await?;
+        Ok(())
+    }
+
+    async fn finalize_run_canceled(
+        run_store: Arc<dyn MobRunStore>,
+        events: Arc<dyn MobEventStore>,
+        mob_id: MobId,
+        run_id: RunId,
+        flow_id: FlowId,
+    ) -> Result<(), MobError> {
+        FlowTerminalizationAuthority::new(run_store, events, mob_id)
+            .terminalize(run_id, flow_id, TerminalizationTarget::Canceled)
+            .await?;
+        Ok(())
+    }
+
+    async fn cancel_all_flow_tasks(&mut self) {
+        let cancel_tokens = std::mem::take(&mut self.run_cancel_tokens);
+        let tasks = std::mem::take(&mut self.run_tasks);
+        for (_, handle) in tasks {
+            handle.abort();
+        }
+        for (run_id, (token, flow_id)) in cancel_tokens {
+            token.cancel();
+            if let Err(error) = Self::finalize_run_canceled(
+                self.run_store.clone(),
+                self.events.clone(),
+                self.definition.id.clone(),
+                run_id.clone(),
+                flow_id.clone(),
+            )
+            .await
+            {
+                tracing::error!(
+                    run_id = %run_id,
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to finalize run cancellation during lifecycle shutdown"
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1137,6 +1354,7 @@ impl MobActor {
             roster.get(meerkat_id).cloned()
         };
         let spawned_comms = self.provisioner_comms(member_ref).await;
+        let mut rollback = LifecycleRollback::new("spawn rollback");
 
         if !wired_peers.is_empty() {
             let spawned_comms = spawned_comms.as_ref().ok_or_else(|| {
@@ -1150,14 +1368,55 @@ impl MobActor {
                 ))
             })?;
             for peer_meerkat_id in &wired_peers {
+                let peer_comms_name = {
+                    let roster = self.roster.read().await;
+                    roster
+                        .get(peer_meerkat_id)
+                        .map(|entry| self.comms_name_for(entry))
+                        .ok_or_else(|| {
+                            MobError::WiringError(format!(
+                                "spawn rollback requires roster entry for wired peer '{peer_meerkat_id}'"
+                            ))
+                        })?
+                };
                 self.notify_peer_retired(peer_meerkat_id, meerkat_id, spawned_entry, spawned_comms)
                     .await?;
+                rollback.defer(
+                    format!("compensating mob.peer_added '{meerkat_id}' -> '{peer_meerkat_id}'"),
+                    {
+                        let spawned_comms = spawned_comms.clone();
+                        let peer_comms_name = peer_comms_name.clone();
+                        let spawned_entry = spawned_entry.clone();
+                        let meerkat_id = meerkat_id.clone();
+                        move || async move {
+                            self.notify_peer_added(
+                                &spawned_comms,
+                                &peer_comms_name,
+                                &meerkat_id,
+                                &spawned_entry,
+                            )
+                            .await
+                        }
+                    },
+                );
             }
         }
 
         let spawned_key = spawned_comms.as_ref().and_then(|comms| comms.public_key());
+        let spawned_spec = if let (Some(spawned_key), Some(spawned_entry)) =
+            (spawned_key.clone(), spawned_entry.as_ref())
+        {
+            let spawned_comms_name = self.comms_name_for(spawned_entry);
+            Some(
+                self.provisioner
+                    .trusted_peer_spec(member_ref, &spawned_comms_name, &spawned_key)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
         if let Some(spawned_key) = spawned_key {
-            let mut cleanup_errors = Vec::new();
             for peer_meerkat_id in &cleanup_peers {
                 let is_wired_peer = wired_peers.contains(peer_meerkat_id);
                 let peer_entry = {
@@ -1166,34 +1425,49 @@ impl MobActor {
                 };
                 let Some(peer_entry) = peer_entry else {
                     if is_wired_peer {
-                        cleanup_errors.push(format!(
-                            "spawn rollback cannot remove trust for '{meerkat_id}': wired peer '{peer_meerkat_id}' missing from roster"
-                        ));
+                        return Err(rollback
+                            .fail(MobError::Internal(format!(
+                                "spawn rollback cannot remove trust for '{meerkat_id}': wired peer '{peer_meerkat_id}' missing from roster"
+                            )))
+                            .await);
                     }
                     continue;
                 };
                 let peer_comms = self.provisioner_comms(&peer_entry.member_ref).await;
                 let Some(peer_comms) = peer_comms else {
                     if is_wired_peer {
-                        cleanup_errors.push(format!(
-                            "spawn rollback cannot remove trust for '{meerkat_id}': comms runtime missing for wired peer '{peer_meerkat_id}'"
-                        ));
+                        return Err(rollback
+                            .fail(MobError::Internal(format!(
+                                "spawn rollback cannot remove trust for '{meerkat_id}': comms runtime missing for wired peer '{peer_meerkat_id}'"
+                            )))
+                            .await);
                     }
                     continue;
                 };
-                if let Err(error) = peer_comms.remove_trusted_peer(&spawned_key).await
-                    && is_wired_peer
-                {
-                    cleanup_errors.push(format!(
-                        "spawn rollback cannot remove trust for '{meerkat_id}' from wired peer '{peer_meerkat_id}': {error}"
-                    ));
+                if let Err(error) = peer_comms.remove_trusted_peer(&spawned_key).await {
+                    if is_wired_peer {
+                        return Err(rollback
+                            .fail(MobError::Internal(format!(
+                                "spawn rollback cannot remove trust for '{meerkat_id}' from wired peer '{peer_meerkat_id}': {error}"
+                            )))
+                            .await);
+                    }
+                    continue;
                 }
-            }
-            if !cleanup_errors.is_empty() {
-                return Err(MobError::Internal(format!(
-                    "spawn rollback cleanup failed for '{meerkat_id}': {}",
-                    cleanup_errors.join("; ")
-                )));
+                if let Some(spawned_spec) = spawned_spec.clone() {
+                    rollback.defer(
+                        format!(
+                            "restore trust '{peer_meerkat_id}' -> '{meerkat_id}' during spawn rollback"
+                        ),
+                        {
+                            let peer_comms = peer_comms.clone();
+                            move || async move {
+                                peer_comms.add_trusted_peer(spawned_spec).await?;
+                                Ok(())
+                            }
+                        },
+                    );
+                }
             }
         }
 
@@ -1203,7 +1477,7 @@ impl MobActor {
                 MobError::SessionError(meerkat_core::service::SessionError::NotFound { .. })
             )
         {
-            return Err(error);
+            return Err(rollback.fail(error).await);
         }
 
         {
@@ -1261,11 +1535,11 @@ impl MobActor {
             let ea = roster
                 .get(a)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(a.to_string()))?;
+                .ok_or_else(|| MobError::MeerkatNotFound(a.clone()))?;
             let eb = roster
                 .get(b)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(b.to_string()))?;
+                .ok_or_else(|| MobError::MeerkatNotFound(b.clone()))?;
             (ea, eb)
         };
 
@@ -1303,15 +1577,29 @@ impl MobActor {
             .trusted_peer_spec(&entry_a.member_ref, &comms_name_a, &key_a)
             .await?;
 
+        let mut rollback = LifecycleRollback::new("wire");
+
         comms_a.add_trusted_peer(spec_b.clone()).await?;
-        if let Err(error) = comms_b.add_trusted_peer(spec_a.clone()).await {
-            if let Err(cleanup_error) = comms_a.remove_trusted_peer(&key_b).await {
-                return Err(MobError::Internal(format!(
-                    "wire failed adding trust '{b}' -> '{a}': {error}; rollback failed removing trust '{a}' -> '{b}': {cleanup_error}"
-                )));
+        rollback.defer(format!("remove trust '{a}' -> '{b}'"), {
+            let comms_a = comms_a.clone();
+            let key_b = key_b.clone();
+            move || async move {
+                comms_a.remove_trusted_peer(&key_b).await?;
+                Ok(())
             }
-            return Err(error.into());
+        });
+
+        if let Err(error) = comms_b.add_trusted_peer(spec_a.clone()).await {
+            return Err(rollback.fail(error.into()).await);
         }
+        rollback.defer(format!("remove trust '{b}' -> '{a}'"), {
+            let comms_b = comms_b.clone();
+            let key_a = key_a.clone();
+            move || async move {
+                comms_b.remove_trusted_peer(&key_a).await?;
+                Ok(())
+            }
+        });
 
         // Notify both peers (required for successful wire):
         // Send FROM b TO a about new peer b
@@ -1319,56 +1607,30 @@ impl MobActor {
             .notify_peer_added(&comms_b, &comms_name_a, b, &entry_b)
             .await
         {
-            let mut cleanup_errors = Vec::new();
-            if let Err(cleanup_error) = comms_a.remove_trusted_peer(&key_b).await {
-                cleanup_errors.push(format!(
-                    "remove trust '{a}' -> '{b}' failed during rollback: {cleanup_error}"
-                ));
-            }
-            if let Err(cleanup_error) = comms_b.remove_trusted_peer(&key_a).await {
-                cleanup_errors.push(format!(
-                    "remove trust '{b}' -> '{a}' failed during rollback: {cleanup_error}"
-                ));
-            }
-            if !cleanup_errors.is_empty() {
-                return Err(MobError::Internal(format!(
-                    "wire failed sending mob.peer_added '{b}' -> '{a}': {error}; rollback failures: {}",
-                    cleanup_errors.join("; ")
-                )));
-            }
-            return Err(error);
+            return Err(rollback.fail(error).await);
         }
+        rollback.defer(format!("compensating mob.peer_retired '{b}' -> '{a}'"), {
+            let comms_b = comms_b.clone();
+            let entry_b = entry_b.clone();
+            let a = a.clone();
+            let b = b.clone();
+            move || async move { self.notify_peer_retired(&a, &b, &entry_b, &comms_b).await }
+        });
+
         // Send FROM a TO b about new peer a
         if let Err(error) = self
             .notify_peer_added(&comms_a, &comms_name_b, a, &entry_a)
             .await
         {
-            let mut cleanup_errors = Vec::new();
-            if let Err(compensation_error) =
-                self.notify_peer_retired(a, b, &entry_b, &comms_b).await
-            {
-                cleanup_errors.push(format!(
-                    "compensating mob.peer_retired '{b}' -> '{a}' failed: {compensation_error}"
-                ));
-            }
-            if let Err(cleanup_error) = comms_a.remove_trusted_peer(&key_b).await {
-                cleanup_errors.push(format!(
-                    "remove trust '{a}' -> '{b}' failed during rollback: {cleanup_error}"
-                ));
-            }
-            if let Err(cleanup_error) = comms_b.remove_trusted_peer(&key_a).await {
-                cleanup_errors.push(format!(
-                    "remove trust '{b}' -> '{a}' failed during rollback: {cleanup_error}"
-                ));
-            }
-            if !cleanup_errors.is_empty() {
-                return Err(MobError::Internal(format!(
-                    "wire failed sending mob.peer_added '{a}' -> '{b}': {error}; rollback failures: {}",
-                    cleanup_errors.join("; ")
-                )));
-            }
-            return Err(error);
+            return Err(rollback.fail(error).await);
         }
+        rollback.defer(format!("compensating mob.peer_retired '{a}' -> '{b}'"), {
+            let comms_a = comms_a.clone();
+            let entry_a = entry_a.clone();
+            let a = a.clone();
+            let b = b.clone();
+            move || async move { self.notify_peer_retired(&b, &a, &entry_a, &comms_a).await }
+        });
 
         // Emit PeersWired event
         if let Err(append_error) = self
@@ -1383,38 +1645,7 @@ impl MobActor {
             })
             .await
         {
-            let mut cleanup_errors = Vec::new();
-            if let Err(compensation_error) =
-                self.notify_peer_retired(a, b, &entry_b, &comms_b).await
-            {
-                cleanup_errors.push(format!(
-                    "compensating mob.peer_retired '{b}' -> '{a}' failed: {compensation_error}"
-                ));
-            }
-            if let Err(compensation_error) =
-                self.notify_peer_retired(b, a, &entry_a, &comms_a).await
-            {
-                cleanup_errors.push(format!(
-                    "compensating mob.peer_retired '{a}' -> '{b}' failed: {compensation_error}"
-                ));
-            }
-            if let Err(cleanup_error) = comms_a.remove_trusted_peer(&key_b).await {
-                cleanup_errors.push(format!(
-                    "remove trust '{a}' -> '{b}' failed during append rollback: {cleanup_error}"
-                ));
-            }
-            if let Err(cleanup_error) = comms_b.remove_trusted_peer(&key_a).await {
-                cleanup_errors.push(format!(
-                    "remove trust '{b}' -> '{a}' failed during append rollback: {cleanup_error}"
-                ));
-            }
-            if !cleanup_errors.is_empty() {
-                return Err(MobError::Internal(format!(
-                    "wire append failed for '{a}' <-> '{b}': {append_error}; rollback failures: {}",
-                    cleanup_errors.join("; ")
-                )));
-            }
-            return Err(append_error);
+            return Err(rollback.fail(append_error).await);
         }
 
         // Update roster

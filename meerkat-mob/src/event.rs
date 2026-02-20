@@ -4,7 +4,7 @@
 //! are projections rebuilt by replaying events.
 
 use crate::definition::MobDefinition;
-use crate::ids::{MeerkatId, MobId, ProfileName};
+use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 use chrono::{DateTime, Utc};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
@@ -192,15 +192,72 @@ pub enum MobEventKindCompat {
         b: MeerkatId,
     },
     TaskCreated {
-        task_id: String,
+        task_id: TaskId,
         subject: String,
         description: String,
-        blocked_by: Vec<String>,
+        blocked_by: Vec<TaskId>,
     },
     TaskUpdated {
-        task_id: String,
+        task_id: TaskId,
         status: super::tasks::TaskStatus,
         owner: Option<MeerkatId>,
+    },
+    FlowStarted {
+        run_id: RunId,
+        flow_id: FlowId,
+        params: serde_json::Value,
+    },
+    FlowCompleted {
+        run_id: RunId,
+        flow_id: FlowId,
+    },
+    FlowFailed {
+        run_id: RunId,
+        flow_id: FlowId,
+        reason: String,
+    },
+    FlowCanceled {
+        run_id: RunId,
+        flow_id: FlowId,
+    },
+    StepDispatched {
+        run_id: RunId,
+        step_id: StepId,
+        meerkat_id: MeerkatId,
+    },
+    StepTargetCompleted {
+        run_id: RunId,
+        step_id: StepId,
+        meerkat_id: MeerkatId,
+    },
+    StepTargetFailed {
+        run_id: RunId,
+        step_id: StepId,
+        meerkat_id: MeerkatId,
+        reason: String,
+    },
+    StepCompleted {
+        run_id: RunId,
+        step_id: StepId,
+    },
+    StepFailed {
+        run_id: RunId,
+        step_id: StepId,
+        reason: String,
+    },
+    StepSkipped {
+        run_id: RunId,
+        step_id: StepId,
+        reason: String,
+    },
+    TopologyViolation {
+        from_role: ProfileName,
+        to_role: ProfileName,
+    },
+    SupervisorEscalation {
+        run_id: RunId,
+        step_id: StepId,
+        escalated_to: MeerkatId,
     },
 }
 
@@ -309,6 +366,92 @@ impl TryFrom<MobEventCompat> for MobEvent {
                 status,
                 owner,
             },
+            MobEventKindCompat::FlowStarted {
+                run_id,
+                flow_id,
+                params,
+            } => MobEventKind::FlowStarted {
+                run_id,
+                flow_id,
+                params,
+            },
+            MobEventKindCompat::FlowCompleted { run_id, flow_id } => {
+                MobEventKind::FlowCompleted { run_id, flow_id }
+            }
+            MobEventKindCompat::FlowFailed {
+                run_id,
+                flow_id,
+                reason,
+            } => MobEventKind::FlowFailed {
+                run_id,
+                flow_id,
+                reason,
+            },
+            MobEventKindCompat::FlowCanceled { run_id, flow_id } => {
+                MobEventKind::FlowCanceled { run_id, flow_id }
+            }
+            MobEventKindCompat::StepDispatched {
+                run_id,
+                step_id,
+                meerkat_id,
+            } => MobEventKind::StepDispatched {
+                run_id,
+                step_id,
+                meerkat_id,
+            },
+            MobEventKindCompat::StepTargetCompleted {
+                run_id,
+                step_id,
+                meerkat_id,
+            } => MobEventKind::StepTargetCompleted {
+                run_id,
+                step_id,
+                meerkat_id,
+            },
+            MobEventKindCompat::StepTargetFailed {
+                run_id,
+                step_id,
+                meerkat_id,
+                reason,
+            } => MobEventKind::StepTargetFailed {
+                run_id,
+                step_id,
+                meerkat_id,
+                reason,
+            },
+            MobEventKindCompat::StepCompleted { run_id, step_id } => {
+                MobEventKind::StepCompleted { run_id, step_id }
+            }
+            MobEventKindCompat::StepFailed {
+                run_id,
+                step_id,
+                reason,
+            } => MobEventKind::StepFailed {
+                run_id,
+                step_id,
+                reason,
+            },
+            MobEventKindCompat::StepSkipped {
+                run_id,
+                step_id,
+                reason,
+            } => MobEventKind::StepSkipped {
+                run_id,
+                step_id,
+                reason,
+            },
+            MobEventKindCompat::TopologyViolation { from_role, to_role } => {
+                MobEventKind::TopologyViolation { from_role, to_role }
+            }
+            MobEventKindCompat::SupervisorEscalation {
+                run_id,
+                step_id,
+                escalated_to,
+            } => MobEventKind::SupervisorEscalation {
+                run_id,
+                step_id,
+                escalated_to,
+            },
         };
 
         Ok(Self {
@@ -366,22 +509,82 @@ pub enum MobEventKind {
     /// A task was created on the shared task board.
     TaskCreated {
         /// Unique task identifier.
-        task_id: String,
+        task_id: TaskId,
         /// Short subject line.
         subject: String,
         /// Detailed description.
         description: String,
         /// Task IDs that must be completed before this task can be claimed.
-        blocked_by: Vec<String>,
+        blocked_by: Vec<TaskId>,
     },
     /// A task's status or owner was updated.
     TaskUpdated {
         /// Task being updated.
-        task_id: String,
+        task_id: TaskId,
         /// New status.
         status: super::tasks::TaskStatus,
         /// New owner (if assigned).
         owner: Option<MeerkatId>,
+    },
+    /// Flow run started.
+    FlowStarted {
+        run_id: RunId,
+        flow_id: FlowId,
+        params: serde_json::Value,
+    },
+    /// Flow run completed.
+    FlowCompleted { run_id: RunId, flow_id: FlowId },
+    /// Flow run failed.
+    FlowFailed {
+        run_id: RunId,
+        flow_id: FlowId,
+        reason: String,
+    },
+    /// Flow run canceled.
+    FlowCanceled { run_id: RunId, flow_id: FlowId },
+    /// Per-target step dispatch event.
+    StepDispatched {
+        run_id: RunId,
+        step_id: StepId,
+        meerkat_id: MeerkatId,
+    },
+    /// Per-target successful completion event.
+    StepTargetCompleted {
+        run_id: RunId,
+        step_id: StepId,
+        meerkat_id: MeerkatId,
+    },
+    /// Per-target failure event.
+    StepTargetFailed {
+        run_id: RunId,
+        step_id: StepId,
+        meerkat_id: MeerkatId,
+        reason: String,
+    },
+    /// Aggregate step completion event.
+    StepCompleted { run_id: RunId, step_id: StepId },
+    /// Aggregate step failure event.
+    StepFailed {
+        run_id: RunId,
+        step_id: StepId,
+        reason: String,
+    },
+    /// Step skipped event.
+    StepSkipped {
+        run_id: RunId,
+        step_id: StepId,
+        reason: String,
+    },
+    /// Topology violation event.
+    TopologyViolation {
+        from_role: ProfileName,
+        to_role: ProfileName,
+    },
+    /// Supervisor escalation event.
+    SupervisorEscalation {
+        run_id: RunId,
+        step_id: StepId,
+        escalated_to: MeerkatId,
     },
 }
 
@@ -421,6 +624,10 @@ mod tests {
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
             backend: BackendConfig::default(),
+            flows: BTreeMap::new(),
+            topology: None,
+            supervisor: None,
+            limits: None,
         }
     }
 
@@ -479,20 +686,113 @@ mod tests {
     #[test]
     fn test_task_created_roundtrip() {
         roundtrip(&MobEventKind::TaskCreated {
-            task_id: "task-001".to_string(),
+            task_id: TaskId::from("task-001"),
             subject: "Implement feature".to_string(),
             description: "Build the widget factory".to_string(),
-            blocked_by: vec!["task-000".to_string()],
+            blocked_by: vec![TaskId::from("task-000")],
         });
     }
 
     #[test]
     fn test_task_updated_roundtrip() {
         roundtrip(&MobEventKind::TaskUpdated {
-            task_id: "task-001".to_string(),
+            task_id: TaskId::from("task-001"),
             status: TaskStatus::InProgress,
             owner: Some(MeerkatId::from("agent-1")),
         });
+    }
+
+    #[test]
+    fn test_flow_variants_roundtrip() {
+        let run_id = RunId::new();
+        let flow_id = FlowId::from("flow-a");
+        let step_id = StepId::from("step-a");
+        let meerkat_id = MeerkatId::from("worker-1");
+
+        roundtrip(&MobEventKind::FlowStarted {
+            run_id: run_id.clone(),
+            flow_id: flow_id.clone(),
+            params: serde_json::json!({"k":"v"}),
+        });
+        roundtrip(&MobEventKind::FlowCompleted {
+            run_id: run_id.clone(),
+            flow_id: flow_id.clone(),
+        });
+        roundtrip(&MobEventKind::FlowFailed {
+            run_id: run_id.clone(),
+            flow_id: flow_id.clone(),
+            reason: "boom".to_string(),
+        });
+        roundtrip(&MobEventKind::FlowCanceled {
+            run_id: run_id.clone(),
+            flow_id: flow_id.clone(),
+        });
+        roundtrip(&MobEventKind::StepDispatched {
+            run_id: run_id.clone(),
+            step_id: step_id.clone(),
+            meerkat_id: meerkat_id.clone(),
+        });
+        roundtrip(&MobEventKind::StepTargetCompleted {
+            run_id: run_id.clone(),
+            step_id: step_id.clone(),
+            meerkat_id: meerkat_id.clone(),
+        });
+        roundtrip(&MobEventKind::StepTargetFailed {
+            run_id: run_id.clone(),
+            step_id: step_id.clone(),
+            meerkat_id: meerkat_id.clone(),
+            reason: "fail".to_string(),
+        });
+        roundtrip(&MobEventKind::StepCompleted {
+            run_id: run_id.clone(),
+            step_id: step_id.clone(),
+        });
+        roundtrip(&MobEventKind::StepFailed {
+            run_id: run_id.clone(),
+            step_id: step_id.clone(),
+            reason: "timeout after 1000ms".to_string(),
+        });
+        roundtrip(&MobEventKind::StepSkipped {
+            run_id: run_id.clone(),
+            step_id: step_id.clone(),
+            reason: "branch lost".to_string(),
+        });
+        roundtrip(&MobEventKind::TopologyViolation {
+            from_role: ProfileName::from("lead"),
+            to_role: ProfileName::from("worker"),
+        });
+        roundtrip(&MobEventKind::SupervisorEscalation {
+            run_id,
+            step_id,
+            escalated_to: meerkat_id,
+        });
+    }
+
+    #[test]
+    fn test_event_compat_mapping_for_new_variants() {
+        let run_id = RunId::new();
+        let flow_id = FlowId::from("flow-a");
+        let compat = MobEventCompat {
+            cursor: 7,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("mob"),
+            kind: MobEventKindCompat::FlowStarted {
+                run_id: run_id.clone(),
+                flow_id: flow_id.clone(),
+                params: serde_json::json!({"x":1}),
+            },
+        };
+
+        let canonical = MobEvent::try_from(compat).expect("compat mapping");
+        assert_eq!(canonical.cursor, 7);
+        assert_eq!(
+            canonical.kind,
+            MobEventKind::FlowStarted {
+                run_id,
+                flow_id,
+                params: serde_json::json!({"x":1}),
+            }
+        );
     }
 
     #[test]

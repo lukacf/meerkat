@@ -1,4 +1,5 @@
 use super::*;
+use crate::run::MobRun;
 
 // ---------------------------------------------------------------------------
 // MobState
@@ -86,6 +87,26 @@ pub(super) enum MobCommand {
         message: String,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    RunFlow {
+        flow_id: FlowId,
+        activation_params: serde_json::Value,
+        reply_tx: oneshot::Sender<Result<RunId, MobError>>,
+    },
+    CancelFlow {
+        run_id: RunId,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    FlowStatus {
+        run_id: RunId,
+        reply_tx: oneshot::Sender<Result<Option<MobRun>, MobError>>,
+    },
+    FlowFinished {
+        run_id: RunId,
+    },
+    #[cfg(test)]
+    FlowTrackerCounts {
+        reply_tx: oneshot::Sender<(usize, usize)>,
+    },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
@@ -101,11 +122,11 @@ pub(super) enum MobCommand {
     TaskCreate {
         subject: String,
         description: String,
-        blocked_by: Vec<String>,
-        reply_tx: oneshot::Sender<Result<String, MobError>>,
+        blocked_by: Vec<TaskId>,
+        reply_tx: oneshot::Sender<Result<TaskId, MobError>>,
     },
     TaskUpdate {
-        task_id: String,
+        task_id: TaskId,
         status: TaskStatus,
         owner: Option<MeerkatId>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,

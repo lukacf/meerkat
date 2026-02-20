@@ -1,0 +1,354 @@
+---
+title: "Mobs"
+description: "Detailed guide to Meerkat mobs across Rust SDK, CLI, MCP, REST, RPC, and SDK surfaces."
+icon: "users"
+---
+
+`Mobs` are Meerkat's optional multi-agent extension for orchestrating named peers ("meerkats") under a shared definition.
+
+## Surface behavior
+
+| Surface | Mob access pattern | Notes |
+|---|---|---|
+| CLI `run` / `resume` | Tool-driven (`mob_*` tools) | Primary CLI mob UX |
+| CLI `rkat mob ...` | Direct command lifecycle control | Secondary operational surface |
+| Rust SDK (`meerkat-mob`) | Native runtime APIs (`MobBuilder`, `MobHandle`) | Full control; recommended for embedded systems |
+| MCP server (`rkat-mcp`) | `meerkat_run` / `meerkat_resume` session tools | Mob tools available via `meerkat-mob-mcp` composition |
+| REST (`rkat-rest`) | Session endpoints (`/sessions`, `/sessions/{id}/messages`) | Mob tools available via `meerkat-mob-mcp` composition |
+| RPC (`rkat-rpc`) | JSON-RPC session/turn methods | Mob tools available via `meerkat-mob-mcp` composition |
+| Python SDK | RPC-backed session/turn APIs | Inherits mob capability from RPC host composition |
+| TypeScript SDK | RPC-backed session/turn APIs | Inherits mob capability from RPC host composition |
+
+## Shared mob capability model (`meerkat-mob-mcp`)
+
+Across non-Rust-SDK surfaces, mob capability is provided by composing the
+`meerkat-mob-mcp` dispatcher into session build options.
+
+Core components:
+
+- `MobMcpState`: mob runtime state manager.
+- `MobMcpDispatcher`: exposes `mob_*` tools through the standard tool interface.
+- `SessionBuildOptions.external_tools`: injection point for mob tool capability.
+
+```rust
+use std::sync::Arc;
+use meerkat_core::service::SessionBuildOptions;
+use meerkat_core::AgentToolDispatcher;
+use meerkat_mob::MobSessionService;
+use meerkat_mob_mcp::{MobMcpDispatcher, MobMcpState};
+
+fn mob_tool_dispatcher(
+    session_service: Arc<dyn MobSessionService>,
+) -> Arc<dyn AgentToolDispatcher> {
+    let state = Arc::new(MobMcpState::new(session_service));
+    Arc::new(MobMcpDispatcher::new(state))
+}
+
+let build = SessionBuildOptions {
+    external_tools: Some(mob_tool_dispatcher(session_service)),
+    ..Default::default()
+};
+```
+
+## Definition model
+
+Mob definitions usually contain:
+
+- `[mob]`: mob identity and optional orchestrator profile.
+- `[profiles.<name>]`: profile model, tools, addressing behavior.
+- `[skills.<name>]`: optional inline or referenced skills.
+- `[wiring]`: default auto-wiring and role wiring rules.
+- `[topology]`: optional policy for role-to-role communication.
+- `[supervisor]`: optional escalation behavior.
+- `[limits]`: optional execution limits and guardrails.
+- `[flows.<flow_id>]`: optional DAG flow definitions.
+
+Example:
+
+```toml
+[mob]
+id = "demo-mob"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "claude-sonnet-4-5"
+skills = ["orchestrator"]
+peer_description = "Lead coordinator"
+external_addressable = true
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+skills = ["worker"]
+peer_description = "Execution worker"
+external_addressable = false
+[profiles.worker.tools]
+builtins = true
+comms = true
+mob_tasks = true
+
+[wiring]
+auto_wire_orchestrator = true
+```
+
+## Rust SDK (detailed)
+
+Use `meerkat-mob` directly when you want full control over lifecycle, storage, and flow execution.
+
+Core Rust types:
+
+- `MobDefinition`
+- `MobStorage`
+- `MobBuilder`
+- `MobHandle`
+- `MobSessionService`
+- `MobRun` / `MobRunStatus`
+
+### Rust example: create and operate a mob
+
+```rust
+use std::sync::Arc;
+use meerkat_mob::{
+    FlowId, MeerkatId, MobBuilder, MobDefinition, MobSessionService, MobStorage, ProfileName,
+};
+
+async fn run_mob(
+    definition_toml: &str,
+    session_service: Arc<dyn MobSessionService>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let definition = MobDefinition::from_toml(definition_toml)?;
+    let storage = MobStorage::redb("./mob.redb")?;
+
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(session_service)
+        .create()
+        .await?;
+
+    handle
+        .spawn_member_ref(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .await?;
+    handle
+        .spawn_member_ref(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
+        .await?;
+    handle
+        .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
+        .await?;
+    handle
+        .external_turn(
+            MeerkatId::from("lead-1"),
+            "Coordinate a short task plan.".to_string(),
+        )
+        .await?;
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo_flow"), serde_json::json!({"severity":"critical"}))
+        .await?;
+    let _status = handle.flow_status(run_id).await?;
+
+    Ok(())
+}
+```
+
+### Rust example: in-memory orchestration helper
+
+`meerkat-mob-mcp` also provides a high-level in-memory state wrapper for mob tool dispatch:
+
+```rust
+use meerkat_mob::{MeerkatId, Prefab, ProfileName};
+use meerkat_mob_mcp::MobMcpState;
+
+async fn in_memory_demo() -> Result<(), Box<dyn std::error::Error>> {
+    let state = MobMcpState::new_in_memory();
+    let mob_id = state.mob_create_prefab(Prefab::Pipeline).await?;
+    state
+        .mob_spawn(
+            &mob_id,
+            ProfileName::from("lead"),
+            MeerkatId::from("lead-1"),
+            None,
+        )
+        .await?;
+    let _status = state.mob_status(&mob_id).await?;
+    Ok(())
+}
+```
+
+## Core runtime concepts
+
+- **Mob**: persisted group state with member roster and event history.
+- **Meerkat member**: runtime participant identified by `meerkat_id`.
+- **Profile**: contract describing model/tooling for members.
+- **Wiring edge**: peer relationship controlling communication paths.
+- **Mob event stream**: append-only operational history.
+
+## Backends and identity
+
+Mob members can run with different backend kinds:
+
+- `subagent` backend => member kind `session`
+- `external` backend => member kind `backend_peer`
+
+Backends can be configured as:
+
+- definition default backend,
+- per-spawn override (where supported),
+- mixed backend deployments in a single mob.
+
+## Topology and policy
+
+Topology enforces role communication policy:
+
+- `mode = "strict"`: disallow disallowed edges.
+- `mode = "permissive"`: allow unless explicitly denied.
+- wildcard `"*"` role matching is supported.
+
+Use topology for structural governance of multi-agent communication.
+
+## Lifecycle states and operations
+
+Common lifecycle operations:
+
+- `create`, `list`, `status`, `destroy`
+- `spawn`, `retire`
+- `wire`, `unwire`
+- `turn`
+- `stop`, `resume`, `complete`
+
+Mobs persist status and events so lifecycle is inspectable and resumable.
+
+## Examples across surfaces
+
+### CLI (primary mob UX: tool-driven)
+
+```bash
+rkat run "Create a mob with one lead and three workers, wire lead to workers, then report mob status."
+rkat resume <session_id> "Retire worker-2, add worker-4, and summarize topology."
+```
+
+### CLI direct commands (operational)
+
+```bash
+rkat mob create --definition mob.toml
+rkat mob spawn team-mob lead lead-1
+rkat mob wire team-mob lead-1 worker-1
+rkat mob status team-mob
+```
+
+### REST
+
+With `meerkat-mob-mcp` composed into session build options:
+
+```bash
+curl -X POST http://127.0.0.1:8080/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Use mob_* tools to create a lead/worker mob, wire workers, and report mob status."}'
+```
+
+REST uses session APIs as the control plane; mob operations happen via `mob_*` tools.
+
+### RPC
+
+With `meerkat-mob-mcp` composed into session build options:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"session/create","params":{"prompt":"Use mob_* tools to set up a lead + workers topology and report status."}}
+```
+
+### MCP
+
+```json
+{
+  "name": "meerkat_run",
+  "arguments": {
+    "prompt": "Use mob_* tools to create a mob, spawn members, and summarize topology state."
+  }
+}
+```
+
+MCP uses session tools (`meerkat_run`/`meerkat_resume`) as the control plane; mob capability is provided by the same composed dispatcher.
+
+### Python SDK
+
+```python
+from meerkat import MeerkatClient
+
+client = MeerkatClient()
+await client.connect(realm_id="team-alpha")
+result = await client.create_session("Design a mob structure for incident triage.")
+print(result.text)
+await client.close()
+```
+
+The SDK itself is RPC-backed; mob capability comes from the host runtime composing `meerkat-mob-mcp`.
+
+### TypeScript SDK
+
+```typescript
+import { MeerkatClient } from "@meerkat/sdk";
+
+const client = new MeerkatClient();
+await client.connect({ realmId: "team-alpha" });
+const result = await client.createSession({
+  prompt: "Design a mob structure for incident triage.",
+});
+console.log(result.text);
+await client.close();
+```
+
+The SDK itself is RPC-backed; mob capability comes from the host runtime composing `meerkat-mob-mcp`.
+
+## Observability and persistence
+
+- operational event audit trail (spawn/wire/retire/state transitions),
+- member identity and profile mapping,
+- terminal status persistence for post-run inspection.
+
+Observability is available through:
+
+- tool responses in `run`/`resume`,
+- explicit command outputs (`mob status`, `mob list`),
+- flow run status when using flows.
+
+## When to use mobs vs plain sessions
+
+Use plain sessions when you need one agent with tools.
+
+Use mobs when you need:
+
+- stable multi-agent coordination,
+- role-based capability separation,
+- explicit wiring and lifecycle control,
+- persistent graph/event state beyond one turn.
+
+## Mob flows (optional subfeature)
+
+Flows are an advanced DAG orchestration layer on top of standard mob lifecycle.
+
+Flow capabilities include:
+
+- step dependencies (`depends_on`, `depends_on_mode`),
+- conditional branches (`condition`, `branch`),
+- dispatch modes (`one_to_one`, `fan_out`, `fan_in`),
+- collection policies (`any`, `all`, `quorum`),
+- run and step ledgers for execution history.
+
+CLI flow commands:
+
+```bash
+rkat mob flows <mob_id>
+rkat mob run-flow <mob_id> --flow <flow_id> [--params '{"key":"value"}']
+rkat mob flow-status <mob_id> <run_id>
+```
+
+Flow definitions live under `[flows.<flow_id>]` in the mob definition.
+
+## See also
+
+- [CLI commands](/cli/commands)
+- [Comms guide](/guides/comms)
+- [API reference](/reference/api-reference)

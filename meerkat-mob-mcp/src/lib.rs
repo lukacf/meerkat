@@ -9,8 +9,8 @@ use meerkat_core::service::{
 };
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
 use meerkat_mob::{
-    MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
-    MobSessionService, MobState, MobStorage, Prefab, ProfileName,
+    FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
+    MobSessionService, MobState, MobStorage, Prefab, ProfileName, RunId,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -47,15 +47,10 @@ impl MobMcpState {
             return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
         }
         let storage = MobStorage::in_memory();
-        let handle = MobBuilder::new(
-            definition.clone(),
-            MobStorage {
-                events: storage.events.clone(),
-            },
-        )
-        .with_session_service(self.session_service.clone())
-        .create()
-        .await?;
+        let handle = MobBuilder::new(definition.clone(), storage)
+            .with_session_service(self.session_service.clone())
+            .create()
+            .await?;
         match self.mobs.write().await.entry(mob_id.clone()) {
             Entry::Vacant(entry) => {
                 entry.insert(ManagedMob { handle });
@@ -193,6 +188,38 @@ impl MobMcpState {
             .events()
             .poll(after_cursor, limit)
             .await
+    }
+
+    pub async fn mob_list_flows(&self, mob_id: &MobId) -> Result<Vec<String>, MobError> {
+        let flows = self.handle_for(mob_id).await?.list_flows();
+        Ok(flows
+            .into_iter()
+            .map(|flow_id| flow_id.to_string())
+            .collect())
+    }
+
+    pub async fn mob_run_flow(
+        &self,
+        mob_id: &MobId,
+        flow_id: FlowId,
+        params: serde_json::Value,
+    ) -> Result<RunId, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .run_flow(flow_id, params)
+            .await
+    }
+
+    pub async fn mob_flow_status(
+        &self,
+        mob_id: &MobId,
+        run_id: RunId,
+    ) -> Result<Option<meerkat_mob::MobRun>, MobError> {
+        self.handle_for(mob_id).await?.flow_status(run_id).await
+    }
+
+    pub async fn mob_cancel_flow(&self, mob_id: &MobId, run_id: RunId) -> Result<(), MobError> {
+        self.handle_for(mob_id).await?.cancel_flow(run_id).await
     }
 
     async fn handle_for(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
@@ -465,6 +492,21 @@ impl MobMcpDispatcher {
                 json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
             ),
             tool(
+                "mob_run_flow",
+                &format!("Start a configured flow run. Required: mob_id, flow_id. Optional params object. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"flow_id":{"type":"string"},"params":{"type":"object"}},"required":["mob_id","flow_id"]}),
+            ),
+            tool(
+                "mob_flow_status",
+                &format!("Read flow run status and ledgers by run_id. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"run_id":{"type":"string"}},"required":["mob_id","run_id"]}),
+            ),
+            tool(
+                "mob_cancel_flow",
+                &format!("Cancel an in-flight flow run by run_id. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"run_id":{"type":"string"}},"required":["mob_id","run_id"]}),
+            ),
+            tool(
                 "mob_external_turn",
                 &format!("Send an external message to a spawned meerkat. Required: mob_id, meerkat_id, message. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"message":{"type":"string"}},"required":["mob_id","meerkat_id","message"]}),
@@ -535,6 +577,18 @@ struct TurnArgs {
     mob_id: String,
     meerkat_id: String,
     message: String,
+}
+#[derive(Deserialize)]
+struct RunFlowArgs {
+    mob_id: String,
+    flow_id: String,
+    #[serde(default)]
+    params: serde_json::Value,
+}
+#[derive(Deserialize)]
+struct FlowStatusArgs {
+    mob_id: String,
+    run_id: String,
 }
 #[derive(Deserialize)]
 struct EventsArgs {
@@ -719,6 +773,48 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"meerkats": rows}))
             }
+            "mob_run_flow" => {
+                let args: RunFlowArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let run_id = self
+                    .state
+                    .mob_run_flow(
+                        &MobId::from(args.mob_id),
+                        FlowId::from(args.flow_id),
+                        args.params,
+                    )
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(call, json!({"run_id": run_id}))
+            }
+            "mob_flow_status" => {
+                let args: FlowStatusArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let run_id = args.run_id.parse::<RunId>().map_err(|e| {
+                    ToolError::invalid_arguments(call.name, format!("invalid run_id: {e}"))
+                })?;
+                let run = self
+                    .state
+                    .mob_flow_status(&MobId::from(args.mob_id), run_id)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(call, json!({"run": run}))
+            }
+            "mob_cancel_flow" => {
+                let args: FlowStatusArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let run_id = args.run_id.parse::<RunId>().map_err(|e| {
+                    ToolError::invalid_arguments(call.name, format!("invalid run_id: {e}"))
+                })?;
+                self.state
+                    .mob_cancel_flow(&MobId::from(args.mob_id), run_id)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(call, json!({"ok": true}))
+            }
             "mob_external_turn" => {
                 let args: TurnArgs = call
                     .parse_args()
@@ -835,6 +931,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
     use tokio::sync::Notify;
+    use tokio::time::{Duration, Instant, sleep};
 
     struct MockComms {
         key: String,
@@ -889,6 +986,7 @@ mod tests {
     struct MockSessionSvc {
         sessions: RwLock<HashMap<SessionId, Arc<MockComms>>>,
         counter: AtomicU64,
+        start_turn_delay_ms: AtomicU64,
     }
 
     impl MockSessionSvc {
@@ -896,7 +994,12 @@ mod tests {
             Self {
                 sessions: RwLock::new(HashMap::new()),
                 counter: AtomicU64::new(0),
+                start_turn_delay_ms: AtomicU64::new(0),
             }
+        }
+
+        fn set_turn_delay_ms(&self, delay_ms: u64) {
+            self.start_turn_delay_ms.store(delay_ms, Ordering::Relaxed);
         }
     }
 
@@ -934,6 +1037,10 @@ mod tests {
         ) -> Result<RunResult, SessionError> {
             if !self.sessions.read().await.contains_key(id) {
                 return Err(SessionError::NotFound { id: id.clone() });
+            }
+            let delay_ms = self.start_turn_delay_ms.load(Ordering::Relaxed);
+            if delay_ms > 0 {
+                sleep(Duration::from_millis(delay_ms)).await;
             }
             Ok(RunResult {
                 text: "ok".to_string(),
@@ -1030,11 +1137,7 @@ mod tests {
         serde_json::from_str(&out.content).expect("tool json")
     }
 
-    async fn call_tool_err(
-        d: &MobMcpDispatcher,
-        name: &str,
-        args: serde_json::Value,
-    ) -> ToolError {
+    async fn call_tool_err(d: &MobMcpDispatcher, name: &str, args: serde_json::Value) -> ToolError {
         let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
         d.dispatch(mk_call(name, &raw))
             .await
@@ -1042,11 +1145,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatcher_exposes_14_tools() {
+    async fn test_dispatcher_exposes_17_tools() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
-        assert_eq!(d.tools().len(), 14);
+        assert_eq!(d.tools().len(), 17);
+    }
+
+    fn flow_enabled_definition() -> MobDefinition {
+        MobDefinition::from_toml(
+            r#"
+[mob]
+id = "flow-mob"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+external_addressable = true
+peer_description = "Lead"
+
+[profiles.lead.tools]
+comms = true
+mob = true
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+external_addressable = false
+peer_description = "Worker"
+
+[profiles.worker.tools]
+comms = true
+mob = true
+
+[wiring]
+auto_wire_orchestrator = false
+role_wiring = []
+
+[backend]
+default = "subagent"
+
+[flows.demo]
+description = "demo flow"
+
+[flows.demo.steps.start]
+role = "worker"
+message = "run demo"
+timeout_ms = 1000
+"#,
+        )
+        .expect("flow mob definition should parse")
     }
 
     #[tokio::test]
@@ -1209,6 +1356,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mcp_flow_tools_dispatch_run_status_cancel() {
+        let svc = Arc::new(MockSessionSvc::new());
+        svc.set_turn_delay_ms(60_000);
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let created = call_tool(
+            &d,
+            "mob_create",
+            json!({
+                "definition": flow_enabled_definition()
+            }),
+        )
+        .await;
+        let mob_id = created["mob_id"]
+            .as_str()
+            .expect("mob_id should be returned")
+            .to_string();
+
+        call_tool(
+            &d,
+            "mob_spawn",
+            json!({"mob_id": mob_id, "profile":"worker", "meerkat_id":"w1"}),
+        )
+        .await;
+
+        let started = call_tool(
+            &d,
+            "mob_run_flow",
+            json!({
+                "mob_id": mob_id,
+                "flow_id": "demo",
+                "params": {"ticket": "ABC-123"}
+            }),
+        )
+        .await;
+        let run_id = started["run_id"]
+            .as_str()
+            .expect("run_id should be returned")
+            .to_string();
+
+        let status = call_tool(
+            &d,
+            "mob_flow_status",
+            json!({
+                "mob_id": mob_id,
+                "run_id": run_id
+            }),
+        )
+        .await;
+        assert_eq!(status["run"]["run_id"], run_id);
+        assert_eq!(status["run"]["flow_id"], "demo");
+
+        let canceled = call_tool(
+            &d,
+            "mob_cancel_flow",
+            json!({
+                "mob_id": mob_id,
+                "run_id": run_id
+            }),
+        )
+        .await;
+        assert_eq!(canceled["ok"], true);
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut terminal_status = None;
+        while Instant::now() < deadline {
+            let polled = call_tool(
+                &d,
+                "mob_flow_status",
+                json!({
+                    "mob_id": mob_id.clone(),
+                    "run_id": run_id.clone()
+                }),
+            )
+            .await;
+            if let Some(status) = polled
+                .get("run")
+                .and_then(|run| run.get("status"))
+                .and_then(|status| status.as_str())
+            {
+                if matches!(status, "canceled" | "completed" | "failed") {
+                    terminal_status = Some(status.to_string());
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            terminal_status.as_deref(),
+            Some("canceled"),
+            "mob_cancel_flow should drive run to canceled status"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_flow_status_rejects_invalid_run_id() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let error = call_tool_err(
+            &d,
+            "mob_flow_status",
+            json!({
+                "mob_id": "does-not-matter",
+                "run_id": "not-a-uuid"
+            }),
+        )
+        .await;
+        assert!(
+            matches!(error, ToolError::InvalidArguments { .. }),
+            "invalid run_id should map to invalid arguments"
+        );
+    }
+
+    #[tokio::test]
     async fn test_mob_spawn_backend_arg_returns_backend_member_ref() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
@@ -1284,7 +1548,11 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default();
-        assert_eq!(ids, vec![mob_id], "duplicate create must not replace active mob");
+        assert_eq!(
+            ids,
+            vec![mob_id],
+            "duplicate create must not replace active mob"
+        );
     }
 
     #[tokio::test]

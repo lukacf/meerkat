@@ -29,6 +29,28 @@ pub enum DiagnosticCode {
     MissingExternalBackendConfig,
     /// External backend config is invalid.
     InvalidExternalBackendConfig,
+    /// A flow has cyclic dependencies.
+    FlowCycleDetected,
+    /// A flow dependency points to an unknown step.
+    FlowUnknownStep,
+    /// A flow step references an unknown role.
+    FlowUnknownRole,
+    /// Flow depth exceeds hard limit.
+    FlowDepthExceeded,
+    /// Topology references an unknown role.
+    TopologyUnknownRole,
+    /// Quorum policy is invalid.
+    QuorumInvalid,
+    /// Branch group has fewer than two steps.
+    BranchGroupEmpty,
+    /// Branch step is missing a condition.
+    BranchStepMissingCondition,
+    /// Branch steps in same group do not share dependency set.
+    BranchStepConflictingDeps,
+    /// `depends_on_mode = any` used without branch dependencies.
+    BranchJoinWithoutBranch,
+    /// Definition uses a reserved flow-system identifier.
+    ReservedSystemIdentifier,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -42,9 +64,28 @@ impl fmt::Display for DiagnosticCode {
             Self::EmptyProfiles => "empty_profiles",
             Self::MissingExternalBackendConfig => "missing_external_backend_config",
             Self::InvalidExternalBackendConfig => "invalid_external_backend_config",
+            Self::FlowCycleDetected => "flow_cycle_detected",
+            Self::FlowUnknownStep => "flow_unknown_step",
+            Self::FlowUnknownRole => "flow_unknown_role",
+            Self::FlowDepthExceeded => "flow_depth_exceeded",
+            Self::TopologyUnknownRole => "topology_unknown_role",
+            Self::QuorumInvalid => "quorum_invalid",
+            Self::BranchGroupEmpty => "branch_group_empty",
+            Self::BranchStepMissingCondition => "branch_step_missing_condition",
+            Self::BranchStepConflictingDeps => "branch_step_conflicting_deps",
+            Self::BranchJoinWithoutBranch => "branch_join_without_branch",
+            Self::ReservedSystemIdentifier => "reserved_system_identifier",
         };
         f.write_str(s)
     }
+}
+
+/// Diagnostic severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
 }
 
 /// A validation diagnostic with code, message, and optional location.
@@ -56,6 +97,8 @@ pub struct Diagnostic {
     pub message: String,
     /// Optional path-like location (e.g. "profiles.worker.skills[0]").
     pub location: Option<String>,
+    /// Severity of this diagnostic.
+    pub severity: DiagnosticSeverity,
 }
 
 /// Validate a mob definition for consistency.
@@ -69,6 +112,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
             code: DiagnosticCode::EmptyProfiles,
             message: "mob definition must define at least one profile".to_string(),
             location: Some("profiles".to_string()),
+            severity: DiagnosticSeverity::Error,
         });
     }
 
@@ -83,6 +127,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                 orch.profile.as_str()
             ),
             location: Some("mob.orchestrator".to_string()),
+            severity: DiagnosticSeverity::Error,
         });
     }
 
@@ -94,6 +139,22 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                 code: DiagnosticCode::InvalidProfileName,
                 message: format!("profile name '{}' is not a valid identifier", name.as_str()),
                 location: Some(format!("profiles.{}", name.as_str())),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
+        if name.as_str() == crate::runtime::flow_system_member_id().as_str()
+            || name
+                .as_str()
+                .starts_with(crate::runtime::FLOW_SYSTEM_MEMBER_ID_PREFIX)
+        {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::ReservedSystemIdentifier,
+                message: format!(
+                    "profile name '{}' uses reserved flow-system identifier namespace",
+                    name.as_str()
+                ),
+                location: Some(format!("profiles.{}", name.as_str())),
+                severity: DiagnosticSeverity::Error,
             });
         }
 
@@ -104,6 +165,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     code: DiagnosticCode::MissingSkillRef,
                     message: format!("skill '{}' is not defined", skill_ref),
                     location: Some(format!("profiles.{}.skills[{}]", name.as_str(), i)),
+                    severity: DiagnosticSeverity::Error,
                 });
             }
         }
@@ -115,6 +177,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     code: DiagnosticCode::MissingMcpRef,
                     message: format!("MCP server '{}' is not defined", mcp_ref),
                     location: Some(format!("profiles.{}.tools.mcp[{}]", name.as_str(), i)),
+                    severity: DiagnosticSeverity::Error,
                 });
             }
         }
@@ -130,6 +193,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     rule.a.as_str()
                 ),
                 location: Some(format!("wiring.role_wiring[{}].a", i)),
+                severity: DiagnosticSeverity::Error,
             });
         }
         if !def.profiles.contains_key(&rule.b) {
@@ -140,6 +204,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     rule.b.as_str()
                 ),
                 location: Some(format!("wiring.role_wiring[{}].b", i)),
+                severity: DiagnosticSeverity::Error,
             });
         }
     }
@@ -156,12 +221,14 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                 message: "external backend selected but backend.external config is missing"
                     .to_string(),
                 location: Some("backend.external".to_string()),
+                severity: DiagnosticSeverity::Error,
             }),
             Some(external) if external.address_base.trim().is_empty() => {
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::InvalidExternalBackendConfig,
                     message: "backend.external.address_base must not be empty".to_string(),
                     location: Some("backend.external.address_base".to_string()),
+                    severity: DiagnosticSeverity::Error,
                 })
             }
             Some(_) => {}
@@ -169,6 +236,15 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
     }
 
     diagnostics
+}
+
+/// Split diagnostics into `(errors, warnings)`.
+pub fn partition_diagnostics(
+    diagnostics: impl IntoIterator<Item = Diagnostic>,
+) -> (Vec<Diagnostic>, Vec<Diagnostic>) {
+    diagnostics
+        .into_iter()
+        .partition(|diag| diag.severity == DiagnosticSeverity::Error)
 }
 
 /// Check if a string is a valid identifier (alphanumeric, hyphens, underscores).
@@ -252,6 +328,10 @@ mod tests {
             },
             skills,
             backend: BackendConfig::default(),
+            flows: BTreeMap::new(),
+            topology: None,
+            supervisor: None,
+            limits: None,
         }
     }
 
@@ -287,6 +367,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingSkillRef);
         assert!(diagnostics[0].message.contains("nonexistent-skill"));
+        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Error);
     }
 
     #[test]
@@ -303,6 +384,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingMcpRef);
         assert!(diagnostics[0].message.contains("nonexistent-mcp"));
+        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Error);
     }
 
     #[test]
@@ -332,6 +414,21 @@ mod tests {
                 .iter()
                 .any(|d| d.code == DiagnosticCode::InvalidProfileName)
         );
+    }
+
+    #[test]
+    fn test_reserved_system_profile_name_rejected() {
+        let mut def = valid_definition();
+        def.profiles.insert(
+            crate::runtime::flow_system_member_id().as_str().into(),
+            base_profile(),
+        );
+
+        let diagnostics = validate_definition(&def);
+        assert!(diagnostics.iter().any(|d| {
+            d.code == DiagnosticCode::ReservedSystemIdentifier
+                && d.message.contains("reserved flow-system identifier")
+        }));
     }
 
     #[test]
@@ -441,10 +538,34 @@ model = "claude-sonnet-4-5"
             code: DiagnosticCode::MissingSkillRef,
             message: "skill 'foo' not found".to_string(),
             location: Some("profiles.worker.skills[0]".to_string()),
+            severity: DiagnosticSeverity::Error,
         };
         let json = serde_json::to_string(&diag).unwrap();
         let parsed: Diagnostic = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, diag);
+    }
+
+    #[test]
+    fn test_partition_diagnostics() {
+        let diagnostics = vec![
+            Diagnostic {
+                code: DiagnosticCode::MissingSkillRef,
+                message: "missing".to_string(),
+                location: None,
+                severity: DiagnosticSeverity::Error,
+            },
+            Diagnostic {
+                code: DiagnosticCode::BranchJoinWithoutBranch,
+                message: "warn".to_string(),
+                location: None,
+                severity: DiagnosticSeverity::Warning,
+            },
+        ];
+        let (errors, warnings) = partition_diagnostics(diagnostics);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(errors[0].severity, DiagnosticSeverity::Error);
+        assert_eq!(warnings[0].severity, DiagnosticSeverity::Warning);
     }
 
     #[test]
@@ -457,6 +578,10 @@ model = "claude-sonnet-4-5"
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
             backend: BackendConfig::default(),
+            flows: BTreeMap::new(),
+            topology: None,
+            supervisor: None,
+            limits: None,
         };
         let diagnostics = validate_definition(&def);
         assert!(

@@ -212,6 +212,10 @@ mod tests {
             wiring: WiringRules::default(),
             skills,
             backend: BackendConfig::default(),
+            flows: BTreeMap::new(),
+            topology: None,
+            supervisor: None,
+            limits: None,
         }
     }
 

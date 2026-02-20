@@ -4,7 +4,7 @@
 //! events. It provides the current view of all tasks in a mob.
 
 use crate::event::{MobEvent, MobEventKind};
-use crate::ids::MeerkatId;
+use crate::ids::{MeerkatId, TaskId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -27,7 +27,7 @@ pub enum TaskStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobTask {
     /// Unique task identifier.
-    pub id: String,
+    pub id: TaskId,
     /// Short subject line.
     pub subject: String,
     /// Detailed description.
@@ -37,7 +37,7 @@ pub struct MobTask {
     /// Assigned owner (meerkat ID), if any.
     pub owner: Option<MeerkatId>,
     /// Task IDs that block this task.
-    pub blocked_by: Vec<String>,
+    pub blocked_by: Vec<TaskId>,
     /// When the task was created.
     pub created_at: DateTime<Utc>,
     /// When the task was last updated.
@@ -47,7 +47,7 @@ pub struct MobTask {
 /// Projected view of all tasks in a mob, built from events.
 #[derive(Debug, Clone, Default)]
 pub struct TaskBoard {
-    tasks: BTreeMap<String, MobTask>,
+    tasks: BTreeMap<TaskId, MobTask>,
 }
 
 impl TaskBoard {
@@ -107,7 +107,7 @@ impl TaskBoard {
     }
 
     /// Get a task by ID.
-    pub fn get(&self, task_id: &str) -> Option<&MobTask> {
+    pub fn get(&self, task_id: &TaskId) -> Option<&MobTask> {
         self.tasks.get(task_id)
     }
 
@@ -158,12 +158,12 @@ mod tests {
     #[test]
     fn test_mob_task_serde_roundtrip() {
         let task = MobTask {
-            id: "task-001".to_string(),
+            id: TaskId::from("task-001"),
             subject: "Build widget".to_string(),
             description: "A detailed description".to_string(),
             status: TaskStatus::InProgress,
             owner: Some(MeerkatId::from("agent-1")),
-            blocked_by: vec!["task-000".to_string()],
+            blocked_by: vec![TaskId::from("task-000")],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -186,7 +186,7 @@ mod tests {
         let events = vec![make_event(
             1,
             MobEventKind::TaskCreated {
-                task_id: "t1".to_string(),
+                task_id: TaskId::from("t1"),
                 subject: "Task 1".to_string(),
                 description: "Do something".to_string(),
                 blocked_by: vec![],
@@ -194,7 +194,8 @@ mod tests {
         )];
         let board = TaskBoard::project(&events);
         assert_eq!(board.len(), 1);
-        let task = board.get("t1").unwrap();
+        let task_id = TaskId::from("t1");
+        let task = board.get(&task_id).unwrap();
         assert_eq!(task.subject, "Task 1");
         assert_eq!(task.status, TaskStatus::Open);
         assert!(task.owner.is_none());
@@ -206,16 +207,16 @@ mod tests {
             make_event(
                 1,
                 MobEventKind::TaskCreated {
-                    task_id: "t1".to_string(),
+                    task_id: TaskId::from("t1"),
                     subject: "Task 1".to_string(),
                     description: "Do something".to_string(),
-                    blocked_by: vec!["t0".to_string()],
+                    blocked_by: vec![TaskId::from("t0")],
                 },
             ),
             make_event(
                 2,
                 MobEventKind::TaskUpdated {
-                    task_id: "t1".to_string(),
+                    task_id: TaskId::from("t1"),
                     status: TaskStatus::InProgress,
                     owner: Some(MeerkatId::from("agent-1")),
                 },
@@ -223,17 +224,18 @@ mod tests {
             make_event(
                 3,
                 MobEventKind::TaskUpdated {
-                    task_id: "t1".to_string(),
+                    task_id: TaskId::from("t1"),
                     status: TaskStatus::Completed,
                     owner: Some(MeerkatId::from("agent-1")),
                 },
             ),
         ];
         let board = TaskBoard::project(&events);
-        let task = board.get("t1").unwrap();
+        let task_id = TaskId::from("t1");
+        let task = board.get(&task_id).unwrap();
         assert_eq!(task.status, TaskStatus::Completed);
         assert_eq!(task.owner, Some(MeerkatId::from("agent-1")));
-        assert_eq!(task.blocked_by, vec!["t0"]);
+        assert_eq!(task.blocked_by, vec![TaskId::from("t0")]);
     }
 
     #[test]
@@ -257,7 +259,7 @@ mod tests {
         let events = vec![make_event(
             1,
             MobEventKind::TaskUpdated {
-                task_id: "nonexistent".to_string(),
+                task_id: TaskId::from("nonexistent"),
                 status: TaskStatus::Completed,
                 owner: None,
             },
@@ -272,7 +274,7 @@ mod tests {
             make_event(
                 1,
                 MobEventKind::TaskCreated {
-                    task_id: "t1".to_string(),
+                    task_id: TaskId::from("t1"),
                     subject: "Task 1".to_string(),
                     description: "First".to_string(),
                     blocked_by: vec![],
@@ -281,10 +283,10 @@ mod tests {
             make_event(
                 2,
                 MobEventKind::TaskCreated {
-                    task_id: "t2".to_string(),
+                    task_id: TaskId::from("t2"),
                     subject: "Task 2".to_string(),
                     description: "Second".to_string(),
-                    blocked_by: vec!["t1".to_string()],
+                    blocked_by: vec![TaskId::from("t1")],
                 },
             ),
         ];
@@ -300,7 +302,7 @@ mod tests {
             make_event(
                 1,
                 MobEventKind::TaskCreated {
-                    task_id: "t1".to_string(),
+                    task_id: TaskId::from("t1"),
                     subject: "Task 1".to_string(),
                     description: "First".to_string(),
                     blocked_by: vec![],
@@ -309,7 +311,7 @@ mod tests {
             make_event(
                 2,
                 MobEventKind::TaskUpdated {
-                    task_id: "t1".to_string(),
+                    task_id: TaskId::from("t1"),
                     status: TaskStatus::Completed,
                     owner: None,
                 },
@@ -317,9 +319,10 @@ mod tests {
         ];
         let board1 = TaskBoard::project(&events);
         let board2 = TaskBoard::project(&events);
+        let task_id = TaskId::from("t1");
         assert_eq!(
-            board1.get("t1").unwrap().status,
-            board2.get("t1").unwrap().status
+            board1.get(&task_id).unwrap().status,
+            board2.get(&task_id).unwrap().status
         );
     }
 }

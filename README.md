@@ -95,9 +95,12 @@ rkat run --model gemini-3-flash-preview "Explain async/await"
 | **Semantic Memory** | Auto-compact long conversations, recall via `memory_search` |
 | **Sub-Agents** | Spawn/fork child agents with budget and tool isolation |
 | **Multi-Agent Comms** | Ed25519-authenticated peer-to-peer messaging |
+| **Mobs (extension)** | Optional multi-agent runtime for role-based coordination and persisted graph state |
 | **Skills** | Composable knowledge packs with capability gating |
 | **Built-in Tools** | Task management, shell, datetime, and more |
 | **Streaming** | Real-time token output via event channels |
+
+Mobs are an optional extension when you need multi-agent orchestration. In CLI, the primary workflow is tool-driven via `rkat run`/`rkat resume` prompts that invoke `mob_*` tools. For direct operational control, `rkat mob ...` subcommands are available, and flows are a further optional DAG layer on top. See [docs/guides/mobs.mdx](docs/guides/mobs.mdx) for full details.
 
 ### Modularity
 
@@ -250,7 +253,7 @@ Full documentation is available at **[docs.rkat.ai](https://docs.rkat.ai)**.
 |---------|--------|
 | [Getting Started](https://docs.rkat.ai/introduction) | Introduction, quickstart |
 | [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, tools, providers, configuration |
-| [Guides](https://docs.rkat.ai/guides/hooks) | Hooks, skills, memory, sub-agents, comms, structured output |
+| [Guides](https://docs.rkat.ai/guides/hooks) | Hooks, skills, memory, sub-agents, comms, mobs, structured output |
 | [CLI & APIs](https://docs.rkat.ai/cli/commands) | CLI reference, REST, JSON-RPC, MCP |
 | [SDKs](https://docs.rkat.ai/rust/overview) | Rust, Python, TypeScript |
 | [Reference](https://docs.rkat.ai/reference/architecture) | Architecture, capability matrix, built-in tools |

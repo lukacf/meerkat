@@ -125,14 +125,38 @@ impl AgentLlmClient for LlmClientAdapter {
                         if let Err(e) = assembler.on_reasoning_delta(&delta) {
                             tracing::warn!(?e, "orphaned reasoning delta");
                         }
+                        meerkat_core::tap_try_send(
+                            &self.event_tap,
+                            &AgentEvent::ReasoningDelta {
+                                delta: delta.clone(),
+                            },
+                        );
+                        if let Some(ref tx) = self.event_tx {
+                            let _ = tx.send(AgentEvent::ReasoningDelta { delta }).await;
+                        }
                     }
                     LlmEvent::ReasoningComplete { text, meta } => {
                         if !reasoning_started {
                             assembler.on_reasoning_start();
                             let _ = assembler.on_reasoning_delta(&text);
                         }
+                        // Collect the full reasoning text before completing.
+                        let reasoning_text = assembler.current_reasoning_text();
                         assembler.on_reasoning_complete(meta);
                         reasoning_started = false;
+                        meerkat_core::tap_try_send(
+                            &self.event_tap,
+                            &AgentEvent::ReasoningComplete {
+                                content: reasoning_text.clone(),
+                            },
+                        );
+                        if let Some(ref tx) = self.event_tx {
+                            let _ = tx
+                                .send(AgentEvent::ReasoningComplete {
+                                    content: reasoning_text,
+                                })
+                                .await;
+                        }
                     }
                     LlmEvent::ToolCallDelta {
                         id,

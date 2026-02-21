@@ -81,6 +81,7 @@ impl SessionService for MockSessionService {
             tool_calls: 0,
             structured_output: None,
             schema_warnings: None,
+            skill_diagnostics: None,
         })
     }
 
@@ -110,6 +111,7 @@ impl SessionService for MockSessionService {
             tool_calls: 0,
             structured_output: None,
             schema_warnings: None,
+            skill_diagnostics: None,
         })
     }
 

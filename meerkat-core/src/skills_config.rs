@@ -7,6 +7,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::{fmt::Write as _, hash::Hasher};
+
+use crate::skills::{
+    SkillAlias, SkillError, SkillKeyRemap, SourceHealthThresholds, SourceIdentityLineage,
+    SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
+    SourceUuid,
+};
 
 // ---------------------------------------------------------------------------
 // SkillsConfig
@@ -27,6 +34,12 @@ pub struct SkillsConfig {
     /// Skill repository configurations (precedence = order).
     #[serde(default)]
     pub repositories: Vec<SkillRepositoryConfig>,
+    /// Health classification thresholds for source state transitions.
+    #[serde(default)]
+    pub health_thresholds: SourceHealthThresholds,
+    /// Source identity governance overlays (lineage/remaps/aliases).
+    #[serde(default)]
+    pub identity: SkillsIdentityConfig,
 }
 
 impl Default for SkillsConfig {
@@ -36,8 +49,19 @@ impl Default for SkillsConfig {
             max_injection_bytes: 32 * 1024,
             inventory_threshold: 12,
             repositories: Vec::new(),
+            health_thresholds: SourceHealthThresholds::default(),
+            identity: SkillsIdentityConfig::default(),
         }
     }
+}
+
+/// Source identity governance controls.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SkillsIdentityConfig {
+    pub lineage: Vec<SourceIdentityLineage>,
+    pub remaps: Vec<SkillKeyRemap>,
+    pub aliases: Vec<SkillAlias>,
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +73,8 @@ impl Default for SkillsConfig {
 pub struct SkillRepositoryConfig {
     /// Human-readable name (used in browsing, tracing, shadowing logs).
     pub name: String,
+    /// Stable UUID for source governance.
+    pub source_uuid: SourceUuid,
     /// Repository type and transport-specific config.
     #[serde(flatten)]
     pub transport: SkillRepoTransport,
@@ -61,6 +87,17 @@ pub enum SkillRepoTransport {
     Filesystem {
         path: String,
     },
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        env: std::collections::BTreeMap<String, String>,
+        #[serde(default = "default_external_timeout_seconds")]
+        timeout_seconds: u64,
+    },
     Http {
         url: String,
         #[serde(default)]
@@ -69,6 +106,8 @@ pub enum SkillRepoTransport {
         auth_token: Option<String>,
         #[serde(default = "default_refresh_seconds")]
         refresh_seconds: u64,
+        #[serde(default = "default_external_timeout_seconds")]
+        timeout_seconds: u64,
     },
     Git {
         url: String,
@@ -91,6 +130,10 @@ pub enum SkillRepoTransport {
 
 fn default_refresh_seconds() -> u64 {
     300
+}
+
+fn default_external_timeout_seconds() -> u64 {
+    15
 }
 
 fn default_git_ref() -> String {
@@ -158,6 +201,66 @@ impl SkillsConfig {
             project_has_file,
         ))
     }
+
+    /// Build a source identity registry from repository config + governance overlays.
+    pub fn build_source_identity_registry(&self) -> Result<SourceIdentityRegistry, SkillError> {
+        let records = self
+            .repositories
+            .iter()
+            .map(repository_to_identity_record)
+            .collect();
+        SourceIdentityRegistry::build(
+            records,
+            self.identity.lineage.clone(),
+            self.identity.remaps.clone(),
+            self.identity.aliases.clone(),
+        )
+    }
+}
+
+fn repository_to_identity_record(repo: &SkillRepositoryConfig) -> SourceIdentityRecord {
+    SourceIdentityRecord {
+        source_uuid: repo.source_uuid.clone(),
+        display_name: repo.name.clone(),
+        transport_kind: repository_transport_kind(&repo.transport),
+        fingerprint: repository_fingerprint(repo),
+        status: SourceIdentityStatus::Active,
+    }
+}
+
+fn repository_transport_kind(transport: &SkillRepoTransport) -> SourceTransportKind {
+    match transport {
+        SkillRepoTransport::Filesystem { .. } => SourceTransportKind::Filesystem,
+        SkillRepoTransport::Stdio { .. } => SourceTransportKind::Stdio,
+        SkillRepoTransport::Http { .. } => SourceTransportKind::Http,
+        SkillRepoTransport::Git { .. } => SourceTransportKind::Git,
+    }
+}
+
+fn repository_fingerprint(repo: &SkillRepositoryConfig) -> String {
+    // Deterministic fingerprint derived from the configured source location/transport.
+    // Keep this stable to ensure deterministic governance behavior across restarts.
+    let material = match &repo.transport {
+        SkillRepoTransport::Filesystem { path } => format!("filesystem:{path}"),
+        SkillRepoTransport::Stdio {
+            command, cwd, env, ..
+        } => format!("stdio:{command}:{cwd:?}:{:?}", env),
+        SkillRepoTransport::Http { url, .. } => format!("http:{url}"),
+        SkillRepoTransport::Git {
+            url,
+            git_ref,
+            ref_type,
+            skills_root,
+            ..
+        } => format!("git:{url}:{git_ref}:{ref_type:?}:{:?}", skills_root),
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write(material.as_bytes());
+    let hash = hasher.finish();
+    let mut fp = String::with_capacity(19);
+    fp.push_str("repo-");
+    let _ = write!(&mut fp, "{hash:016x}");
+    fp
 }
 
 async fn read_skills_file(path: Option<&Path>) -> Result<Option<SkillsConfig>, SkillsConfigError> {
@@ -222,7 +325,17 @@ fn merge_project_over_user(
         } else {
             user.inventory_threshold
         },
+        health_thresholds: if project_has_file {
+            project.health_thresholds
+        } else {
+            user.health_thresholds
+        },
         repositories: merged_repos,
+        identity: if project_has_file {
+            project.identity
+        } else {
+            user.identity
+        },
     }
 }
 
@@ -233,6 +346,24 @@ fn merge_project_over_user(
 fn expand_env_in_config(config: &mut SkillsConfig) -> Result<(), SkillsConfigError> {
     for repo in &mut config.repositories {
         match &mut repo.transport {
+            SkillRepoTransport::Stdio {
+                command,
+                args,
+                cwd,
+                env,
+                ..
+            } => {
+                *command = expand_env_in_string(command, "repositories[].command")?;
+                for arg in args {
+                    *arg = expand_env_in_string(arg, "repositories[].args[]")?;
+                }
+                if let Some(dir) = cwd {
+                    *dir = expand_env_in_string(dir, "repositories[].cwd")?;
+                }
+                for value in env.values_mut() {
+                    *value = expand_env_in_string(value, "repositories[].env[]")?;
+                }
+            }
             SkillRepoTransport::Http {
                 auth_token, url, ..
             } => {
@@ -312,10 +443,14 @@ fn project_skills_path() -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn test_source_uuid() -> &'static str {
+        "dc256086-0d2f-4f61-a307-320d4148107f"
+    }
 
     #[test]
     fn test_default_config() {
@@ -333,12 +468,17 @@ enabled = true
 
 [[repositories]]
 name = "project"
+source_uuid = "dc256086-0d2f-4f61-a307-320d4148107f"
 type = "filesystem"
 path = ".rkat/skills"
 "#;
         let config: SkillsConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.repositories.len(), 1);
         assert_eq!(config.repositories[0].name, "project");
+        assert_eq!(
+            config.repositories[0].source_uuid.to_string(),
+            test_source_uuid()
+        );
         assert!(matches!(
             &config.repositories[0].transport,
             SkillRepoTransport::Filesystem { path } if path == ".rkat/skills"
@@ -350,6 +490,7 @@ path = ".rkat/skills"
         let toml = r#"
 [[repositories]]
 name = "elephant"
+source_uuid = "dc256086-0d2f-4f61-a307-320d4148107f"
 type = "http"
 url = "http://localhost:8080/api"
 auth_header = "X-API-Key"
@@ -375,10 +516,40 @@ refresh_seconds = 60
     }
 
     #[test]
+    fn test_parse_stdio_repo() {
+        let toml = r#"
+[[repositories]]
+name = "external-stdio"
+source_uuid = "dc256086-0d2f-4f61-a307-320d4148107f"
+type = "stdio"
+command = "node"
+args = ["skills-server.js", "--mode", "stdio"]
+cwd = ".rkat/skills"
+timeout_seconds = 7
+"#;
+        let config: SkillsConfig = toml::from_str(toml).unwrap();
+        let SkillRepoTransport::Stdio {
+            command,
+            args,
+            cwd,
+            timeout_seconds,
+            ..
+        } = &config.repositories[0].transport
+        else {
+            unreachable!("Expected Stdio transport");
+        };
+        assert_eq!(command, "node");
+        assert_eq!(args.len(), 3);
+        assert_eq!(cwd.as_deref(), Some(".rkat/skills"));
+        assert_eq!(*timeout_seconds, 7);
+    }
+
+    #[test]
     fn test_parse_git_repo() {
         let toml = r#"
 [[repositories]]
 name = "company"
+source_uuid = "dc256086-0d2f-4f61-a307-320d4148107f"
 type = "git"
 url = "https://github.com/company/skills.git"
 git_ref = "v1.2.0"
@@ -426,12 +597,16 @@ auth_token = "ghp_token"
             repositories: vec![
                 SkillRepositoryConfig {
                     name: "company".into(),
+                    source_uuid: SourceUuid::parse("00000000-0000-4000-8000-000000000001")
+                        .expect("uuid"),
                     transport: SkillRepoTransport::Filesystem {
                         path: "user-path".into(),
                     },
                 },
                 SkillRepositoryConfig {
                     name: "personal".into(),
+                    source_uuid: SourceUuid::parse("00000000-0000-4000-8000-000000000002")
+                        .expect("uuid"),
                     transport: SkillRepoTransport::Filesystem {
                         path: "personal-path".into(),
                     },
@@ -444,12 +619,16 @@ auth_token = "ghp_token"
             repositories: vec![
                 SkillRepositoryConfig {
                     name: "project".into(),
+                    source_uuid: SourceUuid::parse("00000000-0000-4000-8000-000000000003")
+                        .expect("uuid"),
                     transport: SkillRepoTransport::Filesystem {
                         path: "project-path".into(),
                     },
                 },
                 SkillRepositoryConfig {
                     name: "company".into(),
+                    source_uuid: SourceUuid::parse("00000000-0000-4000-8000-000000000004")
+                        .expect("uuid"),
                     transport: SkillRepoTransport::Filesystem {
                         path: "project-company-path".into(),
                     },
@@ -476,6 +655,8 @@ auth_token = "ghp_token"
         let user = SkillsConfig {
             repositories: vec![SkillRepositoryConfig {
                 name: "shared".into(),
+                source_uuid: SourceUuid::parse("00000000-0000-4000-8000-000000000005")
+                    .expect("uuid"),
                 transport: SkillRepoTransport::Filesystem {
                     path: "user-shared".into(),
                 },
@@ -486,6 +667,8 @@ auth_token = "ghp_token"
         let project = SkillsConfig {
             repositories: vec![SkillRepositoryConfig {
                 name: "shared".into(),
+                source_uuid: SourceUuid::parse("00000000-0000-4000-8000-000000000006")
+                    .expect("uuid"),
                 transport: SkillRepoTransport::Filesystem {
                     path: "project-shared".into(),
                 },
@@ -518,6 +701,7 @@ auth_token = "ghp_token"
 enabled = true
 [[repositories]]
 name = "test"
+source_uuid = "dc256086-0d2f-4f61-a307-320d4148107f"
 type = "filesystem"
 path = "/tmp/skills"
 "#,
@@ -530,5 +714,89 @@ path = "/tmp/skills"
             .unwrap();
         assert_eq!(config.repositories.len(), 1);
         assert_eq!(config.repositories[0].name, "test");
+    }
+
+    #[test]
+    fn test_missing_source_uuid_is_rejected() {
+        let toml = r#"
+[[repositories]]
+name = "project"
+type = "filesystem"
+path = ".rkat/skills"
+"#;
+        let result = toml::from_str::<SkillsConfig>(toml);
+        assert!(result.is_err(), "source_uuid must be required");
+    }
+
+    #[test]
+    fn test_build_identity_registry_from_config_rejects_partial_split_remap() {
+        let cfg = SkillsConfig {
+            repositories: vec![
+                SkillRepositoryConfig {
+                    name: "old".to_string(),
+                    source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                        .expect("uuid"),
+                    transport: SkillRepoTransport::Filesystem {
+                        path: ".rkat/skills-old".to_string(),
+                    },
+                },
+                SkillRepositoryConfig {
+                    name: "new-a".to_string(),
+                    source_uuid: SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7")
+                        .expect("uuid"),
+                    transport: SkillRepoTransport::Filesystem {
+                        path: ".rkat/skills-a".to_string(),
+                    },
+                },
+                SkillRepositoryConfig {
+                    name: "new-b".to_string(),
+                    source_uuid: SourceUuid::parse("e8df561d-d38f-4242-af55-3a6efb34c950")
+                        .expect("uuid"),
+                    transport: SkillRepoTransport::Filesystem {
+                        path: ".rkat/skills-b".to_string(),
+                    },
+                },
+            ],
+            identity: SkillsIdentityConfig {
+                lineage: vec![SourceIdentityLineage {
+                    event_id: "split-1".to_string(),
+                    recorded_at_unix_secs: 1,
+                    required_from_skills: vec![
+                        crate::skills::SkillName::parse("email-extractor").expect("skill"),
+                        crate::skills::SkillName::parse("pdf-processing").expect("skill"),
+                    ],
+                    event: crate::skills::SourceIdentityLineageEvent::Split {
+                        from: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                            .expect("uuid"),
+                        into: vec![
+                            SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7")
+                                .expect("uuid"),
+                            SourceUuid::parse("e8df561d-d38f-4242-af55-3a6efb34c950")
+                                .expect("uuid"),
+                        ],
+                    },
+                }],
+                remaps: vec![SkillKeyRemap {
+                    from: crate::skills::SkillKey {
+                        source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                            .expect("uuid"),
+                        skill_name: crate::skills::SkillName::parse("email-extractor")
+                            .expect("skill"),
+                    },
+                    to: crate::skills::SkillKey {
+                        source_uuid: SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7")
+                            .expect("uuid"),
+                        skill_name: crate::skills::SkillName::parse("mail-extractor")
+                            .expect("skill"),
+                    },
+                    reason: None,
+                }],
+                aliases: vec![],
+            },
+            ..SkillsConfig::default()
+        };
+
+        let result = cfg.build_source_identity_registry();
+        assert!(matches!(result, Err(SkillError::MissingSkillRemaps { .. })));
     }
 }

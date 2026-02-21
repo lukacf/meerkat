@@ -31,6 +31,7 @@ class WireRunResult:
     usage: Optional[WireUsage] = None
     structured_output: Optional[Any] = None
     schema_warnings: Optional[list] = None
+    skill_diagnostics: Optional[Any] = None
 
 
 @dataclass

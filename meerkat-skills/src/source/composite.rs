@@ -1,15 +1,16 @@
 //! Composite skill source that merges multiple named sources with precedence.
 
-use async_trait::async_trait;
+use crate::source::SourceNode;
 use meerkat_core::skills::{
-    SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillId, SkillSource,
+    SkillArtifact, SkillArtifactContent, SkillDescriptor, SkillDocument, SkillError, SkillFilter,
+    SkillId, SkillQuarantineDiagnostic, SkillSource, SourceHealthSnapshot, SourceHealthState,
 };
 use std::collections::HashMap;
 
 /// A named skill source for provenance tracking.
 pub struct NamedSource {
     pub name: String,
-    pub source: Box<dyn SkillSource>,
+    pub source: SourceNode,
 }
 
 /// Merges skills from multiple named sources with precedence.
@@ -29,7 +30,7 @@ impl CompositeSkillSource {
 
     /// Create from unnamed sources (backward compatibility).
     /// Sources are named "source_0", "source_1", etc.
-    pub fn new(sources: Vec<Box<dyn SkillSource>>) -> Self {
+    pub fn new(sources: Vec<SourceNode>) -> Self {
         let named = sources
             .into_iter()
             .enumerate()
@@ -42,10 +43,8 @@ impl CompositeSkillSource {
     }
 }
 
-#[async_trait]
 impl SkillSource for CompositeSkillSource {
     async fn list(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
-        // Single map tracks both membership and provenance (no redundant HashSet).
         let mut first_source: HashMap<SkillId, String> = HashMap::new();
         let mut result = Vec::new();
 
@@ -70,16 +69,97 @@ impl SkillSource for CompositeSkillSource {
                 }
             }
         }
-
         Ok(result)
     }
 
     async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError> {
-        // Try each source directly — avoids listing every source (expensive
-        // for HTTP/git) just to check membership.
         for named in &self.sources {
             match named.source.load(id).await {
                 Ok(doc) => return Ok(doc),
+                Err(SkillError::NotFound { .. }) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(SkillError::NotFound { id: id.clone() })
+    }
+
+    async fn quarantined_diagnostics(&self) -> Result<Vec<SkillQuarantineDiagnostic>, SkillError> {
+        let mut all = Vec::new();
+        for named in &self.sources {
+            let mut diagnostics = named.source.quarantined_diagnostics().await?;
+            for diag in &mut diagnostics {
+                diag.location = format!("{}:{}", named.name, diag.location);
+            }
+            all.extend(diagnostics);
+        }
+        Ok(all)
+    }
+
+    async fn health_snapshot(&self) -> Result<SourceHealthSnapshot, SkillError> {
+        let mut aggregate = SourceHealthSnapshot::default();
+        for named in &self.sources {
+            let snapshot = named.source.health_snapshot().await?;
+            aggregate.invalid_count = aggregate
+                .invalid_count
+                .saturating_add(snapshot.invalid_count);
+            aggregate.total_count = aggregate.total_count.saturating_add(snapshot.total_count);
+            aggregate.failure_streak = aggregate.failure_streak.max(snapshot.failure_streak);
+            aggregate.handshake_failed |= snapshot.handshake_failed;
+            aggregate.state = match (aggregate.state, snapshot.state) {
+                (SourceHealthState::Unhealthy, _) | (_, SourceHealthState::Unhealthy) => {
+                    SourceHealthState::Unhealthy
+                }
+                (SourceHealthState::Degraded, _) | (_, SourceHealthState::Degraded) => {
+                    SourceHealthState::Degraded
+                }
+                _ => SourceHealthState::Healthy,
+            };
+        }
+        if aggregate.total_count > 0 {
+            aggregate.invalid_ratio = aggregate.invalid_count as f32 / aggregate.total_count as f32;
+        }
+        Ok(aggregate)
+    }
+
+    async fn list_artifacts(&self, id: &SkillId) -> Result<Vec<SkillArtifact>, SkillError> {
+        for named in &self.sources {
+            match named.source.list_artifacts(id).await {
+                Ok(artifacts) => return Ok(artifacts),
+                Err(SkillError::NotFound { .. }) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(SkillError::NotFound { id: id.clone() })
+    }
+
+    async fn read_artifact(
+        &self,
+        id: &SkillId,
+        artifact_path: &str,
+    ) -> Result<SkillArtifactContent, SkillError> {
+        for named in &self.sources {
+            match named.source.read_artifact(id, artifact_path).await {
+                Ok(artifact) => return Ok(artifact),
+                Err(SkillError::NotFound { .. }) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(SkillError::NotFound { id: id.clone() })
+    }
+
+    async fn invoke_function(
+        &self,
+        id: &SkillId,
+        function_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, SkillError> {
+        for named in &self.sources {
+            match named
+                .source
+                .invoke_function(id, function_name, arguments.clone())
+                .await
+            {
+                Ok(output) => return Ok(output),
                 Err(SkillError::NotFound { .. }) => continue,
                 Err(e) => return Err(e),
             }
@@ -93,6 +173,7 @@ impl SkillSource for CompositeSkillSource {
 mod tests {
     use super::*;
     use crate::source::InMemorySkillSource;
+    use crate::source::SourceNode;
     use indexmap::IndexMap;
     use meerkat_core::skills::{SkillDocument, SkillScope};
 
@@ -118,11 +199,11 @@ mod tests {
         let composite = CompositeSkillSource::from_named(vec![
             NamedSource {
                 name: "project".into(),
-                source: Box::new(source_a),
+                source: SourceNode::Memory(source_a),
             },
             NamedSource {
                 name: "company".into(),
-                source: Box::new(source_b),
+                source: SourceNode::Memory(source_b),
             },
         ]);
 
@@ -144,11 +225,11 @@ mod tests {
         let composite = CompositeSkillSource::from_named(vec![
             NamedSource {
                 name: "project".into(),
-                source: Box::new(source_a),
+                source: SourceNode::Memory(source_a),
             },
             NamedSource {
                 name: "company".into(),
-                source: Box::new(source_b),
+                source: SourceNode::Memory(source_b),
             },
         ]);
 
@@ -171,11 +252,11 @@ mod tests {
         let composite = CompositeSkillSource::from_named(vec![
             NamedSource {
                 name: "a".into(),
-                source: Box::new(source_a),
+                source: SourceNode::Memory(source_a),
             },
             NamedSource {
                 name: "b".into(),
-                source: Box::new(source_b),
+                source: SourceNode::Memory(source_b),
             },
         ]);
 
@@ -191,11 +272,11 @@ mod tests {
         let composite = CompositeSkillSource::from_named(vec![
             NamedSource {
                 name: "a".into(),
-                source: Box::new(source_a),
+                source: SourceNode::Memory(source_a),
             },
             NamedSource {
                 name: "b".into(),
-                source: Box::new(source_b),
+                source: SourceNode::Memory(source_b),
             },
         ]);
 

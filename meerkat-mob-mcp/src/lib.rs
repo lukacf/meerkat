@@ -328,6 +328,7 @@ impl SessionService for LocalSessionService {
             tool_calls: 0,
             structured_output: None,
             schema_warnings: None,
+            skill_diagnostics: None,
         })
     }
 
@@ -347,6 +348,7 @@ impl SessionService for LocalSessionService {
             tool_calls: 0,
             structured_output: None,
             schema_warnings: None,
+            skill_diagnostics: None,
         })
     }
 
@@ -935,6 +937,12 @@ pub async fn handle_tools_call(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::collapsible_if,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -1086,6 +1094,7 @@ mod tests {
                 tool_calls: 0,
                 structured_output: None,
                 schema_warnings: None,
+                skill_diagnostics: None,
             })
         }
 
@@ -1118,6 +1127,7 @@ mod tests {
                     tool_calls: 0,
                     structured_output: None,
                     schema_warnings: None,
+                    skill_diagnostics: None,
                 });
             }
             Ok(RunResult {
@@ -1128,6 +1138,7 @@ mod tests {
                 tool_calls: 0,
                 structured_output: None,
                 schema_warnings: None,
+                skill_diagnostics: None,
             })
         }
 

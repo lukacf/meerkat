@@ -255,6 +255,7 @@ fn mock_run_result(session_id: SessionId, text: String) -> RunResult {
         tool_calls: 0,
         structured_output: None,
         schema_warnings: None,
+        skill_diagnostics: None,
     }
 }
 
@@ -1782,7 +1783,7 @@ impl SessionAgent for PersistentMockAgent {
         self.run_with_events(prompt, event_tx).await
     }
 
-    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillId>>) {}
+    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
     fn cancel(&mut self) {}
 

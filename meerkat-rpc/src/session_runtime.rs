@@ -9,7 +9,7 @@
 //! `SessionId`; the first `start_turn()` call for that ID materializes the
 //! session inside the service (which runs the first turn).
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 
 use indexmap::IndexMap;
 use meerkat::{
@@ -18,12 +18,19 @@ use meerkat::{
 use meerkat_client::LlmClient;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
+use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_core::{Config, ConfigStore, Session};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::error;
 use crate::protocol::RpcError;
+
+#[derive(Clone)]
+struct SkillIdentityRegistryState {
+    generation: u64,
+    registry: SourceIdentityRegistry,
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -81,6 +88,7 @@ pub struct SessionRuntime {
     instance_id: Option<String>,
     backend: Option<String>,
     config_runtime: Option<Arc<meerkat_core::ConfigRuntime>>,
+    skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
 }
 
 impl SessionRuntime {
@@ -103,6 +111,10 @@ impl SessionRuntime {
             instance_id: None,
             backend: None,
             config_runtime: None,
+            skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
+                generation: 0,
+                registry: SourceIdentityRegistry::default(),
+            })),
         }
     }
 
@@ -127,6 +139,10 @@ impl SessionRuntime {
             instance_id: None,
             backend: None,
             config_runtime: None,
+            skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
+                generation: 0,
+                registry: SourceIdentityRegistry::default(),
+            })),
         }
     }
 
@@ -155,6 +171,39 @@ impl SessionRuntime {
     /// Shared config runtime used by config handlers.
     pub fn config_runtime(&self) -> Option<Arc<meerkat_core::ConfigRuntime>> {
         self.config_runtime.as_ref().map(Arc::clone)
+    }
+
+    pub fn set_skill_identity_registry(&self, registry: SourceIdentityRegistry) {
+        if let Ok(mut slot) = self.skill_identity_registry.write() {
+            slot.registry = registry;
+        }
+    }
+
+    pub fn set_skill_identity_registry_for_generation(
+        &self,
+        generation: u64,
+        registry: SourceIdentityRegistry,
+    ) {
+        if let Ok(mut slot) = self.skill_identity_registry.write()
+            && generation >= slot.generation
+        {
+            slot.generation = generation;
+            slot.registry = registry;
+        }
+    }
+
+    pub fn skill_identity_registry(&self) -> SourceIdentityRegistry {
+        self.skill_identity_registry
+            .read()
+            .map(|state| state.registry.clone())
+            .unwrap_or_default()
+    }
+
+    /// Build a source identity registry from runtime config.
+    pub fn build_skill_identity_registry(
+        config: &Config,
+    ) -> Result<SourceIdentityRegistry, SkillError> {
+        config.skills.build_source_identity_registry()
     }
 
     /// Create a new session with the given build configuration.
@@ -211,7 +260,7 @@ impl SessionRuntime {
         session_id: &SessionId,
         prompt: String,
         event_tx: mpsc::Sender<AgentEvent>,
-        skill_references: Option<Vec<meerkat_core::skills::SkillId>>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
     ) -> Result<RunResult, RpcError> {
         // Check if this is a pending (not-yet-materialized) session.
         let pending_config = {
@@ -456,6 +505,13 @@ mod tests {
     use meerkat::AgentBuildConfig;
     use meerkat_client::{LlmClient, LlmError};
     use meerkat_core::StopReason;
+    use meerkat_core::skills::{
+        SkillKey, SkillKeyRemap, SkillName, SourceIdentityLineage, SourceIdentityLineageEvent,
+        SourceUuid,
+    };
+    use meerkat_core::skills_config::{
+        SkillRepoTransport, SkillRepositoryConfig, SkillsConfig, SkillsIdentityConfig,
+    };
     use std::pin::Pin;
     use std::sync::Arc;
 
@@ -839,5 +895,82 @@ mod tests {
             sessions.is_empty(),
             "All sessions should be removed after shutdown"
         );
+    }
+
+    /// 11. Startup registry build rejects invalid lineage/remap config.
+    #[test]
+    fn build_skill_identity_registry_rejects_invalid_config() {
+        let cfg = Config {
+            skills: SkillsConfig {
+                repositories: vec![
+                    SkillRepositoryConfig {
+                        name: "old".to_string(),
+                        source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                            .expect("uuid"),
+                        transport: SkillRepoTransport::Filesystem {
+                            path: ".rkat/skills-old".to_string(),
+                        },
+                    },
+                    SkillRepositoryConfig {
+                        name: "new-a".to_string(),
+                        source_uuid: SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7")
+                            .expect("uuid"),
+                        transport: SkillRepoTransport::Filesystem {
+                            path: ".rkat/skills-a".to_string(),
+                        },
+                    },
+                    SkillRepositoryConfig {
+                        name: "new-b".to_string(),
+                        source_uuid: SourceUuid::parse("e8df561d-d38f-4242-af55-3a6efb34c950")
+                            .expect("uuid"),
+                        transport: SkillRepoTransport::Filesystem {
+                            path: ".rkat/skills-b".to_string(),
+                        },
+                    },
+                ],
+                identity: SkillsIdentityConfig {
+                    lineage: vec![SourceIdentityLineage {
+                        event_id: "split-1".to_string(),
+                        recorded_at_unix_secs: 1,
+                        required_from_skills: vec![
+                            SkillName::parse("email-extractor").expect("skill"),
+                            SkillName::parse("pdf-processing").expect("skill"),
+                        ],
+                        event: SourceIdentityLineageEvent::Split {
+                            from: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                                .expect("uuid"),
+                            into: vec![
+                                SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7")
+                                    .expect("uuid"),
+                                SourceUuid::parse("e8df561d-d38f-4242-af55-3a6efb34c950")
+                                    .expect("uuid"),
+                            ],
+                        },
+                    }],
+                    remaps: vec![SkillKeyRemap {
+                        from: SkillKey {
+                            source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                                .expect("uuid"),
+                            skill_name: SkillName::parse("email-extractor").expect("skill"),
+                        },
+                        to: SkillKey {
+                            source_uuid: SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7")
+                                .expect("uuid"),
+                            skill_name: SkillName::parse("mail-extractor").expect("skill"),
+                        },
+                        reason: None,
+                    }],
+                    aliases: vec![],
+                },
+                ..SkillsConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let result = SessionRuntime::build_skill_identity_registry(&cfg);
+        assert!(matches!(
+            result,
+            Err(meerkat_core::skills::SkillError::MissingSkillRemaps { .. })
+        ));
     }
 }

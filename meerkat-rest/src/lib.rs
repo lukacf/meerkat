@@ -821,6 +821,7 @@ fn session_error_to_api_result(
                     usage: UsageResponse::default(),
                     structured_output: None,
                     schema_warnings: None,
+                    skill_diagnostics: None,
                 }));
             }
             Err(ApiError::Agent(format!("{err}")))
@@ -1425,6 +1426,47 @@ mod tests {
         assert_eq!(
             overrides.entries[1].mode,
             meerkat_core::HookExecutionMode::Background
+        );
+    }
+
+    #[test]
+    fn test_run_result_to_response_carries_skill_diagnostics() {
+        let session_id = SessionId::new();
+        let result = meerkat_core::RunResult {
+            text: "ok".to_string(),
+            session_id: session_id.clone(),
+            usage: Default::default(),
+            turns: 1,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {
+                source_health: meerkat_core::skills::SourceHealthSnapshot {
+                    state: meerkat_core::skills::SourceHealthState::Degraded,
+                    invalid_ratio: 0.50,
+                    invalid_count: 1,
+                    total_count: 2,
+                    failure_streak: 3,
+                    handshake_failed: false,
+                },
+                quarantined: vec![],
+            }),
+        };
+
+        let response = run_result_to_response(result, "test-realm");
+        assert!(response.skill_diagnostics.is_some());
+        assert_eq!(
+            response
+                .skill_diagnostics
+                .as_ref()
+                .expect("skill_diagnostics")
+                .source_health
+                .state,
+            meerkat_core::skills::SourceHealthState::Degraded
+        );
+        assert_eq!(
+            response.session_ref.as_deref().expect("session_ref"),
+            format_session_ref("test-realm", &session_id)
         );
     }
 }

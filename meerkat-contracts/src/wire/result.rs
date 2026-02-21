@@ -19,6 +19,8 @@ pub struct WireRunResult {
     pub structured_output: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_warnings: Option<Vec<SchemaWarning>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_diagnostics: Option<meerkat_core::skills::SkillRuntimeDiagnostics>,
 }
 
 impl From<RunResult> for WireRunResult {
@@ -32,6 +34,7 @@ impl From<RunResult> for WireRunResult {
             usage: r.usage.into(),
             structured_output: r.structured_output,
             schema_warnings: r.schema_warnings,
+            skill_diagnostics: r.skill_diagnostics,
         }
     }
 }

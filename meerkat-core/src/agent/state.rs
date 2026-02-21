@@ -107,7 +107,7 @@ where
             // Check turn limit
             if turn_count >= max_turns {
                 self.state.transition(LoopState::Completed)?;
-                return Ok(self.build_result(turn_count, tool_call_count));
+                return Ok(self.build_result(turn_count, tool_call_count).await);
             }
 
             // Check budget
@@ -119,7 +119,7 @@ where
                     percent: 1.0,
                 });
                 self.state.transition(LoopState::Completed)?;
-                return Ok(self.build_result(turn_count, tool_call_count));
+                return Ok(self.build_result(turn_count, tool_call_count).await);
             }
 
             // Check compaction trigger (before CallingLlm)
@@ -733,6 +733,7 @@ where
                             tool_calls: tool_call_count,
                             structured_output: None,
                             schema_warnings: None,
+                            skill_diagnostics: self.collect_skill_diagnostics().await,
                         });
                     }
                 }
@@ -747,21 +748,21 @@ where
                 LoopState::Cancelling => {
                     // Handle cancellation
                     self.state.transition(LoopState::Completed)?;
-                    return Ok(self.build_result(turn_count, tool_call_count));
+                    return Ok(self.build_result(turn_count, tool_call_count).await);
                 }
                 LoopState::ErrorRecovery => {
                     // Attempt recovery
                     self.state.transition(LoopState::CallingLlm)?;
                 }
                 LoopState::Completed => {
-                    return Ok(self.build_result(turn_count, tool_call_count));
+                    return Ok(self.build_result(turn_count, tool_call_count).await);
                 }
             }
         }
     }
 
     /// Build a RunResult from current state
-    fn build_result(&self, turns: u32, tool_calls: u32) -> RunResult {
+    async fn build_result(&self, turns: u32, tool_calls: u32) -> RunResult {
         RunResult {
             text: self.session.last_assistant_text().unwrap_or_default(),
             session_id: self.session.id().clone(),
@@ -770,7 +771,18 @@ where
             tool_calls,
             structured_output: None,
             schema_warnings: None,
+            skill_diagnostics: self.collect_skill_diagnostics().await,
         }
+    }
+
+    async fn collect_skill_diagnostics(&self) -> Option<crate::skills::SkillRuntimeDiagnostics> {
+        let runtime = self.skill_engine.as_ref()?;
+        let source_health = runtime.health_snapshot().await.ok()?;
+        let quarantined = runtime.quarantined_diagnostics().await.unwrap_or_default();
+        Some(crate::skills::SkillRuntimeDiagnostics {
+            source_health,
+            quarantined,
+        })
     }
 }
 
@@ -841,12 +853,20 @@ fn fallback_raw_value() -> Box<RawValue> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_async_fn
+)]
 mod tests {
     use super::rewrite_assistant_text;
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
     use crate::budget::{Budget, BudgetLimits};
     use crate::error::{AgentError, ToolError};
+    use crate::skills::{
+        ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillFilter, SkillId,
+        SkillKey, SkillName, SourceUuid,
+    };
     use crate::state::LoopState;
     use crate::types::{
         AssistantBlock, Message, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
@@ -928,6 +948,117 @@ mod tests {
 
         fn seen(&self) -> Vec<String> {
             self.seen_user_messages.lock().unwrap().clone()
+        }
+    }
+
+    struct RecordingSkillEngine {
+        seen_ids: Mutex<Vec<SkillId>>,
+    }
+
+    impl RecordingSkillEngine {
+        fn new() -> Self {
+            Self {
+                seen_ids: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen(&self) -> Vec<SkillId> {
+            self.seen_ids.lock().unwrap().clone()
+        }
+    }
+
+    impl SkillEngine for RecordingSkillEngine {
+        fn inventory_section(
+            &self,
+        ) -> impl Future<Output = Result<String, crate::skills::SkillError>> + Send {
+            async move { Ok(String::new()) }
+        }
+
+        fn resolve_and_render(
+            &self,
+            ids: &[SkillId],
+        ) -> impl Future<Output = Result<Vec<ResolvedSkill>, crate::skills::SkillError>> + Send
+        {
+            let ids = ids.to_vec();
+            async move {
+                let mut seen = self.seen_ids.lock().unwrap();
+                seen.extend_from_slice(&ids);
+                drop(seen);
+
+                Ok(vec![ResolvedSkill {
+                    id: ids.first().cloned().unwrap_or_else(|| {
+                        SkillId("dc256086-0d2f-4f61-a307-320d4148107f/email-extractor".to_string())
+                    }),
+                    name: "email-extractor".to_string(),
+                    rendered_body: "<skill>injected canonical skill</skill>".to_string(),
+                    byte_size: 34,
+                }])
+            }
+        }
+
+        fn collections(
+            &self,
+        ) -> impl Future<Output = Result<Vec<SkillCollection>, crate::skills::SkillError>> + Send
+        {
+            async move { Ok(vec![]) }
+        }
+
+        fn list_skills(
+            &self,
+            _filter: &SkillFilter,
+        ) -> impl Future<Output = Result<Vec<SkillDescriptor>, crate::skills::SkillError>> + Send
+        {
+            async move { Ok(vec![]) }
+        }
+
+        fn quarantined_diagnostics(
+            &self,
+        ) -> impl Future<
+            Output = Result<
+                Vec<crate::skills::SkillQuarantineDiagnostic>,
+                crate::skills::SkillError,
+            >,
+        > + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn health_snapshot(
+            &self,
+        ) -> impl Future<
+            Output = Result<crate::skills::SourceHealthSnapshot, crate::skills::SkillError>,
+        > + Send {
+            async move { Ok(crate::skills::SourceHealthSnapshot::default()) }
+        }
+
+        fn list_artifacts(
+            &self,
+            id: &SkillId,
+        ) -> impl Future<
+            Output = Result<Vec<crate::skills::SkillArtifact>, crate::skills::SkillError>,
+        > + Send {
+            let missing = id.clone();
+            async move { Err(crate::skills::SkillError::NotFound { id: missing }) }
+        }
+
+        fn read_artifact(
+            &self,
+            id: &SkillId,
+            _artifact_path: &str,
+        ) -> impl Future<
+            Output = Result<crate::skills::SkillArtifactContent, crate::skills::SkillError>,
+        > + Send {
+            let missing = id.clone();
+            async move { Err(crate::skills::SkillError::NotFound { id: missing }) }
+        }
+
+        fn invoke_function(
+            &self,
+            id: &SkillId,
+            _function_name: &str,
+            _arguments: Value,
+        ) -> impl Future<Output = Result<Value, crate::skills::SkillError>> + Send {
+            let missing = id.clone();
+            async move { Err(crate::skills::SkillError::NotFound { id: missing }) }
         }
     }
 
@@ -1105,6 +1236,48 @@ mod tests {
             seen.iter().any(|m| m.contains("queued during recovery")),
             "expected queued comms message to be drained into LLM input, saw: {:?}",
             seen
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_skill_keys_are_resolved_and_injected_into_runtime_prompt() {
+        let client = Arc::new(RecordingLlmClient::new());
+        let skill_engine = Arc::new(RecordingSkillEngine::new());
+        let skill_runtime = Arc::new(crate::skills::SkillRuntime::new(skill_engine.clone()));
+        let mut agent = AgentBuilder::new()
+            .with_skill_engine(skill_runtime)
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.pending_skill_references = Some(vec![SkillKey {
+            source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                .expect("valid source uuid"),
+            skill_name: SkillName::parse("email-extractor").expect("valid skill name"),
+        }]);
+        agent.config.max_turns = Some(1);
+
+        let result = agent
+            .run("plain user prompt".to_string())
+            .await
+            .expect("run should succeed");
+        assert_eq!(result.turns, 1);
+
+        let seen_ids = skill_engine.seen();
+        assert!(
+            seen_ids
+                .iter()
+                .any(|id| id.0 == "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"),
+            "expected canonical skill id to be forwarded to skill engine, saw: {:?}",
+            seen_ids
+        );
+
+        let seen_messages = client.seen();
+        assert!(
+            seen_messages
+                .iter()
+                .any(|msg| msg.contains("<skill>injected canonical skill</skill>")),
+            "expected runtime prompt to include rendered skill injection, saw: {:?}",
+            seen_messages
         );
     }
 }

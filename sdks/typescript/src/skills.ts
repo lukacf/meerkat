@@ -6,20 +6,34 @@ import type { MeerkatClient } from "./client.js";
 import type { WireRunResult } from "./generated/types.js";
 import { CapabilityUnavailableError } from "./generated/errors.js";
 
+export type SkillKey = {
+  source_uuid: string;
+  skill_name: string;
+};
+
+export type SkillRef = SkillKey | string;
+
+function isStructured(ref: SkillRef): ref is SkillKey {
+  return typeof ref !== "string";
+}
+
+function normalizeRef(ref: SkillRef): SkillKey {
+  if (isStructured(ref)) return ref;
+  const value = ref.startsWith("/") ? ref.slice(1) : ref;
+  const [source_uuid, ...rest] = value.split("/");
+  if (!source_uuid || rest.length === 0) {
+    throw new Error(
+      `Invalid legacy skill reference '${ref}'. Expected '<source_uuid>/<skill_name>'.`,
+    );
+  }
+  console.warn(
+    `[meerkat-sdk] legacy skill reference '${ref}' is deprecated; pass { source_uuid, skill_name } instead.`,
+  );
+  return { source_uuid, skill_name: rest.join("/") };
+}
+
 /**
  * Helpers for working with Meerkat skills.
- *
- * Skills are loaded by the agent from filesystem and embedded sources.
- * The agent's system prompt contains an inventory of available skills.
- * To invoke a skill, include its reference (e.g. `/shell-patterns`)
- * in the user prompt.
- *
- * @example
- * ```ts
- * const helper = new SkillHelper(client);
- * helper.requireSkills();
- * const result = await helper.invoke(sessionId, "/shell-patterns", "How do I run a background job?");
- * ```
  */
 export class SkillHelper {
   private client: MeerkatClient;
@@ -28,12 +42,10 @@ export class SkillHelper {
     this.client = client;
   }
 
-  /** Check if the skills capability is available in this runtime. */
   isAvailable(): boolean {
     return this.client.hasCapability("skills");
   }
 
-  /** Throw if skills capability is not available. */
   requireSkills(): void {
     if (!this.isAvailable()) {
       throw new CapabilityUnavailableError(
@@ -44,33 +56,69 @@ export class SkillHelper {
     }
   }
 
-  /**
-   * Invoke a skill within an existing session.
-   *
-   * The skill reference (e.g. `/shell-patterns`) is prepended to the prompt.
-   * The agent's system prompt already contains the skill inventory, so it
-   * knows how to resolve the reference.
-   */
   async invoke(
     sessionId: string,
-    skillReference: string,
+    skillRef: SkillRef,
     prompt: string,
   ): Promise<WireRunResult> {
     this.requireSkills();
-    const fullPrompt = `${skillReference} ${prompt}`;
-    return this.client.startTurn(sessionId, fullPrompt);
+    return this.client.startTurn(sessionId, prompt, {
+      skill_refs: [normalizeRef(skillRef)],
+    });
   }
 
-  /**
-   * Create a new session and invoke a skill in the first turn.
-   */
   async invokeNewSession(
-    skillReference: string,
+    skillRef: SkillRef,
     prompt: string,
     model?: string,
   ): Promise<WireRunResult> {
     this.requireSkills();
-    const fullPrompt = `${skillReference} ${prompt}`;
-    return this.client.createSession({ prompt: fullPrompt, model });
+    return this.client.createSession({
+      prompt,
+      model,
+      skill_refs: [normalizeRef(skillRef)],
+    });
+  }
+
+  async listResources(sessionId: string, skillRef: SkillRef): Promise<WireRunResult> {
+    this.requireSkills();
+    const canonical = normalizeRef(skillRef);
+    const id = `${canonical.source_uuid}/${canonical.skill_name}`;
+    return this.client.startTurn(
+      sessionId,
+      `Use skill_list_resources for id '${id}' and return only the tool result JSON.`,
+      { skill_refs: [canonical] },
+    );
+  }
+
+  async readResource(
+    sessionId: string,
+    skillRef: SkillRef,
+    path: string,
+  ): Promise<WireRunResult> {
+    this.requireSkills();
+    const canonical = normalizeRef(skillRef);
+    const id = `${canonical.source_uuid}/${canonical.skill_name}`;
+    return this.client.startTurn(
+      sessionId,
+      `Use skill_read_resource for id '${id}' and path '${path}', then return only the tool result JSON.`,
+      { skill_refs: [canonical] },
+    );
+  }
+
+  async invokeFunction(
+    sessionId: string,
+    skillRef: SkillRef,
+    functionName: string,
+    argumentsValue: unknown,
+  ): Promise<WireRunResult> {
+    this.requireSkills();
+    const canonical = normalizeRef(skillRef);
+    const id = `${canonical.source_uuid}/${canonical.skill_name}`;
+    return this.client.startTurn(
+      sessionId,
+      `Use skill_invoke_function for id '${id}', function '${functionName}', arguments: ${JSON.stringify(argumentsValue)}. Return only the tool result JSON.`,
+      { skill_refs: [canonical] },
+    );
   }
 }

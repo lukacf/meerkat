@@ -331,6 +331,12 @@ impl MobDefinition {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::redundant_clone
+)]
 mod tests {
     use super::*;
     use crate::profile::ToolConfig;

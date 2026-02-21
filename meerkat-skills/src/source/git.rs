@@ -5,15 +5,16 @@
 //!
 //! Pure Rust — no runtime dependency on the `git` CLI binary.
 
+use std::future::Future;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use meerkat_core::skills::{
-    SkillCollection, SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillId, SkillScope,
-    SkillSource,
+    SkillCollection, SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillId,
+    SkillQuarantineDiagnostic, SkillScope, SkillSource, SourceHealthSnapshot,
+    SourceHealthThresholds, SourceUuid,
 };
 use tokio::sync::RwLock;
 
@@ -66,6 +67,10 @@ pub struct GitSkillConfig {
     pub auth: Option<GitSkillAuth>,
     /// Shallow clone depth. Default: Some(1).
     pub depth: Option<usize>,
+    /// Stable source UUID used for diagnostics/identity propagation.
+    pub source_uuid: SourceUuid,
+    /// Health thresholds to use for delegated filesystem source classification.
+    pub health_thresholds: SourceHealthThresholds,
 }
 
 impl GitSkillConfig {
@@ -78,6 +83,11 @@ impl GitSkillConfig {
             refresh_interval: Duration::from_secs(300),
             auth: None,
             depth: Some(1),
+            source_uuid: match SourceUuid::parse("00000000-0000-4000-8000-000000000201") {
+                Ok(source_uuid) => source_uuid,
+                Err(_) => unreachable!("hardcoded git source UUID must remain valid"),
+            },
+            health_thresholds: SourceHealthThresholds::default(),
         }
     }
 }
@@ -182,7 +192,12 @@ impl GitSkillSource {
             None => repo_dir.clone(),
         };
 
-        let source = FilesystemSkillSource::new(skills_dir, SkillScope::Project);
+        let source = FilesystemSkillSource::new_with_identity(
+            skills_dir,
+            SkillScope::Project,
+            self.config.source_uuid.clone(),
+            self.config.health_thresholds,
+        );
         *self.inner.write().await = Some(source);
         *self.last_sync.write().await = Some(Instant::now());
 
@@ -417,33 +432,68 @@ impl TryFromU32 for NonZeroU32 {
     }
 }
 
-#[async_trait]
+#[allow(clippy::manual_async_fn)]
 impl SkillSource for GitSkillSource {
-    async fn list(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
-        self.ensure_synced().await?;
-        let guard = self.inner.read().await;
-        let source = guard
-            .as_ref()
-            .ok_or_else(|| SkillError::Load("Git source not initialized".into()))?;
-        source.list(filter).await
+    fn list(
+        &self,
+        filter: &SkillFilter,
+    ) -> impl Future<Output = Result<Vec<SkillDescriptor>, SkillError>> + Send {
+        async move {
+            self.ensure_synced().await?;
+            let guard = self.inner.read().await;
+            let source = guard
+                .as_ref()
+                .ok_or_else(|| SkillError::Load("Git source not initialized".into()))?;
+            source.list(filter).await
+        }
     }
 
-    async fn load(&self, id: &SkillId) -> Result<SkillDocument, SkillError> {
-        self.ensure_synced().await?;
-        let guard = self.inner.read().await;
-        let source = guard
-            .as_ref()
-            .ok_or_else(|| SkillError::Load("Git source not initialized".into()))?;
-        source.load(id).await
+    fn load(&self, id: &SkillId) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
+        async move {
+            self.ensure_synced().await?;
+            let guard = self.inner.read().await;
+            let source = guard
+                .as_ref()
+                .ok_or_else(|| SkillError::Load("Git source not initialized".into()))?;
+            source.load(id).await
+        }
     }
 
-    async fn collections(&self) -> Result<Vec<SkillCollection>, SkillError> {
-        self.ensure_synced().await?;
-        let guard = self.inner.read().await;
-        let source = guard
-            .as_ref()
-            .ok_or_else(|| SkillError::Load("Git source not initialized".into()))?;
-        source.collections().await
+    fn collections(&self) -> impl Future<Output = Result<Vec<SkillCollection>, SkillError>> + Send {
+        async move {
+            self.ensure_synced().await?;
+            let guard = self.inner.read().await;
+            let source = guard
+                .as_ref()
+                .ok_or_else(|| SkillError::Load("Git source not initialized".into()))?;
+            source.collections().await
+        }
+    }
+
+    fn quarantined_diagnostics(
+        &self,
+    ) -> impl Future<Output = Result<Vec<SkillQuarantineDiagnostic>, SkillError>> + Send {
+        async move {
+            self.ensure_synced().await?;
+            let guard = self.inner.read().await;
+            let source = guard
+                .as_ref()
+                .ok_or_else(|| SkillError::Load("Git source not initialized".into()))?;
+            source.quarantined_diagnostics().await
+        }
+    }
+
+    fn health_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<SourceHealthSnapshot, SkillError>> + Send {
+        async move {
+            self.ensure_synced().await?;
+            let guard = self.inner.read().await;
+            let source = guard
+                .as_ref()
+                .ok_or_else(|| SkillError::Load("Git source not initialized".into()))?;
+            source.health_snapshot().await
+        }
     }
 }
 
@@ -551,7 +601,7 @@ pub(crate) mod tests_support {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -637,6 +687,64 @@ mod tests {
 
         let result = source.list(&SkillFilter::default()).await;
         assert!(matches!(result, Err(SkillError::Load(_))));
+    }
+
+    #[tokio::test]
+    async fn test_health_thresholds_and_diagnostics_wired_for_git_source() {
+        let tmp = TempDir::new().unwrap();
+        let repo_dir = tmp.path().join("fake-repo");
+        tokio::fs::create_dir_all(repo_dir.join(".git"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(repo_dir.join("valid-skill"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(repo_dir.join("broken-skill"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            repo_dir.join("valid-skill/SKILL.md"),
+            "---\nname: valid-skill\ndescription: valid\n---\n\nbody",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            repo_dir.join("broken-skill/SKILL.md"),
+            "---\nname: wrong-name\ndescription: invalid\n---\n\nbody",
+        )
+        .await
+        .unwrap();
+
+        let source_uuid = SourceUuid::parse("00000000-0000-4000-8000-000000000208")
+            .expect("valid git source uuid");
+        let source = GitSkillSource::new(GitSkillConfig {
+            repo_url: "file:///unused".to_string(),
+            cache_dir: repo_dir,
+            git_ref: GitRef::Tag("v1.0".into()),
+            health_thresholds: SourceHealthThresholds {
+                degraded_invalid_ratio: 0.75,
+                unhealthy_invalid_ratio: 0.95,
+                degraded_failure_streak: 10,
+                unhealthy_failure_streak: 20,
+            },
+            source_uuid: source_uuid.clone(),
+            ..GitSkillConfig::new("", "")
+        });
+
+        let listed = source.list(&SkillFilter::default()).await.unwrap();
+        assert!(listed.iter().any(|s| s.id.0 == "valid-skill"));
+
+        let snapshot = source.health_snapshot().await.unwrap();
+        assert_eq!(snapshot.invalid_count, 1);
+        assert_eq!(snapshot.total_count, 2);
+        assert_eq!(
+            snapshot.state,
+            meerkat_core::skills::SourceHealthState::Healthy
+        );
+
+        let diagnostics = source.quarantined_diagnostics().await.unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].source_uuid, source_uuid);
     }
 
     #[tokio::test]

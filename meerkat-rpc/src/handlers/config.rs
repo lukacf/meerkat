@@ -14,6 +14,7 @@ use meerkat_core::{
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
+use crate::session_runtime::SessionRuntime;
 
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
@@ -65,6 +66,43 @@ fn snapshot_from_store(config: Config, config_store: &Arc<dyn ConfigStore>) -> C
     }
 }
 
+fn merge_patch(base: &mut Value, patch: Value) {
+    match (base, patch) {
+        (Value::Object(base_map), Value::Object(patch_map)) => {
+            for (k, v) in patch_map {
+                if v.is_null() {
+                    base_map.remove(&k);
+                } else {
+                    merge_patch(base_map.entry(k).or_insert(Value::Null), v);
+                }
+            }
+        }
+        (base_val, patch_val) => {
+            *base_val = patch_val;
+        }
+    }
+}
+
+fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, String> {
+    let mut value = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    merge_patch(&mut value, patch);
+    serde_json::from_value(value).map_err(|e| e.to_string())
+}
+
+#[allow(clippy::result_large_err)]
+fn build_registry_or_invalid_params(
+    id: Option<RpcId>,
+    config: &Config,
+) -> Result<meerkat_core::skills::SourceIdentityRegistry, RpcResponse> {
+    SessionRuntime::build_skill_identity_registry(config).map_err(|err| {
+        RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("Invalid skills source-identity configuration: {err}"),
+        )
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -95,6 +133,7 @@ pub async fn handle_get(
 pub async fn handle_set(
     id: Option<RpcId>,
     params: Option<&RawValue>,
+    runtime: &Arc<SessionRuntime>,
     config_store: &Arc<dyn ConfigStore>,
     config_runtime: Option<Arc<ConfigRuntime>>,
 ) -> RpcResponse {
@@ -118,9 +157,33 @@ pub async fn handle_set(
         }
     };
 
-    if let Some(runtime) = config_runtime {
-        match runtime.set(config, expected_generation).await {
-            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+    let registry = match build_registry_or_invalid_params(id.clone(), &config) {
+        Ok(registry) => registry,
+        Err(response) => return response,
+    };
+
+    if let Some(config_runtime) = config_runtime {
+        match config_runtime.set(config, expected_generation).await {
+            Ok(snapshot) => {
+                let committed_registry =
+                    match SessionRuntime::build_skill_identity_registry(&snapshot.config) {
+                        Ok(registry) => registry,
+                        Err(err) => {
+                            return RpcResponse::error(
+                                id,
+                                error::INTERNAL_ERROR,
+                                format!(
+                                    "Committed config has invalid source-identity registry: {err}"
+                                ),
+                            );
+                        }
+                    };
+                runtime.set_skill_identity_registry_for_generation(
+                    snapshot.generation,
+                    committed_registry,
+                );
+                RpcResponse::success(id, config_response_body(snapshot))
+            }
             Err(e) => runtime_error_to_response(id, e),
         }
     } else {
@@ -132,10 +195,13 @@ pub async fn handle_set(
             );
         }
         match config_store.set(config.clone()).await {
-            Ok(()) => RpcResponse::success(
-                id,
-                config_response_body(snapshot_from_store(config, config_store)),
-            ),
+            Ok(()) => {
+                runtime.set_skill_identity_registry(registry);
+                RpcResponse::success(
+                    id,
+                    config_response_body(snapshot_from_store(config, config_store)),
+                )
+            }
             Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
         }
     }
@@ -145,6 +211,7 @@ pub async fn handle_set(
 pub async fn handle_patch(
     id: Option<RpcId>,
     params: Option<&RawValue>,
+    runtime: &Arc<SessionRuntime>,
     config_store: &Arc<dyn ConfigStore>,
     config_runtime: Option<Arc<ConfigRuntime>>,
 ) -> RpcResponse {
@@ -162,9 +229,50 @@ pub async fn handle_patch(
             (value, None)
         };
 
-    if let Some(runtime) = config_runtime {
-        match runtime.patch(ConfigDelta(patch), expected_generation).await {
-            Ok(snapshot) => RpcResponse::success(id, config_response_body(snapshot)),
+    if let Some(config_runtime) = config_runtime {
+        let current = match config_runtime.get().await {
+            Ok(snapshot) => snapshot.config,
+            Err(e) => return runtime_error_to_response(id, e),
+        };
+        let preview = match apply_patch_preview(&current, patch.clone()) {
+            Ok(config) => config,
+            Err(err) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Failed to apply config patch preview: {err}"),
+                );
+            }
+        };
+        let _registry = match build_registry_or_invalid_params(id.clone(), &preview) {
+            Ok(registry) => registry,
+            Err(response) => return response,
+        };
+
+        match config_runtime
+            .patch(ConfigDelta(patch), expected_generation)
+            .await
+        {
+            Ok(snapshot) => {
+                let committed_registry =
+                    match SessionRuntime::build_skill_identity_registry(&snapshot.config) {
+                        Ok(registry) => registry,
+                        Err(err) => {
+                            return RpcResponse::error(
+                                id,
+                                error::INTERNAL_ERROR,
+                                format!(
+                                    "Committed config has invalid source-identity registry: {err}"
+                                ),
+                            );
+                        }
+                    };
+                runtime.set_skill_identity_registry_for_generation(
+                    snapshot.generation,
+                    committed_registry,
+                );
+                RpcResponse::success(id, config_response_body(snapshot))
+            }
             Err(e) => runtime_error_to_response(id, e),
         }
     } else {
@@ -175,11 +283,32 @@ pub async fn handle_patch(
                 "expected_generation requires config runtime".to_string(),
             );
         }
+        let current = match config_store.get().await {
+            Ok(config) => config,
+            Err(e) => return RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+        };
+        let preview = match apply_patch_preview(&current, patch.clone()) {
+            Ok(config) => config,
+            Err(err) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Failed to apply config patch preview: {err}"),
+                );
+            }
+        };
+        let registry = match build_registry_or_invalid_params(id.clone(), &preview) {
+            Ok(registry) => registry,
+            Err(response) => return response,
+        };
         match config_store.patch(ConfigDelta(patch)).await {
-            Ok(config) => RpcResponse::success(
-                id,
-                config_response_body(snapshot_from_store(config, config_store)),
-            ),
+            Ok(config) => {
+                runtime.set_skill_identity_registry(registry);
+                RpcResponse::success(
+                    id,
+                    config_response_body(snapshot_from_store(config, config_store)),
+                )
+            }
             Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
         }
     }

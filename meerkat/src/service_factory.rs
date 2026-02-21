@@ -98,7 +98,7 @@ impl SessionAgent for FactoryAgent {
         self.agent.run_host_mode(prompt).await
     }
 
-    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillId>>) {
+    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
         self.agent.pending_skill_references = refs;
     }
 

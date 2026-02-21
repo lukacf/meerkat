@@ -2113,6 +2113,7 @@ async fn run_agent(
                 },
                 "structured_output": result.structured_output,
                 "schema_warnings": result.schema_warnings,
+                "skill_diagnostics": result.skill_diagnostics,
             });
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
@@ -2139,6 +2140,17 @@ async fn run_agent(
                         warning.provider, warning.path, warning.message
                     );
                 }
+            }
+            if let Some(diag) = &result.skill_diagnostics
+                && diag.source_health.state != meerkat_core::skills::SourceHealthState::Healthy
+            {
+                eprintln!(
+                    "\n[Skill source health: {:?} | invalid_ratio: {:.3} | streak: {} | quarantined: {}]",
+                    diag.source_health.state,
+                    diag.source_health.invalid_ratio,
+                    diag.source_health.failure_streak,
+                    diag.quarantined.len()
+                );
             }
         }
     }
@@ -3877,6 +3889,7 @@ mod tests {
                 tool_calls: 0,
                 structured_output: None,
                 schema_warnings: None,
+                skill_diagnostics: None,
             })
         }
 
@@ -3896,6 +3909,7 @@ mod tests {
                 tool_calls: 0,
                 structured_output: None,
                 schema_warnings: None,
+                skill_diagnostics: None,
             })
         }
 
@@ -5592,5 +5606,46 @@ timeout_ms = 1000
         let registry = load_mob_registry(&scope_read).await.expect("registry");
         assert!(registry.mobs.contains_key("pipeline"));
         assert!(registry.mobs.contains_key("code_review"));
+    }
+
+    #[test]
+    fn test_json_output_payload_includes_skill_diagnostics_field() {
+        let result = RunResult {
+            text: "ok".to_string(),
+            session_id: SessionId::new(),
+            usage: Usage::default(),
+            turns: 1,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {
+                source_health: meerkat_core::skills::SourceHealthSnapshot {
+                    state: meerkat_core::skills::SourceHealthState::Degraded,
+                    invalid_ratio: 0.2,
+                    invalid_count: 1,
+                    total_count: 5,
+                    failure_streak: 3,
+                    handshake_failed: false,
+                },
+                quarantined: vec![],
+            }),
+        };
+        let json = serde_json::json!({
+            "text": result.text,
+            "session_id": result.session_id.to_string(),
+            "turns": result.turns,
+            "tool_calls": result.tool_calls,
+            "usage": {
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+            },
+            "structured_output": result.structured_output,
+            "schema_warnings": result.schema_warnings,
+            "skill_diagnostics": result.skill_diagnostics,
+        });
+        assert_eq!(
+            json["skill_diagnostics"]["source_health"]["state"],
+            "degraded"
+        );
     }
 }

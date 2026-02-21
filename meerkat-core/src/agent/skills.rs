@@ -3,21 +3,6 @@
 //! Detects `/skill-ref` patterns at the start of user messages and extracts
 //! the skill ID and remaining message text.
 
-use regex::Regex;
-use std::sync::OnceLock;
-
-/// Regex for detecting skill references at the start of a message.
-/// Matches: `/segment` or `/segment/segment/...` followed by whitespace or end of string.
-fn skill_ref_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(
-        || match Regex::new(r"^/([a-z0-9-]+(?:/[a-z0-9-]+)*)(?:\s+(.*))?$") {
-            Ok(re) => re,
-            Err(_) => unreachable!("static regex pattern is valid"),
-        },
-    )
-}
-
 /// Detect a `/skill-ref` at the start of a message.
 ///
 /// Returns `Some((skill_id, remaining_text))` if the message starts with a
@@ -26,10 +11,23 @@ fn skill_ref_regex() -> &'static Regex {
 ///
 /// Returns `None` if the message doesn't start with a skill reference.
 pub fn detect_skill_ref(message: &str) -> Option<(&str, &str)> {
-    let captures = skill_ref_regex().captures(message)?;
-    let skill_id = captures.get(1)?.as_str();
-    let remaining = captures.get(2).map(|m| m.as_str()).unwrap_or("");
-    Some((skill_id, remaining))
+    let trimmed = message.strip_prefix('/')?;
+    let split_at = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let (candidate, trailing) = trimmed.split_at(split_at);
+    if candidate.is_empty() {
+        return None;
+    }
+    if !candidate.split('/').all(is_valid_segment) {
+        return None;
+    }
+    Some((candidate, trailing.trim_start()))
+}
+
+fn is_valid_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 #[cfg(test)]

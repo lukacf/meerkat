@@ -61,6 +61,7 @@ impl SessionAgent for MockAgent {
             tool_calls: 0,
             structured_output: None,
             schema_warnings: None,
+            skill_diagnostics: None,
         })
     }
 
@@ -74,7 +75,7 @@ impl SessionAgent for MockAgent {
         self.run_with_events(prompt, event_tx).await
     }
 
-    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillId>>) {
+    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
         // No-op for mock
     }
 

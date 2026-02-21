@@ -415,7 +415,7 @@ pub struct AgentFactory {
     /// Optional skill source override. When set, bypasses config-driven
     /// repository resolution. For SDK users who wire sources programmatically.
     #[cfg(feature = "skills")]
-    pub skill_source: Option<std::sync::Arc<dyn meerkat_core::skills::SkillSource>>,
+    pub skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>>,
     /// Optional custom session store. When set, `build_agent()` uses this
     /// instead of the feature-flag-based default (jsonl, memory, or ephemeral).
     custom_store: Option<Arc<dyn SessionStore>>,
@@ -465,10 +465,7 @@ impl AgentFactory {
 
     /// Set a custom skill source (bypasses config-driven repository resolution).
     #[cfg(feature = "skills")]
-    pub fn skill_source(
-        mut self,
-        source: std::sync::Arc<dyn meerkat_core::skills::SkillSource>,
-    ) -> Self {
+    pub fn skill_source(mut self, source: Arc<meerkat_skills::CompositeSkillSource>) -> Self {
         self.skill_source = Some(source);
         self
     }
@@ -643,7 +640,7 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
-        #[allow(unused_variables)] skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
+        #[allow(unused_variables)] skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         self.build_builtin_dispatcher_with_skills_internal(
             store,
@@ -668,7 +665,7 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
-        #[allow(unused_variables)] skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
+        #[allow(unused_variables)] skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
         #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
             SubAgentCommsWiring,
         >,
@@ -898,13 +895,16 @@ impl AgentFactory {
         // 5. Resolve max_tokens
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
         let _realm_scope_root = self.realm_scope_root(&build_config);
-        let conventions_context_root = self.context_root.as_deref();
+        let conventions_context_root = self
+            .context_root
+            .as_deref()
+            .or(self.project_root.as_deref());
         let conventions_user_root = self.user_config_root.as_deref();
 
         // 6a. Build skill engine early so it can be passed to the tool dispatcher.
         #[cfg(feature = "skills")]
-        let skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>> = {
-            let skill_source: Option<std::sync::Arc<dyn meerkat_core::skills::SkillSource>> =
+        let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = {
+            let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
                 if self.skill_source.is_some() {
                     self.skill_source.clone()
                 } else if !config.skills.enabled {
@@ -918,7 +918,7 @@ impl AgentFactory {
                     )
                     .await
                     {
-                        Ok(source) => source,
+                        Ok(source) => source.map(Arc::new),
                         Err(e) => {
                             tracing::warn!("Failed to resolve skill repositories: {e}");
                             None
@@ -931,18 +931,16 @@ impl AgentFactory {
                     .into_iter()
                     .map(|c| c.id.to_string())
                     .collect();
-                Arc::new(
-                    meerkat_skills::DefaultSkillEngine::new(
-                        Box::new(ArcSkillSourceAdapter(source)),
-                        available_caps,
-                    )
-                    .with_inventory_threshold(config.skills.inventory_threshold)
-                    .with_max_injection_bytes(config.skills.max_injection_bytes),
-                ) as Arc<dyn meerkat_core::skills::SkillEngine>
+                let engine = Arc::new(
+                    meerkat_skills::DefaultSkillEngine::new(source, available_caps)
+                        .with_inventory_threshold(config.skills.inventory_threshold)
+                        .with_max_injection_bytes(config.skills.max_injection_bytes),
+                );
+                Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
             })
         };
         #[cfg(not(feature = "skills"))]
-        let skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>> = None;
+        let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = None;
 
         // 6b. Build tool dispatcher (with optional external tools, per-build overrides, skill tools)
         let per_request_prompt = build_config.system_prompt.take();
@@ -1254,40 +1252,6 @@ impl AgentFactory {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Adapter: Arc<dyn SkillSource> → Box<dyn SkillSource>
-// ---------------------------------------------------------------------------
-
-/// Adapter to forward `SkillSource` calls from a `Box` to an inner `Arc`.
-/// Needed because `DefaultSkillEngine` takes `Box<dyn SkillSource>` but the
-/// factory resolves to `Arc<dyn SkillSource>`.
-#[cfg(feature = "skills")]
-struct ArcSkillSourceAdapter(std::sync::Arc<dyn meerkat_core::skills::SkillSource>);
-
-#[cfg(feature = "skills")]
-#[async_trait::async_trait]
-impl meerkat_core::skills::SkillSource for ArcSkillSourceAdapter {
-    async fn list(
-        &self,
-        filter: &meerkat_core::skills::SkillFilter,
-    ) -> Result<Vec<meerkat_core::skills::SkillDescriptor>, meerkat_core::skills::SkillError> {
-        self.0.list(filter).await
-    }
-
-    async fn load(
-        &self,
-        id: &meerkat_core::skills::SkillId,
-    ) -> Result<meerkat_core::skills::SkillDocument, meerkat_core::skills::SkillError> {
-        self.0.load(id).await
-    }
-
-    async fn collections(
-        &self,
-    ) -> Result<Vec<meerkat_core::skills::SkillCollection>, meerkat_core::skills::SkillError> {
-        self.0.collections().await
-    }
-}
-
 impl AgentFactory {
     /// Build the tool dispatcher and usage instructions.
     ///
@@ -1302,7 +1266,7 @@ impl AgentFactory {
         effective_builtins: bool,
         effective_shell: bool,
         effective_subagents: bool,
-        skill_engine: Option<Arc<dyn meerkat_core::skills::SkillEngine>>,
+        skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
         #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
             SubAgentCommsWiring,
         >,

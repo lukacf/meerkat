@@ -561,7 +561,7 @@ where
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
 
-        // Detect /skill-ref at start of message for per-turn activation
+        // Apply canonical per-turn skill references staged by the surface.
         let user_input = self.apply_skill_ref(user_input).await;
 
         let run_prompt = user_input.clone();
@@ -684,14 +684,11 @@ where
         }
     }
 
-    /// Detect and resolve `/skill-ref` patterns in user input.
+    /// Consume canonical pending `skill_references` staged by the surface and
+    /// prepend resolved skill bodies to the next user input.
     ///
-    /// If the message starts with `/skill-id`, resolves the skill body via the
-    /// skill engine and prepends it to the user message. Returns the original
-    /// message unchanged if no skill ref is found or no engine is configured.
-    /// Detect `/skill-ref` in user input AND consume any pending
-    /// `skill_references` staged by the surface. Returns the user input
-    /// with resolved skill bodies prepended.
+    /// Compatibility slash refs are handled at transport/resolver boundaries;
+    /// core runtime no longer parses slash refs directly.
     async fn apply_skill_ref(&mut self, user_input: String) -> String {
         let engine = match &self.skill_engine {
             Some(e) => e.clone(),
@@ -704,7 +701,13 @@ where
         if let Some(refs) = self.pending_skill_references.take()
             && !refs.is_empty()
         {
-            match engine.resolve_and_render(&refs).await {
+            let canonical_ids: Vec<crate::skills::SkillId> = refs
+                .into_iter()
+                .map(|key| {
+                    crate::skills::SkillId(format!("{}/{}", key.source_uuid, key.skill_name))
+                })
+                .collect();
+            match engine.resolve_and_render(&canonical_ids).await {
                 Ok(resolved) => {
                     for skill in &resolved {
                         tracing::info!(
@@ -715,47 +718,22 @@ where
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to resolve skill_references");
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to resolve source-pinned skill_references"
+                    );
                 }
             }
         }
-
-        // 2. Detect /skill-ref at start of message
-        let (remaining_input, detected_ref) =
-            if let Some((skill_id, remaining)) = super::skills::detect_skill_ref(&user_input) {
-                let skill_id_owned = crate::skills::SkillId(skill_id.to_string());
-                match engine.resolve_and_render(&[skill_id_owned]).await {
-                    Ok(resolved) if !resolved.is_empty() => {
-                        tracing::info!(skill_id, "Per-turn skill activation via /skill-ref");
-                        prefix_parts.push(resolved[0].rendered_body.clone());
-                        (remaining.to_string(), true)
-                    }
-                    Ok(_) => {
-                        tracing::warn!(skill_id, "Skill ref detected but resolved to empty");
-                        (user_input.clone(), false)
-                    }
-                    Err(e) => {
-                        tracing::warn!(skill_id, error = %e, "Failed to resolve skill ref");
-                        (user_input.clone(), false)
-                    }
-                }
-            } else {
-                (user_input.clone(), false)
-            };
 
         if prefix_parts.is_empty() {
             return user_input;
         }
 
-        let text = if detected_ref {
-            remaining_input
-        } else {
-            user_input
-        };
-        if text.is_empty() {
+        if user_input.is_empty() {
             prefix_parts.join("\n\n")
         } else {
-            format!("{}\n\n{text}", prefix_parts.join("\n\n"))
+            format!("{}\n\n{user_input}", prefix_parts.join("\n\n"))
         }
     }
 }

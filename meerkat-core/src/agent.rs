@@ -337,10 +337,10 @@ where
     /// Optional memory store for indexing compaction discards.
     pub(crate) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     /// Optional skill engine for per-turn `/skill-ref` activation.
-    pub(crate) skill_engine: Option<Arc<dyn crate::skills::SkillEngine>>,
+    pub(crate) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     /// Skill references to resolve and inject for the next turn.
     /// Set by surfaces before calling `run()`, consumed on run start.
-    pub pending_skill_references: Option<Vec<crate::skills::SkillId>>,
+    pub pending_skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Per-interaction event tap for streaming events to subscribers.
     pub(crate) event_tap: crate::event_tap::EventTap,
     /// Optional default event channel configured at build time.

@@ -601,7 +601,8 @@ fn format_agent_result(
                 "turns": result.turns,
                 "tool_calls": result.tool_calls,
                 "structured_output": result.structured_output,
-                "schema_warnings": result.schema_warnings
+                "schema_warnings": result.schema_warnings,
+                "skill_diagnostics": result.skill_diagnostics
             });
             Ok(wrap_tool_payload(payload))
         }
@@ -1323,6 +1324,42 @@ mod tests {
         assert_eq!(
             overrides.entries[1].mode,
             meerkat_core::HookExecutionMode::Background
+        );
+    }
+
+    #[test]
+    fn test_format_agent_result_includes_skill_diagnostics() {
+        let session_id = meerkat::SessionId::new();
+        let result = meerkat_core::types::RunResult {
+            text: "ok".to_string(),
+            session_id: session_id.clone(),
+            usage: Default::default(),
+            turns: 1,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {
+                source_health: meerkat_core::skills::SourceHealthSnapshot {
+                    state: meerkat_core::skills::SourceHealthState::Unhealthy,
+                    invalid_ratio: 0.9,
+                    invalid_count: 9,
+                    total_count: 10,
+                    failure_streak: 10,
+                    handshake_failed: true,
+                },
+                quarantined: vec![],
+            }),
+        };
+
+        let payload = format_agent_result(Ok(result), &session_id).expect("formatted payload");
+        let raw = payload["content"][0]["text"]
+            .as_str()
+            .expect("wrapped MCP payload text");
+        let decoded: serde_json::Value = serde_json::from_str(raw).expect("valid wrapped JSON");
+        assert_eq!(decoded["content"][0]["text"], "ok");
+        assert_eq!(
+            decoded["skill_diagnostics"]["source_health"]["state"],
+            "unhealthy"
         );
     }
 

@@ -20,6 +20,7 @@ export interface WireRunResult {
   usage: WireUsage;
   structured_output?: unknown;
   schema_warnings?: Array<{ provider: string; path: string; message: string }>;
+  skill_diagnostics?: unknown;
 }
 
 export interface WireEvent {

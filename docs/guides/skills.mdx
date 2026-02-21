@@ -186,12 +186,15 @@ The following skills are embedded in component crates:
 
 ## Discovery tools
 
-When skills are active and builtins are enabled, two tools are registered:
+When skills are active and builtins are enabled, these tools are registered:
 
 | Tool | Description |
 |------|-------------|
 | `browse_skills` | List skill collections and search by name/description |
 | `load_skill` | Load a skill's full instructions into the conversation |
+| `skill_list_resources` | List skill-owned resources/artifacts |
+| `skill_read_resource` | Read a specific skill-owned resource |
+| `skill_invoke_function` | Invoke a skill-defined function with structured arguments |
 
 In collection mode (when there are more than 12 skills), the system prompt shows collection summaries. The LLM can use `browse_skills` to explore collections and `load_skill` to activate specific skills.
 
@@ -209,9 +212,9 @@ Include `/skill-id` at the start of a message:
 
 The agent detects the reference, resolves the skill, and injects its body before running the LLM.
 
-### 2. Programmatic skill_references (per-turn)
+### 2. Programmatic typed `skill_refs` (per-turn, recommended)
 
-Pass `skill_references` in the API request to resolve and inject skills for a specific turn:
+Pass `skill_refs` in the API request to resolve and inject skills for a specific turn:
 
 ```json
 {
@@ -219,10 +222,17 @@ Pass `skill_references` in the API request to resolve and inject skills for a sp
   "params": {
     "session_id": "...",
     "prompt": "Extract emails from this text",
-    "skill_references": ["extraction/email"]
+    "skill_refs": [
+      {
+        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+        "skill_name": "email-extractor"
+      }
+    ]
   }
 }
 ```
+
+Legacy `skill_references` strings remain boundary compatibility input only. See [Skills V2.1 Migration](/guides/skills-v2-migration).
 
 ### 3. Preloading at session creation
 

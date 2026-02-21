@@ -57,7 +57,7 @@ enum SessionCommand {
         host_mode: bool,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
-        skill_references: Option<Vec<meerkat_core::skills::SkillId>>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
     },
     ReadSnapshot {
         reply_tx: oneshot::Sender<SessionSnapshot>,
@@ -146,7 +146,7 @@ pub trait SessionAgent: Send {
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
     /// Stage skill references to resolve and inject on the next turn.
-    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillId>>);
+    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>);
 
     /// Cancel the currently running turn.
     fn cancel(&mut self);
@@ -442,6 +442,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 usage: Usage::default(),
                 structured_output: None,
                 schema_warnings: None,
+                skill_diagnostics: None,
             });
         }
 

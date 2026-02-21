@@ -648,6 +648,9 @@ pub struct RunResult {
     /// Warnings produced during schema compilation (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_warnings: Option<Vec<SchemaWarning>>,
+    /// Skill subsystem diagnostics for operator surfaces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_diagnostics: Option<crate::skills::SkillRuntimeDiagnostics>,
 }
 
 /// Reference to an artifact stored externally

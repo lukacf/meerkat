@@ -5,7 +5,7 @@ mod mcp;
 mod stdin_events;
 
 use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
-use meerkat_contracts::{SessionLocator, SessionLocatorError, format_session_ref};
+use meerkat_contracts::{SessionLocator, SessionLocatorError, SkillsParams, format_session_ref};
 use meerkat_core::AgentToolDispatcher;
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
@@ -29,6 +29,7 @@ use meerkat_core::SessionId;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
+use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::types::OutputSchema;
 use meerkat_store::{RealmBackend, RealmOrigin, SessionFilter};
 use std::collections::HashSet;
@@ -64,6 +65,20 @@ fn parse_label(s: &str) -> Result<(String, String), String> {
         .split_once('=')
         .ok_or_else(|| format!("expected key=value, got: {s}"))?;
     Ok((key.to_string(), value.to_string()))
+}
+
+/// Parse a skill reference argument.
+///
+/// Accepts either JSON (`{"source_uuid":"...","skill_name":"..."}`) or a
+/// legacy string (`source_uuid/skill_name`).
+fn parse_skill_ref_arg(s: &str) -> Result<SkillRef, String> {
+    if s.trim().is_empty() {
+        return Err("skill ref cannot be empty".to_string());
+    }
+    match serde_json::from_str::<SkillRef>(s) {
+        Ok(reference) => Ok(reference),
+        Err(_) => Ok(SkillRef::Legacy(s.to_string())),
+    }
 }
 
 /// Spawn a task that handles verbose event output
@@ -248,6 +263,15 @@ enum Commands {
         #[arg(long = "hooks-override-file", value_name = "FILE")]
         hooks_override_file: Option<PathBuf>,
 
+        /// Structured skill refs for this run.
+        /// Accepts JSON objects or legacy source_uuid/skill_name strings.
+        #[arg(long = "skill-ref", value_name = "REF", value_parser = parse_skill_ref_arg)]
+        skill_refs: Vec<SkillRef>,
+
+        /// Legacy compatibility refs for this run.
+        #[arg(long = "skill-reference", value_name = "ID")]
+        skill_references: Vec<String>,
+
         // === Comms flags ===
         /// Agent name for inter-agent communication. Enables comms if set.
         #[cfg(feature = "comms")]
@@ -321,6 +345,15 @@ enum Commands {
         /// Run-scoped hook overrides from a JSON file.
         #[arg(long = "hooks-override-file", value_name = "FILE")]
         hooks_override_file: Option<PathBuf>,
+
+        /// Structured skill refs for this resumed turn.
+        /// Accepts JSON objects or legacy source_uuid/skill_name strings.
+        #[arg(long = "skill-ref", value_name = "REF", value_parser = parse_skill_ref_arg)]
+        skill_refs: Vec<SkillRef>,
+
+        /// Legacy compatibility refs for this resumed turn.
+        #[arg(long = "skill-reference", value_name = "ID")]
+        skill_references: Vec<String>,
 
         /// Verbose output: show each turn, tool calls, and results as they happen
         #[arg(long, short = 'v')]
@@ -675,6 +708,8 @@ async fn main() -> anyhow::Result<ExitCode> {
             structured_output_retries,
             hooks_override_json,
             hooks_override_file,
+            skill_refs,
+            skill_references,
             comms_name,
             comms_listen_tcp,
             no_comms,
@@ -718,6 +753,8 @@ async fn main() -> anyhow::Result<ExitCode> {
                 structured_output_retries,
                 hooks_override_json,
                 hooks_override_file,
+                skill_refs,
+                skill_references,
                 comms_overrides,
                 enable_builtins,
                 enable_shell,
@@ -746,6 +783,8 @@ async fn main() -> anyhow::Result<ExitCode> {
             structured_output_retries,
             hooks_override_json,
             hooks_override_file,
+            skill_refs,
+            skill_references,
             enable_builtins,
             enable_shell,
             no_subagents,
@@ -767,6 +806,8 @@ async fn main() -> anyhow::Result<ExitCode> {
                 structured_output_retries,
                 hooks_override_json,
                 hooks_override_file,
+                skill_refs,
+                skill_references,
                 CommsOverrides::default(),
                 enable_builtins,
                 enable_shell,
@@ -783,10 +824,21 @@ async fn main() -> anyhow::Result<ExitCode> {
             prompt,
             hooks_override_json,
             hooks_override_file,
+            skill_refs,
+            skill_references,
             verbose,
         } => {
             let overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json)?;
-            resume_session(&session_id, &prompt, overrides, &cli_scope, verbose).await
+            resume_session(
+                &session_id,
+                &prompt,
+                overrides,
+                skill_refs,
+                skill_references,
+                &cli_scope,
+                verbose,
+            )
+            .await
         }
         Commands::Sessions { command } => match command {
             SessionCommands::List { limit } => list_sessions(limit, &cli_scope).await,
@@ -847,6 +899,8 @@ async fn handle_run_command(
     structured_output_retries: u32,
     hooks_override_json: Option<String>,
     hooks_override_file: Option<PathBuf>,
+    skill_refs: Vec<SkillRef>,
+    skill_references: Vec<String>,
     comms_overrides: CommsOverrides,
     enable_builtins: bool,
     enable_shell: bool,
@@ -911,6 +965,8 @@ async fn handle_run_command(
                 host,
                 stdin,
                 &config,
+                skill_refs,
+                skill_references,
                 config_base_dir,
                 hooks_override,
                 scope,
@@ -1871,6 +1927,33 @@ fn resolve_scoped_session_id(input: &str, scope: &RuntimeScope) -> anyhow::Resul
     })
 }
 
+fn canonical_skill_keys(
+    config: &Config,
+    skill_refs: Vec<SkillRef>,
+    skill_references: Vec<String>,
+) -> anyhow::Result<Option<Vec<SkillKey>>> {
+    let registry = config
+        .skills
+        .build_source_identity_registry()
+        .map_err(|e| anyhow::anyhow!("Invalid skills config: {e}"))?;
+    let params = SkillsParams {
+        preload_skills: None,
+        skill_refs: if skill_refs.is_empty() {
+            None
+        } else {
+            Some(skill_refs)
+        },
+        skill_references: if skill_references.is_empty() {
+            None
+        } else {
+            Some(skill_references)
+        },
+    };
+    params
+        .canonical_skill_keys_with_registry(&registry)
+        .map_err(|e| anyhow::anyhow!("Invalid skill refs: {e}"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_agent(
     prompt: &str,
@@ -1891,11 +1974,14 @@ async fn run_agent(
     host_mode: bool,
     stdin_events: bool,
     config: &Config,
+    skill_refs: Vec<SkillRef>,
+    skill_references: Vec<String>,
     _config_base_dir: PathBuf,
     hooks_override: HookRunOverrides,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let host_mode = resolve_host_mode(host_mode)?;
+    let canonical_skill_refs = canonical_skill_keys(config, skill_refs, skill_references)?;
 
     // Create event channel if streaming or verbose output is enabled
     let (event_tx, event_task) = if stream || verbose {
@@ -2007,7 +2093,7 @@ async fn run_agent(
         max_tokens: Some(max_tokens),
         event_tx: event_tx.clone(),
         host_mode,
-        skill_references: None,
+        skill_references: canonical_skill_refs,
         initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
         build: Some(build),
     };
@@ -2162,16 +2248,31 @@ async fn resume_session(
     session_id: &str,
     prompt: &str,
     hooks_override: HookRunOverrides,
+    skill_refs: Vec<SkillRef>,
+    skill_references: Vec<String>,
     scope: &RuntimeScope,
     verbose: bool,
 ) -> anyhow::Result<()> {
-    resume_session_with_llm_override(session_id, prompt, hooks_override, scope, None, verbose).await
+    resume_session_with_llm_override(
+        session_id,
+        prompt,
+        hooks_override,
+        skill_refs,
+        skill_references,
+        scope,
+        None,
+        verbose,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resume_session_with_llm_override(
     session_id: &str,
     prompt: &str,
     hooks_override: HookRunOverrides,
+    skill_refs: Vec<SkillRef>,
+    skill_references: Vec<String>,
     scope: &RuntimeScope,
     llm_override: Option<Arc<dyn meerkat_client::LlmClient>>,
     verbose: bool,
@@ -2193,6 +2294,7 @@ async fn resume_session_with_llm_override(
 
     log_stage("load_config");
     let (config, _config_base_dir) = load_config(scope).await?;
+    let canonical_skill_refs = canonical_skill_keys(&config, skill_refs, skill_references)?;
     log_stage("build_cli_persistent_service");
     let loader_service = build_cli_persistent_service(scope, config.clone()).await?;
     log_stage("load_persisted");
@@ -2343,7 +2445,7 @@ async fn resume_session_with_llm_override(
             max_tokens: Some(max_tokens),
             event_tx,
             host_mode,
-            skill_references: None,
+            skill_references: canonical_skill_refs,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
         })
@@ -4376,6 +4478,8 @@ mod tests {
             &session_id,
             "resume and list tools",
             HookRunOverrides::default(),
+            vec![],
+            vec![],
             &scope,
             Some(llm_override),
             false,
@@ -4414,6 +4518,54 @@ mod tests {
         assert_eq!(json["seed"], "42");
         assert_eq!(json["custom_flag"], "true");
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_skill_ref_arg_accepts_legacy_string() {
+        let parsed = parse_skill_ref_arg("legacy/email").expect("legacy ref should parse");
+        assert_eq!(parsed, SkillRef::Legacy("legacy/email".to_string()));
+    }
+
+    #[test]
+    fn test_parse_skill_ref_arg_accepts_structured_json() {
+        let parsed = parse_skill_ref_arg(
+            r#"{"source_uuid":"dc256086-0d2f-4f61-a307-320d4148107f","skill_name":"email-extractor"}"#,
+        )
+        .expect("structured ref should parse");
+        assert!(matches!(parsed, SkillRef::Structured(_)));
+        if let SkillRef::Structured(key) = parsed {
+            assert_eq!(
+                key.source_uuid.to_string(),
+                "dc256086-0d2f-4f61-a307-320d4148107f"
+            );
+            assert_eq!(key.skill_name.to_string(), "email-extractor");
+        }
+    }
+
+    #[test]
+    fn test_canonical_skill_keys_accepts_structured_and_legacy_forms() {
+        let config = Config::default();
+        let structured = canonical_skill_keys(
+            &config,
+            vec![SkillRef::Structured(SkillKey {
+                source_uuid: meerkat_core::skills::SourceUuid::parse(
+                    "dc256086-0d2f-4f61-a307-320d4148107f",
+                )
+                .expect("uuid"),
+                skill_name: meerkat_core::skills::SkillName::parse("email-extractor")
+                    .expect("skill"),
+            })],
+            vec![],
+        )
+        .expect("structured refs should canonicalize");
+        let legacy = canonical_skill_keys(
+            &config,
+            vec![],
+            vec!["dc256086-0d2f-4f61-a307-320d4148107f/email-extractor".to_string()],
+        )
+        .expect("legacy refs should canonicalize");
+
+        assert_eq!(structured, legacy);
     }
 
     #[test]

@@ -26,10 +26,10 @@ pub use protocol::{ExternalSkillSource, StdioExternalClient};
 pub enum SourceNode {
     Embedded(EmbeddedSkillSource),
     Filesystem(FilesystemSkillSource),
-    Git(git::GitSkillSource),
+    Git(Box<git::GitSkillSource>),
     Memory(InMemorySkillSource),
     #[cfg(any(feature = "skills-http", test))]
-    Http(HttpSkillSource),
+    Http(Box<HttpSkillSource>),
     External(ExternalSkillSource<StdioExternalClient>),
 }
 

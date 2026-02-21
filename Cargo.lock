@@ -2722,6 +2722,7 @@ name = "meerkat-session"
 version = "0.3.4"
 dependencies = [
  "async-trait",
+ "futures",
  "indexmap",
  "inventory",
  "meerkat-contracts",

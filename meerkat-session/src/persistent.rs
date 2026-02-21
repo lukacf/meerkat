@@ -194,6 +194,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.shutdown().await;
     }
 
+    /// Subscribe to session-wide events from the live inner service.
+    pub async fn subscribe_session_events(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        self.inner.subscribe_session_events(id).await
+    }
+
     /// Load a full session from the persistent store.
     ///
     /// Used by surfaces to resume sessions that aren't currently live.

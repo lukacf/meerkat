@@ -184,11 +184,11 @@ impl SessionRuntime {
         generation: u64,
         registry: SourceIdentityRegistry,
     ) {
-        if let Ok(mut slot) = self.skill_identity_registry.write() {
-            if generation >= slot.generation {
-                slot.generation = generation;
-                slot.registry = registry;
-            }
+        if let Ok(mut slot) = self.skill_identity_registry.write()
+            && generation >= slot.generation
+        {
+            slot.generation = generation;
+            slot.registry = registry;
         }
     }
 

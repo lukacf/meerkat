@@ -640,4 +640,5 @@ class MeerkatClient:
             usage=usage,
             structured_output=data.get("structured_output"),
             schema_warnings=data.get("schema_warnings"),
+            skill_diagnostics=data.get("skill_diagnostics"),
         )

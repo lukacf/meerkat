@@ -197,6 +197,20 @@ pub async fn handle_create(
         .preload_skills
         .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
 
+    // Validate and canonicalize skill refs before creating a pending session.
+    // This prevents invalid requests from consuming session slots.
+    let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs, params.skill_references)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("Invalid skill_refs: {e}"),
+            );
+        }
+    };
+
     // Create the session
     let session_id = match runtime.create_session(build_config).await {
         Ok(sid) => sid,
@@ -217,17 +231,6 @@ pub async fn handle_create(
     });
 
     // Start the initial turn
-    let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs, params.skill_references)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("Invalid skill_refs: {e}"),
-            );
-        }
-    };
     let result = if params.host_mode {
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();

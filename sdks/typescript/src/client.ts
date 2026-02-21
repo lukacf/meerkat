@@ -664,6 +664,7 @@ export class MeerkatClient {
       schema_warnings: data.schema_warnings as
         | Array<{ provider: string; path: string; message: string }>
         | undefined,
+      skill_diagnostics: data.skill_diagnostics,
     };
   }
 }

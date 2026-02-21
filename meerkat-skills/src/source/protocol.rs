@@ -352,6 +352,7 @@ fn validate_capability(
     Ok(())
 }
 
+#[allow(clippy::manual_async_fn)]
 impl<C: ExternalClient + Send + Sync> SkillSource for ExternalSkillSource<C> {
     fn list(
         &self,
@@ -599,6 +600,7 @@ impl StdioExternalClient {
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 impl ExternalClient for StdioExternalClient {
     fn capabilities_get(
         &self,
@@ -772,7 +774,12 @@ fn response_method_name(response: &SourceProtocolResponse) -> &'static str {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::manual_async_fn,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

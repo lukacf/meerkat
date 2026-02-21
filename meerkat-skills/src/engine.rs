@@ -63,6 +63,7 @@ fn filter_by_capabilities(
         .collect()
 }
 
+#[allow(clippy::manual_async_fn)]
 impl<S> SkillEngine for DefaultSkillEngine<S>
 where
     S: SkillSource + Send + Sync,

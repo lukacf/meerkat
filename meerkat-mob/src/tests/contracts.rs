@@ -3,6 +3,12 @@
 //! These tests prove that the comms primitives meerkat-mob depends on
 //! behave as expected. Each test is tagged with a CONTRACT-MOB-NNN
 //! identifier matching `.rct/mob/spec.yaml`.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::redundant_clone
+)]
 
 use async_trait::async_trait;
 use meerkat_comms::CommsRuntime;

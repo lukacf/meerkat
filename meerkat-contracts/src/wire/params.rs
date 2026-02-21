@@ -158,6 +158,7 @@ impl SkillsParams {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::redundant_clone)]
 mod tests {
     use super::*;
 

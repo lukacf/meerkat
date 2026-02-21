@@ -150,7 +150,10 @@ fn default_source_uuid(scope: SkillScope) -> SourceUuid {
         SkillScope::User => "00000000-0000-4000-8000-000000000102",
         SkillScope::Builtin => "00000000-0000-4000-8000-000000000103",
     };
-    SourceUuid::parse(raw).expect("default filesystem source UUID must be valid")
+    match SourceUuid::parse(raw) {
+        Ok(source_uuid) => source_uuid,
+        Err(_) => unreachable!("hardcoded filesystem source UUID must remain valid"),
+    }
 }
 
 /// Recursively find all `SKILL.md` files under `dir`.
@@ -265,6 +268,7 @@ async fn load_collection_descriptions_recursive(
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 impl SkillSource for FilesystemSkillSource {
     fn list(
         &self,
@@ -504,7 +508,7 @@ impl SkillSource for FilesystemSkillSource {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

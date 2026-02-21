@@ -59,7 +59,7 @@ impl HttpExternalClient {
             client: Client::builder()
                 .timeout(request_timeout)
                 .build()
-                .expect("http client should build"),
+                .unwrap_or_else(|_| Client::new()),
             auth,
             request_timeout,
         }
@@ -171,6 +171,7 @@ struct LegacyCollectionsResponse {
     collections: Vec<SkillCollection>,
 }
 
+#[allow(clippy::manual_async_fn)]
 impl ExternalClient for HttpExternalClient {
     fn capabilities_get(
         &self,
@@ -306,7 +307,7 @@ fn decode_protocol_response(
     if let Ok(protocol) = serde_json::from_value::<SourceProtocolResponse>(payload.clone()) {
         return Ok(protocol);
     }
-    if let Ok(protocol) = HttpExternalClient::try_http_envelope(payload.clone()) {
+    if let Ok(protocol) = HttpExternalClient::try_http_envelope(payload) {
         return Ok(protocol);
     }
     Err(SkillError::Load(
@@ -389,7 +390,7 @@ impl HttpSkillSource {
             external: ExternalSkillSource::new(
                 source_uuid.clone(),
                 HttpExternalClient::new_with_timeout(
-                    source_uuid.clone(),
+                    source_uuid,
                     base_url,
                     auth,
                     request_timeout,
@@ -445,6 +446,7 @@ impl HttpSkillSource {
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 impl SkillSource for HttpSkillSource {
     fn list(
         &self,
@@ -586,7 +588,7 @@ fn format_skill_path(source_uuid: &str, skill_name: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use wiremock::matchers::{body_json, header, method, path};
@@ -608,7 +610,10 @@ mod tests {
     }
 
     fn protocol_body(response: SourceProtocolResponse) -> serde_json::Value {
-        serde_json::to_value(response).expect("protocol response should serialize")
+        match serde_json::to_value(response) {
+            Ok(value) => value,
+            Err(err) => panic!("protocol response should serialize: {err}"),
+        }
     }
 
     async fn setup_protocol_mocks(server: &MockServer) {

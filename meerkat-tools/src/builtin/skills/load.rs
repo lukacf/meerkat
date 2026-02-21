@@ -84,7 +84,7 @@ fn canonical_key(id: &SkillId) -> Value {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::manual_async_fn)]
 mod tests {
     use super::*;
     use meerkat_core::skills::{

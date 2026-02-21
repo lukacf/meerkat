@@ -89,6 +89,7 @@ fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, String> 
     serde_json::from_value(value).map_err(|e| e.to_string())
 }
 
+#[allow(clippy::result_large_err)]
 fn build_registry_or_invalid_params(
     id: Option<RpcId>,
     config: &Config,

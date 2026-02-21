@@ -16,6 +16,18 @@
 //! - [`TaskBoard`] - Projected view of shared tasks
 //! - [`MobEventStore`] - Persistence trait for mob events
 //! - [`MobStorage`] - Storage bundle for a mob
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::redundant_clone,
+        clippy::io_other_error,
+        clippy::collapsible_if,
+        clippy::await_holding_lock
+    )
+)]
 
 pub mod backend;
 pub mod build;

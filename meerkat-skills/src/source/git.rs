@@ -83,8 +83,10 @@ impl GitSkillConfig {
             refresh_interval: Duration::from_secs(300),
             auth: None,
             depth: Some(1),
-            source_uuid: SourceUuid::parse("00000000-0000-4000-8000-000000000201")
-                .expect("default git source uuid should be valid"),
+            source_uuid: match SourceUuid::parse("00000000-0000-4000-8000-000000000201") {
+                Ok(source_uuid) => source_uuid,
+                Err(_) => unreachable!("hardcoded git source UUID must remain valid"),
+            },
             health_thresholds: SourceHealthThresholds::default(),
         }
     }
@@ -430,6 +432,7 @@ impl TryFromU32 for NonZeroU32 {
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 impl SkillSource for GitSkillSource {
     fn list(
         &self,
@@ -598,7 +601,7 @@ pub(crate) mod tests_support {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

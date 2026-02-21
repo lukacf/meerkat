@@ -853,7 +853,11 @@ fn fallback_raw_value() -> Box<RawValue> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_async_fn
+)]
 mod tests {
     use super::rewrite_assistant_text;
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};

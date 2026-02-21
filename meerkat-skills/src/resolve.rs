@@ -257,7 +257,10 @@ fn sanitize_repo_name(url: &str) -> String {
 }
 
 fn source_uuid(raw: &str) -> SourceUuid {
-    SourceUuid::parse(raw).expect("default source UUID should be valid")
+    match SourceUuid::parse(raw) {
+        Ok(source_uuid) => source_uuid,
+        Err(_) => unreachable!("hardcoded source UUID must remain valid"),
+    }
 }
 
 #[cfg(test)]

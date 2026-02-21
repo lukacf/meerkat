@@ -937,6 +937,12 @@ pub async fn handle_tools_call(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::collapsible_if,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use async_trait::async_trait;

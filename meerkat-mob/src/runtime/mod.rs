@@ -1,7 +1,8 @@
 //! Mob runtime: actor, builder, handle, and primitives.
 //!
-//! The mob runtime uses an actor pattern where all mutations (spawn, retire,
-//! wire, unwire, etc.) are serialized through a single command channel.
+//! The mob runtime uses an actor pattern where all mutations (retire, wire,
+//! unwire, etc.) are serialized through a single command channel. Spawn
+//! provisioning is parallelized, then finalized through the same actor.
 //! Read-only operations bypass the actor and read from shared state directly.
 
 use crate::backend::MobBackendKind;
@@ -72,7 +73,7 @@ use state::MobCommand;
 use tools::compose_external_tools_for_profile;
 
 pub use builder::MobBuilder;
-pub use handle::{MobEventsView, MobHandle};
+pub use handle::{MobEventsView, MobHandle, SpawnMemberSpec};
 pub use session_service::MobSessionService;
 pub use state::MobState;
 pub use turn_executor::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};

@@ -64,6 +64,10 @@ pub(super) enum MobCommand {
         backend: Option<MobBackendKind>,
         reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
     },
+    SpawnProvisioned {
+        spawn_ticket: u64,
+        result: Result<MemberRef, MobError>,
+    },
     Retire {
         meerkat_id: MeerkatId,
         reply_tx: oneshot::Sender<Result<(), MobError>>,

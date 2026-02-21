@@ -25,6 +25,16 @@ pub struct MobEventsView {
     inner: Arc<dyn MobEventStore>,
 }
 
+/// Spawn request for first-class batch member provisioning.
+#[derive(Clone, Debug)]
+pub struct SpawnMemberSpec {
+    pub profile_name: ProfileName,
+    pub meerkat_id: MeerkatId,
+    pub initial_message: Option<String>,
+    pub runtime_mode: Option<crate::MobRuntimeMode>,
+    pub backend: Option<MobBackendKind>,
+}
+
 impl MobEventsView {
     pub async fn poll(
         &self,
@@ -218,6 +228,45 @@ impl MobHandle {
                 "spawned member has no session bridge; use spawn_member_ref() instead: {member_ref:?}"
             ))
         })
+    }
+
+    /// Spawn multiple members in parallel.
+    ///
+    /// Results preserve input order.
+    pub async fn spawn_many_member_refs(
+        &self,
+        specs: Vec<SpawnMemberSpec>,
+    ) -> Vec<Result<MemberRef, MobError>> {
+        futures::future::join_all(specs.into_iter().map(|spec| {
+            self.spawn_member_ref_with_runtime_mode_and_backend(
+                spec.profile_name,
+                spec.meerkat_id,
+                spec.initial_message,
+                spec.runtime_mode,
+                spec.backend,
+            )
+        }))
+        .await
+    }
+
+    /// Compatibility batch API: returns session IDs for session-backed members.
+    pub async fn spawn_many(
+        &self,
+        specs: Vec<SpawnMemberSpec>,
+    ) -> Vec<Result<SessionId, MobError>> {
+        self.spawn_many_member_refs(specs)
+            .await
+            .into_iter()
+            .map(|result| {
+                result.and_then(|member_ref| {
+                    member_ref.session_id().cloned().ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "spawned member has no session bridge; use spawn_many_member_refs() instead: {member_ref:?}"
+                        ))
+                    })
+                })
+            })
+            .collect()
     }
 
     /// Retire a meerkat, archiving its session and removing trust.

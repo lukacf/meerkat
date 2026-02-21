@@ -6,6 +6,7 @@ from meerkat import (
     RunResult,
     SchemaWarning,
     SessionInfo,
+    SkillKey,
     Usage,
 )
 from meerkat.errors import (
@@ -68,6 +69,23 @@ def test_run_result_defaults():
     assert result.turns == 0
     assert result.tool_calls == 0
     assert result.usage == Usage()
+    assert result.skill_diagnostics is None
+
+
+def test_run_result_skill_diagnostics():
+    result = RunResult(
+        session_id="s1",
+        text="ok",
+        usage=Usage(input_tokens=10, output_tokens=5),
+        skill_diagnostics={"resolved": ["skill-a"], "failed": []},
+    )
+    assert result.skill_diagnostics == {"resolved": ["skill-a"], "failed": []}
+
+
+def test_skill_key_export():
+    key = SkillKey(source_uuid="abc-123", skill_name="my-skill")
+    assert key.source_uuid == "abc-123"
+    assert key.skill_name == "my-skill"
 
 
 def test_session_info():

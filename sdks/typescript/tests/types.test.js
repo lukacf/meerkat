@@ -15,19 +15,7 @@ import {
   isRunCompleted,
   isTurnCompleted,
   MeerkatClient,
-} from "../src/index";
-import type {
-  AgentEvent,
-  TextDeltaEvent,
-  TurnCompletedEvent,
-  RunCompletedEvent,
-  ToolCallRequestedEvent,
-  BudgetWarningEvent,
-  CompactionStartedEvent,
-  RetryingEvent,
-  UnknownEvent,
-  RunResult,
-} from "../src/index";
+} from "../dist/index.js";
 
 // ---------------------------------------------------------------------------
 // Contract version
@@ -79,7 +67,7 @@ describe("Error Types", () => {
       message: "build with --features comms",
     });
     assert.ok(err.capabilityHint);
-    assert.equal(err.capabilityHint!.capability_id, "comms");
+    assert.equal(err.capabilityHint.capability_id, "comms");
   });
 });
 
@@ -232,7 +220,7 @@ describe("Typed Events", () => {
 
 describe("Type Guards", () => {
   it("isTextDelta narrows type", () => {
-    const event: AgentEvent = parseEvent({ type: "text_delta", delta: "hi" });
+    const event = parseEvent({ type: "text_delta", delta: "hi" });
     if (isTextDelta(event)) {
       // TypeScript should narrow: event.delta is accessible
       assert.equal(event.delta, "hi");
@@ -267,7 +255,7 @@ describe("RunResult parsing", () => {
       structured_output: { answer: 42 },
       schema_warnings: [{ provider: "openai", path: "$.foo", message: "bad" }],
     };
-    const result: RunResult = MeerkatClient.parseRunResult(raw);
+    const result = MeerkatClient.parseRunResult(raw);
     assert.equal(result.sessionId, "s1");
     assert.equal(result.sessionRef, "my-ref");
     assert.equal(result.text, "Hello!");
@@ -279,5 +267,30 @@ describe("RunResult parsing", () => {
     assert.deepEqual(result.structuredOutput, { answer: 42 });
     assert.equal(result.schemaWarnings?.length, 1);
     assert.equal(result.schemaWarnings?.[0].provider, "openai");
+  });
+
+  it("should include skillDiagnostics when present", () => {
+    const raw = {
+      session_id: "s1",
+      text: "ok",
+      turns: 1,
+      tool_calls: 0,
+      usage: { input_tokens: 10, output_tokens: 5 },
+      skill_diagnostics: { resolved: ["skill-a"], failed: [] },
+    };
+    const result = MeerkatClient.parseRunResult(raw);
+    assert.deepEqual(result.skillDiagnostics, { resolved: ["skill-a"], failed: [] });
+  });
+
+  it("should have undefined skillDiagnostics when absent", () => {
+    const raw = {
+      session_id: "s1",
+      text: "ok",
+      turns: 1,
+      tool_calls: 0,
+      usage: { input_tokens: 10, output_tokens: 5 },
+    };
+    const result = MeerkatClient.parseRunResult(raw);
+    assert.equal(result.skillDiagnostics, undefined);
   });
 });

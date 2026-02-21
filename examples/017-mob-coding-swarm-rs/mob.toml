@@ -1,0 +1,73 @@
+# Coding Swarm Mob Definition
+#
+# A lead orchestrator coordinates worker agents for coding tasks.
+# Workers have shell access for running commands; the lead has mob
+# and task tools for coordination.
+
+[mob]
+id = "coding_swarm"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+skills = ["orchestrator"]
+peer_description = "Orchestrator — breaks down tasks, assigns work, reviews results"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+skills = ["worker"]
+peer_description = "Worker — implements assigned coding tasks"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+shell = true
+comms = true
+mob_tasks = true
+
+[wiring]
+auto_wire_orchestrator = true
+
+[skills.orchestrator]
+source = "inline"
+content = """
+## Role
+Lead a coding swarm. Break down complex tasks, spawn workers for each subtask,
+and coordinate their work.
+
+## Available Tools
+Use mob tools (mob.spawn, mob.retire, mob.wire, mob.status) to manage the team.
+Use task tools (task_create, task_update, task_list) for shared work tracking.
+
+## Communication
+Use peers() for discovery and send() for directed messages.
+Handle mob.peer_added and mob.peer_retired events.
+
+## Coordination Pattern
+1. Analyze the request and break into independent tasks
+2. Create tasks on the shared board
+3. Spawn workers and assign tasks
+4. Monitor progress and unblock workers
+5. Review and synthesize results
+6. Call mob.complete() when done
+
+## Worker Lifecycle
+Prefer reusing existing workers. Spawn only for uncovered skill gaps.
+Retire idle workers after their tasks are merged.
+"""
+
+[skills.worker]
+source = "inline"
+content = """
+Implement assigned code tasks. Report concise diffs.
+Use shell tools for running tests and commands.
+Update task status as you progress.
+Communicate with the orchestrator when blocked or done.
+"""

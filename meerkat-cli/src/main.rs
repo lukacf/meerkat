@@ -15,7 +15,10 @@ use meerkat_core::service::{
 use meerkat_core::{
     AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, format_verbose_event,
 };
-use meerkat_core::{Config, ConfigDelta, ConfigStore, FileConfigStore, Session, SessionTooling};
+use meerkat_core::{
+    Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
+    Session, SessionTooling,
+};
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
 use meerkat_mob::{FlowId, MobDefinition, Prefab, ProfileName, RunId};
@@ -400,6 +403,9 @@ enum ConfigCommands {
     Get {
         #[arg(long, default_value = "toml")]
         format: ConfigFormat,
+        /// Include generation + realm metadata in output.
+        #[arg(long)]
+        with_generation: bool,
     },
     /// Replace the config with the provided content
     Set {
@@ -412,6 +418,9 @@ enum ConfigCommands {
         /// Raw TOML config payload
         #[arg(long)]
         toml: Option<String>,
+        /// Expected config generation for optimistic concurrency.
+        #[arg(long)]
+        expected_generation: Option<u64>,
     },
     /// Apply a JSON merge patch to the config
     Patch {
@@ -421,6 +430,9 @@ enum ConfigCommands {
         /// Raw JSON patch payload
         #[arg(long)]
         json: Option<String>,
+        /// Expected config generation for optimistic concurrency.
+        #[arg(long)]
+        expected_generation: Option<u64>,
     },
 }
 
@@ -853,13 +865,21 @@ async fn main() -> anyhow::Result<ExitCode> {
         Commands::Mcp { command } => handle_mcp_command(command).await,
         Commands::Mob { command } => handle_mob_command(command, &cli_scope).await,
         Commands::Config { command } => match command {
-            ConfigCommands::Get { format } => handle_config_get(format, &cli_scope).await,
-            ConfigCommands::Set { file, json, toml } => {
-                handle_config_set(file, json, toml, &cli_scope).await
-            }
-            ConfigCommands::Patch { file, json } => {
-                handle_config_patch(file, json, &cli_scope).await
-            }
+            ConfigCommands::Get {
+                format,
+                with_generation,
+            } => handle_config_get(format, with_generation, &cli_scope).await,
+            ConfigCommands::Set {
+                file,
+                json,
+                toml,
+                expected_generation,
+            } => handle_config_set(file, json, toml, expected_generation, &cli_scope).await,
+            ConfigCommands::Patch {
+                file,
+                json,
+                expected_generation,
+            } => handle_config_patch(file, json, expected_generation, &cli_scope).await,
         },
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
     };
@@ -1149,21 +1169,37 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
     Ok((config, base_dir))
 }
 
-async fn handle_config_get(format: ConfigFormat, scope: &RuntimeScope) -> anyhow::Result<()> {
-    let (store, _) = resolve_config_store(scope).await?;
-    let config = store
+async fn handle_config_get(
+    format: ConfigFormat,
+    with_generation: bool,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    let (store, base_dir) = resolve_config_store(scope).await?;
+    let runtime =
+        meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
+    let snapshot = runtime
         .get()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     match format {
         ConfigFormat::Toml => {
-            let rendered = toml::to_string_pretty(&config)
+            let rendered = toml::to_string_pretty(&snapshot.config)
                 .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
+            if with_generation {
+                println!("# generation = {}", snapshot.generation);
+            }
             println!("{}", rendered);
         }
         ConfigFormat::Json => {
-            let rendered = serde_json::to_string_pretty(&config)
-                .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
+            let rendered = if with_generation {
+                serde_json::to_string_pretty(&ConfigEnvelope::from_snapshot(
+                    snapshot,
+                    ConfigEnvelopePolicy::Public,
+                ))
+            } else {
+                serde_json::to_string_pretty(&snapshot.config)
+            }
+            .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
             println!("{}", rendered);
         }
     }
@@ -1174,6 +1210,7 @@ async fn handle_config_set(
     file: Option<PathBuf>,
     json: Option<String>,
     toml_payload: Option<String>,
+    expected_generation: Option<u64>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let config = if let Some(path) = file {
@@ -1200,16 +1237,18 @@ async fn handle_config_set(
     let (store, base_dir) = resolve_config_store(scope).await?;
     let runtime =
         meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
-    runtime
-        .set(config, None)
+    let snapshot = runtime
+        .set(config, expected_generation)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
+    println!("generation={}", snapshot.generation);
     Ok(())
 }
 
 async fn handle_config_patch(
     file: Option<PathBuf>,
     json: Option<String>,
+    expected_generation: Option<u64>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let patch_value: serde_json::Value = if let Some(path) = file {
@@ -1228,10 +1267,11 @@ async fn handle_config_patch(
     let (store, base_dir) = resolve_config_store(scope).await?;
     let runtime =
         meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
-    runtime
-        .patch(ConfigDelta(patch_value), None)
+    let snapshot = runtime
+        .patch(ConfigDelta(patch_value), expected_generation)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to patch config: {e}"))?;
+    println!("generation={}", snapshot.generation);
     Ok(())
 }
 

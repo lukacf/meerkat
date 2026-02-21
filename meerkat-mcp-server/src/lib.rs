@@ -730,6 +730,7 @@ async fn handle_meerkat_config(
             })?;
             let config: Config = serde_json::from_value(config)
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?;
+            validate_config_for_commit(&config)?;
             let snapshot = state
                 .config_runtime
                 .set(config, input.expected_generation)
@@ -741,6 +742,13 @@ async fn handle_meerkat_config(
             let patch = input.patch.ok_or_else(|| {
                 ToolCallError::invalid_params("patch is required for action=patch")
             })?;
+            let current = state
+                .config_runtime
+                .get()
+                .await
+                .map_err(map_config_runtime_error)?;
+            let preview = apply_patch_preview(&current.config, patch.clone())?;
+            validate_config_for_commit(&preview)?;
             let snapshot = state
                 .config_runtime
                 .patch(ConfigDelta(patch), input.expected_generation)
@@ -762,6 +770,43 @@ fn config_envelope_value(
     };
     serde_json::to_value(ConfigEnvelope::from_snapshot(snapshot, policy))
         .map_err(|e| ToolCallError::internal(e.to_string()))
+}
+
+fn validate_config_for_commit(config: &Config) -> Result<(), ToolCallError> {
+    config
+        .validate()
+        .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?;
+    config
+        .skills
+        .build_source_identity_registry()
+        .map_err(|e| {
+            ToolCallError::invalid_params(format!("Invalid skills source-identity config: {e}"))
+        })?;
+    Ok(())
+}
+
+fn merge_patch(base: &mut Value, patch: Value) {
+    match (base, patch) {
+        (Value::Object(base_map), Value::Object(patch_map)) => {
+            for (k, v) in patch_map {
+                if v.is_null() {
+                    base_map.remove(&k);
+                } else {
+                    merge_patch(base_map.entry(k).or_insert(Value::Null), v);
+                }
+            }
+        }
+        (base_val, patch_val) => {
+            *base_val = patch_val;
+        }
+    }
+}
+
+fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ToolCallError> {
+    let mut value = serde_json::to_value(config)
+        .map_err(|e| ToolCallError::internal(format!("Failed to serialize config: {e}")))?;
+    merge_patch(&mut value, patch);
+    serde_json::from_value(value).map_err(|e| ToolCallError::invalid_params(format!("{e}")))
 }
 
 async fn handle_meerkat_run(
@@ -1177,6 +1222,37 @@ mod tests {
         assert_eq!(data["type"], "generation_conflict");
         assert_eq!(data["expected_generation"], 2);
         assert_eq!(data["current_generation"], 5);
+    }
+
+    #[test]
+    fn test_validate_config_for_commit_rejects_invalid_skills_identity() {
+        let mut config = Config::default();
+        let source_uuid =
+            meerkat_core::skills::SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                .expect("uuid");
+        config.skills.repositories = vec![
+            meerkat_core::skills_config::SkillRepositoryConfig {
+                name: "a".to_string(),
+                source_uuid: source_uuid.clone(),
+                transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
+                    path: "/tmp/a".to_string(),
+                },
+            },
+            meerkat_core::skills_config::SkillRepositoryConfig {
+                name: "b".to_string(),
+                source_uuid,
+                transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
+                    path: "/tmp/b".to_string(),
+                },
+            },
+        ];
+
+        let err = validate_config_for_commit(&config).expect_err("duplicate source uuid");
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message
+                .contains("Invalid skills source-identity config")
+        );
     }
 
     #[test]

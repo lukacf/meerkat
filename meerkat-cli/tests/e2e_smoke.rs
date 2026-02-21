@@ -417,6 +417,90 @@ async fn inner_e2e_cli_capabilities_and_config() -> Result<(), Box<dyn std::erro
         "config get output should look like TOML, got: {config_stdout}"
     );
 
+    // --- Step 3: config get --format json --with-generation ---
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new(&rkat)
+            .current_dir(&project_dir)
+            .args(["config", "get", "--format", "json", "--with-generation"])
+            .output(),
+    )
+    .await??;
+
+    assert!(
+        output.status.success(),
+        "rkat config get --with-generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let envelope_stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope: serde_json::Value =
+        serde_json::from_str(envelope_stdout.trim()).map_err(|e| {
+            format!("Failed to parse config envelope JSON: {e}\nstdout: {envelope_stdout}")
+        })?;
+    let baseline_generation = envelope["generation"]
+        .as_u64()
+        .ok_or("generation missing in config envelope")?;
+    assert!(
+        envelope.get("config").is_some(),
+        "config envelope should include config field"
+    );
+
+    // --- Step 4: config patch with matching expected_generation succeeds ---
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new(&rkat)
+            .current_dir(&project_dir)
+            .args([
+                "config",
+                "patch",
+                "--json",
+                r#"{"agent":{"max_tokens_per_turn":333}}"#,
+                "--expected-generation",
+                &baseline_generation.to_string(),
+            ])
+            .output(),
+    )
+    .await??;
+
+    assert!(
+        output.status.success(),
+        "rkat config patch with expected-generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let patch_stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        patch_stdout.contains("generation="),
+        "config patch output should contain generation marker, got: {patch_stdout}"
+    );
+
+    // --- Step 5: stale expected_generation fails deterministically ---
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new(&rkat)
+            .current_dir(&project_dir)
+            .args([
+                "config",
+                "set",
+                "--toml",
+                "[agent]\nmodel = \"claude-opus-4-6\"\nmax_tokens_per_turn = 256\nbudget_warning_threshold = 0.8\n",
+                "--expected-generation",
+                &baseline_generation.to_string(),
+            ])
+            .output(),
+    )
+    .await??;
+
+    assert!(
+        !output.status.success(),
+        "stale expected-generation write should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("generation") || stderr.to_lowercase().contains("expected"),
+        "stale generation failure should mention generation mismatch, got: {stderr}"
+    );
+
     Ok(())
 }
 

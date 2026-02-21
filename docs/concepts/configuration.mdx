@@ -49,13 +49,26 @@ Writes support optimistic concurrency:
 
 This gives deterministic behavior when multiple clients or processes update config concurrently.
 
+## Merge semantics
+
+Meerkat uses two distinct update models:
+
+1. Layered config loading (`defaults -> file -> env -> runtime`) uses **field-wise merge**:
+  - scalar/option values: last non-default wins
+  - section values (for example `providers`, `store`, `comms`, `compaction`): replace whole section
+  - hook entries: append/extend
+2. Runtime patch APIs (`config/patch`, `PATCH /config`) use **RFC 7396 JSON merge-patch** semantics.
+
+Use `config/set` when replacing the whole config intentionally, and `config/patch` for surgical updates.
+
 ## CLI behavior
 
 CLI config commands operate on the selected realm:
 
 ```bash
 rkat --realm team-alpha config get --format json
-rkat --realm team-alpha config patch --json '{"agent":{"model":"gpt-5.2"}}'
+rkat --realm team-alpha config get --format json --with-generation
+rkat --realm team-alpha config patch --json '{"agent":{"model":"gpt-5.2"}}' --expected-generation 4
 ```
 
 Without `--realm`, CLI uses the workspace-derived default realm (`ws-...`).
@@ -68,6 +81,20 @@ Those files still exist for compatibility and developer ergonomics (`rkat init`,
 
 Session backend is pinned per realm in `realm_manifest.json` (`redb` or `jsonl`).
 `--realm-backend` only matters on first creation of a realm.
+
+## Compaction settings
+
+Compaction runtime policy is configurable in realm config:
+
+```toml
+[compaction]
+auto_compact_threshold = 100000
+recent_turn_budget = 4
+max_summary_tokens = 4096
+min_turns_between_compactions = 3
+```
+
+When `session-compaction` is enabled, `AgentFactory` maps these values into the runtime `CompactionConfig`.
 
 ## See also
 

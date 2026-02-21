@@ -697,6 +697,7 @@ async fn set_config(
         } => (config, expected_generation),
         SetConfigRequest::Direct(config) => (config, None),
     };
+    validate_config_for_commit(&config)?;
     let snapshot = state
         .config_runtime
         .set(config, expected_generation)
@@ -724,6 +725,13 @@ async fn patch_config(
         } => (patch, expected_generation),
         PatchConfigRequest::Direct(patch) => (patch, None),
     };
+    let current = state
+        .config_runtime
+        .get()
+        .await
+        .map_err(config_runtime_err_to_api)?;
+    let preview = apply_patch_preview(&current.config, delta.clone())?;
+    validate_config_for_commit(&preview)?;
     let snapshot = state
         .config_runtime
         .patch(ConfigDelta(delta), expected_generation)
@@ -748,6 +756,41 @@ fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError 
         }
         other => ApiError::Configuration(other.to_string()),
     }
+}
+
+fn validate_config_for_commit(config: &Config) -> Result<(), ApiError> {
+    config
+        .validate()
+        .map_err(|e| ApiError::BadRequest(format!("Invalid config: {e}")))?;
+    config
+        .skills
+        .build_source_identity_registry()
+        .map_err(|e| ApiError::BadRequest(format!("Invalid skills source-identity config: {e}")))?;
+    Ok(())
+}
+
+fn merge_patch(base: &mut Value, patch: Value) {
+    match (base, patch) {
+        (Value::Object(base_map), Value::Object(patch_map)) => {
+            for (k, v) in patch_map {
+                if v.is_null() {
+                    base_map.remove(&k);
+                } else {
+                    merge_patch(base_map.entry(k).or_insert(Value::Null), v);
+                }
+            }
+        }
+        (base_val, patch_val) => {
+            *base_val = patch_val;
+        }
+    }
+}
+
+fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ApiError> {
+    let mut value = serde_json::to_value(config)
+        .map_err(|e| ApiError::Internal(format!("Failed to serialize config: {e}")))?;
+    merge_patch(&mut value, patch);
+    serde_json::from_value(value).map_err(|e| ApiError::BadRequest(format!("Invalid patch: {e}")))
 }
 
 /// Spawn a task that forwards events from an mpsc receiver to the broadcast channel,
@@ -1427,6 +1470,36 @@ mod tests {
             overrides.entries[1].mode,
             meerkat_core::HookExecutionMode::Background
         );
+    }
+
+    #[test]
+    fn test_validate_config_for_commit_rejects_invalid_skills_identity() {
+        let mut config = Config::default();
+        let source_uuid =
+            meerkat_core::skills::SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                .expect("uuid");
+        config.skills.repositories = vec![
+            meerkat_core::skills_config::SkillRepositoryConfig {
+                name: "a".to_string(),
+                source_uuid: source_uuid.clone(),
+                transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
+                    path: "/tmp/a".to_string(),
+                },
+            },
+            meerkat_core::skills_config::SkillRepositoryConfig {
+                name: "b".to_string(),
+                source_uuid,
+                transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
+                    path: "/tmp/b".to_string(),
+                },
+            },
+        ];
+
+        let err = validate_config_for_commit(&config).expect_err("duplicate source uuid");
+        assert!(matches!(&err, ApiError::BadRequest(_)));
+        if let ApiError::BadRequest(message) = err {
+            assert!(message.contains("Invalid skills source-identity config"));
+        }
     }
 
     #[test]

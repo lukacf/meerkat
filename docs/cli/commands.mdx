@@ -135,13 +135,16 @@ These commands read/write through the same session service path used by `run` an
 ## config
 
 ```bash
-rkat config get [--format toml|json]
-rkat config set --file config.toml
+rkat config get [--format toml|json] [--with-generation]
+rkat config set --file config.toml [--expected-generation N]
 rkat config set --json '{"agent":{"model":"gpt-5.2"}}'
-rkat config patch --json '{"budget":{"max_tokens":50000}}'
+rkat config patch --json '{"budget":{"max_tokens":50000}}' [--expected-generation N]
 ```
 
 Config operations are realm-scoped.
+
+- `config get --with-generation` returns envelope-style metadata (JSON) or prepends generation info (TOML).
+- `config set/patch --expected-generation N` enforces optimistic concurrency (CAS) for safe concurrent edits.
 
 ## rkat-rpc
 

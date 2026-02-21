@@ -157,6 +157,14 @@ Core methods:
 
 `config/*` uses the same envelope + CAS semantics as REST.
 
+CLI parity:
+
+```bash
+rkat config get --format json --with-generation
+rkat config set --file config.toml --expected-generation 4
+rkat config patch --json '{"agent":{"model":"gpt-5.2"}}' --expected-generation 4
+```
+
 ---
 
 ## MCP server (`rkat-mcp`)

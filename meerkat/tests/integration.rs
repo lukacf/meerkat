@@ -1083,7 +1083,7 @@ mod combined {
     }
 }
 
-#[cfg(feature = "skills")]
+#[cfg(all(feature = "skills", feature = "integration-real-tests"))]
 mod external_source_lifecycle {
     use std::collections::BTreeMap;
 
@@ -1095,6 +1095,7 @@ mod external_source_lifecycle {
     use tokio::net::TcpListener;
 
     #[tokio::test]
+    #[ignore = "integration-real: spawns stdio child process and TCP listener"]
     async fn e2e_external_source_lifecycle_stdio_and_http_like_transports() {
         let stdio_script = r##"
 read line

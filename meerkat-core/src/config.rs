@@ -37,6 +37,7 @@ pub struct Config {
     pub store: StoreConfig,
     pub providers: ProviderSettings,
     pub comms: CommsRuntimeConfig,
+    pub compaction: CompactionRuntimeConfig,
     pub limits: LimitsConfig,
     pub rest: RestServerConfig,
     pub sub_agents: SubAgentsConfig,
@@ -65,6 +66,7 @@ impl Default for Config {
             store: StoreConfig::default(),
             providers: ProviderSettings::default(),
             comms: CommsRuntimeConfig::default(),
+            compaction: CompactionRuntimeConfig::default(),
             limits: LimitsConfig::default(),
             rest: RestServerConfig::default(),
             sub_agents: SubAgentsConfig::default(),
@@ -215,7 +217,15 @@ impl Config {
         Ok(())
     }
 
-    /// Merge another config into this one
+    /// Merge another config into this one.
+    ///
+    /// Merge semantics are field-specific:
+    /// - Scalar/option fields: last non-default wins.
+    /// - Structured sections (`provider`, `providers`, `store`, `comms`, `compaction`, etc.):
+    ///   whole-section replace when incoming value is non-default.
+    /// - Hook entries: append/extend.
+    ///
+    /// JSON merge-patch semantics are handled separately by `ConfigStore::patch`.
     fn merge(&mut self, other: Config) {
         // Agent config
         if other.agent.system_prompt.is_some() {
@@ -268,6 +278,9 @@ impl Config {
         }
         if other.comms != CommsRuntimeConfig::default() {
             self.comms = other.comms;
+        }
+        if other.compaction != CompactionRuntimeConfig::default() {
+            self.compaction = other.compaction;
         }
         if other.limits != LimitsConfig::default() {
             self.limits = other.limits;
@@ -341,7 +354,10 @@ impl Config {
         Ok(())
     }
 
-    /// Apply CLI argument overrides
+    /// Apply CLI argument overrides.
+    ///
+    /// - Explicit CLI flags override scalar runtime knobs.
+    /// - `override_config` applies RFC 7396 JSON merge-patch semantics.
     pub fn apply_cli_overrides(&mut self, cli: CliOverrides) {
         if let Some(model) = cli.model {
             self.agent.model = model;
@@ -464,6 +480,86 @@ impl Config {
     /// - Every concrete provider key is present and non-empty
     /// - Resolved defaults are valid
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_tokens == 0 {
+            return Err(ConfigError::Validation(
+                "max_tokens must be greater than 0".to_string(),
+            ));
+        }
+        if self.agent.max_tokens_per_turn == 0 {
+            return Err(ConfigError::Validation(
+                "agent.max_tokens_per_turn must be greater than 0".to_string(),
+            ));
+        }
+        if self.budget.max_tokens == Some(0) {
+            return Err(ConfigError::Validation(
+                "budget.max_tokens must be greater than 0 when set".to_string(),
+            ));
+        }
+        if self.limits.budget == Some(0) {
+            return Err(ConfigError::Validation(
+                "limits.budget must be greater than 0 when set".to_string(),
+            ));
+        }
+        if self.compaction.auto_compact_threshold == 0 {
+            return Err(ConfigError::Validation(
+                "compaction.auto_compact_threshold must be greater than 0".to_string(),
+            ));
+        }
+        if self.compaction.recent_turn_budget == 0 {
+            return Err(ConfigError::Validation(
+                "compaction.recent_turn_budget must be greater than 0".to_string(),
+            ));
+        }
+        if self.compaction.max_summary_tokens == 0 {
+            return Err(ConfigError::Validation(
+                "compaction.max_summary_tokens must be greater than 0".to_string(),
+            ));
+        }
+        if self.compaction.min_turns_between_compactions == 0 {
+            return Err(ConfigError::Validation(
+                "compaction.min_turns_between_compactions must be greater than 0".to_string(),
+            ));
+        }
+
+        if let Some(base_urls) = &self.providers.base_urls {
+            let maybe_conflict = match &self.provider {
+                ProviderConfig::Anthropic {
+                    base_url: Some(url),
+                    ..
+                } => base_urls.get("anthropic").filter(|mapped| *mapped != url),
+                ProviderConfig::OpenAI {
+                    base_url: Some(url),
+                    ..
+                } => base_urls.get("openai").filter(|mapped| *mapped != url),
+                _ => None,
+            };
+            if maybe_conflict.is_some() {
+                return Err(ConfigError::Validation(
+                    "provider base_url conflicts with providers.base_urls entry".to_string(),
+                ));
+            }
+        }
+
+        if let Some(api_keys) = &self.providers.api_keys {
+            let maybe_conflict = match &self.provider {
+                ProviderConfig::Anthropic {
+                    api_key: Some(key), ..
+                } => api_keys.get("anthropic").filter(|mapped| *mapped != key),
+                ProviderConfig::OpenAI {
+                    api_key: Some(key), ..
+                } => api_keys.get("openai").filter(|mapped| *mapped != key),
+                ProviderConfig::Gemini { api_key: Some(key) } => {
+                    api_keys.get("gemini").filter(|mapped| *mapped != key)
+                }
+                _ => None,
+            };
+            if maybe_conflict.is_some() {
+                return Err(ConfigError::Validation(
+                    "provider api_key conflicts with providers.api_keys entry".to_string(),
+                ));
+            }
+        }
+
         let sa = &self.sub_agents;
 
         // Validate allowed_models
@@ -954,6 +1050,45 @@ impl Default for CommsRuntimeConfig {
             require_peer_auth: true,
             event_address: None,
             auto_enable_for_subagents: false,
+        }
+    }
+}
+
+/// Runtime compaction configuration (portable across interfaces).
+///
+/// This config is serialized/deserialized in realm config and mapped to
+/// `meerkat_core::CompactionConfig` when wiring the session compactor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CompactionRuntimeConfig {
+    /// Trigger compaction when input tokens for a turn reach this threshold.
+    pub auto_compact_threshold: u64,
+    /// Number of recent complete turns to retain after compaction.
+    pub recent_turn_budget: usize,
+    /// Maximum tokens for the compaction summary response.
+    pub max_summary_tokens: u32,
+    /// Minimum turns between compactions.
+    pub min_turns_between_compactions: u32,
+}
+
+impl Default for CompactionRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            auto_compact_threshold: 100_000,
+            recent_turn_budget: 4,
+            max_summary_tokens: 4096,
+            min_turns_between_compactions: 3,
+        }
+    }
+}
+
+impl From<CompactionRuntimeConfig> for crate::CompactionConfig {
+    fn from(value: CompactionRuntimeConfig) -> Self {
+        Self {
+            auto_compact_threshold: value.auto_compact_threshold,
+            recent_turn_budget: value.recent_turn_budget,
+            max_summary_tokens: value.max_summary_tokens,
+            min_turns_between_compactions: value.min_turns_between_compactions,
         }
     }
 }
@@ -1528,6 +1663,77 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_hooks_entries_append() {
+        let mut base = Config::default();
+        let base_entry = HookEntryConfig {
+            id: HookId::new("base"),
+            ..HookEntryConfig::default()
+        };
+        base.hooks.entries.push(base_entry);
+
+        let mut other = Config::default();
+        let other_entry = HookEntryConfig {
+            id: HookId::new("other"),
+            ..HookEntryConfig::default()
+        };
+        other.hooks.entries.push(other_entry);
+
+        base.merge(other);
+        let ids = base
+            .hooks
+            .entries
+            .iter()
+            .map(|entry| entry.id.0.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["base", "other"]);
+    }
+
+    #[test]
+    fn test_merge_providers_section_replaces_non_default() {
+        let mut base = Config::default();
+        base.providers.base_urls = Some(HashMap::from([
+            ("anthropic".to_string(), "https://a.example".to_string()),
+            ("openai".to_string(), "https://o.example".to_string()),
+        ]));
+
+        let mut other = Config::default();
+        other.providers.base_urls = Some(HashMap::from([(
+            "openai".to_string(),
+            "https://override.example".to_string(),
+        )]));
+
+        base.merge(other);
+        let urls = base
+            .providers
+            .base_urls
+            .expect("providers.base_urls missing");
+        assert_eq!(urls.len(), 1);
+        assert_eq!(
+            urls.get("openai").map(String::as_str),
+            Some("https://override.example")
+        );
+        assert!(!urls.contains_key("anthropic"));
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_min_turns_between_compactions() {
+        let config = Config {
+            compaction: CompactionRuntimeConfig {
+                min_turns_between_compactions: 0,
+                ..CompactionRuntimeConfig::default()
+            },
+            ..Config::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("min_turns_between_compactions=0 should be invalid");
+        assert!(
+            err.to_string()
+                .contains("compaction.min_turns_between_compactions")
+        );
+    }
+
+    #[test]
     fn test_provider_config_serialization() {
         let anthropic = ProviderConfig::Anthropic {
             api_key: Some("sk-test".to_string()),
@@ -1612,6 +1818,68 @@ mod tests {
     fn test_sub_agents_config_default_validates() {
         let config = Config::default();
         config.validate().expect("Default config should validate");
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_tokens() {
+        let config = Config {
+            max_tokens: 0,
+            ..Config::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("max_tokens=0 should be invalid");
+        assert!(
+            err.to_string()
+                .contains("max_tokens must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_agent_max_tokens_per_turn() {
+        let mut config = Config::default();
+        config.agent.max_tokens_per_turn = 0;
+        let err = config
+            .validate()
+            .expect_err("agent.max_tokens_per_turn=0 should be invalid");
+        assert!(err.to_string().contains("agent.max_tokens_per_turn"));
+    }
+
+    #[test]
+    fn test_validate_rejects_provider_base_url_conflict() {
+        let mut config = Config {
+            provider: ProviderConfig::OpenAI {
+                api_key: None,
+                base_url: Some("https://one.example".to_string()),
+            },
+            ..Config::default()
+        };
+        config.providers.base_urls = Some(std::collections::HashMap::from([(
+            "openai".to_string(),
+            "https://two.example".to_string(),
+        )]));
+        let err = config
+            .validate()
+            .expect_err("conflicting base_url settings should be invalid");
+        assert!(err.to_string().contains("provider base_url conflicts"));
+    }
+
+    #[test]
+    fn test_validate_rejects_provider_api_key_conflict() {
+        let mut config = Config {
+            provider: ProviderConfig::Gemini {
+                api_key: Some("one".to_string()),
+            },
+            ..Config::default()
+        };
+        config.providers.api_keys = Some(std::collections::HashMap::from([(
+            "gemini".to_string(),
+            "two".to_string(),
+        )]));
+        let err = config
+            .validate()
+            .expect_err("conflicting api_key settings should be invalid");
+        assert!(err.to_string().contains("provider api_key conflicts"));
     }
 
     #[test]

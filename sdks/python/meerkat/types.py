@@ -1,19 +1,95 @@
-"""Re-exports from generated types for convenience."""
+"""Public domain types for the Meerkat Python SDK.
 
-from .generated.types import (
-    CONTRACT_VERSION,
-    CapabilitiesResponse,
-    CapabilityEntry,
-    WireEvent,
-    WireRunResult,
-    WireUsage,
-)
+These are the types returned by :class:`~meerkat.Session` and
+:class:`~meerkat.MeerkatClient` methods.  They replace the ``Wire*``
+prefixed generated types which are now an internal implementation detail.
+"""
 
-__all__ = [
-    "CONTRACT_VERSION",
-    "CapabilitiesResponse",
-    "CapabilityEntry",
-    "WireEvent",
-    "WireRunResult",
-    "WireUsage",
-]
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Union
+
+from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
+
+# Re-export Usage from events so there's a single canonical definition.
+from .events import Usage as Usage  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# Skill references (v2.1)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class SkillKey:
+    """Structured skill identifier (source UUID + skill name)."""
+
+    source_uuid: str
+    skill_name: str
+
+
+SkillRef = Union[SkillKey, str]
+"""A skill reference — either a :class:`SkillKey` or a legacy string like
+``"<source_uuid>/<skill_name>"``."""
+
+
+# ---------------------------------------------------------------------------
+# Domain types
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class SchemaWarning:
+    """Warning emitted when structured output doesn't match a provider's schema rules."""
+
+    provider: str = ""
+    path: str = ""
+    message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RunResult:
+    """Result of an agent session creation or turn.
+
+    Replaces ``WireRunResult``.  All fields use native Python types.
+    """
+
+    session_id: str = ""
+    text: str = ""
+    turns: int = 0
+    tool_calls: int = 0
+    usage: Usage = field(default_factory=Usage)
+    session_ref: str | None = None
+    structured_output: Any = None
+    schema_warnings: list[SchemaWarning] | None = None
+    skill_diagnostics: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionInfo:
+    """Summary of an active session.
+
+    Returned by :meth:`~meerkat.MeerkatClient.list_sessions` and
+    :meth:`~meerkat.MeerkatClient.read_session`.
+    """
+
+    session_id: str = ""
+    session_ref: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+    message_count: int = 0
+    total_tokens: int = 0
+    is_active: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Capability:
+    """A runtime capability and its availability status."""
+
+    id: str = ""
+    description: str = ""
+    status: str = ""
+
+    @property
+    def available(self) -> bool:
+        """Whether this capability is available."""
+        return self.status == "Available"

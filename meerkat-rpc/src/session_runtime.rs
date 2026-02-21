@@ -26,6 +26,12 @@ use tokio::sync::{RwLock, mpsc};
 use crate::error;
 use crate::protocol::RpcError;
 
+#[derive(Clone)]
+struct SkillIdentityRegistryState {
+    generation: u64,
+    registry: SourceIdentityRegistry,
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -82,7 +88,7 @@ pub struct SessionRuntime {
     instance_id: Option<String>,
     backend: Option<String>,
     config_runtime: Option<Arc<meerkat_core::ConfigRuntime>>,
-    skill_identity_registry: Arc<StdRwLock<SourceIdentityRegistry>>,
+    skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
 }
 
 impl SessionRuntime {
@@ -105,7 +111,10 @@ impl SessionRuntime {
             instance_id: None,
             backend: None,
             config_runtime: None,
-            skill_identity_registry: Arc::new(StdRwLock::new(SourceIdentityRegistry::default())),
+            skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
+                generation: 0,
+                registry: SourceIdentityRegistry::default(),
+            })),
         }
     }
 
@@ -130,7 +139,10 @@ impl SessionRuntime {
             instance_id: None,
             backend: None,
             config_runtime: None,
-            skill_identity_registry: Arc::new(StdRwLock::new(SourceIdentityRegistry::default())),
+            skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
+                generation: 0,
+                registry: SourceIdentityRegistry::default(),
+            })),
         }
     }
 
@@ -163,14 +175,27 @@ impl SessionRuntime {
 
     pub fn set_skill_identity_registry(&self, registry: SourceIdentityRegistry) {
         if let Ok(mut slot) = self.skill_identity_registry.write() {
-            *slot = registry;
+            slot.registry = registry;
+        }
+    }
+
+    pub fn set_skill_identity_registry_for_generation(
+        &self,
+        generation: u64,
+        registry: SourceIdentityRegistry,
+    ) {
+        if let Ok(mut slot) = self.skill_identity_registry.write() {
+            if generation >= slot.generation {
+                slot.generation = generation;
+                slot.registry = registry;
+            }
         }
     }
 
     pub fn skill_identity_registry(&self) -> SourceIdentityRegistry {
         self.skill_identity_registry
             .read()
-            .map(|registry| registry.clone())
+            .map(|state| state.registry.clone())
             .unwrap_or_default()
     }
 

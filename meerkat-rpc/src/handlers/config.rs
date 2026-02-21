@@ -165,7 +165,23 @@ pub async fn handle_set(
     if let Some(config_runtime) = config_runtime {
         match config_runtime.set(config, expected_generation).await {
             Ok(snapshot) => {
-                runtime.set_skill_identity_registry(registry);
+                let committed_registry =
+                    match SessionRuntime::build_skill_identity_registry(&snapshot.config) {
+                        Ok(registry) => registry,
+                        Err(err) => {
+                            return RpcResponse::error(
+                                id,
+                                error::INTERNAL_ERROR,
+                                format!(
+                                    "Committed config has invalid source-identity registry: {err}"
+                                ),
+                            );
+                        }
+                    };
+                runtime.set_skill_identity_registry_for_generation(
+                    snapshot.generation,
+                    committed_registry,
+                );
                 RpcResponse::success(id, config_response_body(snapshot))
             }
             Err(e) => runtime_error_to_response(id, e),
@@ -228,7 +244,7 @@ pub async fn handle_patch(
                 );
             }
         };
-        let registry = match build_registry_or_invalid_params(id.clone(), &preview) {
+        let _registry = match build_registry_or_invalid_params(id.clone(), &preview) {
             Ok(registry) => registry,
             Err(response) => return response,
         };
@@ -238,7 +254,23 @@ pub async fn handle_patch(
             .await
         {
             Ok(snapshot) => {
-                runtime.set_skill_identity_registry(registry);
+                let committed_registry =
+                    match SessionRuntime::build_skill_identity_registry(&snapshot.config) {
+                        Ok(registry) => registry,
+                        Err(err) => {
+                            return RpcResponse::error(
+                                id,
+                                error::INTERNAL_ERROR,
+                                format!(
+                                    "Committed config has invalid source-identity registry: {err}"
+                                ),
+                            );
+                        }
+                    };
+                runtime.set_skill_identity_registry_for_generation(
+                    snapshot.generation,
+                    committed_registry,
+                );
                 RpcResponse::success(id, config_response_body(snapshot))
             }
             Err(e) => runtime_error_to_response(id, e),

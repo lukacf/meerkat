@@ -220,12 +220,7 @@ fn lineage_related(
 
 fn remap_required_sets(
     event: &SourceIdentityLineage,
-) -> Option<(
-    &'static str,
-    HashSet<SourceUuid>,
-    HashSet<SourceUuid>,
-    HashSet<SkillName>,
-)> {
+) -> Option<RemapRequiredSets> {
     match &event.event {
         SourceIdentityLineageEvent::Rotate { from, to } => Some((
             "rotate",
@@ -248,6 +243,13 @@ fn remap_required_sets(
         SourceIdentityLineageEvent::RenameOrRelocate { .. } => None,
     }
 }
+
+type RemapRequiredSets = (
+    &'static str,
+    HashSet<SourceUuid>,
+    HashSet<SourceUuid>,
+    HashSet<SkillName>,
+);
 
 fn remaps_cover_required_sets(
     remaps: &[super::SkillKeyRemap],

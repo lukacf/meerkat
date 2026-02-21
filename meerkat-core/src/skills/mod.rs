@@ -703,6 +703,7 @@ pub trait SkillSource: Send + Sync {
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 impl<T> SkillSource for Arc<T>
 where
     T: SkillSource + ?Sized,

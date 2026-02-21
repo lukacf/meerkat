@@ -36,6 +36,12 @@ gemini = ["gemini-3-flash-preview", "gemini-3-pro-preview"]
 [store]
 # database_dir = "/path/to/db"  # redb session database directory (server surfaces)
 
+[compaction]
+auto_compact_threshold = 100000
+recent_turn_budget = 4
+max_summary_tokens = 4096
+min_turns_between_compactions = 3
+
 [hooks]
 default_timeout_ms = 5000
 payload_max_bytes = 131072

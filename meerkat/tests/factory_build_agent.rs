@@ -16,7 +16,8 @@ use meerkat::BuildAgentError;
 use meerkat::{AgentBuildConfig, AgentFactory, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_client::LlmClient;
 use meerkat_core::{
-    Config, Provider, Session, SessionId, SessionMetadata, SessionTooling, UserMessage,
+    Config, Provider, ProviderConfig, Session, SessionId, SessionMetadata, SessionTooling,
+    UserMessage,
 };
 use meerkat_store::{SessionFilter, SessionStore, StoreError};
 
@@ -121,6 +122,28 @@ async fn build_agent_without_override_fails_missing_api_key() {
         err_str.contains("API key"),
         "Error should mention API key, got: {}",
         err_str
+    );
+}
+
+/// 2b. Provider API key from config.provider is honored when env vars are absent.
+#[tokio::test]
+async fn build_agent_uses_provider_config_api_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config {
+        provider: ProviderConfig::OpenAI {
+            api_key: Some("test-openai-key".to_string()),
+            base_url: None,
+        },
+        ..Config::default()
+    };
+
+    let build_config = AgentBuildConfig::new("gpt-5.2");
+    let result = factory.build_agent(build_config, &config).await;
+    assert!(
+        result.is_ok(),
+        "build_agent should accept API key from config.provider: {:?}",
+        result.err()
     );
 }
 

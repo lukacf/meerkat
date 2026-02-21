@@ -592,6 +592,70 @@ impl AgentFactory {
         factory.create_client(mapped, api_key)
     }
 
+    fn resolve_provider_credentials(
+        &self,
+        provider: Provider,
+        config: &Config,
+    ) -> (Option<String>, Option<String>) {
+        // Preferred shared settings map (works across all providers).
+        let mut base_url = config
+            .providers
+            .base_urls
+            .as_ref()
+            .and_then(|map| map.get(provider_key(provider)).cloned());
+        let mut api_key = config
+            .providers
+            .api_keys
+            .as_ref()
+            .and_then(|map| map.get(provider_key(provider)).cloned());
+
+        // Backward-compatible provider-specific block still supported; if the
+        // selected provider matches this variant, explicit values override map values.
+        match (&config.provider, provider) {
+            (
+                meerkat_core::ProviderConfig::Anthropic {
+                    api_key: cfg_key,
+                    base_url: cfg_url,
+                },
+                Provider::Anthropic,
+            ) => {
+                if cfg_key.is_some() {
+                    api_key = cfg_key.clone();
+                }
+                if cfg_url.is_some() {
+                    base_url = cfg_url.clone();
+                }
+            }
+            (
+                meerkat_core::ProviderConfig::OpenAI {
+                    api_key: cfg_key,
+                    base_url: cfg_url,
+                },
+                Provider::OpenAI,
+            ) => {
+                if cfg_key.is_some() {
+                    api_key = cfg_key.clone();
+                }
+                if cfg_url.is_some() {
+                    base_url = cfg_url.clone();
+                }
+            }
+            (meerkat_core::ProviderConfig::Gemini { api_key: cfg_key }, Provider::Gemini) => {
+                if cfg_key.is_some() {
+                    api_key = cfg_key.clone();
+                }
+            }
+            _ => {}
+        }
+
+        // Env fallback remains last for secrets when config omits keys.
+        if api_key.is_none() {
+            api_key = ProviderResolver::api_key_for(provider);
+        }
+
+        (api_key, base_url)
+    }
+
     /// Wrap a session store in the shared adapter.
     pub async fn build_store_adapter<S: SessionStore + 'static>(
         &self,
@@ -865,17 +929,15 @@ impl AgentFactory {
         let llm_client: Arc<dyn LlmClient> = match build_config.llm_client_override.as_ref() {
             Some(client) => Arc::clone(client),
             None => {
-                if ProviderResolver::api_key_for(provider).is_none() {
+                let (api_key, base_url) = self.resolve_provider_credentials(provider, config);
+                if api_key.is_none() {
                     return Err(BuildAgentError::MissingApiKey {
                         provider: provider_key(provider).to_string(),
                     });
                 }
-                let base_url = config
-                    .providers
-                    .base_urls
-                    .as_ref()
-                    .and_then(|map| map.get(provider_key(provider)).cloned());
-                ProviderResolver::client_for(provider, base_url)
+                self.build_llm_client(provider, api_key, base_url)
+                    .await
+                    .map_err(BuildAgentError::LlmClient)?
             }
         };
 
@@ -1203,9 +1265,8 @@ impl AgentFactory {
         // 12c. Wire compactor (when session-compaction is enabled)
         #[cfg(feature = "session-compaction")]
         {
-            use meerkat_core::CompactionConfig;
             let compactor = Arc::new(meerkat_session::DefaultCompactor::new(
-                CompactionConfig::default(),
+                config.compaction.clone().into(),
             ));
             builder = builder.compactor(compactor);
         }

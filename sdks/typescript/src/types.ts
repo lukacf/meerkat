@@ -16,6 +16,34 @@ export interface SchemaWarning {
   readonly message: string;
 }
 
+/** Runtime health snapshot for skill source resolution. */
+export interface SourceHealthSnapshot {
+  readonly state: string;
+  readonly invalidRatio: number;
+  readonly invalidCount: number;
+  readonly totalCount: number;
+  readonly failureStreak: number;
+  readonly handshakeFailed: boolean;
+}
+
+/** Diagnostic details for a single quarantined skill entry. */
+export interface SkillQuarantineDiagnostic {
+  readonly sourceUuid: string;
+  readonly skillId: string;
+  readonly location: string;
+  readonly errorCode: string;
+  readonly errorClass: string;
+  readonly message: string;
+  readonly firstSeenUnixSecs: number;
+  readonly lastSeenUnixSecs: number;
+}
+
+/** Runtime diagnostics emitted by the Rust skill subsystem. */
+export interface SkillRuntimeDiagnostics {
+  readonly sourceHealth: SourceHealthSnapshot;
+  readonly quarantined: readonly SkillQuarantineDiagnostic[];
+}
+
 /** Structured skill identifier (source UUID + skill name). */
 export interface SkillKey {
   readonly sourceUuid: string;
@@ -35,7 +63,7 @@ export interface RunResult {
   readonly usage: Usage;
   readonly structuredOutput?: unknown;
   readonly schemaWarnings?: readonly SchemaWarning[];
-  readonly skillDiagnostics?: unknown;
+  readonly skillDiagnostics?: SkillRuntimeDiagnostics;
 }
 
 /** Summary of an active session. */

@@ -34,8 +34,11 @@ export type {
   SchemaWarning,
   SessionInfo,
   SessionOptions,
+  SkillQuarantineDiagnostic,
+  SkillRuntimeDiagnostics,
   SkillKey,
   SkillRef,
+  SourceHealthSnapshot,
   Usage,
 } from "./types.js";
 

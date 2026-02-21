@@ -276,10 +276,52 @@ describe("RunResult parsing", () => {
       turns: 1,
       tool_calls: 0,
       usage: { input_tokens: 10, output_tokens: 5 },
-      skill_diagnostics: { resolved: ["skill-a"], failed: [] },
+      skill_diagnostics: {
+        source_health: {
+          state: "degraded",
+          invalid_ratio: 0.25,
+          invalid_count: 1,
+          total_count: 4,
+          failure_streak: 2,
+          handshake_failed: false,
+        },
+        quarantined: [
+          {
+            source_uuid: "src-1",
+            skill_id: "extract/email",
+            location: "project",
+            error_code: "bad_frontmatter",
+            error_class: "ValidationError",
+            message: "missing description",
+            first_seen_unix_secs: 10,
+            last_seen_unix_secs: 20,
+          },
+        ],
+      },
     };
     const result = MeerkatClient.parseRunResult(raw);
-    assert.deepEqual(result.skillDiagnostics, { resolved: ["skill-a"], failed: [] });
+    assert.deepEqual(result.skillDiagnostics, {
+      sourceHealth: {
+        state: "degraded",
+        invalidRatio: 0.25,
+        invalidCount: 1,
+        totalCount: 4,
+        failureStreak: 2,
+        handshakeFailed: false,
+      },
+      quarantined: [
+        {
+          sourceUuid: "src-1",
+          skillId: "extract/email",
+          location: "project",
+          errorCode: "bad_frontmatter",
+          errorClass: "ValidationError",
+          message: "missing description",
+          firstSeenUnixSecs: 10,
+          lastSeenUnixSecs: 20,
+        },
+      ],
+    });
   });
 
   it("should have undefined skillDiagnostics when absent", () => {

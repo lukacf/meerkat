@@ -4,6 +4,9 @@ Every event emitted by the agent loop is represented as a frozen dataclass,
 enabling ``match``/``case`` pattern matching (Python 3.10+) and IDE
 autocompletion on event fields.
 
+Most fields intentionally default to empty/zero values so partially delivered
+streaming payloads can still be parsed into typed events.
+
 Example::
 
     async for event in session.stream("Explain monads"):

@@ -1,5 +1,5 @@
 /**
- * Tests for skills v2.1: SkillKey, SkillRef, and Session.invokeSkill().
+ * Tests for skills v2.1 plus Session comms convenience methods.
  */
 
 import { describe, it } from "node:test";
@@ -103,10 +103,30 @@ describe("Skills v2.1", () => {
       turns: 1,
       tool_calls: 0,
       usage: { input_tokens: 100, output_tokens: 50 },
-      skill_diagnostics: { resolved: ["skill-a"], failed: [] },
+      skill_diagnostics: {
+        source_health: {
+          state: "healthy",
+          invalid_ratio: 0.0,
+          invalid_count: 0,
+          total_count: 10,
+          failure_streak: 0,
+          handshake_failed: false,
+        },
+        quarantined: [],
+      },
     };
     const result = MeerkatClient.parseRunResult(raw);
-    assert.deepEqual(result.skillDiagnostics, { resolved: ["skill-a"], failed: [] });
+    assert.deepEqual(result.skillDiagnostics, {
+      sourceHealth: {
+        state: "healthy",
+        invalidRatio: 0,
+        invalidCount: 0,
+        totalCount: 10,
+        failureStreak: 0,
+        handshakeFailed: false,
+      },
+      quarantined: [],
+    });
   });
 
   it("parseRunResult handles missing skillDiagnostics", () => {
@@ -119,5 +139,54 @@ describe("Skills v2.1", () => {
     };
     const result = MeerkatClient.parseRunResult(raw);
     assert.equal(result.skillDiagnostics, undefined);
+  });
+
+  it("Session.send forwards command through _send", async () => {
+    const calls = [];
+    const mockClient = {
+      async _send(sessionId, command) {
+        calls.push({ sessionId, command });
+        return { queued: true };
+      },
+    };
+
+    const session = new Session(mockClient, {
+      sessionId: "s-1", text: "init", turns: 0, toolCalls: 0,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
+
+    const result = await session.send({
+      kind: "peer_message",
+      to: "agent-b",
+      body: "hello",
+    });
+
+    assert.deepEqual(result, { queued: true });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].sessionId, "s-1");
+    assert.deepEqual(calls[0].command, {
+      kind: "peer_message",
+      to: "agent-b",
+      body: "hello",
+    });
+  });
+
+  it("Session.peers returns peers list from _peers", async () => {
+    const calls = [];
+    const mockClient = {
+      async _peers(sessionId) {
+        calls.push(sessionId);
+        return { peers: [{ id: "peer-a" }, { id: "peer-b" }] };
+      },
+    };
+
+    const session = new Session(mockClient, {
+      sessionId: "s-1", text: "init", turns: 0, toolCalls: 0,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
+
+    const peers = await session.peers();
+    assert.deepEqual(peers, [{ id: "peer-a" }, { id: "peer-b" }]);
+    assert.deepEqual(calls, ["s-1"]);
   });
 });

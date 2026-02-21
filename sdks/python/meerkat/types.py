@@ -47,6 +47,40 @@ class SchemaWarning:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceHealthSnapshot:
+    """Runtime health snapshot for skill source resolution."""
+
+    state: str = ""
+    invalid_ratio: float = 0.0
+    invalid_count: int = 0
+    total_count: int = 0
+    failure_streak: int = 0
+    handshake_failed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SkillQuarantineDiagnostic:
+    """Diagnostic details for a single quarantined skill entry."""
+
+    source_uuid: str = ""
+    skill_id: str = ""
+    location: str = ""
+    error_code: str = ""
+    error_class: str = ""
+    message: str = ""
+    first_seen_unix_secs: int = 0
+    last_seen_unix_secs: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SkillRuntimeDiagnostics:
+    """Runtime diagnostics emitted by the Rust skill subsystem."""
+
+    source_health: SourceHealthSnapshot = field(default_factory=SourceHealthSnapshot)
+    quarantined: list[SkillQuarantineDiagnostic] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
 class RunResult:
     """Result of an agent session creation or turn.
 
@@ -61,7 +95,7 @@ class RunResult:
     session_ref: str | None = None
     structured_output: Any = None
     schema_warnings: list[SchemaWarning] | None = None
-    skill_diagnostics: Any = None
+    skill_diagnostics: SkillRuntimeDiagnostics | None = None
 
 
 @dataclass(frozen=True, slots=True)

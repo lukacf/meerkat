@@ -37,7 +37,17 @@ from .events import Usage
 from .generated.types import CONTRACT_VERSION
 from .session import Session, _normalize_skill_ref
 from .streaming import EventStream, _StdoutDispatcher
-from .types import Capability, RunResult, SchemaWarning, SessionInfo, SkillKey, SkillRef
+from .types import (
+    Capability,
+    RunResult,
+    SchemaWarning,
+    SessionInfo,
+    SkillKey,
+    SkillQuarantineDiagnostic,
+    SkillRef,
+    SkillRuntimeDiagnostics,
+    SourceHealthSnapshot,
+)
 
 _MEERKAT_REPO = ("lukacf", "meerkat")
 _MEERKAT_BINARY = "rkat-rpc"
@@ -648,8 +658,51 @@ class MeerkatClient:
         if isinstance(raw, str):
             return raw
         if isinstance(raw, dict):
+            # Rust can emit externally-tagged enums for status:
+            # {"DisabledByPolicy": {"description": "..."}}
             return next(iter(raw), "Unknown")
         return str(raw)
+
+    @staticmethod
+    def _parse_skill_diagnostics(raw: Any) -> SkillRuntimeDiagnostics | None:
+        if not isinstance(raw, dict):
+            return None
+
+        source_health_raw = raw.get("source_health")
+        source_health = SourceHealthSnapshot()
+        if isinstance(source_health_raw, dict):
+            source_health = SourceHealthSnapshot(
+                state=str(source_health_raw.get("state", "")),
+                invalid_ratio=float(source_health_raw.get("invalid_ratio", 0.0)),
+                invalid_count=int(source_health_raw.get("invalid_count", 0)),
+                total_count=int(source_health_raw.get("total_count", 0)),
+                failure_streak=int(source_health_raw.get("failure_streak", 0)),
+                handshake_failed=bool(source_health_raw.get("handshake_failed", False)),
+            )
+
+        quarantined_items: list[SkillQuarantineDiagnostic] = []
+        raw_quarantined = raw.get("quarantined")
+        if isinstance(raw_quarantined, list):
+            for item in raw_quarantined:
+                if not isinstance(item, dict):
+                    continue
+                quarantined_items.append(
+                    SkillQuarantineDiagnostic(
+                        source_uuid=str(item.get("source_uuid", "")),
+                        skill_id=str(item.get("skill_id", "")),
+                        location=str(item.get("location", "")),
+                        error_code=str(item.get("error_code", "")),
+                        error_class=str(item.get("error_class", "")),
+                        message=str(item.get("message", "")),
+                        first_seen_unix_secs=int(item.get("first_seen_unix_secs", 0)),
+                        last_seen_unix_secs=int(item.get("last_seen_unix_secs", 0)),
+                    )
+                )
+
+        return SkillRuntimeDiagnostics(
+            source_health=source_health,
+            quarantined=quarantined_items,
+        )
 
     @staticmethod
     def _check_version_compatible(server: str, client: str) -> bool:
@@ -691,5 +744,7 @@ class MeerkatClient:
             session_ref=data.get("session_ref"),
             structured_output=data.get("structured_output"),
             schema_warnings=schema_warnings,
-            skill_diagnostics=data.get("skill_diagnostics"),
+            skill_diagnostics=MeerkatClient._parse_skill_diagnostics(
+                data.get("skill_diagnostics")
+            ),
         )

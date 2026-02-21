@@ -3,10 +3,14 @@
 from meerkat import (
     CONTRACT_VERSION,
     Capability,
+    MeerkatClient,
     RunResult,
     SchemaWarning,
     SessionInfo,
     SkillKey,
+    SkillQuarantineDiagnostic,
+    SkillRuntimeDiagnostics,
+    SourceHealthSnapshot,
     Usage,
 )
 from meerkat.errors import (
@@ -73,13 +77,71 @@ def test_run_result_defaults():
 
 
 def test_run_result_skill_diagnostics():
+    diagnostics = SkillRuntimeDiagnostics(
+        source_health=SourceHealthSnapshot(
+            state="degraded",
+            invalid_ratio=0.25,
+            invalid_count=1,
+            total_count=4,
+            failure_streak=2,
+            handshake_failed=False,
+        ),
+        quarantined=[
+            SkillQuarantineDiagnostic(
+                source_uuid="src-1",
+                skill_id="extract/email",
+                location="project",
+                error_code="bad_frontmatter",
+                error_class="ValidationError",
+                message="missing description",
+                first_seen_unix_secs=10,
+                last_seen_unix_secs=20,
+            )
+        ],
+    )
     result = RunResult(
         session_id="s1",
         text="ok",
         usage=Usage(input_tokens=10, output_tokens=5),
-        skill_diagnostics={"resolved": ["skill-a"], "failed": []},
+        skill_diagnostics=diagnostics,
     )
-    assert result.skill_diagnostics == {"resolved": ["skill-a"], "failed": []}
+    assert result.skill_diagnostics == diagnostics
+
+
+def test_parse_run_result_skill_diagnostics():
+    raw = {
+        "session_id": "s1",
+        "text": "ok",
+        "turns": 1,
+        "tool_calls": 0,
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "skill_diagnostics": {
+            "source_health": {
+                "state": "healthy",
+                "invalid_ratio": 0.0,
+                "invalid_count": 0,
+                "total_count": 10,
+                "failure_streak": 0,
+                "handshake_failed": False,
+            },
+            "quarantined": [
+                {
+                    "source_uuid": "src-1",
+                    "skill_id": "extract/email",
+                    "location": "project",
+                    "error_code": "bad_frontmatter",
+                    "error_class": "ValidationError",
+                    "message": "missing description",
+                    "first_seen_unix_secs": 10,
+                    "last_seen_unix_secs": 20,
+                }
+            ],
+        },
+    }
+    result = MeerkatClient._parse_run_result(raw)
+    assert result.skill_diagnostics is not None
+    assert result.skill_diagnostics.source_health.state == "healthy"
+    assert result.skill_diagnostics.quarantined[0].skill_id == "extract/email"
 
 
 def test_skill_key_export():
@@ -100,6 +162,13 @@ def test_capability_available():
     assert cap.available is True
     disabled = Capability(id="comms", status="DisabledByPolicy")
     assert disabled.available is False
+
+
+def test_normalize_status_accepts_externally_tagged_enum():
+    status = MeerkatClient._normalize_status(
+        {"DisabledByPolicy": {"description": "comms disabled"}}
+    )
+    assert status == "DisabledByPolicy"
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,8 @@
  *
  * Events form a discriminated union on the `type` field (snake_case to match
  * the wire protocol).  All other fields use idiomatic camelCase.
+ * Missing fields are defaulted during parsing so partial streaming payloads
+ * can still be represented as typed events.
  *
  * @example
  * ```ts

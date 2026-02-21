@@ -32,8 +32,11 @@ from .types import (
     RunResult,
     SchemaWarning,
     SessionInfo,
+    SkillQuarantineDiagnostic,
+    SkillRuntimeDiagnostics,
     SkillKey,
     SkillRef,
+    SourceHealthSnapshot,
     Usage,
 )
 
@@ -91,8 +94,11 @@ __all__ = [
     "RunResult",
     "SchemaWarning",
     "SessionInfo",
+    "SkillQuarantineDiagnostic",
+    "SkillRuntimeDiagnostics",
     "SkillKey",
     "SkillRef",
+    "SourceHealthSnapshot",
     "Usage",
     # Errors
     "MeerkatError",

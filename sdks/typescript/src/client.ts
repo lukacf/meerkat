@@ -40,7 +40,17 @@ import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js"
 import { CONTRACT_VERSION } from "./generated/types.js";
 import { Session } from "./session.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
-import type { Capability, RunResult, SchemaWarning, SessionInfo, SessionOptions, SkillKey, SkillRef, Usage } from "./types.js";
+import type {
+  Capability,
+  RunResult,
+  SchemaWarning,
+  SessionInfo,
+  SessionOptions,
+  SkillKey,
+  SkillRef,
+  SkillRuntimeDiagnostics,
+  Usage,
+} from "./types.js";
 
 const MEERKAT_REPO = "lukacf/meerkat";
 const MEERKAT_RELEASE_BINARY = "rkat-rpc";
@@ -453,9 +463,45 @@ export class MeerkatClient {
   private static normalizeStatus(raw: unknown): string {
     if (typeof raw === "string") return raw;
     if (typeof raw === "object" && raw !== null) {
+      // Rust can emit externally-tagged enums for status:
+      // { DisabledByPolicy: { description: "..." } }
       return Object.keys(raw)[0] ?? "Unknown";
     }
     return String(raw);
+  }
+
+  private static parseSkillDiagnostics(raw: unknown): SkillRuntimeDiagnostics | undefined {
+    if (!raw || typeof raw !== "object") return undefined;
+    const data = raw as Record<string, unknown>;
+    const sourceHealthRaw = data.source_health as Record<string, unknown> | undefined;
+    const rawQuarantined = Array.isArray(data.quarantined)
+      ? data.quarantined
+      : [];
+
+    const quarantined = rawQuarantined
+      .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+      .map((item) => ({
+        sourceUuid: String(item.source_uuid ?? ""),
+        skillId: String(item.skill_id ?? ""),
+        location: String(item.location ?? ""),
+        errorCode: String(item.error_code ?? ""),
+        errorClass: String(item.error_class ?? ""),
+        message: String(item.message ?? ""),
+        firstSeenUnixSecs: Number(item.first_seen_unix_secs ?? 0),
+        lastSeenUnixSecs: Number(item.last_seen_unix_secs ?? 0),
+      }));
+
+    return {
+      sourceHealth: {
+        state: String(sourceHealthRaw?.state ?? ""),
+        invalidRatio: Number(sourceHealthRaw?.invalid_ratio ?? 0),
+        invalidCount: Number(sourceHealthRaw?.invalid_count ?? 0),
+        totalCount: Number(sourceHealthRaw?.total_count ?? 0),
+        failureStreak: Number(sourceHealthRaw?.failure_streak ?? 0),
+        handshakeFailed: Boolean(sourceHealthRaw?.handshake_failed ?? false),
+      },
+      quarantined,
+    };
   }
 
   private static checkVersionCompatible(server: string, client: string): boolean {
@@ -500,7 +546,7 @@ export class MeerkatClient {
       usage,
       structuredOutput: data.structured_output,
       schemaWarnings,
-      skillDiagnostics: data.skill_diagnostics,
+      skillDiagnostics: MeerkatClient.parseSkillDiagnostics(data.skill_diagnostics),
     };
   }
 

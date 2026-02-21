@@ -1228,6 +1228,7 @@ mod scenario_09_session_service {
             event_tx: None,
             host_mode: false,
             skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: None,
         };
 

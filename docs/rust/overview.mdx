@@ -87,7 +87,7 @@ The recommended entry point is `SessionService` via `build_ephemeral_service`:
 
 ```rust
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
-use meerkat::service::{CreateSessionRequest, SessionService};
+use meerkat::service::{CreateSessionRequest, InitialTurnPolicy, SessionService};
 use meerkat_store;
 
 #[tokio::main]
@@ -104,6 +104,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_tokens: Some(1024),
         event_tx: None,
         host_mode: false,
+        skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
     }).await?;
 
     println!("Response: {}", result.text);
@@ -121,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Multi-turn conversations
 
 ```rust
-use meerkat::service::{CreateSessionRequest, StartTurnRequest, SessionService};
+use meerkat::service::{CreateSessionRequest, InitialTurnPolicy, StartTurnRequest, SessionService};
 
 // Turn 1: create session
 let result = service.create_session(CreateSessionRequest {
@@ -131,6 +133,8 @@ let result = service.create_session(CreateSessionRequest {
     max_tokens: None,
     event_tx: None,
     host_mode: false,
+    skill_references: None,
+    initial_turn: InitialTurnPolicy::RunImmediately,
 }).await?;
 
 let session_id = result.session_id;

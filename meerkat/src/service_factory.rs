@@ -427,6 +427,7 @@ mod tests {
             event_tx: None,
             host_mode: false,
             skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
         };
 

@@ -50,6 +50,7 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 - CLI `mob ...` is the explicit lifecycle surface for persisted mob registry operations.
 - RPC/REST/MCP server/Python SDK/TypeScript SDK expose mob capability via the same dispatcher composition model (`SessionBuildOptions.external_tools`) in host integrations.
 - Member runtime default is `autonomous_host` when `runtime_mode` is omitted; `turn_driven` is explicit opt-in for controlled dispatch paths.
+- Spawned mob members use deferred initial turn semantics; mob actor lifecycle starts autonomous loops explicitly after spawn registration.
 
 ### Mob lifecycle (standard/default usage)
 

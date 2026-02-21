@@ -11,7 +11,8 @@ use meerkat::{
 };
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionBuildOptions, SessionError, SessionService, StartTurnRequest,
+    CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
+    StartTurnRequest,
 };
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
@@ -850,6 +851,7 @@ async fn handle_meerkat_run(
         event_tx: event_tx.clone(),
         host_mode,
         skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),
     };
 
@@ -1014,6 +1016,7 @@ async fn handle_meerkat_resume(
                 event_tx: event_tx.clone(),
                 host_mode,
                 skill_references: None,
+                initial_turn: InitialTurnPolicy::RunImmediately,
                 build: Some(build),
             };
 

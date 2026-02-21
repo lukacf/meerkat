@@ -90,6 +90,10 @@ pub fn to_create_session_request(
         event_tx: None,
         host_mode: config.host_mode,
         skill_references: None,
+        // Mob runtime owns lifecycle startup and starts autonomous host loops
+        // explicitly after provisioning. Avoid synchronous first-turn execution
+        // during create_session so spawn does not block on LLM latency.
+        initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
         build: Some(build_options),
     }
 }

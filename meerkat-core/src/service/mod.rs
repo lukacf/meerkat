@@ -16,6 +16,15 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
+/// Controls whether `create_session()` should execute an initial turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialTurnPolicy {
+    /// Run the initial turn immediately as part of session creation.
+    RunImmediately,
+    /// Register the session and return without running an initial turn.
+    Defer,
+}
+
 /// Errors returned by `SessionService` methods.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -81,6 +90,8 @@ pub struct CreateSessionRequest {
     pub host_mode: bool,
     /// Skill IDs to resolve and inject for the first turn.
     pub skill_references: Option<Vec<crate::skills::SkillId>>,
+    /// Initial turn behavior for this session creation call.
+    pub initial_turn: InitialTurnPolicy,
     /// Optional extended build options for factory-backed builders.
     pub build: Option<SessionBuildOptions>,
 }

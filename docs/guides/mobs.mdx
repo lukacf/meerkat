@@ -199,6 +199,16 @@ Selection rules:
 - Override at profile level (`[profiles.<name>].runtime_mode`)
 - Override at spawn/tool-call level (`runtime_mode` argument)
 
+## Spawn Semantics (Deferred Initial Turn)
+
+Mob spawns now use deferred session startup:
+
+- `create_session()` registers the member session without running an LLM turn.
+- The mob actor starts autonomous host loops explicitly after spawn bookkeeping.
+- First model work happens on real input (`external_turn`, peer injection, or flow dispatch).
+
+This keeps spawn latency bounded by session provisioning (not first-turn model latency), which is important for larger mobs.
+
 ## Backends and identity
 
 Mob members can run with different backend kinds:

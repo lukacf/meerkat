@@ -317,7 +317,7 @@ async fn handle_chat(session_id: SessionId, user_msg: String) -> impl IntoRespon
 
 ```rust
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
-use meerkat::service::{CreateSessionRequest, StartTurnRequest, SessionService};
+use meerkat::service::{CreateSessionRequest, InitialTurnPolicy, StartTurnRequest, SessionService};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -332,6 +332,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_tokens: Some(2048),
         event_tx: None,
         host_mode: false,
+        skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
     }).await?;
 
     println!("Response: {}", result.text);

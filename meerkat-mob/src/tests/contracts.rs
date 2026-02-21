@@ -585,6 +585,7 @@ fn host_mode_req(comms_name: &str) -> CreateSessionRequest {
         event_tx: None,
         host_mode: true,
         skill_references: None,
+        initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
         build: Some(SessionBuildOptions {
             comms_name: Some(comms_name.to_string()),
             ..Default::default()

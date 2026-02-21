@@ -35,8 +35,8 @@ use meerkat::{
 };
 use meerkat_contracts::{SessionLocator, format_session_ref};
 use meerkat_core::service::{
-    CreateSessionRequest as SvcCreateSessionRequest, SessionBuildOptions, SessionError,
-    StartTurnRequest as SvcStartTurnRequest,
+    CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
+    SessionError, StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
@@ -889,6 +889,7 @@ async fn create_session(
         event_tx: Some(caller_event_tx),
         host_mode,
         skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),
     };
 
@@ -1073,6 +1074,7 @@ async fn continue_session(
                 event_tx: Some(caller_event_tx.clone()),
                 host_mode: continue_host_mode,
                 skill_references: None,
+                initial_turn: InitialTurnPolicy::RunImmediately,
                 build: Some(build),
             };
 

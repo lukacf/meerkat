@@ -250,6 +250,7 @@ impl SessionRuntime {
                 event_tx: Some(event_tx),
                 host_mode: build_config.host_mode,
                 skill_references: skill_references.clone(),
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
                 build: Some(build),
             };
 

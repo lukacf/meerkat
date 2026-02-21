@@ -1716,12 +1716,12 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
-        let runtime = self
-            .inner
-            .comms_runtime(session_id)
-            .await
-            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {session_id}")))?;
-        runtime.stream(meerkat_core::comms::StreamScope::Session(session_id.clone()))
+        let runtime = self.inner.comms_runtime(session_id).await.ok_or_else(|| {
+            meerkat_core::comms::StreamError::NotFound(format!("session {session_id}"))
+        })?;
+        runtime.stream(meerkat_core::comms::StreamScope::Session(
+            session_id.clone(),
+        ))
     }
 
     fn supports_persistent_sessions(&self) -> bool {
@@ -2008,6 +2008,7 @@ async fn run_agent(
         event_tx: event_tx.clone(),
         host_mode,
         skill_references: None,
+        initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
         build: Some(build),
     };
 
@@ -2331,6 +2332,7 @@ async fn resume_session_with_llm_override(
             event_tx,
             host_mode,
             skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
         })
         .await
@@ -2537,7 +2539,9 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         )
         .await
         .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {session_id}")))?;
-        runtime.stream(meerkat_core::comms::StreamScope::Session(session_id.clone()))
+        runtime.stream(meerkat_core::comms::StreamScope::Session(
+            session_id.clone(),
+        ))
     }
 
     fn supports_persistent_sessions(&self) -> bool {
@@ -4087,6 +4091,7 @@ mod tests {
             event_tx: None,
             host_mode: false,
             skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
         };
 

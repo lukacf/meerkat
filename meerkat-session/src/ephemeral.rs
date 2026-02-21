@@ -317,6 +317,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
         let prompt = req.prompt.clone();
         let caller_event_tx = req.event_tx.clone();
+        let defer_initial_turn =
+            req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer;
 
         // Create the permanent event channel for this session.
         let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
@@ -376,9 +378,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             interrupt_notify,
         };
 
-        // Acquire turn lock for the first turn (cannot fail — fresh session)
-        turn_lock.store(true, Ordering::Release);
-
         let inserted = {
             let mut sessions = self.sessions.write().await;
             if sessions.contains_key(&session_id) {
@@ -400,6 +399,21 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 )),
             ));
         }
+
+        if defer_initial_turn {
+            return Ok(RunResult {
+                text: String::new(),
+                session_id,
+                turns: 0,
+                tool_calls: 0,
+                usage: Usage::default(),
+                structured_output: None,
+                schema_warnings: None,
+            });
+        }
+
+        // Acquire turn lock for the first turn (cannot fail — fresh session)
+        turn_lock.store(true, Ordering::Release);
 
         // Run the first turn
         let host_mode = req.host_mode;

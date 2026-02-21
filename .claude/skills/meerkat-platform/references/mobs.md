@@ -212,6 +212,13 @@ Runtime-mode behavior is shared across these surfaces because dispatch comes fro
 - autonomous members: event injection/subscription dispatch
 - turn-driven members: direct `start_turn` dispatch
 
+### Spawn startup policy
+
+- Mob member spawn uses deferred initial turn semantics.
+- Session creation for spawn registers the session without immediately running a model turn.
+- Autonomous members then start host loops explicitly from mob actor lifecycle control.
+- First model work is triggered by real dispatch (`external_turn`, peer message, or flow step).
+
 ## Multi-surface examples
 
 ### CLI tool-driven (primary)

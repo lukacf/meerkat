@@ -29,7 +29,10 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolResult, Usage};
-use meerkat_core::{EventInjector, EventInjectorError, InteractionSubscription, PlainEventSource, SubscribableInjector};
+use meerkat_core::{
+    EventInjector, EventInjectorError, InteractionSubscription, PlainEventSource,
+    SubscribableInjector,
+};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde_json::value::RawValue;
@@ -258,6 +261,7 @@ fn mock_run_result(session_id: SessionId, text: String) -> RunResult {
 #[derive(Clone, Debug)]
 struct CreateSessionRecord {
     host_mode: bool,
+    initial_turn: meerkat_core::service::InitialTurnPolicy,
     comms_name: Option<String>,
     peer_meta_labels: BTreeMap<String, String>,
 }
@@ -590,6 +594,7 @@ impl SessionService for MockSessionService {
             .await
             .push(CreateSessionRecord {
                 host_mode: req.host_mode,
+                initial_turn: req.initial_turn,
                 comms_name: req
                     .build
                     .as_ref()
@@ -662,7 +667,10 @@ impl SessionService for MockSessionService {
                 .cloned()
                 .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
             notifier.notified().await;
-            return Ok(mock_run_result(id.clone(), "Host loop interrupted".to_string()));
+            return Ok(mock_run_result(
+                id.clone(),
+                "Host loop interrupted".to_string(),
+            ));
         }
 
         if let Some(event_tx) = req.event_tx {
@@ -868,7 +876,11 @@ impl MobSessionService for MockSessionService {
         let fail = self
             .flow_turn_fail
             .load(std::sync::atomic::Ordering::Relaxed)
-            || self.flow_turn_fail_sessions.read().await.contains(session_id);
+            || self
+                .flow_turn_fail_sessions
+                .read()
+                .await
+                .contains(session_id);
         let completed_result = self.flow_turn_completed_result.read().await.clone();
         Some(Arc::new(CountingInjector {
             calls: self.inject_calls.clone(),
@@ -2903,6 +2915,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
             }),
             host_mode: true,
             skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
         })
         .await
         .expect("create orphan");
@@ -3438,6 +3451,11 @@ async fn test_spawn_create_session_request_sets_non_host_mode_and_peer_meta_labe
     );
     let req = &create_requests[0];
     assert!(!req.host_mode, "spawn must create non-host-mode sessions");
+    assert_eq!(
+        req.initial_turn,
+        meerkat_core::service::InitialTurnPolicy::Defer,
+        "spawn must defer initial turn; mob actor starts autonomous loop explicitly"
+    );
     assert_eq!(req.comms_name.as_deref(), Some("test-mob/worker/w-1"));
     assert_eq!(
         req.peer_meta_labels.get("mob_id").map(String::as_str),
@@ -5447,7 +5465,10 @@ async fn test_external_turn_turn_driven_mode_uses_start_turn_dispatch() {
     let baseline_start_turn_calls = service.start_turn_call_count();
 
     handle
-        .external_turn(MeerkatId::from("l-turn-driven"), "turn-driven message".into())
+        .external_turn(
+            MeerkatId::from("l-turn-driven"),
+            "turn-driven message".into(),
+        )
         .await
         .expect("external turn should execute");
 
@@ -5490,8 +5511,7 @@ async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_st
         .start_turn_call_count()
         .saturating_sub(service.host_mode_start_turn_call_count());
     assert_eq!(
-        non_host_start_turn,
-        baseline_non_host_start_turn,
+        non_host_start_turn, baseline_non_host_start_turn,
         "autonomous flow dispatch should avoid non-host start_turn calls"
     );
     assert!(
@@ -5501,7 +5521,8 @@ async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_st
 }
 
 #[tokio::test]
-async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_turn_for_turn_driven() {
+async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_turn_for_turn_driven()
+ {
     let (handle, service) = create_test_mob(sample_definition()).await;
     handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-auto"), None)
@@ -5614,8 +5635,7 @@ async fn test_external_backend_autonomous_flow_dispatch_uses_injector_routing() 
         .start_turn_call_count()
         .saturating_sub(service.host_mode_start_turn_call_count());
     assert_eq!(
-        non_host_start_turn,
-        baseline_non_host_start_turn,
+        non_host_start_turn, baseline_non_host_start_turn,
         "external autonomous flow dispatch should avoid non-host start_turn calls"
     );
     assert!(
@@ -7525,7 +7545,9 @@ async fn test_spawn_without_initial_message_uses_default() {
         "autonomous spawn must start exactly one host loop"
     );
     assert!(
-        host_mode_prompts[0].1.contains("You have been spawned as 'w-1'"),
+        host_mode_prompts[0]
+            .1
+            .contains("You have been spawned as 'w-1'"),
         "host-loop fallback prompt should contain meerkat id, got: '{}'",
         host_mode_prompts[0].1
     );
@@ -7555,7 +7577,10 @@ async fn test_spawn_autonomous_surfaces_immediate_host_loop_start_failure() {
         "autonomous spawn must surface immediate host-loop start_turn failures"
     );
     assert!(
-        handle.get_meerkat(&MeerkatId::from("w-fail")).await.is_none(),
+        handle
+            .get_meerkat(&MeerkatId::from("w-fail"))
+            .await
+            .is_none(),
         "failed autonomous spawn must roll back projected roster entry"
     );
 }
@@ -7820,7 +7845,10 @@ impl SessionService for RealCommsSessionService {
                 .cloned()
                 .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
             notifier.notified().await;
-            return Ok(mock_run_result(id.clone(), "Host loop interrupted".to_string()));
+            return Ok(mock_run_result(
+                id.clone(),
+                "Host loop interrupted".to_string(),
+            ));
         }
         Ok(mock_run_result(id.clone(), "Turn completed".to_string()))
     }

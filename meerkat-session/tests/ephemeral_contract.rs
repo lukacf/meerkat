@@ -7,7 +7,8 @@
 use async_trait::async_trait;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionQuery, SessionService, StartTurnRequest,
+    CreateSessionRequest, InitialTurnPolicy, SessionError, SessionQuery, SessionService,
+    StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use meerkat_session::ephemeral::SessionSnapshot;
@@ -166,7 +167,15 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         event_tx: None,
         host_mode: false,
         skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
+    }
+}
+
+fn create_req_deferred(prompt: &str) -> CreateSessionRequest {
+    CreateSessionRequest {
+        initial_turn: InitialTurnPolicy::Defer,
+        ..create_req(prompt)
     }
 }
 
@@ -179,6 +188,47 @@ async fn test_create_and_run_turn() {
     let service = make_service(MockAgentBuilder::new());
     let result = service.create_session(create_req("Hello")).await.unwrap();
     assert!(result.text.contains("Hello from mock"));
+}
+
+#[tokio::test]
+async fn test_create_session_can_defer_initial_turn() {
+    let service = make_service(MockAgentBuilder::new());
+    let result = service
+        .create_session(create_req_deferred("defer first turn"))
+        .await
+        .expect("create_session should register deferred session");
+
+    assert_eq!(result.text, "");
+    assert_eq!(result.turns, 0);
+    assert_eq!(result.tool_calls, 0);
+
+    let sessions = service
+        .list(SessionQuery::default())
+        .await
+        .expect("list sessions");
+    assert_eq!(sessions.len(), 1);
+    let session_id = sessions[0].session_id.clone();
+
+    let view = service
+        .read(&session_id)
+        .await
+        .expect("read deferred session");
+    assert_eq!(view.state.message_count, 0);
+    assert!(!view.state.is_active);
+
+    let started = service
+        .start_turn(
+            &session_id,
+            StartTurnRequest {
+                host_mode: false,
+                skill_references: None,
+                prompt: "now run".to_string(),
+                event_tx: None,
+            },
+        )
+        .await
+        .expect("start_turn should run after deferred create");
+    assert!(started.text.contains("Hello from mock"));
 }
 
 #[tokio::test]

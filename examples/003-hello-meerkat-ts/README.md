@@ -11,8 +11,8 @@ npm install @rkat/sdk   # or: npm link from sdks/typescript
 ## Concepts
 - `MeerkatClient` — typed async client
 - `connect()` / `close()` — process lifecycle
-- `createSession({ ... })` — execute a prompt
-- `WireRunResult` — typed response object
+- `createSession(prompt, options)` — execute a prompt
+- `Session` — typed session handle with `.text`, `.usage`, `.id`
 
 ## Run
 ```bash

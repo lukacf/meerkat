@@ -1,8 +1,8 @@
 /**
  * 027 — Skills V2.1 Invocation (TypeScript SDK)
  *
- * Invoke a specific skill using canonical refs (`{ source_uuid, skill_name }`)
- * from the rebuilt skill system.
+ * Invoke a specific skill using canonical refs (`SkillKey`) from the rebuilt
+ * skill system.
  *
  * Run:
  *   ANTHROPIC_API_KEY=sk-... \
@@ -11,7 +11,8 @@
  *   npx tsx main.ts
  */
 
-import { MeerkatClient, SkillHelper } from "@rkat/sdk";
+import { MeerkatClient } from "@rkat/sdk";
+import type { SkillKey } from "@rkat/sdk";
 
 async function main() {
   const sourceUuid = process.env.MEERKAT_SKILL_SOURCE_UUID;
@@ -28,20 +29,20 @@ async function main() {
   await client.connect();
 
   try {
-    const skills = new SkillHelper(client);
-    skills.requireSkills();
+    client.requireCapability("skills");
 
-    const result = await skills.invokeNewSession(
-      {
-        source_uuid: sourceUuid,
-        skill_name: skillName,
-      },
+    // Create a session, then invoke the skill on it.
+    const skill: SkillKey = { sourceUuid, skillName };
+    const session = await client.createSession("Hello", {
+      model: "claude-sonnet-4-5",
+    });
+    const result = await session.invokeSkill(
+      skill,
       "Use this skill to review this shell command for safety: rm -rf /tmp/build-cache",
-      "claude-sonnet-4-5",
     );
 
     console.log(`Skill: ${sourceUuid}/${skillName}`);
-    console.log(`Session: ${result.session_id}`);
+    console.log(`Session: ${session.id}`);
     console.log(result.text);
   } finally {
     await client.close();

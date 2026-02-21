@@ -5,11 +5,11 @@ Meerkat exposes a REST API server for HTTP-based integrations. This example
 shows how to interact with it using standard HTTP requests — no SDK required.
 
 What you'll learn:
-- Starting the REST server (`rkat rest`)
+- Starting the REST server (`rkat-rest`)
 - Creating sessions via POST /sessions
 - Multi-turn via POST /sessions/:id/messages
 - Streaming via SSE (Server-Sent Events)
-- Session management via REST endpoints
+- Reading session state
 
 Run:
     # Terminal 1: Start the REST server
@@ -19,7 +19,6 @@ Run:
     python main.py
 """
 
-import asyncio
 import json
 import os
 
@@ -73,6 +72,7 @@ def main():
     # ── 2. Continue the session ──
     print(f"\n--- 2. POST /sessions/{session_id[:8]}../messages (continue) ---")
     result = api_request("POST", f"/sessions/{session_id}/messages", {
+        "session_id": session_id,
         "prompt": "Explain the difference between metrics and traces.",
     })
     print(f"  Response: {result['text'][:150]}...")
@@ -83,16 +83,6 @@ def main():
     print(f"  Messages: {info.get('message_count', 'N/A')}")
     print(f"  Tokens: {info.get('total_tokens', 'N/A')}")
 
-    # ── 4. List sessions ──
-    print("\n--- 4. GET /sessions (list) ---")
-    sessions = api_request("GET", "/sessions")
-    print(f"  Active sessions: {len(sessions.get('sessions', []))}")
-
-    # ── 5. Archive session ──
-    print(f"\n--- 5. POST /sessions/{session_id[:8]}../archive ---")
-    api_request("POST", f"/sessions/{session_id}/archive")
-    print("  Session archived.")
-
     show_reference()
 
 
@@ -102,14 +92,18 @@ def show_reference():
 Endpoints:
   POST /sessions              Create session + run first turn
   POST /sessions/:id/messages Continue session (new turn)
-  GET  /sessions              List sessions
   GET  /sessions/:id          Read session state
-  POST /sessions/:id/archive  Archive session
   GET  /sessions/:id/events   SSE stream (Server-Sent Events)
+  POST /sessions/:id/event    Push external event (webhook)
 
   POST /comms/send            Send comms message
   GET  /comms/peers           List comms peers
-  POST /webhooks/comms-message  Receive external comms message
+
+  GET  /config                Read runtime config
+  PUT  /config                Replace runtime config
+  PATCH /config               Merge-patch runtime config
+  GET  /capabilities          List runtime capabilities
+  GET  /health                Health check
 
 Start the server:
   rkat-rest                   # Default port 8080 (from [rest] config)

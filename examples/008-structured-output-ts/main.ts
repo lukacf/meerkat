@@ -7,7 +7,7 @@
  *
  * What you'll learn:
  * - Defining an output schema (JSON Schema)
- * - Using `output_schema` with `createSession()`
+ * - Using `outputSchema` with `createSession()`
  * - Parsing the structured result
  * - Handling validation retries
  *
@@ -57,16 +57,18 @@ async function analyzeSentiment(
   client: MeerkatClient,
   text: string
 ): Promise<SentimentResult> {
-  const result = await client.createSession({
-    prompt: `Analyze the sentiment of the following text:\n\n"${text}"`,
-    model: "claude-sonnet-4-5",
-    system_prompt:
-      "You are a sentiment analysis engine. Analyze text and return structured results.",
-    output_schema: sentimentSchema,
-    structured_output_retries: 3, // Retry up to 3 times if schema validation fails
-  });
+  const session = await client.createSession(
+    `Analyze the sentiment of the following text:\n\n"${text}"`,
+    {
+      model: "claude-sonnet-4-5",
+      systemPrompt:
+        "You are a sentiment analysis engine. Analyze text and return structured results.",
+      outputSchema: sentimentSchema,
+      structuredOutputRetries: 3, // Retry up to 3 times if schema validation fails
+    },
+  );
 
-  return JSON.parse(result.text) as SentimentResult;
+  return JSON.parse(session.text) as SentimentResult;
 }
 
 async function main() {

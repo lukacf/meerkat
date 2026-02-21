@@ -74,7 +74,7 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | 024 | [host-mode-event-mesh-rs](024-host-mode-event-mesh-rs/) | Rust | Reactive agents processing incoming events |
 | 025 | [full-stack-agent-rs](025-full-stack-agent-rs/) | Rust | Reference architecture with all features combined |
 | 026 | [skills-v21-invoke-py](026-skills-v21-invoke-py/) | Python | Invoke a specific skill with canonical `SkillKey` refs |
-| 027 | [skills-v21-invoke-ts](027-skills-v21-invoke-ts/) | TypeScript | Use `SkillHelper` with canonical `{source_uuid, skill_name}` refs |
+| 027 | [skills-v21-invoke-ts](027-skills-v21-invoke-ts/) | TypeScript | Use `session.invokeSkill()` with canonical `SkillKey` refs |
 
 ## Examples by Feature
 

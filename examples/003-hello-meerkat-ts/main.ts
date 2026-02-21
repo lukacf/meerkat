@@ -8,7 +8,7 @@
  * What you'll learn:
  * - Connecting to the Meerkat runtime from Node.js
  * - Creating a session with typed options
- * - Reading the WireRunResult
+ * - Reading the Session result
  *
  * Run:
  *   ANTHROPIC_API_KEY=sk-... npx tsx main.ts
@@ -21,16 +21,16 @@ async function main() {
   await client.connect();
 
   try {
-    const result = await client.createSession({
-      prompt: "What makes Rust's ownership model unique? Answer in two sentences.",
-      model: "claude-sonnet-4-5",
-    });
+    const session = await client.createSession(
+      "What makes Rust's ownership model unique? Answer in two sentences.",
+      { model: "claude-sonnet-4-5" },
+    );
 
-    console.log(result.text);
+    console.log(session.text);
     console.log("\n--- Stats ---");
-    console.log(`Session:  ${result.session_id}`);
-    console.log(`Turns:    ${result.turns}`);
-    console.log(`Tokens:   ${result.usage.input_tokens + result.usage.output_tokens}`);
+    console.log(`Session:  ${session.id}`);
+    console.log(`Turns:    ${session.turns}`);
+    console.log(`Tokens:   ${session.usage.inputTokens + session.usage.outputTokens}`);
   } finally {
     await client.close();
   }

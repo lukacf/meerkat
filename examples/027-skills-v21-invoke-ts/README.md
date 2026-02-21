@@ -1,12 +1,12 @@
 # 027 — Skills V2.1 Invocation (TypeScript SDK)
 
 Invoke a skill using canonical refs with
-`{ source_uuid, skill_name }` and `SkillHelper`.
+`SkillKey` (`{ sourceUuid, skillName }`).
 
 ## Concepts
-- `SkillHelper` for skill-scoped invocation
-- Canonical `skill_refs` (recommended)
-- Capability gating via `requireSkills()`
+- `session.invokeSkill()` for skill-scoped invocation
+- Canonical `SkillKey` refs (recommended)
+- Capability gating via `client.requireCapability("skills")`
 
 ## Required Environment
 ```bash

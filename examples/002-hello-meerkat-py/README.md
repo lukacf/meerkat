@@ -11,8 +11,8 @@ pip install meerkat-sdk   # or: pip install -e sdks/python
 ## Concepts
 - `MeerkatClient` — async client wrapping the RPC transport
 - `connect()` / `close()` — lifecycle management
-- `create_session()` — single-turn prompt execution
-- `WireRunResult` — session ID, text, usage, stop reason
+- `create_session()` — returns a `Session` handle
+- `Session` — `.id`, `.text`, `.usage`, `.turns`
 
 ## Run
 ```bash

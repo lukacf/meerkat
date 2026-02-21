@@ -8,7 +8,7 @@ via JSON-RPC over stdio — no HTTP server needed.
 What you'll learn:
 - Connecting to the Meerkat runtime
 - Creating a session with a prompt
-- Reading the WireRunResult
+- Reading the Session result
 
 Run:
     ANTHROPIC_API_KEY=sk-... python main.py
@@ -23,15 +23,15 @@ async def main():
     await client.connect()
 
     try:
-        result = await client.create_session(
+        session = await client.create_session(
             prompt="What makes Rust's ownership model unique? Answer in two sentences.",
             model="claude-sonnet-4-5",
         )
-        print(result.text)
+        print(session.text)
         print(f"\n--- Stats ---")
-        print(f"Session:  {result.session_id}")
-        print(f"Turns:    {result.turns}")
-        print(f"Tokens:   {result.usage.input_tokens + result.usage.output_tokens}")
+        print(f"Session:  {session.id}")
+        print(f"Turns:    {session.turns}")
+        print(f"Tokens:   {session.usage.input_tokens + session.usage.output_tokens}")
     finally:
         await client.close()
 

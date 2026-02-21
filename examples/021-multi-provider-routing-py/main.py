@@ -22,11 +22,11 @@ from meerkat import MeerkatClient
 async def query_provider(client: MeerkatClient, model: str, prompt: str) -> dict:
     """Run a prompt on a specific model and return stats."""
     try:
-        result = await client.create_session(prompt=prompt, model=model)
+        session = await client.create_session(prompt=prompt, model=model)
         return {
             "model": model,
-            "text": result.text,
-            "tokens": result.usage.input_tokens + result.usage.output_tokens,
+            "text": session.text,
+            "tokens": session.usage.input_tokens + session.usage.output_tokens,
             "error": None,
         }
     except Exception as e:
@@ -80,7 +80,7 @@ async def main():
 
         if os.environ.get("ANTHROPIC_API_KEY"):
             print("--- Anthropic with extended thinking ---")
-            result = await client.create_session(
+            session = await client.create_session(
                 prompt="What is the optimal data structure for a LRU cache? Think step by step.",
                 model="claude-sonnet-4-5",
                 provider_params={
@@ -89,13 +89,13 @@ async def main():
                     }
                 },
             )
-            print(f"  Response: {result.text[:200]}...")
-            print(f"  Tokens: {result.usage.input_tokens + result.usage.output_tokens}")
+            print(f"  Response: {session.text[:200]}...")
+            print(f"  Tokens: {session.usage.input_tokens + session.usage.output_tokens}")
             print()
 
         if os.environ.get("OPENAI_API_KEY"):
             print("--- OpenAI with reasoning effort ---")
-            result = await client.create_session(
+            session = await client.create_session(
                 prompt="What is the optimal data structure for a LRU cache?",
                 model="gpt-5.2",
                 provider_params={
@@ -104,8 +104,8 @@ async def main():
                     }
                 },
             )
-            print(f"  Response: {result.text[:200]}...")
-            print(f"  Tokens: {result.usage.input_tokens + result.usage.output_tokens}")
+            print(f"  Response: {session.text[:200]}...")
+            print(f"  Tokens: {session.usage.input_tokens + session.usage.output_tokens}")
             print()
 
         # ── Routing strategy reference ──

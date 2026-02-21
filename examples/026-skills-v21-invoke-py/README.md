@@ -4,9 +4,9 @@ Invoke a skill using canonical typed refs (`SkillKey`) with
 `{ source_uuid, skill_name }`.
 
 ## Concepts
-- `SkillHelper` for skill-scoped invocation
+- `Session.invoke_skill()` for skill-scoped invocation
 - Canonical `SkillKey` refs (recommended)
-- Runtime capability check via `require_skills()`
+- Runtime capability check via `client.require_capability("skills")`
 
 ## Required Environment
 ```bash

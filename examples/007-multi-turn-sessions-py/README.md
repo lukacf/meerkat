@@ -4,21 +4,21 @@ Build a multi-turn coding assistant that remembers context across turns.
 Shows the complete session lifecycle: create, continue, read, list, archive.
 
 ## Concepts
-- `create_session()` — first turn creates the session
-- `start_turn()` — subsequent turns continue the conversation
-- `start_turn_streaming()` — stream events in real-time
-- `read_session()` — inspect session state (message count, tokens)
-- `list_sessions()` / `archive_session()` — session management
+- `create_session()` — first turn creates the session, returns `Session`
+- `session.turn()` — subsequent turns continue the conversation
+- `session.stream()` — stream events in real-time
+- `client.read_session()` — inspect session state (message count, tokens)
+- `client.list_sessions()` / `session.archive()` — session management
 
 ## Session Lifecycle
 ```
-create_session() → session_id
+session = create_session(prompt)  → Session
   ↓
-start_turn(session_id, ...) → continues conversation
+session.turn(prompt)  → continues conversation
   ↓ (repeat)
-read_session(session_id) → inspect state
+client.read_session(session.id)  → inspect state
   ↓
-archive_session(session_id) → clean up
+session.archive()  → clean up
 ```
 
 ## Run

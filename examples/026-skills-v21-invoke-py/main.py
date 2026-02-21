@@ -13,7 +13,7 @@ Run:
 
 import asyncio
 import os
-from meerkat import MeerkatClient, SkillHelper, SkillKey
+from meerkat import MeerkatClient, SkillKey
 
 
 async def main() -> None:
@@ -30,18 +30,21 @@ async def main() -> None:
     await client.connect()
 
     try:
-        skills = SkillHelper(client)
-        skills.require_skills()
+        client.require_capability("skills")
 
+        # Create a session, then invoke the skill on it.
         skill = SkillKey(source_uuid=source_uuid, skill_name=skill_name)
-        result = await skills.invoke_new_session(
+        session = await client.create_session(
+            prompt="Hello",
+            model="claude-sonnet-4-5",
+        )
+        result = await session.invoke_skill(
             skill,
             "Use this skill to review this shell command for safety: rm -rf /tmp/build-cache",
-            model="claude-sonnet-4-5",
         )
 
         print(f"Skill: {source_uuid}/{skill_name}")
-        print(f"Session: {result.session_id}")
+        print(f"Session: {session.id}")
         print(result.text)
     finally:
         await client.close()

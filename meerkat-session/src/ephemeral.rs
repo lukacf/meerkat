@@ -409,6 +409,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 usage: Usage::default(),
                 structured_output: None,
                 schema_warnings: None,
+                skill_diagnostics: None,
             });
         }
 

@@ -5343,16 +5343,6 @@ timeout_ms = 1000
         .await
         .expect("create flow mob");
         handle_mob_command(
-            MobCommands::Spawn {
-                mob_id: "flow-mob".to_string(),
-                profile: "worker".to_string(),
-                meerkat_id: "w1".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("spawn worker");
-        handle_mob_command(
             MobCommands::Flows {
                 mob_id: "flow-mob".to_string(),
             },
@@ -5545,17 +5535,6 @@ timeout_ms = 1000
         )
         .await
         .expect("create flow mob");
-        handle_mob_command(
-            MobCommands::Spawn {
-                mob_id: "flow-mob".to_string(),
-                profile: "worker".to_string(),
-                meerkat_id: "w1".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("spawn worker");
-
         let err = handle_mob_command(
             MobCommands::RunFlow {
                 mob_id: "flow-mob".to_string(),

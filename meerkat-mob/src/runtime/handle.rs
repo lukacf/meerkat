@@ -154,7 +154,7 @@ impl MobHandle {
             None,
             None,
         )
-            .await
+        .await
     }
 
     /// Spawn a new meerkat from a profile with explicit backend override.
@@ -416,8 +416,7 @@ impl MobHandle {
     /// Shut down the actor. After this, no more commands are accepted.
     pub async fn shutdown(&self) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self
-            .command_tx
+        self.command_tx
             .send(MobCommand::Shutdown { reply_tx })
             .await
             .map_err(|_| MobError::Internal("actor task dropped".into()))?;

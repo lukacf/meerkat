@@ -196,7 +196,11 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
         .expect("create");
 
     handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-auto"), None)
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("lead-auto"),
+            None,
+        )
         .await
         .expect("spawn autonomous");
     handle

@@ -620,6 +620,10 @@ impl MobBuilder {
             default_llm_client,
             retired_event_index: Arc::new(RwLock::new(HashSet::new())),
             autonomous_host_loops: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            next_spawn_ticket: 0,
+            pending_spawns: BTreeMap::new(),
+            pending_spawn_ids: HashSet::new(),
+            pending_spawn_tasks: BTreeMap::new(),
         };
         tokio::spawn(actor.run(command_rx));
 

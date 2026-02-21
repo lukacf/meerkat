@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.1.0"
+version = "0.3.4"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2644,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.1.0"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "chrono",

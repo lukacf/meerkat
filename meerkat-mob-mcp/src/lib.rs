@@ -993,7 +993,7 @@ mod tests {
             self.inject(body, source)?;
             let (tx, rx) = tokio::sync::mpsc::channel(1);
             let interaction_id = InteractionId(uuid::Uuid::new_v4());
-            let interaction_id_for_task = interaction_id.clone();
+            let interaction_id_for_task = interaction_id;
             tokio::spawn(async move {
                 let _ = tx
                     .send(AgentEvent::InteractionComplete {

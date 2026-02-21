@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionError, SessionQuery, SessionService,
@@ -229,6 +230,46 @@ async fn test_create_session_can_defer_initial_turn() {
         .await
         .expect("start_turn should run after deferred create");
     assert!(started.text.contains("Hello from mock"));
+}
+
+#[tokio::test]
+async fn test_subscribe_session_events_available_before_first_turn() {
+    let service = make_service(MockAgentBuilder::new());
+    let created = service
+        .create_session(create_req_deferred("defer stream"))
+        .await
+        .expect("create deferred session");
+    let sid = created.session_id;
+
+    let mut stream = service
+        .subscribe_session_events(&sid)
+        .await
+        .expect("session stream should attach immediately after registration");
+
+    service
+        .start_turn(
+            &sid,
+            StartTurnRequest {
+                host_mode: false,
+                skill_references: None,
+                prompt: "trigger".to_string(),
+                event_tx: None,
+            },
+        )
+        .await
+        .expect("start turn");
+
+    let first = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+        .await
+        .expect("timed out waiting for session event")
+        .expect("stream closed unexpectedly");
+    assert!(
+        matches!(
+            first,
+            AgentEvent::RunStarted { .. } | AgentEvent::RunCompleted { .. }
+        ),
+        "expected run lifecycle event, got: {first:?}"
+    );
 }
 
 #[tokio::test]

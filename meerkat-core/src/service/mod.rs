@@ -10,6 +10,7 @@ use crate::types::{RunResult, SessionId, Usage};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
 };
+use crate::{EventStream, StreamError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -274,6 +275,13 @@ pub trait SessionService: Send + Sync {
 
     /// Archive (remove) a session.
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError>;
+
+    /// Subscribe to session-wide events regardless of triggering interaction.
+    ///
+    /// Services that do not support this capability return `StreamError::NotFound`.
+    async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
+        Err(StreamError::NotFound(format!("session {}", id)))
+    }
 }
 
 /// Extension trait for `Arc<dyn SessionService>` to allow calling methods directly.

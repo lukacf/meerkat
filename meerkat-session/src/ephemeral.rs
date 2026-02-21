@@ -96,6 +96,8 @@ struct SessionHandle {
     interrupt_requested: Arc<AtomicBool>,
     /// Wakes the running turn loop when an interrupt is requested.
     interrupt_notify: Arc<tokio::sync::Notify>,
+    /// Broadcast channel for session-wide event subscription.
+    session_event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
 }
 
 struct SessionTaskControl {
@@ -104,6 +106,7 @@ struct SessionTaskControl {
     turn_lock: Arc<AtomicBool>,
     interrupt_requested: Arc<AtomicBool>,
     interrupt_notify: Arc<tokio::sync::Notify>,
+    session_event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +288,31 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         }
     }
 
+    /// Subscribe to session-wide events.
+    ///
+    /// This stream is available as soon as the session is registered and emits
+    /// all agent events produced by the session task, regardless of which
+    /// interaction triggered them.
+    pub async fn subscribe_session_events(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {}", id)))?;
+        let rx = handle.session_event_tx.subscribe();
+        Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => return Some((event, rx)),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        })))
+    }
+
     /// Acquire the turn lock atomically. Returns Err(Busy) if already locked.
     fn try_acquire_turn(id: &SessionId, handle: &SessionHandle) -> Result<(), SessionError> {
         match handle
@@ -345,6 +373,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             message_count: 0,
             total_tokens: 0,
         });
+        let (session_event_tx, session_event_rx) =
+            tokio::sync::broadcast::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
+        drop(session_event_rx);
         let interrupt_requested = Arc::new(AtomicBool::new(false));
         let interrupt_notify = Arc::new(tokio::sync::Notify::new());
 
@@ -361,6 +392,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 turn_lock: task_turn_lock,
                 interrupt_requested: interrupt_requested.clone(),
                 interrupt_notify: interrupt_notify.clone(),
+                session_event_tx: session_event_tx.clone(),
             },
         ));
 
@@ -376,6 +408,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             comms_runtime,
             interrupt_requested,
             interrupt_notify,
+            session_event_tx,
         };
 
         let inserted = {
@@ -599,6 +632,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())
     }
+
+    async fn subscribe_session_events(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        EphemeralSessionService::<B>::subscribe_session_events(self, id).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +699,7 @@ async fn session_task<A: SessionAgent>(
                                 }
                             }
                             Some(event) = agent_event_rx.recv() => {
+                                let _ = control.session_event_tx.send(event.clone());
                                 if event_stream_open
                                     && let Some(ref tx) = event_tx
                                     && tx.send(event).await.is_err()
@@ -676,6 +717,7 @@ async fn session_task<A: SessionAgent>(
 
                     // Drain any remaining events
                     while let Ok(event) = agent_event_rx.try_recv() {
+                        let _ = control.session_event_tx.send(event.clone());
                         if event_stream_open
                             && let Some(ref tx) = event_tx
                             && tx.send(event).await.is_err()

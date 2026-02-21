@@ -1264,11 +1264,10 @@ mod tests {
 
         let seen_ids = skill_engine.seen();
         assert!(
-            seen_ids.iter().any(|id| {
-                id.0 == "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"
-                    || id.0 == "email-extractor"
-            }),
-            "expected canonical or source-local skill id to be forwarded to skill engine, saw: {:?}",
+            seen_ids
+                .iter()
+                .any(|id| id.0 == "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"),
+            "expected canonical skill id to be forwarded to skill engine, saw: {:?}",
             seen_ids
         );
 

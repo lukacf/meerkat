@@ -718,35 +718,10 @@ where
                     }
                 }
                 Err(e) => {
-                    // Compatibility fallback: many sources still expose source-local IDs.
-                    // Retry with local `skill_name` identifiers to avoid false negatives.
-                    let local_ids: Vec<crate::skills::SkillId> = canonical_ids
-                        .iter()
-                        .filter_map(|id| {
-                            id.0
-                                .split_once('/')
-                                .map(|(_, skill_name)| crate::skills::SkillId(skill_name.to_string()))
-                        })
-                        .collect();
-
-                    match engine.resolve_and_render(&local_ids).await {
-                        Ok(resolved) => {
-                            for skill in &resolved {
-                                tracing::info!(
-                                    skill_id = %skill.id.0,
-                                    "Per-turn skill activation via source-local skill id fallback"
-                                );
-                                prefix_parts.push(skill.rendered_body.clone());
-                            }
-                        }
-                        Err(fallback_error) => {
-                            tracing::warn!(
-                                error = %e,
-                                fallback_error = %fallback_error,
-                                "Failed to resolve skill_references"
-                            );
-                        }
-                    }
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to resolve source-pinned skill_references"
+                    );
                 }
             }
         }

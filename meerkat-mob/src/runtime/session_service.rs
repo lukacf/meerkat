@@ -28,11 +28,7 @@ pub trait MobSessionService: SessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<EventStream, StreamError> {
-        let runtime = self
-            .comms_runtime(session_id)
-            .await
-            .ok_or_else(|| StreamError::NotFound(format!("session {}", session_id)))?;
-        runtime.stream(StreamScope::Session(session_id.clone()))
+        <Self as SessionService>::subscribe_session_events(self, session_id).await
     }
 
     /// Whether this service satisfies the persistent-session contract required

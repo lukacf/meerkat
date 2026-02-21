@@ -7980,7 +7980,12 @@ async fn test_mob_session_service_subscribe_session_events_available() {
         .await
         .expect("spawn lead");
 
-    let stream_result = service.subscribe_session_events(&sid).await;
+    let stream_result =
+        crate::runtime::session_service::MobSessionService::subscribe_session_events(
+            service.as_ref(),
+            &sid,
+        )
+        .await;
     assert!(
         stream_result.is_ok(),
         "expected session-wide event stream contract from mob session service"

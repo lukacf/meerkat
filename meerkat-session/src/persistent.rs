@@ -165,6 +165,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             _ => live_result,
         }
     }
+
+    async fn subscribe_session_events(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        self.inner.subscribe_session_events(id).await
+    }
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {

@@ -373,8 +373,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             message_count: 0,
             total_tokens: 0,
         });
-        let (session_event_tx, _session_event_rx) =
+        let (session_event_tx, session_event_rx) =
             tokio::sync::broadcast::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
+        drop(session_event_rx);
         let interrupt_requested = Arc::new(AtomicBool::new(false));
         let interrupt_notify = Arc::new(tokio::sync::Notify::new());
 
@@ -630,6 +631,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())
+    }
+
+    async fn subscribe_session_events(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        EphemeralSessionService::<B>::subscribe_session_events(self, id).await
     }
 }
 

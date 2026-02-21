@@ -8,7 +8,7 @@ stay alive between turns for instant multi-turn conversations.
 - `SessionRuntime` — keeps agents alive between turns (no reconstruction)
 - Capability detection — check features before using them
 - Config management — read/write runtime config
-- Streaming via notifications (no SSE setup needed)
+- Event notifications are available on the JSON-RPC transport
 
 ## Why JSON-RPC over REST?
 | Feature | REST | JSON-RPC |

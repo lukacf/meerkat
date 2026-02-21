@@ -5,13 +5,13 @@ as a child process — no manual binary management needed.
 
 ## Prerequisites
 ```bash
-npm install meerkat-sdk   # or: npm link from sdks/typescript
+npm install @rkat/sdk   # or: npm link from sdks/typescript
 ```
 
 ## Concepts
 - `MeerkatClient` — typed async client
 - `connect()` / `close()` — process lifecycle
-- `createSession()` — execute a prompt
+- `createSession({ ... })` — execute a prompt
 - `WireRunResult` — typed response object
 
 ## Run

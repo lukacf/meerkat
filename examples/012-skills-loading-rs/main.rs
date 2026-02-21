@@ -143,8 +143,23 @@ url = "https://skills.example.com/compliance.md"
 #   rkat run --skill code-reviewer "Review this file..."
 #   rkat run --skill code-reviewer --skill security-auditor "Audit this..."
 
-# Reference skills in Python/TypeScript SDK:
-#   client.create_session("...", skill_references=["code-reviewer"])
+# Reference skills in Python SDK (canonical):
+#   client.create_session(
+#       "...",
+#       skill_refs=[{
+#           "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+#           "skill_name": "code-reviewer"
+#       }]
+#   )
+#
+# Reference skills in TypeScript SDK (canonical):
+#   client.createSession({
+#       prompt: "...",
+#       skill_refs: [{
+#           source_uuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+#           skill_name: "code-reviewer"
+#       }]
+#   })
 "#
     );
 

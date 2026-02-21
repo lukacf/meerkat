@@ -14,17 +14,17 @@
  *   ANTHROPIC_API_KEY=sk-... npx tsx main.ts
  */
 
-import { MeerkatClient } from "meerkat-sdk";
+import { MeerkatClient } from "@rkat/sdk";
 
 async function main() {
   const client = new MeerkatClient();
   await client.connect();
 
   try {
-    const result = await client.createSession(
-      "What makes Rust's ownership model unique? Answer in two sentences.",
-      { model: "claude-sonnet-4-5" }
-    );
+    const result = await client.createSession({
+      prompt: "What makes Rust's ownership model unique? Answer in two sentences.",
+      model: "claude-sonnet-4-5",
+    });
 
     console.log(result.text);
     console.log("\n--- Stats ---");

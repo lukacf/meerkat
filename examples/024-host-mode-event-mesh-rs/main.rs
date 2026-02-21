@@ -127,10 +127,11 @@ Configuration:
   )
 
   # TypeScript SDK
-  const result = await client.createSession(
-      "Process incoming events",
-      {{ hostMode: true, commsName: "processor" }}
-  );
+  const result = await client.createSession({
+      prompt: "Process incoming events",
+      host_mode: true,
+      comms_name: "processor",
+  });
 
   # REST: Send external event to agent
   curl -X POST http://localhost:8000/webhooks/comms-message \

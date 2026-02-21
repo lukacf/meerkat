@@ -113,16 +113,17 @@ rkat run --comms-name "agent-a" --host-mode "Send hello to agent-b"
 
 # Python SDK:
 result = await client.create_session(
-    "Hello peers!",
+    prompt="Hello peers!",
     comms_name="agent-a",
     host_mode=True,   # Stay alive for incoming messages
 )
 
 # TypeScript SDK:
-const result = await client.createSession("Hello peers!", {{
-    commsName: "agent-a",
-    hostMode: true,
-}});
+const result = await client.createSession({
+    prompt: "Hello peers!",
+    comms_name: "agent-a",
+    host_mode: true,
+});
 
 # Peer directory:
 # Peers discover each other via:

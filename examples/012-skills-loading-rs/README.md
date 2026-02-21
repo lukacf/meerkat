@@ -22,7 +22,7 @@ guidance — all without changing agent code.
 - Same agent logic, different domains (code review vs. API design)
 - Team-shared behavioral standards
 - A/B testing different agent behaviors
-- Swapping expertise at runtime via `skill_references`
+- Swapping expertise at runtime via canonical `skill_refs`
 
 ## Run
 ```bash

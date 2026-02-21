@@ -15,7 +15,7 @@
  *   ANTHROPIC_API_KEY=sk-... npx tsx main.ts
  */
 
-import { MeerkatClient } from "meerkat-sdk";
+import { MeerkatClient } from "@rkat/sdk";
 
 // Define the schema for the agent's output
 const sentimentSchema = {
@@ -57,16 +57,14 @@ async function analyzeSentiment(
   client: MeerkatClient,
   text: string
 ): Promise<SentimentResult> {
-  const result = await client.createSession(
-    `Analyze the sentiment of the following text:\n\n"${text}"`,
-    {
-      model: "claude-sonnet-4-5",
-      system_prompt:
-        "You are a sentiment analysis engine. Analyze text and return structured results.",
-      output_schema: sentimentSchema,
-      structured_output_retries: 3, // Retry up to 3 times if schema validation fails
-    }
-  );
+  const result = await client.createSession({
+    prompt: `Analyze the sentiment of the following text:\n\n"${text}"`,
+    model: "claude-sonnet-4-5",
+    system_prompt:
+      "You are a sentiment analysis engine. Analyze text and return structured results.",
+    output_schema: sentimentSchema,
+    structured_output_retries: 3, // Retry up to 3 times if schema validation fails
+  });
 
   return JSON.parse(result.text) as SentimentResult;
 }

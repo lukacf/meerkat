@@ -1,6 +1,6 @@
 # Meerkat Examples Library
 
-25 fully functional examples covering every Meerkat surface and feature,
+27 fully functional examples covering every Meerkat surface and feature,
 from "Hello World" to production multi-agent systems.
 
 ## Quick Start
@@ -73,6 +73,8 @@ cd examples/004-cli-one-liners-sh && bash examples.sh
 | 023 | [rpc-ide-integration-ts](023-rpc-ide-integration-ts/) | TypeScript | JSON-RPC for IDE extensions and desktop apps |
 | 024 | [host-mode-event-mesh-rs](024-host-mode-event-mesh-rs/) | Rust | Reactive agents processing incoming events |
 | 025 | [full-stack-agent-rs](025-full-stack-agent-rs/) | Rust | Reference architecture with all features combined |
+| 026 | [skills-v21-invoke-py](026-skills-v21-invoke-py/) | Python | Invoke a specific skill with canonical `SkillKey` refs |
+| 027 | [skills-v21-invoke-ts](027-skills-v21-invoke-ts/) | TypeScript | Use `SkillHelper` with canonical `{source_uuid, skill_name}` refs |
 
 ## Examples by Feature
 
@@ -80,12 +82,12 @@ cd examples/004-cli-one-liners-sh && bash examples.sh
 |---------|----------|
 | **Custom Tools** | 006, 025 |
 | **Built-in Tools** | 016, 025 |
-| **Streaming** | 005, 007, 023 |
+| **Streaming** | 005, 007 |
 | **Sessions** | 004, 007, 015, 022, 023 |
 | **Budget & Retry** | 009 |
 | **MCP Integration** | 010 |
 | **Hooks** | 011 |
-| **Skills** | 012, 017, 018, 019 |
+| **Skills** | 012, 017, 018, 019, 026, 027 |
 | **Compaction** | 013 |
 | **Semantic Memory** | 014 |
 | **Persistence** | 015 |
@@ -103,8 +105,8 @@ cd examples/004-cli-one-liners-sh && bash examples.sh
 | Surface | Examples |
 |---------|----------|
 | **Rust SDK** | 001, 005, 006, 009, 011-020, 024, 025 |
-| **Python SDK** | 002, 007, 021, 022 |
-| **TypeScript SDK** | 003, 008, 023 |
+| **Python SDK** | 002, 007, 021, 022, 026 |
+| **TypeScript SDK** | 003, 008, 023, 027 |
 | **CLI (Shell)** | 004, 010 |
 
 ## Prerequisites
@@ -127,7 +129,7 @@ pip install -e sdks/python
 
 ### TypeScript Examples
 ```bash
-npm install meerkat-sdk
+npm install @rkat/sdk
 # Or link from source:
 cd sdks/typescript && npm link
 ```

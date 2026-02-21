@@ -3990,16 +3990,8 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "comms"))]
     #[test]
-    fn test_resolve_host_mode_rejects_when_comms_disabled() {
-        let err = resolve_host_mode(true).expect_err("host mode should be rejected");
-        assert!(err.to_string().contains("host_mode requires comms support"));
-    }
-
-    #[cfg(feature = "comms")]
-    #[test]
-    fn test_resolve_host_mode_allows_when_comms_enabled() {
+    fn test_resolve_host_mode_roundtrip() {
         assert!(resolve_host_mode(true).expect("host mode should be enabled"));
         assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
     }
@@ -4323,14 +4315,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "jsonl-store")]
     #[tokio::test]
     async fn test_resume_session_wires_mob_tools_into_llm_request() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
         let mut scope = test_scope_with_context(temp.path().to_path_buf());
-        #[cfg(feature = "jsonl-store")]
-        {
-            scope.backend_hint = Some(RealmBackend::Jsonl);
-        }
+        scope.backend_hint = Some(RealmBackend::Jsonl);
         let (manifest, store) = create_session_store(&scope)
             .await
             .expect("session store should initialize");

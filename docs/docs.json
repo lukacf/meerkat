@@ -46,6 +46,7 @@
               "guides/memory",
               "guides/hooks",
               "guides/skills",
+              "guides/skills-v2-migration",
               "guides/sub-agents",
               "guides/comms",
               "guides/mobs"
@@ -115,7 +116,8 @@
             "group": "Reference",
             "pages": [
               "reference/api-reference",
-              "reference/builtin-tools"
+              "reference/builtin-tools",
+              "reference/skills-governance-runbook"
             ]
           },
           {

@@ -210,6 +210,7 @@ fn test_run_result_json_schema() {
         tool_calls: 5,
         structured_output: None,
         schema_warnings: None,
+        skill_diagnostics: None,
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -543,6 +544,7 @@ fn test_run_result_with_structured_output() {
         tool_calls: 0,
         structured_output: Some(json!({"name": "Alice", "age": 30})),
         schema_warnings: None,
+        skill_diagnostics: None,
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -565,6 +567,7 @@ fn test_run_result_without_structured_output_skips_field() {
         tool_calls: 0,
         structured_output: None,
         schema_warnings: None,
+        skill_diagnostics: None,
     };
 
     let json = serde_json::to_value(&result).unwrap();

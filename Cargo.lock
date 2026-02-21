@@ -2506,7 +2506,6 @@ dependencies = [
  "indexmap",
  "jsonschema",
  "parking_lot",
- "regex",
  "schemars",
  "serde",
  "serde_json",

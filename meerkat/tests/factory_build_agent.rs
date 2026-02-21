@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream;
-use meerkat::{
-    AgentBuildConfig, AgentFactory, BuildAgentError, LlmDoneOutcome, LlmEvent, LlmRequest,
-};
+#[cfg(feature = "comms")]
+use meerkat::BuildAgentError;
+use meerkat::{AgentBuildConfig, AgentFactory, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_client::LlmClient;
 use meerkat_core::{
     Config, Provider, Session, SessionId, SessionMetadata, SessionTooling, UserMessage,
@@ -452,6 +452,58 @@ async fn test_preload_missing_skill_fails_build() {
     assert!(
         result.is_err(),
         "Should fail when preloading a nonexistent skill"
+    );
+}
+
+#[cfg(feature = "skills")]
+#[tokio::test]
+async fn test_mixed_validity_skills_quarantine_preserves_valid_preload() {
+    let temp = tempfile::tempdir().unwrap();
+    let skills_root = temp.path().join(".rkat/skills");
+    tokio::fs::create_dir_all(skills_root.join("valid-skill"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(skills_root.join("broken-skill"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        skills_root.join("valid-skill/SKILL.md"),
+        "---\nname: valid-skill\ndescription: Valid skill\n---\n\n# Valid",
+    )
+    .await
+    .unwrap();
+    // Invalid on purpose: frontmatter name does not match directory slug.
+    tokio::fs::write(
+        skills_root.join("broken-skill/SKILL.md"),
+        "---\nname: wrong-name\ndescription: Invalid skill\n---\n\n# Invalid",
+    )
+    .await
+    .unwrap();
+
+    let factory = temp_factory(&temp).project_root(temp.path());
+    let config = Config::default();
+
+    let valid_build = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        preload_skills: Some(vec![meerkat_core::skills::SkillId("valid-skill".into())]),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let valid_result = factory.build_agent(valid_build, &config).await;
+    assert!(
+        valid_result.is_ok(),
+        "Expected valid skill preload to succeed despite quarantined sibling; got: {:?}",
+        valid_result.err()
+    );
+
+    let invalid_build = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        preload_skills: Some(vec![meerkat_core::skills::SkillId("broken-skill".into())]),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let invalid_result = factory.build_agent(invalid_build, &config).await;
+    assert!(
+        invalid_result.is_err(),
+        "Expected quarantined invalid skill preload to fail deterministically"
     );
 }
 

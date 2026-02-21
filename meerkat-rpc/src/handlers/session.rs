@@ -1,7 +1,9 @@
 //! `session/*` method handlers.
 
 use meerkat::AgentBuildConfig;
+use meerkat_contracts::SkillsParams;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::{HookRunOverrides, OutputSchema, Provider};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -73,11 +75,27 @@ pub struct CreateSessionParams {
     pub preload_skills: Option<Vec<String>>,
     /// Skill IDs to resolve and inject for the first turn.
     #[serde(default)]
+    pub skill_refs: Option<Vec<SkillRef>>,
+    /// Legacy compatibility refs to resolve and inject for the first turn.
+    #[serde(default)]
     pub skill_references: Option<Vec<String>>,
 }
 
 fn default_structured_output_retries() -> u32 {
     2
+}
+
+fn canonical_skill_ids(
+    runtime: &SessionRuntime,
+    skill_refs: Option<Vec<SkillRef>>,
+    skill_references: Option<Vec<String>>,
+) -> Result<Option<Vec<SkillKey>>, meerkat_core::skills::SkillError> {
+    let params = SkillsParams {
+        preload_skills: None,
+        skill_refs,
+        skill_references,
+    };
+    params.canonical_skill_keys_with_registry(&runtime.skill_identity_registry())
 }
 
 /// Parameters for `session/read`.
@@ -199,9 +217,17 @@ pub async fn handle_create(
     });
 
     // Start the initial turn
-    let skill_refs = params
-        .skill_references
-        .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
+    let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs, params.skill_references)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("Invalid skill_refs: {e}"),
+            );
+        }
+    };
     let result = if params.host_mode {
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();
@@ -242,6 +268,7 @@ pub async fn handle_create(
             tool_calls: 0,
             structured_output: None,
             schema_warnings: None,
+            skill_diagnostics: None,
         }
     } else {
         match runtime
@@ -335,6 +362,42 @@ pub async fn handle_read(
             error::SESSION_NOT_FOUND,
             format!("Session not found: {session_id}"),
         ),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::CreateSessionResult;
+
+    #[test]
+    fn create_session_result_preserves_skill_diagnostics() {
+        let run = meerkat_core::RunResult {
+            text: "ok".to_string(),
+            session_id: meerkat_core::SessionId::new(),
+            usage: Default::default(),
+            turns: 1,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {
+                source_health: meerkat_core::skills::SourceHealthSnapshot {
+                    state: meerkat_core::skills::SourceHealthState::Degraded,
+                    invalid_ratio: 0.2,
+                    invalid_count: 1,
+                    total_count: 5,
+                    failure_streak: 3,
+                    handshake_failed: false,
+                },
+                quarantined: vec![],
+            }),
+        };
+        let wire: CreateSessionResult = run.into();
+        assert!(wire.skill_diagnostics.is_some());
+        assert_eq!(
+            wire.skill_diagnostics.as_ref().unwrap().source_health.state,
+            meerkat_core::skills::SourceHealthState::Degraded
+        );
     }
 }
 

@@ -112,6 +112,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .unwrap_or_else(|_| Config::default());
     config.apply_env_overrides()?;
+    let identity_registry =
+        meerkat_rpc::session_runtime::SessionRuntime::build_skill_identity_registry(&config)
+            .map_err(|err| {
+                std::io::Error::other(format!(
+                    "failed to build skills source-identity registry from config: {err}"
+                ))
+            })?;
 
     let store_path = match manifest.backend {
         RealmBackend::Jsonl => realm_paths.sessions_jsonl_dir.clone(),
@@ -148,6 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         64,
         session_store,
     );
+    runtime.set_skill_identity_registry(identity_registry);
     runtime.set_realm_context(
         Some(locator.realm_id.clone()),
         cli.instance.clone(),

@@ -1,36 +1,33 @@
 """Skill listing and invocation helpers for the Meerkat SDK."""
 
-from typing import Optional
+from __future__ import annotations
 
-from .errors import CapabilityUnavailableError, SkillNotFoundError
+from dataclasses import dataclass
+from typing import Union
+import warnings
+
+from .errors import CapabilityUnavailableError
+
+
+@dataclass(frozen=True)
+class SkillKey:
+    source_uuid: str
+    skill_name: str
+
+
+SkillRef = Union[SkillKey, str]
 
 
 class SkillHelper:
-    """Helpers for working with Meerkat skills.
-
-    Skills are loaded by the agent from filesystem and embedded sources.
-    The agent's system prompt contains an inventory of available skills.
-    To invoke a skill, include its reference (e.g. ``/shell-patterns``)
-    in the user prompt.
-
-    Usage::
-
-        helper = SkillHelper(client)
-        helper.require_skills()  # raises if skills not available
-        result = await helper.invoke(
-            session_id, "/shell-patterns", "How do I run a background job?"
-        )
-    """
+    """Helpers for working with Meerkat skills."""
 
     def __init__(self, client):
         self._client = client
 
     def is_available(self) -> bool:
-        """Check if the skills capability is available in this runtime."""
         return self._client.has_capability("skills")
 
     def require_skills(self) -> None:
-        """Raise if skills capability is not available."""
         if not self.is_available():
             raise CapabilityUnavailableError(
                 "CAPABILITY_UNAVAILABLE",
@@ -38,46 +35,50 @@ class SkillHelper:
                 "Build with --features skills to enable.",
             )
 
-    async def invoke(
-        self,
-        session_id: str,
-        skill_reference: str,
-        prompt: str,
-    ):
-        """Invoke a skill within an existing session.
+    @staticmethod
+    def _normalize_ref(skill_ref: SkillRef) -> SkillKey:
+        if isinstance(skill_ref, SkillKey):
+            return skill_ref
 
-        The skill reference (e.g. ``/shell-patterns``) is prepended to the
-        prompt. The agent's system prompt already contains the skill inventory,
-        so it knows how to resolve the reference.
+        value = skill_ref[1:] if skill_ref.startswith("/") else skill_ref
+        parts = value.split("/")
+        if len(parts) < 2:
+            raise ValueError(
+                f"Invalid legacy skill reference '{skill_ref}'. "
+                "Expected '<source_uuid>/<skill_name>'."
+            )
 
-        Args:
-            session_id: The session to invoke the skill in.
-            skill_reference: Skill reference like ``/shell-patterns``.
-            prompt: The user's question or request for the skill.
+        warnings.warn(
+            "Legacy string skill references are deprecated; pass SkillKey instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return SkillKey(source_uuid=parts[0], skill_name="/".join(parts[1:]))
 
-        Returns:
-            WireRunResult from the turn.
-        """
+    async def invoke(self, session_id: str, skill_ref: SkillRef, prompt: str):
         self.require_skills()
-        full_prompt = f"{skill_reference} {prompt}"
-        return await self._client.start_turn(session_id, full_prompt)
+        canonical = self._normalize_ref(skill_ref)
+        return await self._client.start_turn(
+            session_id,
+            prompt,
+            skill_refs=[
+                {
+                    "source_uuid": canonical.source_uuid,
+                    "skill_name": canonical.skill_name,
+                }
+            ],
+        )
 
-    async def invoke_new_session(
-        self,
-        skill_reference: str,
-        prompt: str,
-        model: Optional[str] = None,
-    ):
-        """Create a new session and invoke a skill in the first turn.
-
-        Args:
-            skill_reference: Skill reference like ``/shell-patterns``.
-            prompt: The user's question or request for the skill.
-            model: Optional model override.
-
-        Returns:
-            WireRunResult from the session creation.
-        """
+    async def invoke_new_session(self, skill_ref: SkillRef, prompt: str, model: str | None = None):
         self.require_skills()
-        full_prompt = f"{skill_reference} {prompt}"
-        return await self._client.create_session(prompt=full_prompt, model=model)
+        canonical = self._normalize_ref(skill_ref)
+        return await self._client.create_session(
+            prompt=prompt,
+            model=model,
+            skill_refs=[
+                {
+                    "source_uuid": canonical.source_uuid,
+                    "skill_name": canonical.skill_name,
+                }
+            ],
+        )

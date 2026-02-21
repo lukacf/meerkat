@@ -1,0 +1,65 @@
+---
+title: "Skills Governance Runbook"
+description: "Operational runbook for source UUID lifecycle, lineage migrations, and remap governance."
+icon: "sitemap"
+---
+
+This runbook defines the required operator workflow for skill source identity changes.
+
+## Canonical Identity
+
+- Canonical identity is `SkillKey { source_uuid, skill_name }`.
+- `source_uuid` is immutable unless changed through lineage events.
+- Runtime execution paths consume canonical identity only.
+
+## Required Source Record Fields
+
+Every source identity record must include:
+
+- `source_uuid`
+- `display_name`
+- `transport_kind`
+- locator `fingerprint`
+- `status` (`active` or `retired`)
+
+## Governance Checks
+
+Startup rejects:
+
+- UUID collisions with conflicting fingerprints unless lineage explicitly permits.
+- UUID mutation without lineage.
+- split/merge/rotate lineage without complete per-skill remap coverage.
+
+## Migration Procedures
+
+### Rotate (one source to one source)
+
+1. Add lineage event `rotate` from old UUID to new UUID.
+2. Add remap rows for all affected skills (`old_uuid/skill` -> `new_uuid/skill`).
+3. Deploy config and verify canonicalization tests pass.
+
+### Split (one source to many)
+
+1. Add lineage event `split` with all target UUIDs.
+2. Add explicit per-skill remaps from old UUID to exactly one target UUID per skill.
+3. Reject deployment if any source skill lacks remap coverage.
+
+### Merge (many sources to one)
+
+1. Add lineage event `merge` with all origin UUIDs and target UUID.
+2. Add explicit per-skill remaps from each origin UUID skill to target UUID skill.
+3. Reject deployment if any origin skill lacks remap coverage.
+
+## Incident Recovery
+
+If startup fails with lineage/remap validation:
+
+1. Freeze rollout and keep prior registry active.
+2. Fix missing remaps or incorrect lineage edge.
+3. Re-run identity migration tests:
+
+```bash
+cargo test -p meerkat-core --test skill_identity_migrations
+```
+
+4. Roll forward only after tests pass and resolver-boundary canonicalization is verified.

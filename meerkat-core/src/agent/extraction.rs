@@ -120,6 +120,7 @@ where
                                 tool_calls: tool_call_count,
                                 structured_output: Some(parsed),
                                 schema_warnings: schema_warnings.clone(),
+                                skill_diagnostics: None,
                             });
                         }
                         Err(error) => {

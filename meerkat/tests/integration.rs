@@ -1082,3 +1082,158 @@ mod combined {
         assert_eq!(request.temperature, Some(0.7));
     }
 }
+
+#[cfg(feature = "skills")]
+mod external_source_lifecycle {
+    use std::collections::BTreeMap;
+
+    use meerkat_core::skills::{SkillFilter, SkillId, SkillSource};
+    use meerkat_skills::source::http::HttpExternalClient;
+    use meerkat_skills::source::protocol::{ExternalSkillSource, StdioExternalClient};
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn e2e_external_source_lifecycle_stdio_and_http_like_transports() {
+        let stdio_script = r##"
+read line
+if echo "$line" | grep -q '"method":"capabilities/get"'; then
+  echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"capabilities/get","result":{"protocol_version":1,"methods":["skills/list_summaries","skills/load_package","skills/list_artifacts","skills/read_artifact","skills/invoke_function"]}}}'
+elif echo "$line" | grep -q '"method":"skills/list_summaries"'; then
+  echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"skills/list_summaries","result":{"summaries":[{"source_uuid":"stdio-src","skill_name":"remote-skill","description":"Remote skill"}]}}}'
+elif echo "$line" | grep -q '"method":"skills/load_package"'; then
+  echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"skills/load_package","result":{"package":{"summary":{"source_uuid":"stdio-src","skill_name":"remote-skill","description":"Remote skill"},"body":"stdio-body"}}}}'
+elif echo "$line" | grep -q '"method":"skills/list_artifacts"'; then
+  echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"skills/list_artifacts","result":{"artifacts":[{"path":"README.md","mime_type":"text/markdown","byte_length":9}]}}}'
+elif echo "$line" | grep -q '"method":"skills/read_artifact"'; then
+  echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"skills/read_artifact","result":{"artifact":{"path":"README.md","mime_type":"text/markdown","content":"stdio-doc"}}}}'
+elif echo "$line" | grep -q '"method":"skills/invoke_function"'; then
+  echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"skills/invoke_function","result":{"output":{"transport":"stdio","ok":true}}}}'
+fi
+"##;
+        let stdio = ExternalSkillSource::new(
+            "stdio-src",
+            StdioExternalClient::new(
+                "sh",
+                vec!["-c".to_string(), stdio_script.to_string()],
+                BTreeMap::new(),
+                None,
+            ),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0_u8; 8192];
+                    let n = match stream.read(&mut buf).await {
+                        Ok(read) if read > 0 => read,
+                        _ => return,
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = request.lines().next().unwrap_or_default();
+                    let response_payload = if first_line.starts_with("GET /capabilities ") {
+                        json!({"method":"capabilities/get","result":{"protocol_version":1,"methods":["skills/list_summaries","skills/load_package","skills/list_artifacts","skills/read_artifact","skills/invoke_function"]}})
+                    } else if first_line.starts_with("GET /skills ") {
+                        json!({"method":"skills/list_summaries","result":{"summaries":[{"source_uuid":"http-src","skill_name":"remote-skill","description":"Remote skill"}]}})
+                    } else if first_line
+                        .contains("/skills/http-src%2Fremote-skill/functions/inspect")
+                        && first_line.starts_with("POST ")
+                    {
+                        json!({"method":"skills/invoke_function","result":{"output":{"transport":"http","ok":true}}})
+                    } else if first_line
+                        .contains("/skills/http-src%2Fremote-skill/artifacts/README.md")
+                    {
+                        json!({"method":"skills/read_artifact","result":{"artifact":{"path":"README.md","mime_type":"application/json","content":"{\"ok\":true}"}}})
+                    } else if first_line.contains("/skills/http-src%2Fremote-skill/artifacts") {
+                        json!({"method":"skills/list_artifacts","result":{"artifacts":[{"path":"README.md","mime_type":"application/json","byte_length":11}]}})
+                    } else if first_line.contains("/skills/http-src%2Fremote-skill") {
+                        json!({"method":"skills/load_package","result":{"package":{"summary":{"source_uuid":"http-src","skill_name":"remote-skill","description":"Remote skill"},"body":"http-body"}}})
+                    } else {
+                        json!({"error":"not found"})
+                    };
+
+                    let status = if response_payload.get("error").is_some() {
+                        "404 Not Found"
+                    } else {
+                        "200 OK"
+                    };
+                    let body = response_payload.to_string();
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let http = ExternalSkillSource::new(
+            "http-src",
+            HttpExternalClient::new("http-src", format!("http://{addr}"), None),
+        );
+
+        let stdio_skills = stdio.list(&SkillFilter::default()).await.unwrap();
+        let http_skills = http.list(&SkillFilter::default()).await.unwrap();
+        assert_eq!(stdio_skills[0].id.0, "remote-skill");
+        assert_eq!(http_skills[0].id.0, "remote-skill");
+
+        let stdio_doc = stdio
+            .load(&SkillId("remote-skill".to_string()))
+            .await
+            .unwrap();
+        let http_doc = http
+            .load(&SkillId("remote-skill".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(stdio_doc.body, "stdio-body");
+        assert_eq!(http_doc.body, "http-body");
+
+        let stdio_artifacts = stdio
+            .list_artifacts(&SkillId("remote-skill".to_string()))
+            .await
+            .unwrap();
+        let http_artifacts = http
+            .list_artifacts(&SkillId("remote-skill".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(stdio_artifacts[0].path, "README.md");
+        assert_eq!(http_artifacts[0].path, "README.md");
+
+        let stdio_artifact = stdio
+            .read_artifact(&SkillId("remote-skill".to_string()), "README.md")
+            .await
+            .unwrap();
+        let http_artifact = http
+            .read_artifact(&SkillId("remote-skill".to_string()), "README.md")
+            .await
+            .unwrap();
+        assert_eq!(stdio_artifact.content, "stdio-doc");
+        assert_eq!(http_artifact.content, "{\"ok\":true}");
+
+        let stdio_invoke = stdio
+            .invoke_function(
+                &SkillId("remote-skill".to_string()),
+                "inspect",
+                json!({"k":"v"}),
+            )
+            .await
+            .unwrap();
+        let http_invoke = http
+            .invoke_function(
+                &SkillId("remote-skill".to_string()),
+                "inspect",
+                json!({"k":"v"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stdio_invoke["transport"], "stdio");
+        assert_eq!(http_invoke["transport"], "http");
+        server.abort();
+    }
+}

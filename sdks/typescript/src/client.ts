@@ -452,6 +452,7 @@ export class MeerkatClient {
     peer_meta?: PeerMeta;
     provider_params?: Record<string, unknown>;
     preload_skills?: string[];
+    skill_refs?: Array<Record<string, unknown> | string>;
     skill_references?: string[];
   }): Promise<WireRunResult> {
     const result = (await this.request("session/create", params)) as Record<
@@ -464,7 +465,10 @@ export class MeerkatClient {
   async startTurn(
     sessionId: string,
     prompt: string,
-    options?: { skill_references?: string[] },
+    options?: {
+      skill_refs?: Array<Record<string, unknown> | string>;
+      skill_references?: string[];
+    },
   ): Promise<WireRunResult> {
     const result = (await this.request("turn/start", {
       session_id: sessionId,

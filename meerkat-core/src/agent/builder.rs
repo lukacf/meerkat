@@ -31,7 +31,7 @@ pub struct AgentBuilder {
     pub(super) hook_run_overrides: HookRunOverrides,
     pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
-    pub(super) skill_engine: Option<Arc<dyn crate::skills::SkillEngine>>,
+    pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
 }
@@ -215,7 +215,7 @@ impl AgentBuilder {
     }
 
     /// Set the skill engine for per-turn `/skill-ref` activation.
-    pub fn with_skill_engine(mut self, engine: Arc<dyn crate::skills::SkillEngine>) -> Self {
+    pub fn with_skill_engine(mut self, engine: Arc<crate::skills::SkillRuntime>) -> Self {
         self.skill_engine = Some(engine);
         self
     }

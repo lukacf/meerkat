@@ -4,7 +4,9 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 
+use meerkat_contracts::SkillsParams;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::skills::{SkillKey, SkillRef};
 
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
@@ -21,6 +23,9 @@ use crate::session_runtime::SessionRuntime;
 pub struct StartTurnParams {
     pub session_id: String,
     pub prompt: String,
+    /// Structured refs for Skills V2.1.
+    #[serde(default)]
+    pub skill_refs: Option<Vec<SkillRef>>,
     /// Skill IDs to resolve and inject for this turn.
     #[serde(default)]
     pub skill_references: Option<Vec<String>>,
@@ -42,6 +47,19 @@ pub type TurnResult = meerkat_contracts::WireRunResult;
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+fn canonical_skill_ids(
+    runtime: &SessionRuntime,
+    skill_refs: Option<Vec<SkillRef>>,
+    skill_references: Option<Vec<String>>,
+) -> Result<Option<Vec<SkillKey>>, meerkat_core::skills::SkillError> {
+    let params = SkillsParams {
+        preload_skills: None,
+        skill_refs,
+        skill_references,
+    };
+    params.canonical_skill_keys_with_registry(&runtime.skill_identity_registry())
+}
 
 /// Handle `turn/start`.
 pub async fn handle_start(
@@ -71,9 +89,17 @@ pub async fn handle_start(
         }
     });
 
-    let skill_refs = params
-        .skill_references
-        .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
+    let skill_refs = match canonical_skill_ids(runtime, params.skill_refs, params.skill_references)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return RpcResponse::error(
+                id,
+                crate::error::INVALID_PARAMS,
+                format!("Invalid skill_refs: {e}"),
+            );
+        }
+    };
     let result = match runtime
         .start_turn(&session_id, params.prompt, event_tx, skill_refs)
         .await

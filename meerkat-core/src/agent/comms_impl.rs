@@ -138,6 +138,7 @@ where
                 usage: Usage::default(),
                 structured_output: None,
                 schema_warnings: None,
+                skill_diagnostics: None,
             }
         };
 

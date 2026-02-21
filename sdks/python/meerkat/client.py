@@ -168,12 +168,13 @@ class MeerkatClient:
             peer_meta: Optional[dict] = None,
             provider_params: Optional[dict] = None,
             preload_skills: Optional[list[str]] = None,
+            skill_refs: Optional[list[dict]] = None,
             skill_references: Optional[list[str]] = None) -> WireRunResult:
         """Create a new session and run the first turn."""
         params = self._build_create_params(prompt, model, provider, system_prompt,
             max_tokens, output_schema, structured_output_retries, hooks_override,
             enable_builtins, enable_shell, enable_subagents, enable_memory,
-            host_mode, comms_name, peer_meta, provider_params, preload_skills, skill_references)
+            host_mode, comms_name, peer_meta, provider_params, preload_skills, skill_refs, skill_references)
         result = await self._request("session/create", params)
         return self._parse_run_result(result)
 
@@ -181,10 +182,13 @@ class MeerkatClient:
         self,
         session_id: str,
         prompt: str,
+        skill_refs: Optional[list[dict]] = None,
         skill_references: Optional[list[str]] = None,
     ) -> WireRunResult:
         """Start a new turn on an existing session."""
         params: dict = {"session_id": session_id, "prompt": prompt}
+        if skill_refs is not None:
+            params["skill_refs"] = skill_refs
         if skill_references is not None:
             params["skill_references"] = skill_references
         result = await self._request("turn/start", params)
@@ -202,6 +206,7 @@ class MeerkatClient:
             peer_meta: Optional[dict] = None,
             provider_params: Optional[dict] = None,
             preload_skills: Optional[list[str]] = None,
+            skill_refs: Optional[list[dict]] = None,
             skill_references: Optional[list[str]] = None) -> StreamingTurn:
         """Create a new session and stream events from the first turn.
 
@@ -222,7 +227,7 @@ class MeerkatClient:
         params = self._build_create_params(prompt, model, provider, system_prompt,
             max_tokens, output_schema, structured_output_retries, hooks_override,
             enable_builtins, enable_shell, enable_subagents, enable_memory,
-            host_mode, comms_name, peer_meta, provider_params, preload_skills, skill_references)
+            host_mode, comms_name, peer_meta, provider_params, preload_skills, skill_refs, skill_references)
         self._request_id += 1
         request_id = self._request_id
         event_queue = self._dispatcher.subscribe_pending_stream(request_id)
@@ -235,6 +240,7 @@ class MeerkatClient:
             pending_send=(self._process.stdin, data))
 
     def start_turn_streaming(self, session_id: str, prompt: str,
+            skill_refs: Optional[list[dict]] = None,
             skill_references: Optional[list[str]] = None) -> StreamingTurn:
         """Start a new turn on an existing session and stream events.
 
@@ -252,6 +258,8 @@ class MeerkatClient:
         event_queue = self._dispatcher.subscribe_events(session_id)
         response_future = self._dispatcher.expect_response(request_id)
         params: dict = {"session_id": session_id, "prompt": prompt}
+        if skill_refs is not None:
+            params["skill_refs"] = skill_refs
         if skill_references is not None:
             params["skill_references"] = skill_references
         request = {"jsonrpc": "2.0", "id": request_id, "method": "turn/start",
@@ -543,6 +551,7 @@ class MeerkatClient:
         peer_meta: Optional[dict],
         provider_params: Optional[dict],
         preload_skills: Optional[list[str]] = None,
+        skill_refs: Optional[list[dict]] = None,
         skill_references: Optional[list[str]] = None,
     ) -> dict:
         """Build the params dict for session/create."""
@@ -579,6 +588,8 @@ class MeerkatClient:
             params["provider_params"] = provider_params
         if preload_skills is not None:
             params["preload_skills"] = preload_skills
+        if skill_refs is not None:
+            params["skill_refs"] = skill_refs
         if skill_references is not None:
             params["skill_references"] = skill_references
         return params

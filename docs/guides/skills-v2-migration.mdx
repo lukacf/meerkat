@@ -1,0 +1,69 @@
+---
+title: "Skills V2.1 Migration"
+description: "Migrate from legacy string skill references to typed canonical SkillKey refs and deterministic compatibility behavior."
+icon: "arrows-rotate"
+---
+
+## What Changed
+
+Skills V2.1 introduces:
+
+- canonical typed references: `skill_refs` with `{ source_uuid, skill_name }`
+- source identity governance via lineage + remap registry
+- strict parser + skill-level quarantine + source health states
+- model-mediated implicit activation (no runtime lexical heuristics)
+
+## Reference Migration
+
+### New form (recommended)
+
+```json
+{
+  "skill_refs": [
+    {
+      "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+      "skill_name": "email-extractor"
+    }
+  ]
+}
+```
+
+### Legacy compatibility form
+
+```json
+{
+  "skill_references": [
+    "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"
+  ]
+}
+```
+
+Legacy refs are accepted at resolver boundaries only, canonicalized immediately, and should be treated as deprecated.
+
+## Deterministic Compatibility Guarantees
+
+- Unknown refs fail with typed deterministic errors.
+- Ambiguous refs fail with typed deterministic errors.
+- Lineage remaps are applied only at boundary canonicalization.
+- Runtime execution uses canonical `SkillKey`-derived IDs only.
+
+## SDK Guidance
+
+- Prefer typed refs in TypeScript/Python SDK skill helpers.
+- Legacy string refs still work but emit compatibility/deprecation warnings.
+- Migrate callsites to `SkillKey` to remove boundary conversions.
+
+## Rollout Checklist
+
+1. Add/verify source UUID records and lineage/remap data.
+2. Switch API callers to `skill_refs`.
+3. Keep legacy `skill_references` only during transition.
+4. Validate with:
+
+```bash
+cargo test -p meerkat-contracts
+cargo test -p meerkat-core
+cargo test -p meerkat-rpc
+```
+
+5. Remove remaining legacy-ref callers.

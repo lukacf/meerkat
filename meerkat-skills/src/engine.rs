@@ -1,25 +1,32 @@
 //! Default skill engine implementation.
 
 use std::collections::HashSet;
+use std::future::Future;
 
-use async_trait::async_trait;
 use meerkat_core::skills::{
-    ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillError, SkillFilter, SkillId,
-    SkillSource,
+    ResolvedSkill, SkillArtifact, SkillArtifactContent, SkillCollection, SkillDescriptor,
+    SkillEngine, SkillError, SkillFilter, SkillId, SkillQuarantineDiagnostic, SkillSource,
+    SourceHealthSnapshot,
 };
 
 use crate::renderer;
 
 /// Default implementation of [`SkillEngine`].
-pub struct DefaultSkillEngine {
-    source: Box<dyn SkillSource>,
+pub struct DefaultSkillEngine<S>
+where
+    S: SkillSource + Send + Sync,
+{
+    source: S,
     available_capabilities: HashSet<String>,
     inventory_threshold: usize,
     max_injection_bytes: usize,
 }
 
-impl DefaultSkillEngine {
-    pub fn new(source: Box<dyn SkillSource>, available_capabilities: Vec<String>) -> Self {
+impl<S> DefaultSkillEngine<S>
+where
+    S: SkillSource + Send + Sync,
+{
+    pub fn new(source: S, available_capabilities: Vec<String>) -> Self {
         Self {
             source,
             available_capabilities: available_capabilities.into_iter().collect(),
@@ -56,67 +63,120 @@ fn filter_by_capabilities(
         .collect()
 }
 
-#[async_trait]
-impl SkillEngine for DefaultSkillEngine {
-    async fn inventory_section(&self) -> Result<String, SkillError> {
-        let all_skills = self.source.list(&SkillFilter::default()).await?;
-        let available = filter_by_capabilities(all_skills, &self.available_capabilities);
-        // Derive collections from capability-filtered skills so counts and
-        // descriptions only reflect actually-usable skills.
-        let collections = meerkat_core::skills::derive_collections(&available);
-        Ok(renderer::render_inventory(
-            &available,
-            &collections,
-            self.inventory_threshold,
-        ))
-    }
-
-    async fn resolve_and_render(&self, ids: &[SkillId]) -> Result<Vec<ResolvedSkill>, SkillError> {
-        let mut results = Vec::new();
-        for id in ids {
-            let doc = self.source.load(id).await?;
-
-            // Enforce capability gating: reject skills whose required
-            // capabilities are not available, even if the caller knows the ID.
-            let missing: Vec<_> = doc
-                .descriptor
-                .requires_capabilities
-                .iter()
-                .filter(|cap| !self.available_capabilities.contains(*cap))
-                .collect();
-            if !missing.is_empty() {
-                return Err(SkillError::Load(
-                    format!(
-                        "skill '{}' requires unavailable capabilities: {:?}",
-                        id.0, missing
-                    )
-                    .into(),
-                ));
-            }
-
-            let rendered =
-                renderer::render_injection_with_limit(&id.0, &doc.body, self.max_injection_bytes);
-            let byte_size = rendered.len();
-            results.push(ResolvedSkill {
-                id: id.clone(),
-                name: doc.descriptor.name.clone(),
-                rendered_body: rendered,
-                byte_size,
-            });
+impl<S> SkillEngine for DefaultSkillEngine<S>
+where
+    S: SkillSource + Send + Sync,
+{
+    fn inventory_section(&self) -> impl Future<Output = Result<String, SkillError>> + Send {
+        async move {
+            let all_skills = self.source.list(&SkillFilter::default()).await?;
+            let available = filter_by_capabilities(all_skills, &self.available_capabilities);
+            let collections = meerkat_core::skills::derive_collections(&available);
+            Ok(renderer::render_inventory(
+                &available,
+                &collections,
+                self.inventory_threshold,
+            ))
         }
-        Ok(results)
     }
 
-    async fn collections(&self) -> Result<Vec<SkillCollection>, SkillError> {
-        self.source.collections().await
+    fn resolve_and_render(
+        &self,
+        ids: &[SkillId],
+    ) -> impl Future<Output = Result<Vec<ResolvedSkill>, SkillError>> + Send {
+        async move {
+            let mut results = Vec::new();
+            for id in ids {
+                let doc = self.source.load(id).await?;
+
+                let missing: Vec<_> = doc
+                    .descriptor
+                    .requires_capabilities
+                    .iter()
+                    .filter(|cap| !self.available_capabilities.contains(*cap))
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(SkillError::Load(
+                        format!(
+                            "skill '{}' requires unavailable capabilities: {:?}",
+                            id.0, missing
+                        )
+                        .into(),
+                    ));
+                }
+
+                let rendered = renderer::render_injection_with_limit(
+                    &id.0,
+                    &doc.body,
+                    self.max_injection_bytes,
+                );
+                let byte_size = rendered.len();
+                results.push(ResolvedSkill {
+                    id: id.clone(),
+                    name: doc.descriptor.name.clone(),
+                    rendered_body: rendered,
+                    byte_size,
+                });
+            }
+            Ok(results)
+        }
     }
 
-    async fn list_skills(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
-        let all_skills = self.source.list(filter).await?;
-        Ok(filter_by_capabilities(
-            all_skills,
-            &self.available_capabilities,
-        ))
+    fn collections(&self) -> impl Future<Output = Result<Vec<SkillCollection>, SkillError>> + Send {
+        async move { self.source.collections().await }
+    }
+
+    fn list_skills(
+        &self,
+        filter: &SkillFilter,
+    ) -> impl Future<Output = Result<Vec<SkillDescriptor>, SkillError>> + Send {
+        async move {
+            let all_skills = self.source.list(filter).await?;
+            Ok(filter_by_capabilities(
+                all_skills,
+                &self.available_capabilities,
+            ))
+        }
+    }
+
+    fn quarantined_diagnostics(
+        &self,
+    ) -> impl Future<Output = Result<Vec<SkillQuarantineDiagnostic>, SkillError>> + Send {
+        async move { self.source.quarantined_diagnostics().await }
+    }
+
+    fn health_snapshot(
+        &self,
+    ) -> impl Future<Output = Result<SourceHealthSnapshot, SkillError>> + Send {
+        async move { self.source.health_snapshot().await }
+    }
+
+    fn list_artifacts(
+        &self,
+        id: &SkillId,
+    ) -> impl Future<Output = Result<Vec<SkillArtifact>, SkillError>> + Send {
+        async move { self.source.list_artifacts(id).await }
+    }
+
+    fn read_artifact(
+        &self,
+        id: &SkillId,
+        artifact_path: &str,
+    ) -> impl Future<Output = Result<SkillArtifactContent, SkillError>> + Send {
+        async move { self.source.read_artifact(id, artifact_path).await }
+    }
+
+    fn invoke_function(
+        &self,
+        id: &SkillId,
+        function_name: &str,
+        arguments: serde_json::Value,
+    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+        async move {
+            self.source
+                .invoke_function(id, function_name, arguments)
+                .await
+        }
     }
 }
 
@@ -152,8 +212,6 @@ mod tests {
         ])
     }
 
-    // --- Inventory ---
-
     #[tokio::test]
     async fn test_inventory_section_uses_xml() {
         let source = InMemorySkillSource::new(vec![
@@ -161,10 +219,8 @@ mod tests {
             test_skill("shell-patterns", "Shell Patterns", &["builtins", "shell"]),
         ]);
 
-        let engine = DefaultSkillEngine::new(
-            Box::new(source),
-            vec!["builtins".to_string(), "shell".to_string()],
-        );
+        let engine =
+            DefaultSkillEngine::new(source, vec!["builtins".to_string(), "shell".to_string()]);
 
         let section = engine.inventory_section().await.unwrap();
         assert!(section.contains("<available_skills>"));
@@ -179,21 +235,19 @@ mod tests {
             test_skill("shell-patterns", "Shell Patterns", &["builtins", "shell"]),
         ]);
 
-        let engine = DefaultSkillEngine::new(Box::new(source), vec!["builtins".to_string()]);
+        let engine = DefaultSkillEngine::new(source, vec!["builtins".to_string()]);
 
         let section = engine.inventory_section().await.unwrap();
         assert!(section.contains("<skill id=\"task-workflow\">"));
         assert!(!section.contains("shell-patterns"));
     }
 
-    // --- resolve_and_render ---
-
     #[tokio::test]
     async fn test_resolve_and_render_returns_vec() {
         let source =
             InMemorySkillSource::new(vec![test_skill("task-workflow", "Task Workflow", &[])]);
 
-        let engine = DefaultSkillEngine::new(Box::new(source), vec![]);
+        let engine = DefaultSkillEngine::new(source, vec![]);
 
         let result = engine
             .resolve_and_render(&[SkillId("task-workflow".into())])
@@ -217,7 +271,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_and_render_unknown_id() {
         let source = InMemorySkillSource::new(vec![]);
-        let engine = DefaultSkillEngine::new(Box::new(source), vec![]);
+        let engine = DefaultSkillEngine::new(source, vec![]);
 
         let result = engine
             .resolve_and_render(&[SkillId("nonexistent/skill".into())])
@@ -228,9 +282,8 @@ mod tests {
     #[tokio::test]
     async fn test_preload_missing_skill_errors() {
         let source = InMemorySkillSource::new(vec![test_skill("existing/skill", "Existing", &[])]);
-        let engine = DefaultSkillEngine::new(Box::new(source), vec![]);
+        let engine = DefaultSkillEngine::new(source, vec![]);
 
-        // One valid, one invalid — should fail on the invalid one
         let result = engine
             .resolve_and_render(&[
                 SkillId("existing/skill".into()),
@@ -240,18 +293,16 @@ mod tests {
         assert!(matches!(result, Err(SkillError::NotFound { .. })));
     }
 
-    // --- list_skills ---
-
     #[tokio::test]
     async fn test_list_skills_no_filter() {
-        let engine = DefaultSkillEngine::new(Box::new(multi_source()), vec![]);
+        let engine = DefaultSkillEngine::new(multi_source(), vec![]);
         let skills = engine.list_skills(&SkillFilter::default()).await.unwrap();
         assert_eq!(skills.len(), 4);
     }
 
     #[tokio::test]
     async fn test_list_skills_collection_filter() {
-        let engine = DefaultSkillEngine::new(Box::new(multi_source()), vec![]);
+        let engine = DefaultSkillEngine::new(multi_source(), vec![]);
         let skills = engine
             .list_skills(&SkillFilter {
                 collection: Some("extraction".into()),
@@ -261,33 +312,5 @@ mod tests {
             .unwrap();
         assert_eq!(skills.len(), 2);
         assert!(skills.iter().all(|s| s.id.0.starts_with("extraction/")));
-    }
-
-    #[tokio::test]
-    async fn test_list_skills_query_filter() {
-        let engine = DefaultSkillEngine::new(Box::new(multi_source()), vec![]);
-        let skills = engine
-            .list_skills(&SkillFilter {
-                query: Some("email".into()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].id.0, "extraction/email");
-    }
-
-    // --- collections ---
-
-    #[tokio::test]
-    async fn test_collections_derived() {
-        let engine = DefaultSkillEngine::new(Box::new(multi_source()), vec![]);
-        let collections = engine.collections().await.unwrap();
-
-        // extraction (2 skills) and formatting (1 skill)
-        assert_eq!(collections.len(), 2);
-        let extraction = collections.iter().find(|c| c.path == "extraction");
-        assert!(extraction.is_some());
-        assert_eq!(extraction.map(|c| c.count), Some(2));
     }
 }

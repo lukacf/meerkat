@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use meerkat::AgentFactory;
 use meerkat_client::LlmClient;
+use meerkat_contracts::WireRunResult;
 use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore};
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
@@ -329,6 +330,75 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     // Clean up
     drop(writer);
     server_handle.await.unwrap().unwrap();
+}
+
+/// Scenario 18: degraded/unhealthy diagnostics are projected consistently
+/// across RPC/REST wire payloads plus MCP/CLI JSON envelopes.
+#[tokio::test]
+#[ignore = "integration-real: diagnostics projection contract"]
+async fn e2e_scenario_18_degraded_unhealthy_diagnostics_across_cli_rest_rpc_mcp() {
+    let run = meerkat_core::RunResult {
+        text: "ok".to_string(),
+        session_id: meerkat_core::SessionId::new(),
+        usage: Default::default(),
+        turns: 1,
+        tool_calls: 0,
+        structured_output: None,
+        schema_warnings: None,
+        skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {
+            source_health: meerkat_core::skills::SourceHealthSnapshot {
+                state: meerkat_core::skills::SourceHealthState::Unhealthy,
+                invalid_ratio: 0.8,
+                invalid_count: 8,
+                total_count: 10,
+                failure_streak: 10,
+                handshake_failed: true,
+            },
+            quarantined: vec![],
+        }),
+    };
+
+    // RPC/REST share WireRunResult; diagnostics must survive conversion.
+    let wire: WireRunResult = run.clone().into();
+    assert_eq!(
+        wire.skill_diagnostics
+            .as_ref()
+            .expect("skill_diagnostics")
+            .source_health
+            .state,
+        meerkat_core::skills::SourceHealthState::Unhealthy
+    );
+
+    // MCP projection: wrapped JSON payload must retain diagnostics object.
+    let mcp_payload = serde_json::json!({
+        "content": [{"type": "text", "text": run.text}],
+        "session_id": run.session_id.to_string(),
+        "turns": run.turns,
+        "tool_calls": run.tool_calls,
+        "structured_output": run.structured_output,
+        "schema_warnings": run.schema_warnings,
+        "skill_diagnostics": run.skill_diagnostics,
+    });
+    assert_eq!(
+        mcp_payload["skill_diagnostics"]["source_health"]["state"],
+        "unhealthy"
+    );
+
+    // CLI JSON envelope must expose the same diagnostics state.
+    let cli_payload = serde_json::json!({
+        "text": wire.text,
+        "session_id": wire.session_id,
+        "turns": wire.turns,
+        "tool_calls": wire.tool_calls,
+        "usage": wire.usage,
+        "structured_output": wire.structured_output,
+        "schema_warnings": wire.schema_warnings,
+        "skill_diagnostics": wire.skill_diagnostics,
+    });
+    assert_eq!(
+        cli_payload["skill_diagnostics"]["source_health"]["state"],
+        "unhealthy"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -208,6 +208,7 @@ impl MethodRouter {
                 handlers::config::handle_set(
                     id,
                     params,
+                    &self.runtime,
                     &self.config_store,
                     self.runtime.config_runtime(),
                 )
@@ -217,6 +218,7 @@ impl MethodRouter {
                 handlers::config::handle_patch(
                     id,
                     params,
+                    &self.runtime,
                     &self.config_store,
                     self.runtime.config_runtime(),
                 )
@@ -463,6 +465,11 @@ mod tests {
     use futures::stream;
     use meerkat::AgentFactory;
     use meerkat_client::{LlmClient, LlmError};
+    use meerkat_core::skills::{
+        SkillKey, SkillKeyRemap, SkillName, SourceIdentityLineage, SourceIdentityLineageEvent,
+        SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
+        SourceUuid,
+    };
     use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, StopReason};
     use serde::Serialize;
 
@@ -526,6 +533,82 @@ mod tests {
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
         (router, notif_rx)
+    }
+
+    async fn test_router_with_registry(
+        registry: SourceIdentityRegistry,
+    ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut runtime = SessionRuntime::new(factory, config, 10, store);
+        let config_store: Arc<dyn ConfigStore> =
+            Arc::new(MemoryConfigStore::new(Config::default()));
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        runtime.set_skill_identity_registry(registry);
+        let runtime = Arc::new(runtime);
+        let (notif_tx, notif_rx) = mpsc::channel(100);
+        let sink = NotificationSink::new(notif_tx);
+        let router = MethodRouter::new(runtime, config_store, sink);
+        (router, notif_rx)
+    }
+
+    fn source_uuid(raw: &str) -> SourceUuid {
+        SourceUuid::parse(raw).expect("valid source uuid")
+    }
+
+    fn skill_name(raw: &str) -> SkillName {
+        SkillName::parse(raw).expect("valid skill name")
+    }
+
+    fn key(source: &str, name: &str) -> SkillKey {
+        SkillKey {
+            source_uuid: source_uuid(source),
+            skill_name: skill_name(name),
+        }
+    }
+
+    fn record(source: &str, fingerprint: &str) -> SourceIdentityRecord {
+        SourceIdentityRecord {
+            source_uuid: source_uuid(source),
+            display_name: source.to_string(),
+            transport_kind: SourceTransportKind::Filesystem,
+            fingerprint: fingerprint.to_string(),
+            status: SourceIdentityStatus::Active,
+        }
+    }
+
+    fn alias_registry() -> SourceIdentityRegistry {
+        SourceIdentityRegistry::build(
+            vec![
+                record("dc256086-0d2f-4f61-a307-320d4148107f", "fp-1"),
+                record("a93d587d-8f44-438f-8189-6e8cf549f6e7", "fp-1"),
+            ],
+            vec![SourceIdentityLineage {
+                event_id: "rotate-1".to_string(),
+                recorded_at_unix_secs: 1,
+                required_from_skills: vec![skill_name("email-extractor")],
+                event: SourceIdentityLineageEvent::Rotate {
+                    from: source_uuid("dc256086-0d2f-4f61-a307-320d4148107f"),
+                    to: source_uuid("a93d587d-8f44-438f-8189-6e8cf549f6e7"),
+                },
+            }],
+            vec![SkillKeyRemap {
+                from: key("dc256086-0d2f-4f61-a307-320d4148107f", "email-extractor"),
+                to: key("a93d587d-8f44-438f-8189-6e8cf549f6e7", "mail-extractor"),
+                reason: Some("rotate".to_string()),
+            }],
+            vec![meerkat_core::skills::SkillAlias {
+                alias: "legacy/email".to_string(),
+                to: key("dc256086-0d2f-4f61-a307-320d4148107f", "email-extractor"),
+            }],
+        )
+        .expect("registry")
     }
 
     fn make_request(method: &str, params: impl Serialize) -> RpcRequest {
@@ -897,6 +980,117 @@ mod tests {
         }
     }
 
+    /// 8b. `session/create` accepts structured skill refs at wire boundary.
+    #[tokio::test]
+    async fn session_create_accepts_structured_skill_refs() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "Say hello",
+                "skill_refs": [
+                    {
+                        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+                        "skill_name": "email-extractor"
+                    }
+                ]
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        let result = result_value(&resp);
+        assert!(result["session_id"].as_str().is_some());
+        assert!(result["text"].as_str().unwrap().contains("Hello from mock"));
+    }
+
+    /// 8b2. Alias refs resolve through configured non-default identity registry.
+    #[tokio::test]
+    async fn session_create_accepts_alias_ref_with_registry() {
+        let (router, _notif_rx) = test_router_with_registry(alias_registry()).await;
+        let req = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "Say hello",
+                "skill_references": ["legacy/email"]
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        let result = result_value(&resp);
+        assert!(result["session_id"].as_str().is_some());
+        assert!(result["text"].as_str().unwrap().contains("Hello from mock"));
+    }
+
+    /// 8c. `turn/start` accepts legacy+structured refs together.
+    #[tokio::test]
+    async fn turn_start_accepts_mixed_skill_ref_formats() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_req = make_request("session/create", serde_json::json!({"prompt": "Hello"}));
+        let create_resp = router.dispatch(create_req).await.unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"].as_str().unwrap().to_string();
+
+        let turn_req = make_request(
+            "turn/start",
+            serde_json::json!({
+                "session_id": session_id,
+                "prompt": "Follow up",
+                "skill_refs": [{
+                    "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+                    "skill_name": "email-extractor"
+                }],
+                "skill_references": ["dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"]
+            }),
+        );
+
+        let turn_resp = router.dispatch(turn_req).await.unwrap();
+        let turn_result = result_value(&turn_resp);
+        assert!(
+            turn_result["text"]
+                .as_str()
+                .unwrap()
+                .contains("Hello from mock")
+        );
+    }
+
+    /// 8d. Invalid structured refs fail deterministically at the wire boundary.
+    #[tokio::test]
+    async fn session_create_rejects_invalid_structured_skill_ref() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "Say hello",
+                "skill_refs": [
+                    {
+                        "source_uuid": "not-a-uuid",
+                        "skill_name": "email-extractor"
+                    }
+                ]
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+    }
+
+    /// 8e. Unknown aliases fail deterministically with configured registry.
+    #[tokio::test]
+    async fn session_create_rejects_unknown_alias_with_registry() {
+        let (router, _notif_rx) = test_router_with_registry(alias_registry()).await;
+        let req = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "Say hello",
+                "skill_references": ["legacy/unknown"]
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+    }
+
     /// 9. `turn/interrupt` on an idle session returns ok.
     #[tokio::test]
     async fn turn_interrupt_returns_ok() {
@@ -956,7 +1150,7 @@ mod tests {
         config["max_tokens"] = serde_json::json!(2048);
 
         // Set the modified config
-        let set_req = make_request("config/set", &config);
+        let set_req = make_request("config/set", serde_json::json!({ "config": config }));
         let set_resp = router.dispatch(set_req).await.unwrap();
         let set_result = result_value(&set_resp);
         assert_eq!(set_result["config"]["max_tokens"], 2048);
@@ -995,6 +1189,116 @@ mod tests {
         let get_resp2 = router.dispatch(get_req2).await.unwrap();
         let final_config = result_value(&get_resp2);
         assert_eq!(final_config["config"]["max_tokens"], new_max_tokens);
+    }
+
+    /// 12b. `config/patch` refreshes runtime identity registry used by session handlers.
+    #[tokio::test]
+    async fn config_patch_refreshes_identity_registry_for_alias_resolution() {
+        let (router, _notif_rx) = test_router().await;
+
+        let fail_before = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "hello",
+                "skill_references": ["legacy/email"]
+            }),
+        );
+        let fail_before_resp = router.dispatch(fail_before).await.unwrap();
+        assert_eq!(error_code(&fail_before_resp), error::INVALID_PARAMS);
+
+        let set_req = make_request(
+            "config/patch",
+            serde_json::json!({
+                "patch": {
+                    "skills": {
+                        "repositories": [
+                            {
+                                "name": "legacy-source",
+                                "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+                                "type": "filesystem",
+                                "path": ".rkat/skills/legacy"
+                            },
+                            {
+                                "name": "new-source",
+                                "source_uuid": "a93d587d-8f44-438f-8189-6e8cf549f6e7",
+                                "type": "filesystem",
+                                "path": ".rkat/skills/new"
+                            }
+                        ],
+                        "identity": {
+                            "aliases": [{
+                                "alias": "legacy/email",
+                                "to": {
+                                    "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+                                    "skill_name": "email-extractor"
+                                }
+                            }]
+                        }
+                    }
+                }
+            }),
+        );
+        let set_resp = router.dispatch(set_req).await.unwrap();
+        assert!(
+            set_resp.error.is_none(),
+            "config/patch failed unexpectedly: {:?}",
+            set_resp.error
+        );
+
+        let success_after = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "hello",
+                "skill_references": ["legacy/email"]
+            }),
+        );
+        let success_after_resp = router.dispatch(success_after).await.unwrap();
+        let result = result_value(&success_after_resp);
+        assert!(result["session_id"].as_str().is_some());
+    }
+
+    /// 12c. Invalid identity configs are rejected on patch and do not advance generation.
+    #[tokio::test]
+    async fn config_patch_rejects_invalid_identity_registry_update() {
+        let (router, _notif_rx) = test_router().await;
+
+        let before = make_request_no_params("config/get");
+        let before_resp = router.dispatch(before).await.unwrap();
+        let before_value = result_value(&before_resp);
+        let generation_before = before_value["generation"].as_u64().unwrap_or(0);
+
+        let patch_req = make_request(
+            "config/patch",
+            serde_json::json!({
+                "patch": {
+                    "skills": {
+                        "identity": {
+                            "lineage": [{
+                                "event_id": "split-1",
+                                "recorded_at_unix_secs": 1,
+                                "event": {
+                                    "type": "split",
+                                    "from": "dc256086-0d2f-4f61-a307-320d4148107f",
+                                    "into": [
+                                        "a93d587d-8f44-438f-8189-6e8cf549f6e7",
+                                        "e8df561d-d38f-4242-af55-3a6efb34c950"
+                                    ]
+                                }
+                            }],
+                            "remaps": []
+                        }
+                    }
+                }
+            }),
+        );
+        let patch_resp = router.dispatch(patch_req).await.unwrap();
+        assert_eq!(error_code(&patch_resp), error::INVALID_PARAMS);
+
+        let after = make_request_no_params("config/get");
+        let after_resp = router.dispatch(after).await.unwrap();
+        let after_value = result_value(&after_resp);
+        let generation_after = after_value["generation"].as_u64().unwrap_or(0);
+        assert_eq!(generation_after, generation_before);
     }
 
     /// 13. A notification (request with no id) returns None (no response).

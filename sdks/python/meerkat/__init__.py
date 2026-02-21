@@ -8,7 +8,7 @@ from .errors import (
     SessionNotFoundError,
     SkillNotFoundError,
 )
-from .skills import SkillHelper
+from .skills import SkillHelper, SkillKey
 from .streaming import StreamingTurn
 from .types import (
     CONTRACT_VERSION,
@@ -24,6 +24,7 @@ __all__ = [
     "CapabilityChecker",
     "StreamingTurn",
     "SkillHelper",
+    "SkillKey",
     "MeerkatError",
     "CapabilityUnavailableError",
     "SessionNotFoundError",

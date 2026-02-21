@@ -328,6 +328,7 @@ impl SessionService for LocalSessionService {
             tool_calls: 0,
             structured_output: None,
             schema_warnings: None,
+            skill_diagnostics: None,
         })
     }
 
@@ -347,6 +348,7 @@ impl SessionService for LocalSessionService {
             tool_calls: 0,
             structured_output: None,
             schema_warnings: None,
+            skill_diagnostics: None,
         })
     }
 
@@ -1086,6 +1088,7 @@ mod tests {
                 tool_calls: 0,
                 structured_output: None,
                 schema_warnings: None,
+                skill_diagnostics: None,
             })
         }
 
@@ -1128,6 +1131,7 @@ mod tests {
                 tool_calls: 0,
                 structured_output: None,
                 schema_warnings: None,
+                skill_diagnostics: None,
             })
         }
 

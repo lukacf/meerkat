@@ -70,7 +70,7 @@ memory-store-session = ["dep:meerkat-memory"]
 comms = ["dep:meerkat-comms", "meerkat-tools/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat-tools/mcp"]
 sub-agents = ["meerkat-tools/sub-agents"]
-skills = ["dep:meerkat-skills", "meerkat-tools/skills"]
+skills = ["dep:meerkat-skills", "meerkat-skills/skills-http", "meerkat-tools/skills"]
 
 [lints]
 workspace = true
@@ -79,6 +79,21 @@ workspace = true
 name = "comms_verbose"
 path = "examples/comms_verbose.rs"
 required-features = ["comms"]
+
+[[example]]
+name = "simple"
+path = "examples/simple.rs"
+required-features = ["jsonl-store"]
+
+[[example]]
+name = "with_tools"
+path = "examples/with_tools.rs"
+required-features = ["jsonl-store"]
+
+[[example]]
+name = "multi_turn_tools"
+path = "examples/multi_turn_tools.rs"
+required-features = ["jsonl-store"]
 
 [[test]]
 name = "e2e"

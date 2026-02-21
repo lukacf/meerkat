@@ -111,12 +111,14 @@ pub async fn resolve_repositories_with_roots(
 
                         sources.push(NamedSource {
                             name: repo.name.clone(),
-                            source: SourceNode::Http(HttpSkillSource::new_with_source_uuid(
-                                repo.source_uuid.to_string(),
-                                url.clone(),
-                                auth,
-                                std::time::Duration::from_secs(*refresh_seconds),
-                                std::time::Duration::from_secs(*timeout_seconds),
+                            source: SourceNode::Http(Box::new(
+                                HttpSkillSource::new_with_source_uuid(
+                                    repo.source_uuid.to_string(),
+                                    url.clone(),
+                                    auth,
+                                    std::time::Duration::from_secs(*refresh_seconds),
+                                    std::time::Duration::from_secs(*timeout_seconds),
+                                ),
                             )),
                         });
                     }
@@ -227,7 +229,7 @@ pub async fn resolve_repositories_with_roots(
 
                     sources.push(NamedSource {
                         name: repo.name.clone(),
-                        source: SourceNode::Git(GitSkillSource::new(config)),
+                        source: SourceNode::Git(Box::new(GitSkillSource::new(config))),
                     });
                 }
             }

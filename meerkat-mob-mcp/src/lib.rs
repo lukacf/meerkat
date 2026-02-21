@@ -1127,6 +1127,7 @@ mod tests {
                     tool_calls: 0,
                     structured_output: None,
                     schema_warnings: None,
+                    skill_diagnostics: None,
                 });
             }
             Ok(RunResult {

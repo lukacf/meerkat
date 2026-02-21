@@ -39,8 +39,8 @@ pub mod prefab;
 pub mod profile;
 pub mod roster;
 pub mod run;
-pub mod runtime_mode;
 pub mod runtime;
+pub mod runtime_mode;
 pub mod spec;
 pub mod storage;
 pub mod store;
@@ -58,7 +58,6 @@ pub use event::{
 pub use ids::{BranchId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 pub use prefab::Prefab;
 pub use profile::{Profile, ToolConfig};
-pub use runtime_mode::MobRuntimeMode;
 pub use roster::{Roster, RosterEntry};
 pub use run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobRun, MobRunStatus, StepLedgerEntry,
@@ -66,6 +65,7 @@ pub use run::{
 };
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime::{MobBuilder, MobHandle, MobSessionService, MobState};
+pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;
 pub use store::{

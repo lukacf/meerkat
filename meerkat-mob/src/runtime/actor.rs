@@ -29,7 +29,8 @@ pub(super) struct MobActor {
     pub(super) tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     pub(super) default_llm_client: Option<Arc<dyn LlmClient>>,
     pub(super) retired_event_index: Arc<RwLock<HashSet<String>>>,
-    pub(super) autonomous_host_loops: Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, AutonomousHostLoopHandle>>>,
+    pub(super) autonomous_host_loops:
+        Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, AutonomousHostLoopHandle>>>,
 }
 
 impl MobActor {
@@ -199,7 +200,11 @@ impl MobActor {
         )
     }
 
-    fn resume_host_loop_prompt(&self, profile_name: &ProfileName, meerkat_id: &MeerkatId) -> String {
+    fn resume_host_loop_prompt(
+        &self,
+        profile_name: &ProfileName,
+        meerkat_id: &MeerkatId,
+    ) -> String {
         format!(
             "Mob '{}' resumed autonomous host loop for '{}' (role: {}). Continue coordinated execution.",
             self.definition.id, meerkat_id, profile_name
@@ -584,8 +589,11 @@ impl MobActor {
                                     );
                                 }
                                 Err(error)
-                            } else if let Err(error) = self.start_autonomous_host_loops_from_roster().await {
-                                if let Err(stop_error) = self.stop_all_autonomous_host_loops().await {
+                            } else if let Err(error) =
+                                self.start_autonomous_host_loops_from_roster().await
+                            {
+                                if let Err(stop_error) = self.stop_all_autonomous_host_loops().await
+                                {
                                     tracing::warn!(
                                         mob_id = %self.definition.id,
                                         error = %stop_error,
@@ -1424,7 +1432,11 @@ impl MobActor {
         Ok(())
     }
 
-    async fn dispatch_member_turn(&self, entry: &RosterEntry, message: String) -> Result<(), MobError> {
+    async fn dispatch_member_turn(
+        &self,
+        entry: &RosterEntry,
+        message: String,
+    ) -> Result<(), MobError> {
         match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
                 let session_id = entry.member_ref.session_id().ok_or_else(|| {

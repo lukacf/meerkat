@@ -946,12 +946,14 @@ pub async fn handle_tools_call(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use meerkat_core::InteractionId;
+    use meerkat_core::PlainEventSource;
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
     use meerkat_core::comms::{CommsCommand, SendError, SendReceipt};
     use meerkat_core::event::AgentEvent;
-    use meerkat_core::event_injector::{EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector};
-    use meerkat_core::InteractionId;
-    use meerkat_core::PlainEventSource;
+    use meerkat_core::event_injector::{
+        EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
+    };
     use meerkat_core::service::SessionService;
     use meerkat_core::service::{
         CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionSummary,
@@ -973,7 +975,11 @@ mod tests {
     struct MockInjector;
 
     impl EventInjector for MockInjector {
-        fn inject(&self, _body: String, _source: PlainEventSource) -> Result<(), EventInjectorError> {
+        fn inject(
+            &self,
+            _body: String,
+            _source: PlainEventSource,
+        ) -> Result<(), EventInjectorError> {
             Ok(())
         }
     }
@@ -996,7 +1002,10 @@ mod tests {
                     })
                     .await;
             });
-            Ok(InteractionSubscription { id: interaction_id, events: rx })
+            Ok(InteractionSubscription {
+                id: interaction_id,
+                events: rx,
+            })
         }
     }
 
@@ -1550,7 +1559,10 @@ timeout_ms = 1000
             sleep(Duration::from_millis(25)).await;
         }
         assert!(
-            matches!(terminal_status.as_deref(), Some("canceled") | Some("failed")),
+            matches!(
+                terminal_status.as_deref(),
+                Some("canceled") | Some("failed")
+            ),
             "mob_cancel_flow should converge to canceled, or failed if terminal failure won the race first"
         );
     }

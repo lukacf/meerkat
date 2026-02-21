@@ -1,38 +1,140 @@
-"""Meerkat Python SDK — communicate with the Meerkat agent runtime via JSON-RPC."""
+"""Meerkat Python SDK — communicate with the Meerkat agent runtime.
 
-from .capabilities import CapabilityChecker
+Quick start::
+
+    import asyncio
+    from meerkat import MeerkatClient, TextDelta
+
+    async def main():
+        async with MeerkatClient() as client:
+            session = await client.create_session("Hello, Meerkat!")
+            print(session.text)
+
+            async with session.stream("Tell me a joke") as events:
+                async for event in events:
+                    match event:
+                        case TextDelta(delta=chunk):
+                            print(chunk, end="", flush=True)
+                print()
+
+    asyncio.run(main())
+"""
+
+# Core client and session
 from .client import MeerkatClient
+from .session import Session
+from .streaming import EventStream
+
+# Domain types (clean, Wire-free public names)
+from .types import (
+    CONTRACT_VERSION,
+    Capability,
+    RunResult,
+    SchemaWarning,
+    SessionInfo,
+    SkillQuarantineDiagnostic,
+    SkillRuntimeDiagnostics,
+    SkillKey,
+    SkillRef,
+    SourceHealthSnapshot,
+    Usage,
+)
+
+# Error hierarchy
 from .errors import (
     CapabilityUnavailableError,
     MeerkatError,
     SessionNotFoundError,
     SkillNotFoundError,
 )
-from .skills import SkillHelper, SkillKey
-from .streaming import StreamingTurn
-from .types import (
-    CONTRACT_VERSION,
-    CapabilitiesResponse,
-    CapabilityEntry,
-    WireEvent,
-    WireRunResult,
-    WireUsage,
+
+# Typed event hierarchy — every event variant is a frozen dataclass
+from .events import (
+    BudgetWarning,
+    CompactionCompleted,
+    CompactionFailed,
+    CompactionStarted,
+    Event,
+    HookCompleted,
+    HookDenied,
+    HookFailed,
+    HookPatchPublished,
+    HookRewriteApplied,
+    HookStarted,
+    InteractionComplete,
+    InteractionFailed,
+    Retrying,
+    RunCompleted,
+    RunFailed,
+    RunStarted,
+    SkillResolutionFailed,
+    SkillsResolved,
+    StreamTruncated,
+    TextComplete,
+    TextDelta,
+    ToolCallRequested,
+    ToolExecutionCompleted,
+    ToolExecutionStarted,
+    ToolExecutionTimedOut,
+    ToolResultReceived,
+    TurnCompleted,
+    TurnStarted,
+    UnknownEvent,
+    parse_event,
 )
 
 __all__ = [
+    # Client & session
     "MeerkatClient",
-    "CapabilityChecker",
-    "StreamingTurn",
-    "SkillHelper",
+    "Session",
+    "EventStream",
+    # Types
+    "CONTRACT_VERSION",
+    "Capability",
+    "RunResult",
+    "SchemaWarning",
+    "SessionInfo",
+    "SkillQuarantineDiagnostic",
+    "SkillRuntimeDiagnostics",
     "SkillKey",
+    "SkillRef",
+    "SourceHealthSnapshot",
+    "Usage",
+    # Errors
     "MeerkatError",
     "CapabilityUnavailableError",
     "SessionNotFoundError",
     "SkillNotFoundError",
-    "CONTRACT_VERSION",
-    "WireUsage",
-    "WireRunResult",
-    "WireEvent",
-    "CapabilitiesResponse",
-    "CapabilityEntry",
+    # Events (base + all variants)
+    "Event",
+    "RunStarted",
+    "RunCompleted",
+    "RunFailed",
+    "TurnStarted",
+    "TextDelta",
+    "TextComplete",
+    "ToolCallRequested",
+    "ToolResultReceived",
+    "TurnCompleted",
+    "ToolExecutionStarted",
+    "ToolExecutionCompleted",
+    "ToolExecutionTimedOut",
+    "CompactionStarted",
+    "CompactionCompleted",
+    "CompactionFailed",
+    "BudgetWarning",
+    "Retrying",
+    "HookStarted",
+    "HookCompleted",
+    "HookFailed",
+    "HookDenied",
+    "HookRewriteApplied",
+    "HookPatchPublished",
+    "SkillsResolved",
+    "SkillResolutionFailed",
+    "InteractionComplete",
+    "InteractionFailed",
+    "StreamTruncated",
+    "UnknownEvent",
+    "parse_event",
 ]

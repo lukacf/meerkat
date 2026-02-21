@@ -202,6 +202,9 @@ Core methods:
 
 - `create_session(...)`
 - `start_turn(session_id, prompt, ...)`
+- `Session.invoke_skill(skill_ref, prompt)`
+- `Session.send(**command)`
+- `Session.peers()`
 - `interrupt(session_id)`
 - `list_sessions()`
 - `read_session(session_id)`
@@ -210,6 +213,12 @@ Core methods:
 - `get_capabilities()`
 
 `get_config()` / `patch_config()` return the config envelope.
+
+Type/parsing notes:
+
+- capability status may arrive as externally-tagged enum maps (e.g. `{"DisabledByPolicy": {...}}`) and is normalized to the tag string.
+- event parsing defaults missing fields to empty/zero values to keep partial stream payloads parseable.
+- `RunResult.skill_diagnostics` is typed as `SkillRuntimeDiagnostics`.
 
 ---
 
@@ -229,6 +238,9 @@ Core methods:
 
 - `createSession(...)`
 - `startTurn(sessionId, prompt, ...)`
+- `Session.invokeSkill(skillRef, prompt)`
+- `Session.send(command)`
+- `Session.peers()`
 - `interrupt(sessionId)`
 - `listSessions()`
 - `readSession(sessionId)`
@@ -237,6 +249,12 @@ Core methods:
 - `getCapabilities()`
 
 `getConfig()` / `patchConfig()` return the config envelope.
+
+Type/parsing notes:
+
+- capability status may arrive as externally-tagged enum maps (e.g. `{ DisabledByPolicy: {...} }`) and is normalized to the tag string.
+- event parsing defaults missing fields to empty/zero values to keep partial stream payloads parseable.
+- `RunResult.skillDiagnostics` is typed as `SkillRuntimeDiagnostics`.
 
 ---
 

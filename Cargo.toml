@@ -117,8 +117,8 @@ meerkat-session = { version = "0.3.4", path = "meerkat-session", default-feature
 meerkat-memory = { version = "0.3.4", path = "meerkat-memory", default-features = false }
 meerkat-contracts = { version = "0.3.4", path = "meerkat-contracts", default-features = false }
 meerkat-skills = { version = "0.3.4", path = "meerkat-skills" }
-meerkat-mob = { version = "0.1.0", path = "meerkat-mob" }
-meerkat-mob-mcp = { version = "0.1.0", path = "meerkat-mob-mcp" }
+meerkat-mob = { version = "0.3.4", path = "meerkat-mob" }
+meerkat-mob-mcp = { version = "0.3.4", path = "meerkat-mob-mcp" }
 
 
 [workspace.lints.rust]

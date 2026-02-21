@@ -1,22 +1,102 @@
 /**
- * Meerkat TypeScript SDK — communicate with the Meerkat agent runtime via JSON-RPC.
+ * Meerkat TypeScript SDK — communicate with the Meerkat agent runtime.
+ *
+ * @example
+ * ```ts
+ * import { MeerkatClient } from "@rkat/sdk";
+ *
+ * const client = new MeerkatClient();
+ * await client.connect();
+ *
+ * const session = await client.createSession("Hello!");
+ * console.log(session.text);
+ *
+ * for await (const event of session.stream("Tell me a joke")) {
+ *   if (event.type === "text_delta") {
+ *     process.stdout.write(event.delta);
+ *   }
+ * }
+ *
+ * await client.close();
+ * ```
  */
 
+// Core client and session
 export { MeerkatClient } from "./client.js";
-export { CapabilityChecker } from "./capabilities.js";
+export type { ConnectOptions } from "./client.js";
+export { Session } from "./session.js";
 export { EventStream } from "./streaming.js";
-export { SkillHelper } from "./skills.js";
+
+// Domain types (clean, Wire-free public names)
+export type {
+  Capability,
+  RunResult,
+  SchemaWarning,
+  SessionInfo,
+  SessionOptions,
+  SkillQuarantineDiagnostic,
+  SkillRuntimeDiagnostics,
+  SkillKey,
+  SkillRef,
+  SourceHealthSnapshot,
+  Usage,
+} from "./types.js";
+
+// Error hierarchy
 export {
   MeerkatError,
   CapabilityUnavailableError,
   SessionNotFoundError,
   SkillNotFoundError,
 } from "./generated/errors.js";
-export type {
-  WireUsage,
-  WireRunResult,
-  WireEvent,
-  CapabilitiesResponse,
-  CapabilityEntry,
-} from "./generated/types.js";
+
+// Contract version
 export { CONTRACT_VERSION } from "./generated/types.js";
+
+// Typed events — discriminated union and all interfaces
+export type {
+  AgentEvent,
+  RunStartedEvent,
+  RunCompletedEvent,
+  RunFailedEvent,
+  TurnStartedEvent,
+  TextDeltaEvent,
+  TextCompleteEvent,
+  ToolCallRequestedEvent,
+  ToolResultReceivedEvent,
+  TurnCompletedEvent,
+  ToolExecutionStartedEvent,
+  ToolExecutionCompletedEvent,
+  ToolExecutionTimedOutEvent,
+  CompactionStartedEvent,
+  CompactionCompletedEvent,
+  CompactionFailedEvent,
+  BudgetWarningEvent,
+  RetryingEvent,
+  HookStartedEvent,
+  HookCompletedEvent,
+  HookFailedEvent,
+  HookDeniedEvent,
+  HookRewriteAppliedEvent,
+  HookPatchPublishedEvent,
+  SkillsResolvedEvent,
+  SkillResolutionFailedEvent,
+  InteractionCompleteEvent,
+  InteractionFailedEvent,
+  StreamTruncatedEvent,
+  UnknownEvent,
+  StopReason,
+  BudgetType,
+  HookPoint,
+} from "./events.js";
+
+// Event utilities
+export {
+  parseEvent,
+  isTextDelta,
+  isTextComplete,
+  isTurnCompleted,
+  isToolCallRequested,
+  isRunCompleted,
+  isRunFailed,
+} from "./events.js";

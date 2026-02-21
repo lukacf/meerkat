@@ -202,6 +202,22 @@ await client.send(
 )
 ```
 
+### Session convenience methods
+
+`create_session()` returns a `Session` object with convenience wrappers over the client APIs:
+
+- `await session.invoke_skill(skill_ref, prompt)` uses structured `skill_refs`.
+- `await session.send(**command)` scopes `comms/send` to the active session.
+- `await session.peers()` returns the session-visible peer list.
+
+---
+
+## Parsing and typing notes
+
+- Capability statuses may be encoded as externally-tagged enum objects by Rust (for example `{"DisabledByPolicy": {...}}`). The SDK normalizes these to the string key.
+- Event parsing intentionally defaults missing fields to empty/zero values so partial streaming payloads can still be surfaced as typed events.
+- `RunResult.skill_diagnostics` is typed as `SkillRuntimeDiagnostics` (with `source_health` and `quarantined`) when diagnostics are present.
+
 ---
 
 ## Examples

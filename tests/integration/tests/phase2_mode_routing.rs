@@ -49,7 +49,7 @@ impl SubscribableInjector for MockInjector {
         self.inject(body, source)?;
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let interaction_id = InteractionId(uuid::Uuid::new_v4());
-        let interaction_id_for_task = interaction_id.clone();
+        let interaction_id_for_task = interaction_id;
         tokio::spawn(async move {
             let _ = tx
                 .send(AgentEvent::InteractionComplete {
@@ -196,7 +196,11 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
         .expect("create");
 
     handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-auto"), None)
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("lead-auto"),
+            None,
+        )
         .await
         .expect("spawn autonomous");
     handle
@@ -226,7 +230,7 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
     let host_after = service.host_mode_start_turn_calls.load(Ordering::Relaxed);
     let inject_after = service.inject_calls.load(Ordering::Relaxed);
     assert!(
-        start_after >= start_before + 1,
+        start_after > start_before,
         "turn-driven path should invoke start_turn"
     );
     assert_eq!(
@@ -234,7 +238,7 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
         "external turns should not route through host-mode start_turn"
     );
     assert!(
-        inject_after >= inject_before + 1,
+        inject_after > inject_before,
         "autonomous path should invoke event injector"
     );
 }

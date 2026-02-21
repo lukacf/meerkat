@@ -64,6 +64,25 @@ Each `CapabilityEntry` has `id`, `description`, and `status` fields.
 
 ---
 
+## Domain run result types
+
+The public SDK surface uses Python dataclasses (`RunResult`) instead of wire-prefixed types.
+
+<Accordion title="SkillRuntimeDiagnostics">
+```python
+@dataclass(frozen=True, slots=True)
+class SkillRuntimeDiagnostics:
+    source_health: SourceHealthSnapshot
+    quarantined: list[SkillQuarantineDiagnostic]
+```
+</Accordion>
+
+<Note>
+`RunResult.skill_diagnostics` is `SkillRuntimeDiagnostics | None` on the Python domain type.
+</Note>
+
+---
+
 ## CapabilityChecker
 
 Standalone capability-checking helper:

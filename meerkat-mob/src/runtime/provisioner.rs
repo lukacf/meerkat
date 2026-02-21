@@ -24,10 +24,8 @@ pub trait MobProvisioner: Send + Sync {
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError>;
-    async fn event_injector(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<Arc<dyn SubscribableInjector>>;
+    async fn event_injector(&self, session_id: &SessionId)
+    -> Option<Arc<dyn SubscribableInjector>>;
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError>;
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>>;
     async fn trusted_peer_spec(

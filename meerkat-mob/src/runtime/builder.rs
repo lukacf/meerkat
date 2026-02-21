@@ -464,7 +464,9 @@ impl MobBuilder {
                 .sum::<usize>()
                 / 2;
             let session_id = orchestrator_entry.session_id().ok_or_else(|| {
-                MobError::Internal("orchestrator entry missing session-backed member ref".to_string())
+                MobError::Internal(
+                    "orchestrator entry missing session-backed member ref".to_string(),
+                )
             })?;
             let resume_message = format!(
                 "Mob '{}' resumed with {} active meerkats and {} wiring links. Reconcile worker state and continue orchestration.",

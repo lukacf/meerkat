@@ -66,6 +66,41 @@ interface CapabilityEntry {
 
 ---
 
+## Domain run result types
+
+The public SDK surface uses camelCase domain types (`RunResult`) instead of wire types.
+
+<Accordion title="SkillRuntimeDiagnostics">
+```typescript
+interface SkillRuntimeDiagnostics {
+  sourceHealth: {
+    state: string;
+    invalidRatio: number;
+    invalidCount: number;
+    totalCount: number;
+    failureStreak: number;
+    handshakeFailed: boolean;
+  };
+  quarantined: Array<{
+    sourceUuid: string;
+    skillId: string;
+    location: string;
+    errorCode: string;
+    errorClass: string;
+    message: string;
+    firstSeenUnixSecs: number;
+    lastSeenUnixSecs: number;
+  }>;
+}
+```
+</Accordion>
+
+<Note>
+`RunResult.skillDiagnostics` is `SkillRuntimeDiagnostics | undefined` on the TypeScript domain type.
+</Note>
+
+---
+
 ## CapabilityChecker
 
 Standalone helper for checking runtime capabilities:

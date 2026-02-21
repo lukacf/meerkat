@@ -1,4 +1,4 @@
-"""Tests for the streaming API: _StdoutDispatcher and StreamingTurn."""
+"""Tests for the streaming API: _StdoutDispatcher and EventStream."""
 
 import asyncio
 import json
@@ -6,7 +6,15 @@ import json
 import pytest
 
 from meerkat.errors import MeerkatError
-from meerkat.streaming import StreamingTurn, _StdoutDispatcher
+from meerkat.events import (
+    Event,
+    TextDelta,
+    TurnCompleted,
+    TurnStarted,
+    Usage,
+)
+from meerkat.streaming import EventStream, _StdoutDispatcher
+from meerkat.types import RunResult
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +60,21 @@ RUN_RESULT = {
     "tool_calls": 0,
     "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
 }
+
+
+def _parse_run_result(data: dict) -> RunResult:
+    """Minimal RunResult parser for tests."""
+    usage_data = data.get("usage", {})
+    return RunResult(
+        session_id=data.get("session_id", ""),
+        text=data.get("text", ""),
+        turns=data.get("turns", 0),
+        tool_calls=data.get("tool_calls", 0),
+        usage=Usage(
+            input_tokens=usage_data.get("input_tokens", 0),
+            output_tokens=usage_data.get("output_tokens", 0),
+        ),
+    )
 
 
 # ===========================================================================
@@ -119,7 +142,6 @@ class TestStdoutDispatcher:
         future = d.expect_response(1)
 
         events = []
-        # Collect events until the response future resolves
         while not future.done():
             try:
                 ev = await asyncio.wait_for(queue.get(), timeout=0.2)
@@ -127,7 +149,6 @@ class TestStdoutDispatcher:
                     events.append(ev)
             except asyncio.TimeoutError:
                 pass
-        # Drain remaining
         while not queue.empty():
             ev = queue.get_nowait()
             if ev is not None:
@@ -143,7 +164,7 @@ class TestStdoutDispatcher:
 
     @pytest.mark.asyncio
     async def test_eof_fails_pending_futures(self):
-        reader = make_reader([])  # immediate EOF
+        reader = make_reader([])
         d = _StdoutDispatcher(reader)
         d.start()
         future = d.expect_response(1)
@@ -163,7 +184,6 @@ class TestStdoutDispatcher:
 
     @pytest.mark.asyncio
     async def test_pending_stream_buffers_then_flushes(self):
-        """Events buffered by session_id before response, flushed on response."""
         ev1 = {"type": "run_started", "session_id": "new-id", "prompt": "hi"}
         ev2 = {"type": "text_delta", "delta": "hello"}
         reader = make_reader([
@@ -175,7 +195,6 @@ class TestStdoutDispatcher:
         d.start()
         queue = d.subscribe_pending_stream(request_id=1)
         _ = d.expect_response(1)
-        # Events are buffered internally, then flushed when response arrives
         e1 = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert e1["type"] == "run_started"
         e2 = await asyncio.wait_for(queue.get(), timeout=1.0)
@@ -184,7 +203,6 @@ class TestStdoutDispatcher:
 
     @pytest.mark.asyncio
     async def test_pending_stream_rejects_other_session_events(self):
-        """Events from other sessions are NOT delivered to the pending stream."""
         ev_other = {"type": "text_delta", "delta": "wrong"}
         ev_ours = {"type": "text_delta", "delta": "right"}
         reader = make_reader([
@@ -196,10 +214,8 @@ class TestStdoutDispatcher:
         d.start()
         queue = d.subscribe_pending_stream(request_id=1)
         _ = d.expect_response(1)
-        # Only our-session's event should be delivered
         e = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert e["delta"] == "right"
-        # Next item should be None sentinel (EOF), not the other-session event
         sentinel = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert sentinel is None
         await d.stop()
@@ -231,7 +247,6 @@ class TestStdoutDispatcher:
         queue = d.subscribe_events("s1")
         d.unsubscribe_events("s1")
         assert "s1" not in d._event_queues
-        # Event should be dropped, response still works
         future = d.expect_response(1)
         result = await asyncio.wait_for(future, timeout=1.0)
         assert result == {}
@@ -255,15 +270,16 @@ class TestStdoutDispatcher:
 
 
 # ===========================================================================
-# StreamingTurn tests
+# EventStream tests — events are now typed Event objects
 # ===========================================================================
 
-class TestStreamingTurn:
+class TestEventStream:
 
     @pytest.mark.asyncio
-    async def test_iterate_events_and_access_result(self):
+    async def test_iterate_yields_typed_events(self):
+        """Events are parsed into typed dataclasses, not raw dicts."""
         reader = make_reader([
-            event_notification("s1", {"type": "turn_started", "turn_number": 0}),
+            event_notification("s1", {"type": "turn_started", "turn_number": 1}),
             event_notification("s1", {"type": "text_delta", "delta": "Hi"}),
             response(1, RUN_RESULT),
         ])
@@ -272,25 +288,65 @@ class TestStreamingTurn:
         queue = d.subscribe_events("s1")
         future = d.expect_response(1)
 
-        stream = StreamingTurn(
+        stream = EventStream(
             session_id="s1",
             event_queue=queue,
             response_future=future,
             dispatcher=d,
-            parse_result=_mock_parse_result,
+            parse_result=_parse_run_result,
         )
 
-        events = []
+        events: list[Event] = []
         async with stream:
             async for event in stream:
                 events.append(event)
             result = stream.result
 
         assert len(events) == 2
-        assert events[0]["type"] == "turn_started"
-        assert events[1]["type"] == "text_delta"
+        assert isinstance(events[0], TurnStarted)
+        assert events[0].turn_number == 1
+        assert isinstance(events[1], TextDelta)
+        assert events[1].delta == "Hi"
         assert result.session_id == "s1"
         assert result.text == "Hello!"
+        await d.stop()
+
+    @pytest.mark.asyncio
+    async def test_pattern_matching(self):
+        """Events support match/case pattern matching."""
+        reader = make_reader([
+            event_notification("s1", {"type": "text_delta", "delta": "Hi"}),
+            event_notification("s1", {"type": "turn_completed", "stop_reason": "end_turn",
+                                       "usage": {"input_tokens": 5, "output_tokens": 3}}),
+            response(1, RUN_RESULT),
+        ])
+        d = _StdoutDispatcher(reader)
+        d.start()
+        queue = d.subscribe_events("s1")
+        future = d.expect_response(1)
+
+        stream = EventStream(
+            session_id="s1",
+            event_queue=queue,
+            response_future=future,
+            dispatcher=d,
+            parse_result=_parse_run_result,
+        )
+
+        text_parts: list[str] = []
+        final_usage: Usage | None = None
+        async with stream:
+            async for event in stream:
+                match event:
+                    case TextDelta(delta=chunk):
+                        text_parts.append(chunk)
+                    case TurnCompleted(usage=u):
+                        final_usage = u
+
+        assert text_parts == ["Hi"]
+        assert final_usage is not None
+        assert final_usage.input_tokens == 5
+        assert final_usage.output_tokens == 3
         await d.stop()
 
     @pytest.mark.asyncio
@@ -301,12 +357,12 @@ class TestStreamingTurn:
         queue = d.subscribe_events("s1")
         future = d.expect_response(1)
 
-        stream = StreamingTurn(
+        stream = EventStream(
             session_id="s1",
             event_queue=queue,
             response_future=future,
             dispatcher=d,
-            parse_result=_mock_parse_result,
+            parse_result=_parse_run_result,
         )
 
         with pytest.raises(MeerkatError, match="Iterate the stream"):
@@ -325,17 +381,15 @@ class TestStreamingTurn:
         queue = d.subscribe_events("s1")
         future = d.expect_response(1)
 
-        stream = StreamingTurn(
+        stream = EventStream(
             session_id="s1",
             event_queue=queue,
             response_future=future,
             dispatcher=d,
-            parse_result=_mock_parse_result,
+            parse_result=_parse_run_result,
         )
 
-        async with stream:
-            result = await stream.collect()
-
+        result = await stream.collect()
         assert result.text == "Hello!"
         await d.stop()
 
@@ -351,18 +405,16 @@ class TestStreamingTurn:
         queue = d.subscribe_events("s1")
         future = d.expect_response(1)
 
-        stream = StreamingTurn(
+        stream = EventStream(
             session_id="s1",
             event_queue=queue,
             response_future=future,
             dispatcher=d,
-            parse_result=_mock_parse_result,
+            parse_result=_parse_run_result,
         )
 
-        async with stream:
-            text, result = await stream.collect_text()
-
-        assert text == "Hel" + "lo!"
+        text, result = await stream.collect_text()
+        assert text == "Hello!"
         assert result.text == "Hello!"
         await d.stop()
 
@@ -374,38 +426,35 @@ class TestStreamingTurn:
         queue = d.subscribe_events("s1")
         future = d.expect_response(1)
 
-        stream = StreamingTurn(
+        stream = EventStream(
             session_id="s1",
             event_queue=queue,
             response_future=future,
             dispatcher=d,
-            parse_result=_mock_parse_result,
+            parse_result=_parse_run_result,
         )
 
-        async with stream:
-            _ = await stream.collect()
-
+        result = await stream.collect()
         assert "s1" not in d._event_queues
         await d.stop()
 
     @pytest.mark.asyncio
     async def test_no_events_before_response(self):
-        """Response arrives with no events — iteration ends immediately."""
         reader = make_reader([response(1, RUN_RESULT)])
         d = _StdoutDispatcher(reader)
         d.start()
         queue = d.subscribe_events("s1")
         future = d.expect_response(1)
 
-        stream = StreamingTurn(
+        stream = EventStream(
             session_id="s1",
             event_queue=queue,
             response_future=future,
             dispatcher=d,
-            parse_result=_mock_parse_result,
+            parse_result=_parse_run_result,
         )
 
-        events = []
+        events: list[Event] = []
         async with stream:
             async for event in stream:
                 events.append(event)
@@ -413,24 +462,3 @@ class TestStreamingTurn:
         assert events == []
         assert stream.result.session_id == "s1"
         await d.stop()
-
-
-# ---------------------------------------------------------------------------
-# Test helpers
-# ---------------------------------------------------------------------------
-
-def _mock_parse_result(data: dict):
-    """Minimal parser that returns a WireRunResult-like object."""
-    from meerkat.generated.types import WireRunResult, WireUsage
-    usage_data = data.get("usage", {})
-    return WireRunResult(
-        session_id=data.get("session_id", ""),
-        text=data.get("text", ""),
-        turns=data.get("turns", 0),
-        tool_calls=data.get("tool_calls", 0),
-        usage=WireUsage(
-            input_tokens=usage_data.get("input_tokens", 0),
-            output_tokens=usage_data.get("output_tokens", 0),
-            total_tokens=usage_data.get("total_tokens", 0),
-        ),
-    )

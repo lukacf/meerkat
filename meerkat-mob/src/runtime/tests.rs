@@ -817,7 +817,7 @@ impl SubscribableInjector for CountingInjector {
         let never_terminal = self.never_terminal;
         let fail = self.fail;
         let completed_result = self.completed_result.clone();
-        let interaction_id_for_task = interaction_id.clone();
+        let interaction_id_for_task = interaction_id;
         tokio::spawn(async move {
             if delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;

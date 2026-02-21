@@ -218,9 +218,7 @@ fn lineage_related(
     false
 }
 
-fn remap_required_sets(
-    event: &SourceIdentityLineage,
-) -> Option<RemapRequiredSets> {
+fn remap_required_sets(event: &SourceIdentityLineage) -> Option<RemapRequiredSets> {
     match &event.event {
         SourceIdentityLineageEvent::Rotate { from, to } => Some((
             "rotate",

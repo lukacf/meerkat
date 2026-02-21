@@ -20,5 +20,5 @@ and state transition is surfaced as a typed `AgentEvent`.
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 005_streaming_events
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

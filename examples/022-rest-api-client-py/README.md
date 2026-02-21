@@ -21,8 +21,8 @@ language or tool that speaks HTTP can integrate.
 
 ## Setup
 ```bash
-# Terminal 1: Start REST server
-ANTHROPIC_API_KEY=sk-... rkat rest --port 8000
+# Terminal 1: Start REST server (default port 8080, configured in [rest] section)
+ANTHROPIC_API_KEY=sk-... rkat-rest
 
 # Terminal 2: Run the example
 python main.py

@@ -21,5 +21,5 @@ Agent A signs message with private key A
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 020_comms_peer_messaging --features comms
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

@@ -9,9 +9,6 @@ from "Hello World" to production multi-agent systems.
 # Set your API key
 export ANTHROPIC_API_KEY=sk-...
 
-# Run any Rust example
-cargo run --example 001_hello_meerkat
-
 # Run a Python example
 cd examples/002-hello-meerkat-py && python main.py
 
@@ -21,6 +18,9 @@ cd examples/003-hello-meerkat-ts && npx tsx main.ts
 # Run a shell example
 cd examples/004-cli-one-liners-sh && bash examples.sh
 ```
+
+Rust examples are reference implementations showing how to use the crate API.
+For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat --example simple`).
 
 ## Examples by Level
 

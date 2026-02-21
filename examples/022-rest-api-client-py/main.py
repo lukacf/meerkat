@@ -13,7 +13,7 @@ What you'll learn:
 
 Run:
     # Terminal 1: Start the REST server
-    ANTHROPIC_API_KEY=sk-... rkat rest --port 8000
+    ANTHROPIC_API_KEY=sk-... rkat-rest
 
     # Terminal 2: Run this script
     python main.py
@@ -28,7 +28,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 
-BASE_URL = os.environ.get("MEERKAT_REST_URL", "http://localhost:8000")
+BASE_URL = os.environ.get("MEERKAT_REST_URL", "http://localhost:8080")
 
 
 def api_request(method: str, path: str, body: dict | None = None) -> dict:
@@ -50,7 +50,7 @@ def api_request(method: str, path: str, body: dict | None = None) -> dict:
 def main():
     print("=== Meerkat REST API Client ===\n")
     print(f"Base URL: {BASE_URL}")
-    print("(Start the server with: rkat rest --port 8000)\n")
+    print("(Start the server with: rkat-rest)\n")
 
     # ── 1. Create a session ──
     print("--- 1. POST /sessions (create session) ---")
@@ -66,7 +66,7 @@ def main():
         print(f"  Tokens: {result['usage']['input_tokens'] + result['usage']['output_tokens']}")
     except Exception as e:
         print(f"  Failed to connect. Is the REST server running? ({e})")
-        print("\n  Start it with: ANTHROPIC_API_KEY=sk-... rkat rest --port 8000")
+        print("\n  Start it with: ANTHROPIC_API_KEY=sk-... rkat-rest")
         show_reference()
         return
 
@@ -112,12 +112,10 @@ Endpoints:
   POST /webhooks/comms-message  Receive external comms message
 
 Start the server:
-  rkat rest                   # Default port 8000
-  rkat rest --port 3000       # Custom port
-  rkat rest --host 0.0.0.0    # Listen on all interfaces
+  rkat-rest                   # Default port 8080 (from [rest] config)
 
 Streaming via SSE:
-  curl -N http://localhost:8000/sessions/{id}/events
+  curl -N http://localhost:8080/sessions/{id}/events
 
   Events:
     data: {"type": "text_delta", "delta": "Hello"}

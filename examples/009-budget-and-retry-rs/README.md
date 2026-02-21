@@ -27,5 +27,5 @@ Attempt 4 → give up
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 009_budget_and_retry
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

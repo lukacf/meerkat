@@ -12,7 +12,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=your-key cargo run --example 013_context_compaction
+//! This is a reference implementation. For runnable examples, see meerkat/examples/.
 //! ```
 
 use std::sync::Arc;

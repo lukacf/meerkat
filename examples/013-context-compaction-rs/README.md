@@ -24,5 +24,5 @@ Messages accumulate → token_threshold exceeded →
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 013_context_compaction
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

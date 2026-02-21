@@ -11,7 +11,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=your-key cargo run --example 006_custom_tools
+//! This is a reference implementation. For runnable examples, see meerkat/examples/.
 //! ```
 
 use async_trait::async_trait;

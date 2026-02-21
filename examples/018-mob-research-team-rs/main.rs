@@ -12,7 +12,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=your-key cargo run --example 018_mob_research_team
+//! This is a reference implementation. For runnable examples, see meerkat/examples/.
 //! ```
 
 use meerkat_mob::{MobDefinition, Prefab, validate_definition};

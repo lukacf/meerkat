@@ -13,7 +13,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=your-key cargo run --example 025_full_stack_agent
+//! This is a reference implementation. For runnable examples, see meerkat/examples/.
 //! ```
 
 use async_trait::async_trait;

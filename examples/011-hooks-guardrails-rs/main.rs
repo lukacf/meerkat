@@ -12,7 +12,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=your-key cargo run --example 011_hooks_guardrails
+//! This is a reference implementation. For runnable examples, see meerkat/examples/.
 //! ```
 
 use std::sync::Arc;

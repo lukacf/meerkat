@@ -10,7 +10,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=your-key cargo run --example 001_hello_meerkat
+//! This is a reference implementation. For runnable examples, see meerkat/examples/.
 //! ```
 
 use std::sync::Arc;

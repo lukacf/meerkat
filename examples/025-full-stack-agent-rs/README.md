@@ -39,5 +39,5 @@ persistence, event streaming, and composable dispatchers.
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 025_full_stack_agent
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

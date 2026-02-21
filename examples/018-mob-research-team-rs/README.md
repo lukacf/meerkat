@@ -20,5 +20,5 @@ and a lead analyst synthesizes findings into a cohesive report.
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 018_mob_research_team
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

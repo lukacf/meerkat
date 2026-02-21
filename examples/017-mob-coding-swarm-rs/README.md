@@ -32,5 +32,5 @@ for coding tasks. The mob runtime handles spawning, wiring, and lifecycle.
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 017_mob_coding_swarm
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

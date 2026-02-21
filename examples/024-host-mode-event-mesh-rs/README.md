@@ -21,5 +21,5 @@ peers, webhooks, timers, and users.
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 024_host_mode_event_mesh --features comms
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

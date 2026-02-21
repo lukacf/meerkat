@@ -22,5 +22,5 @@ pre_llm_call → LLM → post_llm_response → pre_tool_dispatch → Tool
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 011_hooks_guardrails
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

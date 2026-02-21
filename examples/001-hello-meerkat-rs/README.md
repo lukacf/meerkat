@@ -10,5 +10,5 @@ The simplest possible Meerkat agent. Send one prompt, get one response.
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 001_hello_meerkat
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

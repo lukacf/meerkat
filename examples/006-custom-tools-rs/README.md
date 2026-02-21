@@ -19,5 +19,5 @@ Your code runs → ToolResult returned → Agent loop feeds result back to LLM
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... cargo run --example 006_custom_tools
+# This is a reference implementation. For runnable examples, see meerkat/examples/.
 ```

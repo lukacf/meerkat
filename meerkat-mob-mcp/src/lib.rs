@@ -11,6 +11,7 @@ use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResul
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
     MobRuntimeMode, MobSessionService, MobState, MobStorage, Prefab, ProfileName, RunId,
+    SpawnMemberSpec,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -127,16 +128,46 @@ impl MobMcpState {
         runtime_mode: Option<MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<meerkat_mob::MemberRef, MobError> {
+        self.mob_spawn_spec(
+            mob_id,
+            SpawnMemberSpec {
+                profile_name: profile,
+                meerkat_id,
+                initial_message: None,
+                runtime_mode,
+                backend,
+            },
+        )
+        .await
+    }
+
+    pub async fn mob_spawn_spec(
+        &self,
+        mob_id: &MobId,
+        spec: SpawnMemberSpec,
+    ) -> Result<meerkat_mob::MemberRef, MobError> {
         self.handle_for(mob_id)
             .await?
             .spawn_member_ref_with_runtime_mode_and_backend(
-                profile,
-                meerkat_id,
-                None,
-                runtime_mode,
-                backend,
+                spec.profile_name,
+                spec.meerkat_id,
+                spec.initial_message,
+                spec.runtime_mode,
+                spec.backend,
             )
             .await
+    }
+
+    pub async fn mob_spawn_many(
+        &self,
+        mob_id: &MobId,
+        specs: Vec<SpawnMemberSpec>,
+    ) -> Result<Vec<Result<meerkat_mob::MemberRef, MobError>>, MobError> {
+        Ok(self
+            .handle_for(mob_id)
+            .await?
+            .spawn_many_member_refs(specs)
+            .await)
     }
 
     pub async fn mob_retire(&self, mob_id: &MobId, meerkat_id: MeerkatId) -> Result<(), MobError> {
@@ -490,6 +521,31 @@ impl MobMcpDispatcher {
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"profile":{"type":"string"},"meerkat_id":{"type":"string"},"backend":{"type":"string","enum":["subagent","external"]},"runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]}},"required":["mob_id","profile","meerkat_id"]}),
             ),
             tool(
+                "mob_spawn_many",
+                &format!("Spawn multiple meerkats in one call. Required: mob_id, specs[].profile, specs[].meerkat_id. Optional per-spec backend/runtime_mode/initial_message. {COMMON}"),
+                json!({
+                    "type":"object",
+                    "properties":{
+                        "mob_id":{"type":"string"},
+                        "specs":{
+                            "type":"array",
+                            "items":{
+                                "type":"object",
+                                "properties":{
+                                    "profile":{"type":"string"},
+                                    "meerkat_id":{"type":"string"},
+                                    "initial_message":{"type":"string"},
+                                    "backend":{"type":"string","enum":["subagent","external"]},
+                                    "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]}
+                                },
+                                "required":["profile","meerkat_id"]
+                            }
+                        }
+                    },
+                    "required":["mob_id","specs"]
+                }),
+            ),
+            tool(
                 "mob_retire",
                 &format!("Retire a spawned meerkat by ID. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
@@ -580,6 +636,22 @@ struct SpawnArgs {
     backend: Option<MobBackendKind>,
     #[serde(default)]
     runtime_mode: Option<MobRuntimeMode>,
+}
+#[derive(Deserialize)]
+struct MobSpawnMeerkatArgs {
+    profile: String,
+    meerkat_id: String,
+    #[serde(default)]
+    initial_message: Option<String>,
+    #[serde(default)]
+    backend: Option<MobBackendKind>,
+    #[serde(default)]
+    runtime_mode: Option<MobRuntimeMode>,
+}
+#[derive(Deserialize)]
+struct SpawnManyMeerkatsArgs {
+    mob_id: String,
+    specs: Vec<MobSpawnMeerkatArgs>,
 }
 #[derive(Deserialize)]
 struct RetireArgs {
@@ -729,14 +801,18 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: SpawnArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let spec = SpawnMemberSpec::from_wire(
+                    args.profile,
+                    args.meerkat_id,
+                    None,
+                    args.runtime_mode,
+                    args.backend,
+                );
                 let member_ref = self
                     .state
-                    .mob_spawn(
+                    .mob_spawn_spec(
                         &MobId::from(args.mob_id),
-                        ProfileName::from(args.profile),
-                        MeerkatId::from(args.meerkat_id),
-                        args.runtime_mode,
-                        args.backend,
+                        spec,
                     )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
@@ -744,6 +820,44 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     call,
                     json!({"ok": true, "member_ref": member_ref, "session_id": member_ref.session_id()}),
                 )
+            }
+            "mob_spawn_many" => {
+                let args: SpawnManyMeerkatsArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let specs = args
+                    .specs
+                    .into_iter()
+                    .map(|spec| {
+                        SpawnMemberSpec::from_wire(
+                            spec.profile,
+                            spec.meerkat_id,
+                            spec.initial_message,
+                            spec.runtime_mode,
+                            spec.backend,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let results = self
+                    .state
+                    .mob_spawn_many(&MobId::from(args.mob_id), specs)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                let results = results
+                    .into_iter()
+                    .map(|result| match result {
+                        Ok(member_ref) => json!({
+                            "ok": true,
+                            "member_ref": member_ref,
+                            "session_id": member_ref.session_id(),
+                        }),
+                        Err(error) => json!({
+                            "ok": false,
+                            "error": error.to_string(),
+                        }),
+                    })
+                    .collect::<Vec<_>>();
+                encode(call, json!({"results": results}))
             }
             "mob_retire" => {
                 let args: RetireArgs = call
@@ -1259,11 +1373,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatcher_exposes_17_tools() {
+    async fn test_dispatcher_exposes_18_tools() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
-        assert_eq!(d.tools().len(), 17);
+        assert_eq!(d.tools().len(), 18);
     }
 
     fn flow_enabled_definition() -> MobDefinition {
@@ -1684,6 +1798,46 @@ timeout_ms = 1000
 
         assert_eq!(lead_mode, Some("autonomous_host"));
         assert_eq!(worker_mode, Some("turn_driven"));
+    }
+
+    #[tokio::test]
+    async fn test_mob_spawn_many_dispatches_batch() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let created = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await;
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+
+        let spawned = call_tool(
+            &d,
+            "mob_spawn_many",
+            json!({
+                "mob_id": mob_id,
+                "specs": [
+                    {"profile":"worker","meerkat_id":"w-many-a"},
+                    {"profile":"worker","meerkat_id":"w-many-b"}
+                ]
+            }),
+        )
+        .await;
+        let results = spawned["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 2, "expected two batch rows");
+        assert!(
+            results.iter().all(|row| row["ok"] == json!(true)),
+            "all batch spawn rows should succeed"
+        );
+
+        let listed = call_tool(&d, "mob_list_meerkats", json!({"mob_id": mob_id})).await;
+        let ids = listed["meerkats"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| m["meerkat_id"].as_str().map(ToString::to_string))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(ids.contains("w-many-a"));
+        assert!(ids.contains("w-many-b"));
     }
 
     #[tokio::test]

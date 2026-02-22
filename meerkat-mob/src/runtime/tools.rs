@@ -70,6 +70,30 @@ impl MobToolDispatcher {
                 }),
             ));
             defs.push(tool_def(
+                TOOL_SPAWN_MANY_MEERKATS,
+                "Spawn multiple meerkats in one call. Returns per-item results in input order.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "specs": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "profile": {"type": "string"},
+                                    "meerkat_id": {"type": "string"},
+                                    "initial_message": {"type": "string"},
+                                    "backend": {"type": "string", "enum": ["subagent", "external"]},
+                                    "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
+                                },
+                                "required": ["profile", "meerkat_id"]
+                            }
+                        }
+                    },
+                    "required": ["specs"]
+                }),
+            ));
+            defs.push(tool_def(
                 TOOL_RETIRE_MEERKAT,
                 "Retire a meerkat and archive its session",
                 json!({
@@ -241,6 +265,11 @@ struct SpawnMeerkatArgs {
 }
 
 #[derive(Deserialize)]
+struct SpawnManyMeerkatsArgs {
+    specs: Vec<SpawnMeerkatArgs>,
+}
+
+#[derive(Deserialize)]
 struct RetireMeerkatArgs {
     meerkat_id: String,
 }
@@ -313,6 +342,40 @@ impl AgentToolDispatcher for MobToolDispatcher {
                         "session_id": member_ref.session_id(),
                     }),
                 )
+            }
+            TOOL_SPAWN_MANY_MEERKATS => {
+                let args: SpawnManyMeerkatsArgs = call
+                    .parse_args()
+                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let specs = args
+                    .specs
+                    .into_iter()
+                    .map(|spec| {
+                        SpawnMemberSpec::from_wire(
+                            spec.profile,
+                            spec.meerkat_id,
+                            spec.initial_message,
+                            spec.runtime_mode,
+                            spec.backend,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let results = self.handle.spawn_many_member_refs(specs).await;
+                let results = results
+                    .into_iter()
+                    .map(|result| match result {
+                        Ok(member_ref) => json!({
+                            "ok": true,
+                            "member_ref": member_ref,
+                            "session_id": member_ref.session_id(),
+                        }),
+                        Err(error) => json!({
+                            "ok": false,
+                            "error": error.to_string(),
+                        }),
+                    })
+                    .collect::<Vec<_>>();
+                Self::encode_result(call, json!({ "results": results }))
             }
             TOOL_RETIRE_MEERKAT => {
                 let args: RetireMeerkatArgs = call
@@ -449,6 +512,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
 }
 
 const TOOL_SPAWN_MEERKAT: &str = "spawn_meerkat";
+const TOOL_SPAWN_MANY_MEERKATS: &str = "spawn_many_meerkats";
 const TOOL_RETIRE_MEERKAT: &str = "retire_meerkat";
 const TOOL_WIRE_PEERS: &str = "wire_peers";
 const TOOL_UNWIRE_PEERS: &str = "unwire_peers";

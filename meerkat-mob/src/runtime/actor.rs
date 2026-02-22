@@ -3,8 +3,11 @@ use super::transaction::LifecycleRollback;
 use super::*;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
+use std::collections::VecDeque;
 
 type AutonomousHostLoopHandle = tokio::task::JoinHandle<Result<(), MobError>>;
+// Sized for real mob-scale startup/shutdown fan-out (50+ members).
+const MAX_PARALLEL_HOST_LOOP_OPS: usize = 64;
 
 pub(super) struct PendingSpawn {
     profile_name: ProfileName,
@@ -45,6 +48,8 @@ pub(super) struct MobActor {
     pub(super) pending_spawns: BTreeMap<u64, PendingSpawn>,
     pub(super) pending_spawn_ids: HashSet<MeerkatId>,
     pub(super) pending_spawn_tasks: BTreeMap<u64, tokio::task::JoinHandle<()>>,
+    pub(super) wire_edge_locks:
+        Arc<tokio::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl MobActor {
@@ -287,17 +292,39 @@ impl MobActor {
             let roster = self.roster.read().await;
             roster.list().cloned().collect::<Vec<_>>()
         };
-        for entry in entries {
-            if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
-                self.ensure_autonomous_dispatch_capability(&entry.meerkat_id, &entry.member_ref)
-                    .await?;
-                self.start_autonomous_host_loop(
-                    &entry.meerkat_id,
-                    &entry.member_ref,
-                    self.resume_host_loop_prompt(&entry.profile, &entry.meerkat_id),
-                )
-                .await?;
+        let autonomous_entries = entries
+            .into_iter()
+            .filter(|entry| entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost)
+            .collect::<Vec<_>>();
+        if autonomous_entries.is_empty() {
+            return Ok(());
+        }
+
+        let actor: &MobActor = self;
+        let mut remaining = autonomous_entries.into_iter();
+        let mut in_flight = FuturesUnordered::new();
+        let mut first_error: Option<MobError> = None;
+
+        for _ in 0..MAX_PARALLEL_HOST_LOOP_OPS {
+            let Some(entry) = remaining.next() else {
+                break;
+            };
+            in_flight.push(actor.start_autonomous_host_loop_for_entry(entry));
+        }
+
+        while let Some(result) = in_flight.next().await {
+            if let Err(error) = result
+                && first_error.is_none()
+            {
+                first_error = Some(error);
             }
+            if let Some(entry) = remaining.next() {
+                in_flight.push(actor.start_autonomous_host_loop_for_entry(entry));
+            }
+        }
+
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(())
     }
@@ -384,20 +411,34 @@ impl MobActor {
                 .cloned()
                 .collect::<Vec<_>>()
         };
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let actor: &MobActor = self;
+        let mut remaining = entries.into_iter();
+        let mut in_flight = FuturesUnordered::new();
         let mut first_error: Option<MobError> = None;
-        for entry in entries {
-            if let Err(error) = self
-                .stop_autonomous_host_loop_for_member(&entry.meerkat_id, &entry.member_ref)
-                .await
-            {
+
+        for _ in 0..MAX_PARALLEL_HOST_LOOP_OPS {
+            let Some(entry) = remaining.next() else {
+                break;
+            };
+            in_flight.push(actor.stop_autonomous_host_loop_for_entry(entry));
+        }
+
+        while let Some(result) = in_flight.next().await {
+            if let Err((meerkat_id, error)) = result {
                 tracing::warn!(
-                    meerkat_id = %entry.meerkat_id,
+                    meerkat_id = %meerkat_id,
                     error = %error,
                     "failed stopping autonomous host loop member"
                 );
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
+            }
+            if let Some(entry) = remaining.next() {
+                in_flight.push(actor.stop_autonomous_host_loop_for_entry(entry));
             }
         }
 
@@ -411,6 +452,29 @@ impl MobActor {
         Ok(())
     }
 
+    async fn start_autonomous_host_loop_for_entry(
+        &self,
+        entry: RosterEntry,
+    ) -> Result<(), MobError> {
+        self.ensure_autonomous_dispatch_capability(&entry.meerkat_id, &entry.member_ref)
+            .await?;
+        self.start_autonomous_host_loop(
+            &entry.meerkat_id,
+            &entry.member_ref,
+            self.resume_host_loop_prompt(&entry.profile, &entry.meerkat_id),
+        )
+        .await
+    }
+
+    async fn stop_autonomous_host_loop_for_entry(
+        &self,
+        entry: RosterEntry,
+    ) -> Result<(), (MeerkatId, MobError)> {
+        self.stop_autonomous_host_loop_for_member(&entry.meerkat_id, &entry.member_ref)
+            .await
+            .map_err(|error| (entry.meerkat_id, error))
+    }
+
     /// Main actor loop: process commands sequentially until Shutdown.
     pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<MobCommand>) {
         if matches!(self.state(), MobState::Running) {
@@ -420,6 +484,13 @@ impl MobActor {
                     error = %error,
                     "failed to start mcp servers during actor startup; entering Stopped"
                 );
+                if let Err(stop_error) = self.stop_all_autonomous_host_loops().await {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        error = %stop_error,
+                        "failed cleaning up autonomous host loops after mcp startup error"
+                    );
+                }
                 if let Err(stop_error) = self.stop_mcp_servers().await {
                     tracing::warn!(
                         mob_id = %self.definition.id,
@@ -451,7 +522,15 @@ impl MobActor {
                 self.state.store(MobState::Stopped as u8, Ordering::Release);
             }
         }
-        while let Some(cmd) = command_rx.recv().await {
+        let mut deferred_commands = VecDeque::new();
+        loop {
+            let cmd = if let Some(cmd) = deferred_commands.pop_front() {
+                cmd
+            } else if let Some(cmd) = command_rx.recv().await {
+                cmd
+            } else {
+                break;
+            };
             match cmd {
                 MobCommand::Spawn {
                     profile_name,
@@ -481,7 +560,22 @@ impl MobActor {
                     spawn_ticket,
                     result,
                 } => {
-                    self.handle_spawn_provisioned(spawn_ticket, result).await;
+                    let mut completions = vec![(spawn_ticket, result)];
+                    loop {
+                        match command_rx.try_recv() {
+                            Ok(MobCommand::SpawnProvisioned {
+                                spawn_ticket,
+                                result,
+                            }) => completions.push((spawn_ticket, result)),
+                            Ok(other) => {
+                                deferred_commands.push_back(other);
+                                break;
+                            }
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                        }
+                    }
+                    self.handle_spawn_provisioned_batch(completions).await;
                 }
                 MobCommand::Retire {
                     meerkat_id,
@@ -581,7 +675,11 @@ impl MobActor {
                             ))
                             .await;
                             let mut stop_result: Result<(), MobError> = Ok(());
-                            if let Err(error) = self.stop_all_autonomous_host_loops().await {
+                            let (loop_result, mcp_result) = tokio::join!(
+                                self.stop_all_autonomous_host_loops(),
+                                self.stop_mcp_servers()
+                            );
+                            if let Err(error) = loop_result {
                                 tracing::warn!(
                                     mob_id = %self.definition.id,
                                     error = %error,
@@ -591,7 +689,7 @@ impl MobActor {
                                     stop_result = Err(error);
                                 }
                             }
-                            if let Err(error) = self.stop_mcp_servers().await {
+                            if let Err(error) = mcp_result {
                                 tracing::warn!(
                                     mob_id = %self.definition.id,
                                     error = %error,
@@ -622,11 +720,8 @@ impl MobActor {
                                     );
                                 }
                                 Err(error)
-                            } else if let Err(error) =
-                                self.start_autonomous_host_loops_from_roster().await
-                            {
-                                if let Err(stop_error) = self.stop_all_autonomous_host_loops().await
-                                {
+                            } else if let Err(error) = self.start_autonomous_host_loops_from_roster().await {
+                                if let Err(stop_error) = self.stop_all_autonomous_host_loops().await {
                                     tracing::warn!(
                                         mob_id = %self.definition.id,
                                         error = %stop_error,
@@ -922,61 +1017,86 @@ impl MobActor {
         self.pending_spawn_tasks.insert(spawn_ticket, task);
     }
 
-    async fn handle_spawn_provisioned(
+    async fn handle_spawn_provisioned_batch(
         &mut self,
-        spawn_ticket: u64,
-        result: Result<MemberRef, MobError>,
+        completions: Vec<(u64, Result<MemberRef, MobError>)>,
     ) {
-        self.pending_spawn_tasks.remove(&spawn_ticket);
-        let Some(pending) = self.pending_spawns.remove(&spawn_ticket) else {
-            tracing::warn!(spawn_ticket, "received spawn completion for unknown ticket");
-            if let Ok(member_ref) = result
-                && let Err(error) = self.provisioner.retire_member(&member_ref).await
-            {
-                tracing::warn!(
-                    spawn_ticket,
-                    member_ref = ?member_ref,
-                    error = %error,
-                    "unknown spawn completion cleanup failed"
-                );
-            }
-            return;
-        };
-        self.pending_spawn_ids.remove(&pending.meerkat_id);
-
-        let reply = match result {
-            Ok(member_ref) => {
-                if let Err(error) =
-                    self.expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+        let mut pending_items = Vec::with_capacity(completions.len());
+        for (spawn_ticket, result) in completions {
+            self.pending_spawn_tasks.remove(&spawn_ticket);
+            let Some(pending) = self.pending_spawns.remove(&spawn_ticket) else {
+                tracing::warn!(spawn_ticket, "received spawn completion for unknown ticket");
+                if let Ok(member_ref) = result
+                    && let Err(error) = self.provisioner.retire_member(&member_ref).await
                 {
-                    if let Err(retire_error) = self.provisioner.retire_member(&member_ref).await {
-                        Err(MobError::Internal(format!(
-                            "spawn completed while mob state changed for '{}': {}; cleanup retire failed for member '{member_ref:?}': {}",
-                            pending.meerkat_id, error, retire_error
-                        )))
-                    } else {
-                        Err(error)
-                    }
-                } else {
-                    self.finalize_spawn_from_pending(&pending, &member_ref)
-                        .await
+                    tracing::warn!(
+                        spawn_ticket,
+                        member_ref = ?member_ref,
+                        error = %error,
+                        "unknown spawn completion cleanup failed"
+                    );
                 }
-            }
-            Err(error) => Err(error),
-        };
+                continue;
+            };
+            self.pending_spawn_ids.remove(&pending.meerkat_id);
+            pending_items.push((pending, result));
+        }
 
-        let _ = pending.reply_tx.send(reply);
+        let mut in_flight = FuturesUnordered::new();
+        let actor: &MobActor = self;
+        for (pending, result) in pending_items {
+            let PendingSpawn {
+                profile_name,
+                meerkat_id,
+                prompt,
+                runtime_mode,
+                reply_tx,
+            } = pending;
+            in_flight.push(async move {
+                let reply = match result {
+                    Ok(member_ref) => {
+                        if let Err(error) = actor
+                            .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                        {
+                            if let Err(retire_error) = actor.provisioner.retire_member(&member_ref).await
+                            {
+                                Err(MobError::Internal(format!(
+                                    "spawn completed while mob state changed for '{}': {}; cleanup retire failed for member '{member_ref:?}': {}",
+                                    meerkat_id, error, retire_error
+                                )))
+                            } else {
+                                Err(error)
+                            }
+                        } else {
+                            actor.finalize_spawn_from_pending(
+                                &profile_name,
+                                &meerkat_id,
+                                runtime_mode,
+                                prompt,
+                                &member_ref,
+                            )
+                            .await
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                (reply_tx, reply)
+            });
+        }
+
+        while let Some((reply_tx, reply)) = in_flight.next().await {
+            let _ = reply_tx.send(reply);
+        }
     }
 
     async fn finalize_spawn_from_pending(
         &self,
-        pending: &PendingSpawn,
+        profile_name: &ProfileName,
+        meerkat_id: &MeerkatId,
+        runtime_mode: crate::MobRuntimeMode,
+        prompt: String,
         member_ref: &MemberRef,
     ) -> Result<MemberRef, MobError> {
-        let profile_name = &pending.profile_name;
-        let meerkat_id = &pending.meerkat_id;
-        let runtime_mode = pending.runtime_mode;
-
         if let Err(append_error) = self
             .events
             .append(NewMobEvent {
@@ -1041,7 +1161,7 @@ impl MobActor {
 
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost
             && let Err(start_error) = self
-                .start_autonomous_host_loop(meerkat_id, member_ref, pending.prompt.clone())
+                .start_autonomous_host_loop(meerkat_id, member_ref, prompt)
                 .await
         {
             if let Err(rollback_error) = self
@@ -1299,6 +1419,7 @@ impl MobActor {
             let mut roster = self.roster.write().await;
             roster.remove(&meerkat_id);
         }
+        self.prune_wire_edge_locks_for_member(&meerkat_id).await;
 
         Ok(())
     }
@@ -1442,6 +1563,7 @@ impl MobActor {
             let mut roster = self.roster.write().await;
             roster.unwire(&a, &b);
         }
+        self.remove_wire_edge_lock(&a, &b).await;
 
         Ok(())
     }
@@ -1491,6 +1613,7 @@ impl MobActor {
         self.stop_mcp_servers().await?;
         self.events.clear().await?;
         self.cleanup_namespace().await?;
+        self.wire_edge_locks.lock().await.clear();
         self.state
             .store(MobState::Destroyed as u8, Ordering::Release);
         Ok(())
@@ -2112,6 +2235,25 @@ impl MobActor {
 
     /// Internal wire operation (used by handle_wire and auto_wire/role_wiring).
     async fn do_wire(&self, a: &MeerkatId, b: &MeerkatId) -> Result<(), MobError> {
+        let edge_key = Self::canonical_edge_key(a, b);
+        let edge_lock = {
+            let mut locks = self.wire_edge_locks.lock().await;
+            locks
+                .entry(edge_key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _edge_guard = edge_lock.lock().await;
+
+        {
+            let roster = self.roster.read().await;
+            if let Some(entry_a) = roster.get(a)
+                && entry_a.wired_to.contains(b)
+            {
+                return Ok(());
+            }
+        }
+
         let (entry_a, entry_b) = {
             let roster = self.roster.read().await;
             let ea = roster
@@ -2237,6 +2379,31 @@ impl MobActor {
         }
 
         Ok(())
+    }
+
+    fn canonical_edge_key(a: &MeerkatId, b: &MeerkatId) -> String {
+        if a.as_str() <= b.as_str() {
+            format!("{a}|{b}")
+        } else {
+            format!("{b}|{a}")
+        }
+    }
+
+    async fn remove_wire_edge_lock(&self, a: &MeerkatId, b: &MeerkatId) {
+        let edge_key = Self::canonical_edge_key(a, b);
+        self.wire_edge_locks.lock().await.remove(&edge_key);
+    }
+
+    async fn prune_wire_edge_locks_for_member(&self, meerkat_id: &MeerkatId) {
+        let mut locks = self.wire_edge_locks.lock().await;
+        // Keep this parser aligned with `canonical_edge_key` ("left|right").
+        // If the canonical format changes, update both together.
+        locks.retain(|edge_key, _| {
+            let Some((left, right)) = edge_key.split_once('|') else {
+                return true;
+            };
+            left != meerkat_id.as_str() && right != meerkat_id.as_str()
+        });
     }
 
     /// Get the comms runtime for a session, if available.

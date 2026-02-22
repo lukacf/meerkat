@@ -2,7 +2,7 @@
 
 use crate::budget::Budget;
 use crate::error::AgentError;
-use crate::event::AgentEvent;
+use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use crate::hooks::{HookDecision, HookInvocation, HookPatch, HookPoint};
 use crate::ops::{
     ForkBranch, ForkBudgetPolicy, OperationId, OperationResult, SpawnSpec, ToolAccessPolicy,
@@ -144,6 +144,8 @@ where
         let depth = self.depth + 1;
         let model = self.config.model.clone();
         let max_tokens = self.config.max_tokens_per_turn;
+        let parent_scoped_event_tx = self.default_scoped_event_tx.clone();
+        let parent_scope_path = self.default_scope_path.clone();
 
         // Create filtered tools based on policy
         let allowed_tool_names: Vec<String> =
@@ -166,8 +168,34 @@ where
                 .build(client, filtered_tools, store)
                 .await;
 
-            // Run the sub-agent
-            let result = sub_agent.run(prompt).await;
+            let (result, forwarder_task) = if let Some(scoped_tx) = parent_scoped_event_tx {
+                let (child_event_tx, mut child_event_rx) = mpsc::channel::<AgentEvent>(64);
+                let parent_scope = parent_scope_path.clone();
+                let child_scope_frame = StreamScopeFrame::SubAgent {
+                    agent_id: op_id_clone.to_string(),
+                    tool_call_id: None,
+                    label: Some("spawn".to_string()),
+                };
+                let forwarder = tokio::spawn(async move {
+                    while let Some(event) = child_event_rx.recv().await {
+                        let mut scoped = if parent_scope.is_empty() {
+                            ScopedAgentEvent::from_agent_event_primary("unknown", event)
+                        } else {
+                            ScopedAgentEvent::new(parent_scope.clone(), event)
+                        };
+                        scoped = scoped.append_scope(child_scope_frame.clone());
+                        if scoped_tx.send(scoped).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                (sub_agent.run_with_events(prompt, child_event_tx).await, Some(forwarder))
+            } else {
+                (sub_agent.run(prompt).await, None)
+            };
+            if let Some(forwarder) = forwarder_task {
+                let _ = forwarder.await;
+            }
 
             // Report completion
             match result {
@@ -278,6 +306,8 @@ where
             let model = self.config.model.clone();
             let max_tokens = self.config.max_tokens_per_turn;
             let branch_name = branch.name.clone();
+            let parent_scoped_event_tx = self.default_scoped_event_tx.clone();
+            let parent_scope_path = self.default_scope_path.clone();
 
             // Create session with full history (fork uses FullHistory context)
             let mut fork_session = Session::new();
@@ -298,8 +328,37 @@ where
                     .build(client, filtered_tools, store)
                     .await;
 
-                // Run the sub-agent with the branch prompt
-                let result = sub_agent.run(prompt).await;
+                let (result, forwarder_task) = if let Some(scoped_tx) = parent_scoped_event_tx {
+                    let (child_event_tx, mut child_event_rx) = mpsc::channel::<AgentEvent>(64);
+                    let parent_scope = parent_scope_path.clone();
+                    let child_scope_frame = StreamScopeFrame::SubAgent {
+                        agent_id: op_id_clone.to_string(),
+                        tool_call_id: None,
+                        label: Some(branch_name.clone()),
+                    };
+                    let forwarder = tokio::spawn(async move {
+                        while let Some(event) = child_event_rx.recv().await {
+                            let mut scoped = if parent_scope.is_empty() {
+                                ScopedAgentEvent::from_agent_event_primary("unknown", event)
+                            } else {
+                                ScopedAgentEvent::new(parent_scope.clone(), event)
+                            };
+                            scoped = scoped.append_scope(child_scope_frame.clone());
+                            if scoped_tx.send(scoped).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    (
+                        sub_agent.run_with_events(prompt, child_event_tx).await,
+                        Some(forwarder),
+                    )
+                } else {
+                    (sub_agent.run(prompt).await, None)
+                };
+                if let Some(forwarder) = forwarder_task {
+                    let _ = forwarder.await;
+                }
 
                 // Report completion
                 match result {

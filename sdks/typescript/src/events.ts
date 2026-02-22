@@ -60,6 +60,35 @@ export type HookPoint =
   | "turn_boundary";
 
 // ---------------------------------------------------------------------------
+// Scoped streaming attribution
+// ---------------------------------------------------------------------------
+
+export type StreamScopeFrame =
+  | {
+      readonly scope: "primary";
+      readonly session_id: string;
+    }
+  | {
+      readonly scope: "mob_member";
+      readonly flow_run_id: string;
+      readonly member_ref: string;
+      readonly session_id: string;
+    }
+  | {
+      readonly scope: "sub_agent";
+      readonly agent_id: string;
+      readonly tool_call_id?: string;
+      readonly label?: string;
+    };
+
+export interface ScopedAgentEvent {
+  readonly type: "scoped_agent_event";
+  readonly scopeId: string;
+  readonly scopePath: readonly StreamScopeFrame[];
+  readonly event: CoreAgentEvent;
+}
+
+// ---------------------------------------------------------------------------
 // Session lifecycle events
 // ---------------------------------------------------------------------------
 
@@ -296,7 +325,7 @@ export interface UnknownEvent {
 // ---------------------------------------------------------------------------
 
 /** All known agent events, discriminated on `type`. */
-export type AgentEvent =
+export type CoreAgentEvent =
   | RunStartedEvent
   | RunCompletedEvent
   | RunFailedEvent
@@ -326,6 +355,9 @@ export type AgentEvent =
   | InteractionFailedEvent
   | StreamTruncatedEvent
   | UnknownEvent;
+
+/** Known stream events including optional scoped wrappers. */
+export type AgentEvent = CoreAgentEvent | ScopedAgentEvent;
 
 // ---------------------------------------------------------------------------
 // Type guards for the most commonly used events
@@ -380,6 +412,21 @@ function parseUsage(raw: Record<string, unknown> | undefined): Usage {
  * forward-compatibility.
  */
 export function parseEvent(raw: Record<string, unknown>): AgentEvent {
+  if (
+    raw.event &&
+    (typeof raw.scope_id === "string" || Array.isArray(raw.scope_path))
+  ) {
+    const innerRaw = typeof raw.event === "object" && raw.event !== null
+      ? (raw.event as Record<string, unknown>)
+      : { type: "unknown" };
+    return {
+      type: "scoped_agent_event",
+      scopeId: String(raw.scope_id ?? ""),
+      scopePath: (raw.scope_path ?? []) as StreamScopeFrame[],
+      event: parseEvent(innerRaw) as CoreAgentEvent,
+    };
+  }
+
   const type = String(raw.type ?? "");
 
   switch (type) {

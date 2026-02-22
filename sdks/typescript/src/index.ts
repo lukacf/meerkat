@@ -56,6 +56,8 @@ export { CONTRACT_VERSION } from "./generated/types.js";
 // Typed events — discriminated union and all interfaces
 export type {
   AgentEvent,
+  ScopedAgentEvent,
+  StreamScopeFrame,
   RunStartedEvent,
   RunCompletedEvent,
   RunFailedEvent,

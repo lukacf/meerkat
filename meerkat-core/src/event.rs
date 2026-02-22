@@ -202,6 +202,97 @@ pub enum AgentEvent {
     StreamTruncated { reason: String },
 }
 
+/// Scope attribution frame for multi-agent streaming.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StreamScopeFrame {
+    /// Top-level primary session scope.
+    Primary { session_id: String },
+    /// Mob member scope for flow dispatch turns.
+    MobMember {
+        flow_run_id: String,
+        member_ref: String,
+        session_id: String,
+    },
+    /// Sub-agent scope nested under a parent scope.
+    SubAgent {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+}
+
+/// Attributed stream event wrapper for multi-agent streaming.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedAgentEvent {
+    pub scope_id: String,
+    pub scope_path: Vec<StreamScopeFrame>,
+    pub event: AgentEvent,
+}
+
+impl ScopedAgentEvent {
+    /// Build a scoped event from a scope path and payload event.
+    pub fn new(scope_path: Vec<StreamScopeFrame>, event: AgentEvent) -> Self {
+        let scope_id = Self::scope_id_from_path(&scope_path);
+        Self {
+            scope_id,
+            scope_path,
+            event,
+        }
+    }
+
+    /// Build a primary-scoped event for a top-level session event.
+    pub fn primary(session_id: impl Into<String>, event: AgentEvent) -> Self {
+        Self::new(
+            vec![StreamScopeFrame::Primary {
+                session_id: session_id.into(),
+            }],
+            event,
+        )
+    }
+
+    /// Convenience alias for converting a legacy event into primary scope.
+    pub fn from_agent_event_primary(session_id: impl Into<String>, event: AgentEvent) -> Self {
+        Self::primary(session_id, event)
+    }
+
+    /// Append one scope frame and recompute scope_id deterministically.
+    pub fn append_scope(mut self, frame: StreamScopeFrame) -> Self {
+        self.scope_path.push(frame);
+        self.scope_id = Self::scope_id_from_path(&self.scope_path);
+        self
+    }
+
+    /// Deterministic canonical selector from scope path.
+    ///
+    /// Formats:
+    /// - `primary`
+    /// - `mob:<member_ref>`
+    /// - `primary/sub:<agent_id>`
+    /// - `mob:<member_ref>/sub:<agent_id>`
+    pub fn scope_id_from_path(path: &[StreamScopeFrame]) -> String {
+        if path.is_empty() {
+            return "primary".to_string();
+        }
+        let mut segments: Vec<String> = Vec::with_capacity(path.len());
+        for frame in path {
+            match frame {
+                StreamScopeFrame::Primary { .. } => segments.push("primary".to_string()),
+                StreamScopeFrame::MobMember { member_ref, .. } => {
+                    segments.push(format!("mob:{member_ref}"));
+                }
+                StreamScopeFrame::SubAgent { agent_id, .. } => {
+                    segments.push(format!("sub:{agent_id}"));
+                }
+            }
+        }
+        segments.join("/")
+    }
+}
+
 /// Type of budget being tracked
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -453,6 +544,77 @@ mod tests {
         assert_eq!(
             serde_json::to_value(BudgetType::ToolCalls).unwrap(),
             "tool_calls"
+        );
+    }
+
+    #[test]
+    fn test_scoped_agent_event_roundtrip() {
+        let event = ScopedAgentEvent::new(
+            vec![
+                StreamScopeFrame::MobMember {
+                    flow_run_id: "run_123".to_string(),
+                    member_ref: "writer".to_string(),
+                    session_id: "sid_1".to_string(),
+                },
+                StreamScopeFrame::SubAgent {
+                    agent_id: "op_abc".to_string(),
+                    tool_call_id: Some("tool_1".to_string()),
+                    label: Some("fork-op_abc".to_string()),
+                },
+            ],
+            AgentEvent::TextDelta {
+                delta: "hello".to_string(),
+            },
+        );
+
+        assert_eq!(event.scope_id, "mob:writer/sub:op_abc");
+
+        let json = serde_json::to_value(&event).unwrap();
+        let roundtrip: ScopedAgentEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.scope_id, "mob:writer/sub:op_abc");
+        assert!(matches!(
+            roundtrip.event,
+            AgentEvent::TextDelta { ref delta } if delta == "hello"
+        ));
+    }
+
+    #[test]
+    fn test_scope_id_from_path_formats() {
+        let primary = vec![StreamScopeFrame::Primary {
+            session_id: "sid_x".to_string(),
+        }];
+        assert_eq!(ScopedAgentEvent::scope_id_from_path(&primary), "primary");
+
+        let primary_sub = vec![
+            StreamScopeFrame::Primary {
+                session_id: "sid_x".to_string(),
+            },
+            StreamScopeFrame::SubAgent {
+                agent_id: "op_1".to_string(),
+                tool_call_id: None,
+                label: None,
+            },
+        ];
+        assert_eq!(
+            ScopedAgentEvent::scope_id_from_path(&primary_sub),
+            "primary/sub:op_1"
+        );
+
+        let mob_sub = vec![
+            StreamScopeFrame::MobMember {
+                flow_run_id: "run_1".to_string(),
+                member_ref: "planner".to_string(),
+                session_id: "sid_m".to_string(),
+            },
+            StreamScopeFrame::SubAgent {
+                agent_id: "op_2".to_string(),
+                tool_call_id: None,
+                label: None,
+            },
+        ];
+        assert_eq!(
+            ScopedAgentEvent::scope_id_from_path(&mob_sub),
+            "mob:planner/sub:op_2"
         );
     }
 }

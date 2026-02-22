@@ -7,7 +7,7 @@ use crate::error::MobError;
 use crate::ids::{MeerkatId, RunId, StepId};
 use async_trait::async_trait;
 use futures::FutureExt;
-use meerkat_core::event::AgentEvent;
+use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use meerkat_core::service::StartTurnRequest;
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -106,10 +106,16 @@ impl ActorFlowTurnExecutor {
     fn spawn_subscription_bridge(
         mut events: tokio::sync::mpsc::Receiver<AgentEvent>,
         completion_tx: oneshot::Sender<FlowTurnOutcome>,
+        scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+        scoped_frame: Option<StreamScopeFrame>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut completion_tx = Some(completion_tx);
             while let Some(event) = events.recv().await {
+                if let (Some(tx), Some(frame)) = (&scoped_event_tx, &scoped_frame) {
+                    let scoped = ScopedAgentEvent::new(vec![frame.clone()], event.clone());
+                    let _ = tx.send(scoped).await;
+                }
                 match event {
                     AgentEvent::RunCompleted { result, .. }
                     | AgentEvent::InteractionComplete { result, .. } => {
@@ -236,6 +242,16 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
             .ok_or_else(|| MobError::MeerkatNotFound(target.clone()))?;
 
         let (completion_tx, completion_rx) = oneshot::channel::<FlowTurnOutcome>();
+        let scoped_event_tx = self.handle.flow_streams.lock().await.get(run_id).cloned();
+        let scope_frame = StreamScopeFrame::MobMember {
+            flow_run_id: run_id.to_string(),
+            member_ref: target.to_string(),
+            session_id: entry
+                .member_ref
+                .session_id()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default(),
+        };
         let bridge_handle = match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
                 let session_id = entry.member_ref.session_id().ok_or_else(|| {
@@ -262,11 +278,21 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             target, error
                         ))
                     })?;
-                Self::spawn_subscription_bridge(subscription.events, completion_tx)
+                Self::spawn_subscription_bridge(
+                    subscription.events,
+                    completion_tx,
+                    scoped_event_tx.clone(),
+                    Some(scope_frame.clone()),
+                )
             }
             crate::MobRuntimeMode::TurnDriven => {
                 let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(8);
-                let bridge_handle = Self::spawn_subscription_bridge(event_rx, completion_tx);
+                let bridge_handle = Self::spawn_subscription_bridge(
+                    event_rx,
+                    completion_tx,
+                    scoped_event_tx,
+                    Some(scope_frame),
+                );
 
                 if let Err(error) = self
                     .provisioner

@@ -67,6 +67,7 @@ from .events import (
     RunCompleted,
     RunFailed,
     RunStarted,
+    ScopedEvent,
     SkillResolutionFailed,
     SkillsResolved,
     StreamTruncated,
@@ -108,6 +109,7 @@ __all__ = [
     # Events (base + all variants)
     "Event",
     "RunStarted",
+    "ScopedEvent",
     "RunCompleted",
     "RunFailed",
     "TurnStarted",

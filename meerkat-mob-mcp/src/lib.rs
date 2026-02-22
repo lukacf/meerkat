@@ -7,6 +7,7 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
     SessionUsage, SessionView, StartTurnRequest,
 };
+use meerkat_core::ScopedAgentEvent;
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
@@ -18,7 +19,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 
 #[derive(Clone)]
 struct ManagedMob {
@@ -242,9 +243,20 @@ impl MobMcpState {
         flow_id: FlowId,
         params: serde_json::Value,
     ) -> Result<RunId, MobError> {
+        self.mob_run_flow_with_stream(mob_id, flow_id, params, None)
+            .await
+    }
+
+    pub async fn mob_run_flow_with_stream(
+        &self,
+        mob_id: &MobId,
+        flow_id: FlowId,
+        params: serde_json::Value,
+        scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+    ) -> Result<RunId, MobError> {
         self.handle_for(mob_id)
             .await?
-            .run_flow(flow_id, params)
+            .run_flow_with_stream(flow_id, params, scoped_event_tx)
             .await
     }
 

@@ -36,6 +36,8 @@ pub(super) struct MobActor {
     pub(super) flow_engine: FlowEngine,
     pub(super) run_tasks: BTreeMap<RunId, tokio::task::JoinHandle<()>>,
     pub(super) run_cancel_tokens: BTreeMap<RunId, (tokio_util::sync::CancellationToken, FlowId)>,
+    pub(super) flow_streams:
+        Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
     pub(super) mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
     pub(super) mcp_processes: Arc<tokio::sync::Mutex<BTreeMap<String, Child>>>,
     pub(super) command_tx: mpsc::Sender<MobCommand>,
@@ -66,6 +68,7 @@ impl MobActor {
             state: self.state.clone(),
             events: self.events.clone(),
             mcp_running: self.mcp_running.clone(),
+            flow_streams: self.flow_streams.clone(),
         }
     }
 
@@ -636,10 +639,14 @@ impl MobActor {
                 MobCommand::RunFlow {
                     flow_id,
                     activation_params,
+                    scoped_event_tx,
                     reply_tx,
                 } => {
                     let result = match self.expect_state(&[MobState::Running], MobState::Running) {
-                        Ok(()) => self.handle_run_flow(flow_id, activation_params).await,
+                        Ok(()) => {
+                            self.handle_run_flow(flow_id, activation_params, scoped_event_tx)
+                                .await
+                        }
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -658,6 +665,7 @@ impl MobActor {
                 MobCommand::FlowFinished { run_id } => {
                     self.run_tasks.remove(&run_id);
                     self.run_cancel_tokens.remove(&run_id);
+                    self.flow_streams.lock().await.remove(&run_id);
                 }
                 #[cfg(test)]
                 MobCommand::FlowTrackerCounts { reply_tx } => {
@@ -1793,6 +1801,7 @@ impl MobActor {
         &mut self,
         flow_id: FlowId,
         activation_params: serde_json::Value,
+        scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
     ) -> Result<RunId, MobError> {
         let run_id = RunId::new();
         let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
@@ -1815,6 +1824,12 @@ impl MobActor {
             run_id.clone(),
             (cancel_token.clone(), config.flow_id.clone()),
         );
+        if let Some(scoped_event_tx) = scoped_event_tx {
+            self.flow_streams
+                .lock()
+                .await
+                .insert(run_id.clone(), scoped_event_tx);
+        }
 
         let engine = self.flow_engine.clone();
         let cleanup_tx = self.command_tx.clone();
@@ -1875,6 +1890,7 @@ impl MobActor {
         let Some((cancel_token, flow_id)) = self.run_cancel_tokens.remove(&run_id) else {
             return Ok(());
         };
+        self.flow_streams.lock().await.remove(&run_id);
         cancel_token.cancel();
 
         let Some(mut handle) = self.run_tasks.remove(&run_id) else {

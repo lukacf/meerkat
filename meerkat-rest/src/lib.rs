@@ -914,6 +914,8 @@ async fn create_session(
             .llm_client_override
             .clone()
             .map(encode_llm_client_override_for_service),
+        scoped_event_tx: None,
+        scoped_event_path: None,
         override_builtins: req.enable_builtins,
         override_shell: req.enable_shell,
         override_subagents: req.enable_subagents,
@@ -1087,6 +1089,8 @@ async fn continue_session(
                     .llm_client_override
                     .clone()
                     .map(encode_llm_client_override_for_service),
+                scoped_event_tx: None,
+                scoped_event_path: None,
                 override_builtins: Some(tooling.builtins),
                 override_shell: Some(tooling.shell),
                 override_subagents: Some(tooling.subagents),

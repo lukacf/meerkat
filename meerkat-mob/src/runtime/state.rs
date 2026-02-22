@@ -95,6 +95,7 @@ pub(super) enum MobCommand {
     RunFlow {
         flow_id: FlowId,
         activation_params: serde_json::Value,
+        scoped_event_tx: Option<tokio::sync::mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
         reply_tx: oneshot::Sender<Result<RunId, MobError>>,
     },
     CancelFlow {

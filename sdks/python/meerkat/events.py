@@ -334,6 +334,19 @@ class StreamTruncated(Event):
 
 
 # ---------------------------------------------------------------------------
+# Scoped streaming attribution
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class ScopedEvent(Event):
+    """A scoped wrapper around a base agent event."""
+
+    scope_id: str = ""
+    scope_path: list[dict[str, Any]] = field(default_factory=list)
+    event: Event = field(default_factory=Event)
+
+
+# ---------------------------------------------------------------------------
 # Unknown / forward-compat
 # ---------------------------------------------------------------------------
 
@@ -404,6 +417,15 @@ def parse_event(raw: dict[str, Any]) -> Event:
     Unknown event types are returned as :class:`UnknownEvent` for
     forward-compatibility with newer server versions.
     """
+    if "event" in raw and ("scope_id" in raw or "scope_path" in raw):
+        inner_raw = raw.get("event")
+        inner = parse_event(inner_raw) if isinstance(inner_raw, dict) else UnknownEvent()
+        return ScopedEvent(
+            scope_id=str(raw.get("scope_id", "")),
+            scope_path=list(raw.get("scope_path", [])),
+            event=inner,
+        )
+
     event_type = raw.get("type", "")
     cls = _EVENT_MAP.get(event_type)
     if cls is None:

@@ -15,7 +15,7 @@ use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
-    SessionTooling,
+    SessionTooling, ScopedAgentEvent, StreamScopeFrame,
 };
 #[cfg(feature = "sub-agents")]
 use meerkat_core::{ConcurrencyLimits, SubAgentManager};
@@ -180,6 +180,10 @@ pub struct AgentBuildConfig {
     pub budget_limits: Option<BudgetLimits>,
     /// Optional event channel for streaming agent events.
     pub event_tx: Option<mpsc::Sender<AgentEvent>>,
+    /// Optional scoped event channel for attributed multi-agent streaming.
+    pub scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+    /// Base scope path used for attributed nested stream events.
+    pub scoped_event_path: Option<Vec<StreamScopeFrame>>,
     /// Override LLM client (for testing or embedding).
     pub llm_client_override: Option<Arc<dyn LlmClient>>,
     /// Provider-specific parameters (e.g., thinking config, reasoning effort).
@@ -236,6 +240,8 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("resume_session", &self.resume_session.is_some())
             .field("budget_limits", &self.budget_limits)
             .field("event_tx", &self.event_tx.is_some())
+            .field("scoped_event_tx", &self.scoped_event_tx.is_some())
+            .field("scoped_event_path", &self.scoped_event_path.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
@@ -268,6 +274,8 @@ impl AgentBuildConfig {
             resume_session: None,
             budget_limits: None,
             event_tx: None,
+            scoped_event_tx: None,
+            scoped_event_path: None,
             llm_client_override: None,
             provider_params: None,
             external_tools: None,
@@ -316,6 +324,8 @@ impl AgentBuildConfig {
             .llm_client_override
             .as_ref()
             .and_then(decode_llm_client_override_from_service);
+        self.scoped_event_tx = build.scoped_event_tx.clone();
+        self.scoped_event_path = build.scoped_event_path.clone();
         self.override_builtins = build.override_builtins;
         self.override_shell = build.override_shell;
         self.override_subagents = build.override_subagents;
@@ -345,6 +355,8 @@ impl AgentBuildConfig {
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            scoped_event_tx: self.scoped_event_tx.clone(),
+            scoped_event_path: self.scoped_event_path.clone(),
             override_builtins: self.override_builtins,
             override_shell: self.override_shell,
             override_subagents: self.override_subagents,
@@ -718,6 +730,8 @@ impl AgentFactory {
             external,
             session_id,
             skill_engine,
+            None,
+            None,
             #[cfg(all(feature = "sub-agents", feature = "comms"))]
             None,
         )
@@ -735,6 +749,8 @@ impl AgentFactory {
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
         #[allow(unused_variables)] skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        sub_agent_scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+        sub_agent_scope_path: Option<Vec<StreamScopeFrame>>,
         #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
             SubAgentCommsWiring,
         >,
@@ -882,6 +898,12 @@ impl AgentFactory {
                 sub_agent_config,
                 0,
             ));
+            state
+                .set_scoped_stream(
+                    sub_agent_scoped_event_tx.clone(),
+                    sub_agent_scope_path.clone().unwrap_or_default(),
+                )
+                .await;
 
             let tool_set = SubAgentToolSet::new(state);
             composite.register_sub_agent_tools(tool_set, &config)?;
@@ -1071,6 +1093,8 @@ impl AgentFactory {
                 effective_shell,
                 effective_subagents,
                 skill_engine.clone(),
+                build_config.scoped_event_tx.clone(),
+                build_config.scoped_event_path.clone(),
                 #[cfg(all(feature = "sub-agents", feature = "comms"))]
                 sub_agent_comms,
             )
@@ -1286,6 +1310,12 @@ impl AgentFactory {
         if let Some(tx) = build_config.event_tx {
             builder = builder.with_default_event_tx(tx);
         }
+        if let Some(tx) = build_config.scoped_event_tx {
+            builder = builder.with_default_scoped_event_tx(tx);
+        }
+        if let Some(path) = build_config.scoped_event_path {
+            builder = builder.with_default_scope_path(path);
+        }
 
         // 12f. Wire session checkpointer for host-mode persistence
         if let Some(cp) = build_config.checkpointer {
@@ -1338,6 +1368,8 @@ impl AgentFactory {
         effective_shell: bool,
         effective_subagents: bool,
         skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        sub_agent_scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+        sub_agent_scope_path: Option<Vec<StreamScopeFrame>>,
         #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
             SubAgentCommsWiring,
         >,
@@ -1397,6 +1429,8 @@ impl AgentFactory {
                 external,
                 None,
                 skill_engine,
+                sub_agent_scoped_event_tx,
+                sub_agent_scope_path,
                 #[cfg(all(feature = "sub-agents", feature = "comms"))]
                 sub_agent_comms,
             )

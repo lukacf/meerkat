@@ -348,6 +348,12 @@ where
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
     /// Optional session checkpointer for host-mode persistence.
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
+    /// Optional default scoped event channel configured at build time.
+    /// Used by nested sub-agent forwarding to emit attributed events.
+    pub(crate) default_scoped_event_tx:
+        Option<tokio::sync::mpsc::Sender<crate::event::ScopedAgentEvent>>,
+    /// Base scope path for nested scoped event forwarding.
+    pub(crate) default_scope_path: Vec<crate::event::StreamScopeFrame>,
     /// When true, the host loop owns the inbox drain cycle.
     /// `drain_comms_inbox()` becomes a no-op to avoid stealing
     /// interaction-scoped messages through the legacy path.

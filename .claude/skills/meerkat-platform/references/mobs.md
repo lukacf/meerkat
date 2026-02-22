@@ -93,7 +93,7 @@ Primary crates:
 ### `MobHandle` API
 
 - inspection: `status()`, `definition()`, `roster()`, `list_meerkats()`, `events()`
-- membership: `spawn_member_ref*`, `retire`
+- membership: `spawn_member_ref*`, `spawn_many*`, `retire`
 - graph: `wire`, `unwire`
 - turns: `external_turn`, `internal_turn`
 - lifecycle: `stop`, `resume`, `complete`, `destroy`
@@ -218,6 +218,8 @@ Runtime-mode behavior is shared across these surfaces because dispatch comes fro
 - Session creation for spawn registers the session without immediately running a model turn.
 - Autonomous members then start host loops explicitly from mob actor lifecycle control.
 - First model work is triggered by real dispatch (`external_turn`, peer message, or flow step).
+- Concurrent spawns provision in parallel; actor finalization stays serialized for deterministic state transitions.
+- `spawn_many_member_refs(Vec<SpawnMemberSpec>)` and `spawn_many(Vec<SpawnMemberSpec>)` expose this as first-class runtime API.
 
 ## Multi-surface examples
 

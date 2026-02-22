@@ -142,6 +142,12 @@ where
             }
         };
 
+        // Checkpoint after the initial host-mode turn so the first run
+        // is persisted even if no inbox traffic ever arrives.
+        if let Some(ref cp) = self.checkpointer {
+            cp.checkpoint(&self.session).await;
+        }
+
         let inbox_notify = comms.inbox_notify();
         const POLL_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -176,11 +182,13 @@ where
                 let mut batched_texts = Vec::new();
                 let mut individual: Vec<(InboxInteraction, Option<mpsc::Sender<AgentEvent>>)> =
                     Vec::new();
+                let mut had_response_injections = false;
 
                 for interaction in interactions {
                     // Response interactions: inject into session, never run through LLM
                     if matches!(&interaction.content, InteractionContent::Response { .. }) {
                         inject_response_into_session(&mut self.session, &interaction);
+                        had_response_injections = true;
                         continue;
                     }
 
@@ -207,6 +215,16 @@ where
                             }
                         }
                     }
+                }
+
+                // Checkpoint after response injections mutate session state.
+                // Responses bypass the LLM loop (no run call), so without
+                // this checkpoint they would only be persisted if a later
+                // request/message triggers its own checkpoint.
+                if had_response_injections
+                    && let Some(ref cp) = self.checkpointer
+                {
+                    cp.checkpoint(&self.session).await;
                 }
 
                 // Process individual interactions (requests, or subscriber-bound)

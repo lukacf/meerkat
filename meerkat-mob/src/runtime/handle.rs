@@ -35,6 +35,24 @@ pub struct SpawnMemberSpec {
     pub backend: Option<MobBackendKind>,
 }
 
+impl SpawnMemberSpec {
+    pub fn from_wire(
+        profile: String,
+        meerkat_id: String,
+        initial_message: Option<String>,
+        runtime_mode: Option<crate::MobRuntimeMode>,
+        backend: Option<MobBackendKind>,
+    ) -> Self {
+        Self {
+            profile_name: ProfileName::from(profile),
+            meerkat_id: MeerkatId::from(meerkat_id),
+            initial_message,
+            runtime_mode,
+            backend,
+        }
+    }
+}
+
 impl MobEventsView {
     pub async fn poll(
         &self,

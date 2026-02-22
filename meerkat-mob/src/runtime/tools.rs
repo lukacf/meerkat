@@ -350,12 +350,14 @@ impl AgentToolDispatcher for MobToolDispatcher {
                 let specs = args
                     .specs
                     .into_iter()
-                    .map(|spec| SpawnMemberSpec {
-                        profile_name: ProfileName::from(spec.profile),
-                        meerkat_id: MeerkatId::from(spec.meerkat_id),
-                        initial_message: spec.initial_message,
-                        backend: spec.backend,
-                        runtime_mode: spec.runtime_mode,
+                    .map(|spec| {
+                        SpawnMemberSpec::from_wire(
+                            spec.profile,
+                            spec.meerkat_id,
+                            spec.initial_message,
+                            spec.runtime_mode,
+                            spec.backend,
+                        )
                     })
                     .collect::<Vec<_>>();
                 let results = self.handle.spawn_many_member_refs(specs).await;

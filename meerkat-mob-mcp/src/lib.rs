@@ -128,14 +128,32 @@ impl MobMcpState {
         runtime_mode: Option<MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<meerkat_mob::MemberRef, MobError> {
+        self.mob_spawn_spec(
+            mob_id,
+            SpawnMemberSpec {
+                profile_name: profile,
+                meerkat_id,
+                initial_message: None,
+                runtime_mode,
+                backend,
+            },
+        )
+        .await
+    }
+
+    pub async fn mob_spawn_spec(
+        &self,
+        mob_id: &MobId,
+        spec: SpawnMemberSpec,
+    ) -> Result<meerkat_mob::MemberRef, MobError> {
         self.handle_for(mob_id)
             .await?
             .spawn_member_ref_with_runtime_mode_and_backend(
-                profile,
-                meerkat_id,
-                None,
-                runtime_mode,
-                backend,
+                spec.profile_name,
+                spec.meerkat_id,
+                spec.initial_message,
+                spec.runtime_mode,
+                spec.backend,
             )
             .await
     }
@@ -620,7 +638,7 @@ struct SpawnArgs {
     runtime_mode: Option<MobRuntimeMode>,
 }
 #[derive(Deserialize)]
-struct SpawnBatchItem {
+struct SpawnMeerkatArgs {
     profile: String,
     meerkat_id: String,
     #[serde(default)]
@@ -631,9 +649,9 @@ struct SpawnBatchItem {
     runtime_mode: Option<MobRuntimeMode>,
 }
 #[derive(Deserialize)]
-struct SpawnBatchArgs {
+struct SpawnManyMeerkatsArgs {
     mob_id: String,
-    specs: Vec<SpawnBatchItem>,
+    specs: Vec<SpawnMeerkatArgs>,
 }
 #[derive(Deserialize)]
 struct RetireArgs {
@@ -783,14 +801,18 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: SpawnArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let spec = SpawnMemberSpec::from_wire(
+                    args.profile,
+                    args.meerkat_id,
+                    None,
+                    args.runtime_mode,
+                    args.backend,
+                );
                 let member_ref = self
                     .state
-                    .mob_spawn(
+                    .mob_spawn_spec(
                         &MobId::from(args.mob_id),
-                        ProfileName::from(args.profile),
-                        MeerkatId::from(args.meerkat_id),
-                        args.runtime_mode,
-                        args.backend,
+                        spec,
                     )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
@@ -800,18 +822,20 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 )
             }
             "mob_spawn_many" => {
-                let args: SpawnBatchArgs = call
+                let args: SpawnManyMeerkatsArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let specs = args
                     .specs
                     .into_iter()
-                    .map(|spec| SpawnMemberSpec {
-                        profile_name: ProfileName::from(spec.profile),
-                        meerkat_id: MeerkatId::from(spec.meerkat_id),
-                        initial_message: spec.initial_message,
-                        runtime_mode: spec.runtime_mode,
-                        backend: spec.backend,
+                    .map(|spec| {
+                        SpawnMemberSpec::from_wire(
+                            spec.profile,
+                            spec.meerkat_id,
+                            spec.initial_message,
+                            spec.runtime_mode,
+                            spec.backend,
+                        )
                     })
                     .collect::<Vec<_>>();
                 let results = self

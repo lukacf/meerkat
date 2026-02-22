@@ -6,6 +6,8 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::VecDeque;
 
 type AutonomousHostLoopHandle = tokio::task::JoinHandle<Result<(), MobError>>;
+// Sized for real mob-scale startup/shutdown fan-out (50+ members).
+const MAX_PARALLEL_HOST_LOOP_OPS: usize = 64;
 
 pub(super) struct PendingSpawn {
     profile_name: ProfileName,
@@ -298,8 +300,7 @@ impl MobActor {
             return Ok(());
         }
 
-        const MAX_PARALLEL_HOST_LOOP_OPS: usize = 8;
-        let actor = self;
+        let actor: &MobActor = self;
         let mut remaining = autonomous_entries.into_iter();
         let mut in_flight = FuturesUnordered::new();
         let mut first_error: Option<MobError> = None;
@@ -413,8 +414,7 @@ impl MobActor {
         if entries.is_empty() {
             return Ok(());
         }
-        const MAX_PARALLEL_HOST_LOOP_OPS: usize = 8;
-        let actor = self;
+        let actor: &MobActor = self;
         let mut remaining = entries.into_iter();
         let mut in_flight = FuturesUnordered::new();
         let mut first_error: Option<MobError> = None;
@@ -1043,8 +1043,15 @@ impl MobActor {
         }
 
         let mut in_flight = FuturesUnordered::new();
-        let actor = &*self;
+        let actor: &MobActor = self;
         for (pending, result) in pending_items {
+            let PendingSpawn {
+                profile_name,
+                meerkat_id,
+                prompt,
+                runtime_mode,
+                reply_tx,
+            } = pending;
             in_flight.push(async move {
                 let reply = match result {
                     Ok(member_ref) => {
@@ -1055,17 +1062,17 @@ impl MobActor {
                             {
                                 Err(MobError::Internal(format!(
                                     "spawn completed while mob state changed for '{}': {}; cleanup retire failed for member '{member_ref:?}': {}",
-                                    pending.meerkat_id, error, retire_error
+                                    meerkat_id, error, retire_error
                                 )))
                             } else {
                                 Err(error)
                             }
                         } else {
                             actor.finalize_spawn_from_pending(
-                                &pending.profile_name,
-                                &pending.meerkat_id,
-                                pending.runtime_mode,
-                                pending.prompt.clone(),
+                                &profile_name,
+                                &meerkat_id,
+                                runtime_mode,
+                                prompt,
                                 &member_ref,
                             )
                             .await
@@ -1073,7 +1080,7 @@ impl MobActor {
                     }
                     Err(error) => Err(error),
                 };
-                (pending.reply_tx, reply)
+                (reply_tx, reply)
             });
         }
 
@@ -1412,6 +1419,7 @@ impl MobActor {
             let mut roster = self.roster.write().await;
             roster.remove(&meerkat_id);
         }
+        self.prune_wire_edge_locks_for_member(&meerkat_id).await;
 
         Ok(())
     }
@@ -1555,6 +1563,7 @@ impl MobActor {
             let mut roster = self.roster.write().await;
             roster.unwire(&a, &b);
         }
+        self.remove_wire_edge_lock(&a, &b).await;
 
         Ok(())
     }
@@ -1604,6 +1613,7 @@ impl MobActor {
         self.stop_mcp_servers().await?;
         self.events.clear().await?;
         self.cleanup_namespace().await?;
+        self.wire_edge_locks.lock().await.clear();
         self.state
             .store(MobState::Destroyed as u8, Ordering::Release);
         Ok(())
@@ -2377,6 +2387,21 @@ impl MobActor {
         } else {
             format!("{b}|{a}")
         }
+    }
+
+    async fn remove_wire_edge_lock(&self, a: &MeerkatId, b: &MeerkatId) {
+        let edge_key = Self::canonical_edge_key(a, b);
+        self.wire_edge_locks.lock().await.remove(&edge_key);
+    }
+
+    async fn prune_wire_edge_locks_for_member(&self, meerkat_id: &MeerkatId) {
+        let mut locks = self.wire_edge_locks.lock().await;
+        locks.retain(|edge_key, _| {
+            let Some((left, right)) = edge_key.split_once('|') else {
+                return true;
+            };
+            left != meerkat_id.as_str() && right != meerkat_id.as_str()
+        });
     }
 
     /// Get the comms runtime for a session, if available.

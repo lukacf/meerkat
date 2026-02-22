@@ -435,7 +435,7 @@ export function parseEvent(raw: Record<string, unknown>): StreamEvent {
 
 /** Parse a raw wire event as a core (non-wrapper) agent event. */
 export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
-  
+
   const type = String(raw.type ?? "");
 
   switch (type) {

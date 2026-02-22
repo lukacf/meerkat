@@ -77,5 +77,24 @@ pub use validate::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,
 };
 
+// Embedded skill: mob communication instructions.
+//
+// Registered via inventory so the skill engine loads it as an embedded
+// skill. Mob agents preload this via `preload_skills` in their build
+// config, which means it survives any per-request system_prompt
+// override (skills are appended as extra_sections, not baked into the
+// base prompt).
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "mob-communication",
+        name: "Mob Communication",
+        description: "How to communicate with peers in a collaborative mob",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["comms"],
+        body: include_str!("../skills/mob-communication/SKILL.md"),
+        extensions: &[],
+    }
+}
+
 #[cfg(test)]
 mod tests;

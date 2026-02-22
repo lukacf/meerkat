@@ -2123,6 +2123,7 @@ async fn run_agent(
         instance_id: scope.instance_id.clone(),
         backend: Some(manifest.backend.as_str().to_string()),
         config_generation: None,
+        checkpointer: None,
     };
 
     // Route through SessionService::create_session()
@@ -2471,6 +2472,7 @@ async fn resume_session_with_llm_override(
             .and_then(|m| m.backend.clone())
             .or_else(|| Some(manifest.backend.as_str().to_string())),
         config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
+        checkpointer: None,
     };
 
     // Route through SessionService::create_session() with the resumed session

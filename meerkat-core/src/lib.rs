@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod budget;
+pub mod checkpoint;
 pub mod comms;
 pub mod compact;
 pub mod config;
@@ -46,6 +47,7 @@ pub use comms::{
     PeerDirectorySource, PeerName, SendAndStreamError, SendError, SendReceipt, StreamError,
     StreamScope,
 };
+pub use checkpoint::SessionCheckpointer;
 pub use compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 pub use peer_meta::PeerMeta;

@@ -16,9 +16,43 @@ use meerkat_core::service::{
 };
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_store::SessionStore;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
+
+/// Shared gate between the checkpointer and archive.
+///
+/// The `Mutex` provides mutual exclusion so that `checkpoint()` cannot
+/// race with `archive()`: both acquire the lock before touching the store,
+/// and `archive()` sets `cancelled = true` under the lock before deleting.
+struct CheckpointerGate {
+    cancelled: Mutex<bool>,
+}
+
+/// Checkpointer that saves sessions to a [`SessionStore`].
+///
+/// Used by host-mode agents to persist the session after each interaction
+/// without going through `SessionService::start_turn()`.
+struct StoreCheckpointer {
+    store: Arc<dyn SessionStore>,
+    gate: Arc<CheckpointerGate>,
+}
+
+#[async_trait]
+impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
+    async fn checkpoint(&self, session: &Session) {
+        let guard = self.gate.cancelled.lock().await;
+        if *guard {
+            return;
+        }
+        if let Err(e) = self.store.save(session).await {
+            tracing::warn!("Host-mode checkpoint failed: {e}");
+        }
+        drop(guard);
+    }
+}
 
 /// Session service backed by persistent storage.
 ///
@@ -28,6 +62,11 @@ use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
 pub struct PersistentSessionService<B: SessionAgentBuilder> {
     inner: EphemeralSessionService<B>,
     store: Arc<dyn SessionStore>,
+    /// Gates for active host-mode checkpointers, keyed by session ID.
+    /// Archive acquires the gate's lock, sets cancelled, then deletes —
+    /// mutual exclusion prevents a concurrent checkpoint from resurrecting
+    /// the row.
+    checkpointer_gates: Mutex<HashMap<SessionId, Arc<CheckpointerGate>>>,
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
@@ -36,14 +75,44 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Self {
             inner: EphemeralSessionService::new(builder, max_sessions),
             store,
+            checkpointer_gates: Mutex::new(HashMap::new()),
         }
     }
 }
 
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
-    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+    async fn create_session(
+        &self,
+        mut req: CreateSessionRequest,
+    ) -> Result<RunResult, SessionError> {
+        // Inject a checkpointer so host-mode agents persist after each interaction.
+        // The gate is shared with archive() for mutual exclusion.
+        let gate = if req.host_mode {
+            let gate = Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            });
+            let checkpointer: Arc<dyn meerkat_core::checkpoint::SessionCheckpointer> =
+                Arc::new(StoreCheckpointer {
+                    store: Arc::clone(&self.store),
+                    gate: Arc::clone(&gate),
+                });
+            let build = req.build.get_or_insert_with(Default::default);
+            build.checkpointer = Some(checkpointer);
+            Some(gate)
+        } else {
+            None
+        };
+
         let result = self.inner.create_session(req).await?;
+
+        // Track the gate so archive() can cancel checkpoint writes.
+        if let Some(gate) = gate {
+            self.checkpointer_gates
+                .lock()
+                .await
+                .insert(result.session_id.clone(), gate);
+        }
 
         // Persist the full session snapshot (messages + metadata) after first turn.
         self.persist_full_session(&result.session_id).await?;
@@ -141,6 +210,19 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+        // Acquire the checkpointer gate (if any) and hold it across the
+        // delete. This prevents a concurrent checkpoint() from saving the
+        // session back after we delete it. Setting cancelled under the
+        // lock ensures all future checkpoints are no-ops.
+        let gate = self.checkpointer_gates.lock().await.remove(id);
+        let _gate_guard = if let Some(ref g) = gate {
+            let mut guard = g.cancelled.lock().await;
+            *guard = true;
+            Some(guard)
+        } else {
+            None
+        };
+
         let live_result = self.inner.archive(id).await;
 
         // Check whether the session exists in the persistent store before
@@ -157,6 +239,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                 .await
                 .map_err(|e| SessionError::Store(Box::new(e)))?;
         }
+
+        // Gate guard is dropped here — any in-flight checkpoint that was
+        // blocked on the lock will now see cancelled == true and bail out.
+        drop(_gate_guard);
 
         match (&live_result, in_store) {
             // At least one side had the session — success.
@@ -278,6 +364,70 @@ mod tests {
 
         // Verify it's gone
         assert!(store.load(&id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_store_checkpointer_saves_session() {
+        use meerkat_core::checkpoint::SessionCheckpointer;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let gate = Arc::new(super::CheckpointerGate {
+            cancelled: tokio::sync::Mutex::new(false),
+        });
+        let checkpointer = super::StoreCheckpointer {
+            store: Arc::clone(&store),
+            gate,
+        };
+
+        let mut session = Session::new();
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage {
+                content: "hello".to_string(),
+            },
+        ));
+
+        // Checkpoint should persist the session
+        checkpointer.checkpoint(&session).await;
+
+        let loaded = store.load(session.id()).await.unwrap();
+        assert!(loaded.is_some(), "session should be persisted after checkpoint");
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.id(), session.id());
+        assert_eq!(loaded.messages().len(), session.messages().len());
+    }
+
+    #[tokio::test]
+    async fn test_store_checkpointer_suppressed_after_cancellation() {
+        use meerkat_core::checkpoint::SessionCheckpointer;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let gate = Arc::new(super::CheckpointerGate {
+            cancelled: tokio::sync::Mutex::new(false),
+        });
+        let checkpointer = super::StoreCheckpointer {
+            store: Arc::clone(&store),
+            gate: Arc::clone(&gate),
+        };
+
+        let session = Session::new();
+
+        // First checkpoint should persist
+        checkpointer.checkpoint(&session).await;
+        assert!(store.load(session.id()).await.unwrap().is_some());
+
+        // Simulate archive: acquire gate, set cancelled, delete
+        {
+            let mut guard = gate.cancelled.lock().await;
+            *guard = true;
+            store.delete(session.id()).await.unwrap();
+        }
+
+        // Checkpoint after cancellation should be a no-op
+        checkpointer.checkpoint(&session).await;
+        assert!(
+            store.load(session.id()).await.unwrap().is_none(),
+            "cancelled checkpointer should not write session back"
+        );
     }
 
     #[tokio::test]

@@ -1,17 +1,17 @@
 ---
 title: "TypeScript SDK"
-description: "Getting started with the Meerkat TypeScript SDK: sessions, turns, events, and capabilities."
+description: "Getting started with the Meerkat TypeScript SDK: sessions, turns, streaming events, and capabilities."
 icon: "js"
 ---
 
-The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, stream events, and query capabilities from TypeScript or JavaScript. It communicates with a local `rkat-rpc` subprocess over JSON-RPC 2.0 and supports explicit realm scoping.
+The TypeScript SDK (`@rkat/sdk`) lets you create sessions, run agent turns, stream typed events, and query capabilities from TypeScript or JavaScript. It spawns a local `rkat-rpc` subprocess and communicates with it over JSON-RPC 2.0.
 
 ## Getting started
 
 <Steps>
   <Step title="Install the SDK">
     ```bash
-    npm install @meerkat/sdk
+    npm install @rkat/sdk
     ```
   </Step>
   <Step title="Install the RPC binary">
@@ -38,22 +38,19 @@ The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, s
   </Step>
   <Step title="Connect and run">
     ```typescript
-    import { MeerkatClient } from "@meerkat/sdk";
+    import { MeerkatClient } from "@rkat/sdk";
 
     const client = new MeerkatClient();
-    await client.connect({ realmId: "team-alpha" });
+    await client.connect();
 
-    const result = await client.createSession({
-      prompt: "What is the capital of Sweden?",
-    });
+    const session = await client.createSession("What is the capital of Sweden?");
+    console.log(session.text);
+    console.log(session.id);
 
+    const result = await session.turn("And what is its population?");
     console.log(result.text);
-    console.log(result.session_id);
 
-    const followUp = await client.startTurn(result.session_id, "And what is its population?");
-    console.log(followUp.text);
-
-    await client.archiveSession(result.session_id);
+    await session.archive();
     await client.close();
     ```
   </Step>
@@ -63,24 +60,39 @@ The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, s
 
 ## Method overview
 
+### MeerkatClient methods
+
 | Method | Description |
 |--------|-------------|
 | `connect(options?)` | Spawn `rkat-rpc`, handshake, fetch capabilities |
 | `close()` | Kill the subprocess |
-| `createSession(params)` | Create a session and run the first turn |
-| `startTurn(sessionId, prompt)` | Continue an existing session |
-| `interrupt(sessionId)` | Cancel an in-flight turn |
+| `createSession(prompt, options?)` | Create a session, run the first turn, return a `Session` |
+| `createSessionStreaming(prompt, options?)` | Create a session and stream typed events from the first turn |
 | `listSessions()` | List active sessions |
-| `readSession(sessionId)` | Read session state |
-| `archiveSession(sessionId)` | Remove a session |
-| `getCapabilities()` | Get runtime capabilities |
-| `hasCapability(id)` | Check if a capability is available |
-| `requireCapability(id)` | Guard a code path by capability |
+| `readSession(sessionId)` | Read raw session state |
 | `getConfig()` | Read runtime configuration |
 | `setConfig(config)` | Replace runtime configuration |
 | `patchConfig(patch)` | Merge-patch runtime configuration |
-| `send(sessionId, command)` | Send a comms command to a session |
-| `peers(sessionId)` | List peers visible to a session |
+
+### Capability methods
+
+| Method | Description |
+|--------|-------------|
+| `client.capabilities` | Read-only array of all `Capability` objects |
+| `client.hasCapability(id)` | Returns `true` if capability is `"Available"` |
+| `client.requireCapability(id)` | Throws `CapabilityUnavailableError` if unavailable |
+
+### Session methods
+
+| Method | Description |
+|--------|-------------|
+| `session.turn(prompt, options?)` | Run another turn (non-streaming), returns `RunResult` |
+| `session.stream(prompt, options?)` | Run another turn with streaming, returns `EventStream` |
+| `session.interrupt()` | Cancel the currently running turn |
+| `session.archive()` | Remove the session from the server |
+| `session.invokeSkill(skillRef, prompt)` | Invoke a skill in this session |
+| `session.send(command)` | Send a comms command scoped to this session |
+| `session.peers()` | List peers visible to this session's comms runtime |
 
 ---
 
@@ -92,122 +104,259 @@ The TypeScript SDK (`@meerkat/sdk`) lets you manage sessions, run agent turns, s
 new MeerkatClient(rkatPath?: string)
 ```
 
+Defaults to searching `$PATH` for `rkat-rpc`. If not found, automatically downloads the correct binary for the current platform and caches it in `~/.cache/meerkat/bin/rkat-rpc`. Pass an explicit path or set `MEERKAT_BIN_PATH` to override.
+
 ### connect()
 
 ```typescript
-async connect(options?: {
-  realmId?: string;
-  instanceId?: string;
-  realmBackend?: "jsonl" | "redb";
-}): Promise<this>
+async connect(options?: ConnectOptions): Promise<this>
 ```
 
 Spawns `rkat-rpc`, performs `initialize` handshake, checks contract version compatibility, and fetches capabilities. Returns `this` for chaining.
 
-If `realmId` is omitted, each SDK process gets an isolated default RPC realm. Reuse `realmId` to share sessions/config across surfaces.
-`realmBackend` is a creation hint only; backend selection is pinned per realm in `realm_manifest.json`.
+```typescript
+export interface ConnectOptions {
+  realmId?: string;
+  instanceId?: string;
+  realmBackend?: "jsonl" | "redb";
+  isolated?: boolean;
+  stateRoot?: string;
+  contextRoot?: string;
+  userConfigRoot?: string;
+}
+```
 
-The TypeScript SDK is RPC-backed. Mob capability is provided by the RPC host composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which exposes `mob_*` tools to session turns.
+`realmId` and `isolated` are mutually exclusive. If `realmId` is omitted and `isolated` is not set, sessions are stored in the default realm. Reuse `realmId` to share sessions and config across processes or surfaces.
 
-### createSession(params)
+### createSession()
 
 ```typescript
-async createSession(params: {
-  prompt: string;
+async createSession(
+  prompt: string,
+  options?: SessionOptions,
+): Promise<Session>
+```
+
+Creates a new session, runs the first turn with `prompt`, and returns a `Session` object. The `Session` holds the last `RunResult` and exposes convenience accessors for the most recent text, usage, and tool call counts.
+
+```typescript
+const session = await client.createSession("Summarise this project", {
+  model: "claude-sonnet-4-5",
+  systemPrompt: "You are a senior engineer.",
+  maxTokens: 4096,
+});
+
+console.log(session.text);
+console.log(session.usage.inputTokens);
+```
+
+### createSessionStreaming()
+
+```typescript
+createSessionStreaming(
+  prompt: string,
+  options?: SessionOptions,
+): EventStream
+```
+
+Creates a new session and returns an `EventStream` for the first turn. Iterate the stream to receive typed events as they arrive. The final `RunResult` is available on `stream.result` after iteration completes.
+
+```typescript
+const stream = client.createSessionStreaming("Explain async/await in TypeScript");
+
+for await (const event of stream) {
+  if (event.type === "text_delta") {
+    process.stdout.write(event.delta);
+  }
+}
+
+console.log("\nTokens used:", stream.result.usage.outputTokens);
+```
+
+### SessionOptions
+
+All fields are camelCase:
+
+```typescript
+interface SessionOptions {
   model?: string;
   provider?: string;
-  system_prompt?: string;
-  max_tokens?: number;
-  output_schema?: Record<string, unknown>;
-  structured_output_retries?: number;
-  enable_builtins?: boolean;
-  enable_shell?: boolean;
-  enable_subagents?: boolean;
-  enable_memory?: boolean;
-  host_mode?: boolean;
-  comms_name?: string;
-  provider_params?: Record<string, unknown>;
-}): Promise<WireRunResult>
+  systemPrompt?: string;
+  maxTokens?: number;
+  outputSchema?: Record<string, unknown>;
+  structuredOutputRetries?: number;
+  hooksOverride?: Record<string, unknown>;
+  enableBuiltins?: boolean;
+  enableShell?: boolean;
+  enableSubagents?: boolean;
+  enableMemory?: boolean;
+  hostMode?: boolean;
+  commsName?: string;
+  peerMeta?: Record<string, unknown>;
+  providerParams?: Record<string, unknown>;
+  preloadSkills?: string[];
+  skillRefs?: SkillRef[];
+  skillReferences?: string[];
+}
 ```
 
-### startTurn(sessionId, prompt)
+---
+
+## Session
+
+`createSession()` and `createSessionStreaming()` both produce a `Session` object that acts as the handle for all subsequent turns on the same conversation.
+
+### Identity
 
 ```typescript
-async startTurn(sessionId: string, prompt: string): Promise<WireRunResult>
+session.id    // stable UUID string
+session.ref   // optional human-readable reference (string | undefined)
 ```
 
-### interrupt(sessionId)
+### Last-result shortcuts
+
+These accessors always reflect the most recent completed turn:
 
 ```typescript
-async interrupt(sessionId: string): Promise<void>
+session.text            // assistant text from the last turn
+session.usage           // Usage from the last turn
+session.turns           // number of LLM turns in the last run
+session.toolCalls       // number of tool calls in the last run
+session.structuredOutput // structured output from the last run (unknown | undefined)
+session.lastResult      // the full RunResult object
 ```
 
-### Session management
+### turn()
 
 ```typescript
-const sessions = await client.listSessions();
-const state = await client.readSession(sessionId);
-await client.archiveSession(sessionId);
+async turn(
+  prompt: string,
+  options?: { skillRefs?: SkillRef[]; skillReferences?: string[] },
+): Promise<RunResult>
 ```
 
-### Config management
+Sends another turn to the session and returns the `RunResult`. Also updates the session's last-result shortcuts.
+
+```typescript
+const result = await session.turn("Now explain the second point in more detail");
+console.log(result.text);
+```
+
+### stream()
+
+```typescript
+stream(
+  prompt: string,
+  options?: { skillRefs?: SkillRef[]; skillReferences?: string[] },
+): EventStream
+```
+
+Sends another turn and returns an `EventStream`. Iterating it yields typed `AgentEvent` objects. The session's last-result shortcuts are updated when iteration completes.
+
+```typescript
+for await (const event of session.stream("Elaborate on point three")) {
+  if (event.type === "text_delta") {
+    process.stdout.write(event.delta);
+  }
+}
+// session.text is now updated
+```
+
+### interrupt()
+
+```typescript
+async interrupt(): Promise<void>
+```
+
+Sends `turn/interrupt` for this session. Has no effect if no turn is running.
+
+### archive()
+
+```typescript
+async archive(): Promise<void>
+```
+
+Removes this session from the server. The `Session` object should not be used after calling `archive()`.
+
+### invokeSkill()
+
+```typescript
+async invokeSkill(skillRef: SkillRef, prompt: string): Promise<RunResult>
+```
+
+Calls `requireCapability("skills")`, then runs a turn with the provided skill reference injected. `SkillRef` is either a `SkillKey` object or a legacy string:
+
+```typescript
+// Structured (preferred)
+const result = await session.invokeSkill(
+  { sourceUuid: "abc123", skillName: "code-review" },
+  "Review this function for safety issues",
+);
+
+// Legacy string (deprecated)
+const result = await session.invokeSkill("/abc123/code-review", "Review this function");
+```
+
+### send() and peers()
+
+```typescript
+async send(command: Record<string, unknown>): Promise<Record<string, unknown>>
+async peers(): Promise<Array<Record<string, unknown>>>
+```
+
+Scope comms operations to this session. Requires the `comms` capability.
+
+```typescript
+await session.send({ kind: "peer_message", to: "agent-b", body: "Hello!" });
+const peers = await session.peers();
+```
+
+---
+
+## Capabilities
+
+Capabilities are fetched automatically during `connect()`. Use them to guard code paths that depend on optional features.
+
+```typescript
+// Read all capabilities
+console.log(client.capabilities);
+// [{ id: "sessions", description: "...", status: "Available" }, ...]
+
+// Check a single capability
+if (client.hasCapability("comms")) {
+  await session.send({ kind: "peer_message", to: "agent-b", body: "Hi" });
+}
+
+// Assert and throw if unavailable
+client.requireCapability("skills");  // throws CapabilityUnavailableError if not available
+```
+
+<Accordion title="Known capability IDs">
+| ID | Description |
+|---|-------------|
+| `sessions` | Session lifecycle |
+| `streaming` | Real-time event streaming |
+| `structured_output` | JSON schema structured output |
+| `hooks` | Lifecycle hooks |
+| `builtins` | Built-in tools |
+| `shell` | Shell tool |
+| `comms` | Inter-agent communication |
+| `sub_agents` | Sub-agent tools |
+| `memory_store` | Semantic memory |
+| `session_store` | Session persistence |
+| `session_compaction` | Context compaction |
+| `skills` | Skill loading |
+</Accordion>
+
+---
+
+## Config management
 
 ```typescript
 const config = await client.getConfig();
-await client.setConfig({ ...config, max_tokens: 4096 });
-const updated = await client.patchConfig({ max_tokens: 8192 });
+await client.setConfig({ ...config, model: "claude-opus-4-6" });
+const updated = await client.patchConfig({ maxTokens: 8192 });
 ```
-
-### send(sessionId, command)
-
-```typescript
-async send(
-  sessionId: string,
-  command: Record<string, unknown>,
-): Promise<Record<string, unknown>>
-```
-
-Send a canonical comms command to a session.
-
-```typescript
-await client.send(sessionId, {
-  kind: "peer_message",
-  to: "agent-b",
-  body: "Hello from Agent A!",
-});
-```
-
-### peers(sessionId)
-
-```typescript
-async peers(
-  sessionId: string,
-): Promise<{ peers: Array<Record<string, unknown>> }>
-```
-
-List peers visible to a session's comms runtime.
-
-```typescript
-const { peers } = await client.peers(sessionId);
-```
-
----
-
-## Session convenience methods
-
-`createSession()` returns a `Session` instance with convenience wrappers:
-
-- `await session.invokeSkill(skillRef, prompt)` sends structured `skillRefs`.
-- `await session.send(command)` scopes `comms/send` to the active session.
-- `await session.peers()` returns `peers` directly as an array.
-
----
-
-## Parsing and typing notes
-
-- Capability statuses may be encoded as externally-tagged enum objects by Rust (for example `{ DisabledByPolicy: {...} }`). The SDK normalizes these to the status key string.
-- Event parsing intentionally defaults missing fields to empty/zero values so partial streaming payloads can still be surfaced as typed events.
-- `RunResult.skillDiagnostics` is typed as `SkillRuntimeDiagnostics` (with `sourceHealth` and `quarantined`) when diagnostics are present.
 
 ---
 
@@ -215,34 +364,111 @@ const { peers } = await client.peers(sessionId);
 
 <Accordion title="Structured output">
 ```typescript
-const result = await client.createSession({
-  prompt: "List three European capitals",
-  output_schema: {
+import { MeerkatClient } from "@rkat/sdk";
+
+const client = new MeerkatClient();
+await client.connect();
+
+const session = await client.createSession("List three European capitals", {
+  outputSchema: {
     type: "object",
     properties: {
       capitals: { type: "array", items: { type: "string" } },
     },
     required: ["capitals"],
   },
-  structured_output_retries: 3,
+  structuredOutputRetries: 3,
 });
 
-console.log(result.structured_output);
+console.log(session.structuredOutput);
 // { capitals: ["Paris", "Berlin", "Madrid"] }
+
+await client.close();
 ```
 </Accordion>
 
 <Accordion title="Multi-turn conversation">
 ```typescript
-const session = await client.createSession({
-  prompt: "My name is Alice.",
+import { MeerkatClient } from "@rkat/sdk";
+
+const client = new MeerkatClient();
+await client.connect();
+
+const session = await client.createSession("My name is Alice.", {
   model: "claude-sonnet-4-5",
 });
 
-const turn2 = await client.startTurn(session.session_id, "What is my name?");
-console.log(turn2.text);  // Should mention "Alice"
+const result = await session.turn("What is my name?");
+console.log(result.text);  // Mentions "Alice"
 
-await client.archiveSession(session.session_id);
+await session.archive();
+await client.close();
+```
+</Accordion>
+
+<Accordion title="Streaming a turn">
+```typescript
+import { MeerkatClient } from "@rkat/sdk";
+
+const client = new MeerkatClient();
+await client.connect();
+
+const session = await client.createSession("You are a helpful assistant.", {
+  systemPrompt: "Be concise.",
+});
+
+for await (const event of session.stream("Explain Rust lifetimes in two sentences")) {
+  switch (event.type) {
+    case "text_delta":
+      process.stdout.write(event.delta);
+      break;
+    case "turn_completed":
+      console.log(`\nStop reason: ${event.stopReason}`);
+      console.log(`Tokens: ${event.usage.inputTokens} in / ${event.usage.outputTokens} out`);
+      break;
+  }
+}
+
+await client.close();
+```
+</Accordion>
+
+<Accordion title="Invoking a skill">
+```typescript
+import { MeerkatClient } from "@rkat/sdk";
+
+const client = new MeerkatClient();
+await client.connect();
+
+client.requireCapability("skills");
+
+const session = await client.createSession("Let's review some code.");
+
+const result = await session.invokeSkill(
+  { sourceUuid: "abc123", skillName: "code-review" },
+  "Review this function for correctness and safety",
+);
+
+console.log(result.text);
+
+await client.close();
+```
+</Accordion>
+
+<Accordion title="Using collectText() for simple streaming">
+```typescript
+import { MeerkatClient } from "@rkat/sdk";
+
+const client = new MeerkatClient();
+await client.connect();
+
+const stream = client.createSessionStreaming("Write a haiku about Rust");
+const [fullText, result] = await stream.collectText();
+
+console.log(fullText);
+console.log("Input tokens:", result.usage.inputTokens);
+
+await client.close();
 ```
 </Accordion>
 
@@ -250,6 +476,6 @@ await client.archiveSession(session.session_id);
 
 ## See also
 
-- [TypeScript SDK reference](/sdks/typescript/reference) - wire types, capabilities, skills, errors
+- [TypeScript SDK reference](/sdks/typescript/reference) - types, events, errors, and version compatibility
 - [Rust SDK overview](/rust/overview) - Rust library API
 - [RPC reference](/api/rpc) - JSON-RPC protocol specification

@@ -12,7 +12,7 @@ Meerkat treats the LLM execution loop the way a database engine treats storage �
 
 ### Trait contracts own the architecture
 
-`meerkat-core` defines six trait contracts (`AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`) and contains zero I/O dependencies. Everything else — providers, storage backends, tool registries — lives in separate crates that implement these traits.
+`meerkat-core` defines nine trait contracts (`AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`, `HookEngine`, `SkillEngine`, `SkillSource`) and contains zero I/O dependencies. Everything else — providers, storage backends, tool registries — lives in separate crates that implement these traits.
 
 This is a hard constraint, not an aspiration. The core agent loop is testable in-memory without mocks, embeddable in any Rust binary, and provably independent of any specific LLM provider or storage backend.
 

@@ -372,7 +372,7 @@ Remove a session from the runtime.
 ```
 
 ```json Response
-{"jsonrpc":"2.0","id":5,"result":{}}
+{"jsonrpc":"2.0","id":5,"result":{"archived":true}}
 ```
 </CodeGroup>
 
@@ -441,7 +441,7 @@ Cancel an in-flight turn. No-op if the session is idle.
 ```
 
 ```json Response
-{"jsonrpc":"2.0","id":7,"result":{}}
+{"jsonrpc":"2.0","id":7,"result":{"interrupted":true}}
 ```
 </CodeGroup>
 
@@ -537,18 +537,28 @@ Open a scoped event stream for a session. Events from this session will be emitt
   "id": 10,
   "method": "comms/stream_open",
   "params": {
-    "session_id": "01936f8a-..."
+    "session_id": "01936f8a-...",
+    "scope": "session",
+    "interaction_id": null
   }
 }
 ```
 
 ```json Response
-{"jsonrpc":"2.0","id":10,"result":{}}
+{"jsonrpc":"2.0","id":10,"result":{"stream_id":"550e8400-e29b-41d4-a716-446655440000","opened":true}}
 ```
 </CodeGroup>
 
 <ParamField body="session_id" type="string" required>
   Session ID to stream events for.
+</ParamField>
+
+<ParamField body="scope" type="string" required>
+  Stream scope: `"session"` (all events for the session) or `"interaction"` (events for a specific interaction).
+</ParamField>
+
+<ParamField body="interaction_id" type="string | null" default="null">
+  Interaction UUID (required when `scope` is `"interaction"`).
 </ParamField>
 
 ### comms/stream_close
@@ -562,18 +572,18 @@ Close a previously opened scoped event stream. Requires the `comms` feature.
   "id": 11,
   "method": "comms/stream_close",
   "params": {
-    "session_id": "01936f8a-..."
+    "stream_id": "550e8400-e29b-41d4-a716-446655440000"
   }
 }
 ```
 
 ```json Response
-{"jsonrpc":"2.0","id":11,"result":{}}
+{"jsonrpc":"2.0","id":11,"result":{"stream_id":"550e8400-e29b-41d4-a716-446655440000","closed":true}}
 ```
 </CodeGroup>
 
-<ParamField body="session_id" type="string" required>
-  Session ID to stop streaming events for.
+<ParamField body="stream_id" type="string" required>
+  Stream ID returned by `comms/stream_open`.
 </ParamField>
 
 ## Capabilities
@@ -822,16 +832,19 @@ When a scoped event stream is open (via `comms/stream_open`), the server emits `
   "jsonrpc": "2.0",
   "method": "comms/stream_event",
   "params": {
-    "session_id": "01936f8a-...",
+    "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+    "scope": {"type": "session", "session_id": "01936f8a-..."},
+    "sequence": 1,
     "event": {
       "type": "text_delta",
       "delta": "Hello"
-    }
+    },
+    "contract_version": "0.3.4"
   }
 }
 ```
 
-These events are scoped to the session and only emitted while the stream is open.
+These events are scoped to the stream and only emitted while the stream is open.
 
 ## Error codes
 

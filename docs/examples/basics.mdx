@@ -164,7 +164,7 @@ The agent emits `AgentEvent` values during execution. When using the SDK directl
 Events are delivered as `session/event` notifications:
 
 ```json
-{"jsonrpc":"2.0","method":"session/event","params":{"session_id":"...","event":{"type":"text_delta","content":"Hello"}}}
+{"jsonrpc":"2.0","method":"session/event","params":{"session_id":"...","event":{"type":"text_delta","delta":"Hello"}}}
 {"jsonrpc":"2.0","method":"session/event","params":{"session_id":"...","event":{"type":"tool_use","name":"add","input":{"a":2,"b":3}}}}
 {"jsonrpc":"2.0","method":"session/event","params":{"session_id":"...","event":{"type":"turn_end","usage":{"input_tokens":50,"output_tokens":20}}}}
 ```

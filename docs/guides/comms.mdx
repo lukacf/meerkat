@@ -243,7 +243,7 @@ Standard strings are parsed into their enum variants; unknown strings become `Cu
 
 ## LLM-facing tools
 
-Four tools are exposed to the LLM when comms is enabled.
+Two tools are exposed to the LLM when comms is enabled.
 
 <Accordion title="send (kind=peer_message)">
 Send a fire-and-forget text message to a peer.
@@ -338,8 +338,9 @@ the current agent.
 ### Tool availability
 
 Comms tools are conditionally available based on peer/trust configuration in the
-surface. `CommsToolSurface::peer_availability()` checks whether either
-`TrustedPeers` has entries or `InprocRegistry` contains a peer other than self.
+surface. `CommsToolSurface::peer_availability()` checks whether `TrustedPeers`
+has any configured peers (`TrustedPeers::has_peers()`). Tools are hidden when no
+peers are configured.
 
 ## Inbox
 

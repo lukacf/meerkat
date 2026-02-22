@@ -352,8 +352,7 @@ curl -X POST http://localhost:8080/sessions/sid_abc/event \
 
 ```python
 # Or via Python SDK
-await client.send(
-    session_id=session_id,
+await session.send(
     payload={"alert": "deployment failed", "env": "prod"},
     source="github-actions",
 )

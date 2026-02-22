@@ -1,219 +1,413 @@
 ---
 title: "Python SDK reference"
-description: "Wire types, capability checking, skill helpers, event streaming, and error handling for the Python SDK."
+description: "Types, streaming events, capability checking, skill references, and error handling for the Python SDK."
 icon: "book"
 ---
 
-## Wire types
+## RunResult
 
-<Note>
-`get_config()` / `patch_config()` operate on the RPC config envelope (`config`, `generation`, `realm_id`, `instance_id`, `backend`, `resolved_paths`). `set_config()` currently forwards the payload you provide.
-</Note>
+`RunResult` is returned by `client.create_session()`, `session.turn()`, and `session.invoke_skill()`. It is also available as `events.result` after consuming an `EventStream`.
 
-<Accordion title="WireRunResult">
 ```python
-from meerkat import WireRunResult
+from meerkat import RunResult
 ```
 
-Returned by `create_session()` and `start_turn()`.
-
 <ResponseField name="session_id" type="str">Session UUID.</ResponseField>
-<ResponseField name="text" type="str">Agent response text.</ResponseField>
-<ResponseField name="turns" type="int">Number of turns completed.</ResponseField>
+<ResponseField name="text" type="str">Assistant response text.</ResponseField>
+<ResponseField name="turns" type="int">Number of LLM turns completed.</ResponseField>
 <ResponseField name="tool_calls" type="int">Number of tool calls made.</ResponseField>
-<ResponseField name="usage" type="Optional[WireUsage]">Token usage breakdown.</ResponseField>
-<ResponseField name="structured_output" type="Optional[Any]">Parsed structured output.</ResponseField>
-<ResponseField name="schema_warnings" type="Optional[list]">Schema validation warnings.</ResponseField>
-</Accordion>
+<ResponseField name="usage" type="Usage">Token usage breakdown.</ResponseField>
+<ResponseField name="session_ref" type="str | None">Optional human-readable session reference.</ResponseField>
+<ResponseField name="structured_output" type="Any | None">Parsed structured output, if an `output_schema` was provided.</ResponseField>
+<ResponseField name="schema_warnings" type="list[SchemaWarning] | None">Schema validation warnings emitted by the provider.</ResponseField>
+<ResponseField name="skill_diagnostics" type="SkillRuntimeDiagnostics | None">Runtime diagnostics from the skill subsystem, when present.</ResponseField>
 
-<Accordion title="WireUsage">
+---
+
+## Usage
+
+`Usage` is a frozen dataclass describing token consumption for a single LLM turn. It appears on `RunResult.usage` and on the `TurnCompleted` and `RunCompleted` events.
+
 ```python
-from meerkat import WireUsage
+from meerkat import Usage
 ```
 
 <ResponseField name="input_tokens" type="int">Input tokens consumed.</ResponseField>
 <ResponseField name="output_tokens" type="int">Output tokens generated.</ResponseField>
-<ResponseField name="total_tokens" type="int">Total tokens.</ResponseField>
-<ResponseField name="cache_creation_tokens" type="Optional[int]">Cache creation tokens.</ResponseField>
-<ResponseField name="cache_read_tokens" type="Optional[int]">Cache read tokens.</ResponseField>
-</Accordion>
-
-<Accordion title="WireEvent (deprecated)">
-```python
-from meerkat import WireEvent
-```
-
-<ResponseField name="session_id" type="str">Session this event belongs to.</ResponseField>
-<ResponseField name="event" type="Optional[dict]">The agent event payload.</ResponseField>
-
-<Warning>
-`WireEvent` is deprecated. The streaming API (`StreamingTurn`) yields raw event dicts directly. This type is retained for backward compatibility only.
-</Warning>
-</Accordion>
-
-<Accordion title="CapabilitiesResponse">
-```python
-from meerkat import CapabilitiesResponse, CapabilityEntry
-```
-
-<ResponseField name="contract_version" type="str">Server contract version.</ResponseField>
-<ResponseField name="capabilities" type="list[CapabilityEntry]">List of capability entries.</ResponseField>
-
-Each `CapabilityEntry` has `id`, `description`, and `status` fields.
-</Accordion>
+<ResponseField name="cache_creation_tokens" type="int | None">Tokens used to write to the prompt cache (provider-specific).</ResponseField>
+<ResponseField name="cache_read_tokens" type="int | None">Tokens read from the prompt cache (provider-specific).</ResponseField>
 
 ---
 
-## Domain run result types
+## SessionInfo
 
-The public SDK surface uses Python dataclasses (`RunResult`) instead of wire-prefixed types.
+Returned by `client.list_sessions()`.
 
-<Accordion title="SkillRuntimeDiagnostics">
 ```python
-@dataclass(frozen=True, slots=True)
-class SkillRuntimeDiagnostics:
-    source_health: SourceHealthSnapshot
-    quarantined: list[SkillQuarantineDiagnostic]
+from meerkat import SessionInfo
 ```
-</Accordion>
+
+<ResponseField name="session_id" type="str">Session UUID.</ResponseField>
+<ResponseField name="session_ref" type="str | None">Optional human-readable reference.</ResponseField>
+<ResponseField name="created_at" type="str">ISO 8601 creation timestamp.</ResponseField>
+<ResponseField name="updated_at" type="str">ISO 8601 last-updated timestamp.</ResponseField>
+<ResponseField name="message_count" type="int">Number of messages in the session.</ResponseField>
+<ResponseField name="total_tokens" type="int">Cumulative tokens consumed.</ResponseField>
+<ResponseField name="is_active" type="bool">Whether a turn is currently in progress.</ResponseField>
+
+---
+
+## Capability
+
+Returned as elements of `client.capabilities`.
+
+```python
+from meerkat import Capability
+```
+
+<ResponseField name="id" type="str">Capability identifier (e.g. `"shell"`, `"comms"`, `"skills"`).</ResponseField>
+<ResponseField name="description" type="str">Human-readable description.</ResponseField>
+<ResponseField name="status" type="str">Availability status string. Normalised from Rust-tagged enums to a plain string by the SDK.</ResponseField>
+<ResponseField name="available" type="bool">Convenience property — `True` when `status == "Available"`.</ResponseField>
+
+### Checking capabilities
+
+Capability inspection is done directly on the client — there is no separate checker class.
+
+```python
+# Property: list[Capability] populated during connect()
+for cap in client.capabilities:
+    if cap.available:
+        print(f"{cap.id}: {cap.description}")
+
+# Boolean check
+if client.has_capability("shell"):
+    ...
+
+# Guarded code path — raises CapabilityUnavailableError if not available
+client.require_capability("comms")
+```
+
+---
+
+## Skill types
+
+### SkillKey
+
+```python
+from meerkat import SkillKey
+
+key = SkillKey(source_uuid="abc123", skill_name="code-review")
+```
+
+<ResponseField name="source_uuid" type="str">UUID of the skill source.</ResponseField>
+<ResponseField name="skill_name" type="str">Name of the skill within the source.</ResponseField>
+
+### SkillRef
+
+```python
+SkillRef = Union[SkillKey, str]
+```
+
+Wherever a skill reference is accepted (e.g. `session.invoke_skill()`, `turn(skill_refs=...)`) you can pass either a `SkillKey` or a legacy string of the form `"<source_uuid>/<skill_name>"`. Legacy strings emit a `DeprecationWarning`.
+
+---
+
+## Diagnostic types
+
+### SchemaWarning
+
+```python
+from meerkat import SchemaWarning
+```
+
+<ResponseField name="provider" type="str">Provider that emitted the warning.</ResponseField>
+<ResponseField name="path" type="str">JSON path to the offending schema location.</ResponseField>
+<ResponseField name="message" type="str">Warning message.</ResponseField>
+
+### SkillRuntimeDiagnostics
+
+```python
+from meerkat import SkillRuntimeDiagnostics, SourceHealthSnapshot, SkillQuarantineDiagnostic
+```
+
+Present on `RunResult.skill_diagnostics` when the skill subsystem emits diagnostics.
+
+<ResponseField name="source_health" type="SourceHealthSnapshot">Health snapshot for skill source resolution.</ResponseField>
+<ResponseField name="quarantined" type="list[SkillQuarantineDiagnostic]">Skills that have been quarantined due to repeated failures.</ResponseField>
+
+`SourceHealthSnapshot` fields: `state`, `invalid_ratio`, `invalid_count`, `total_count`, `failure_streak`, `handshake_failed`.
+
+`SkillQuarantineDiagnostic` fields: `source_uuid`, `skill_id`, `location`, `error_code`, `error_class`, `message`, `first_seen_unix_secs`, `last_seen_unix_secs`.
+
+---
+
+## EventStream
+
+`EventStream` is an async context manager returned by `session.stream()` and `client.create_session_streaming()`. Iterating it yields typed `Event` subclass instances.
+
+```python
+from meerkat import EventStream
+```
 
 <Note>
-`RunResult.skill_diagnostics` is `SkillRuntimeDiagnostics | None` on the Python domain type.
+`session.stream()` and `client.create_session_streaming()` are synchronous — they return an `EventStream` directly. The JSON-RPC request is sent when entering the `async with` block.
 </Note>
 
----
+### Properties
 
-## CapabilityChecker
+<ResponseField name="session_id" type="str">Session UUID. For `create_session_streaming`, this is set after the response arrives (once `__aenter__` has flushed the request).</ResponseField>
+<ResponseField name="result" type="RunResult">The final result. Available only after the stream has been fully consumed. Raises `MeerkatError("STREAM_NOT_CONSUMED")` if accessed beforehand.</ResponseField>
 
-Standalone capability-checking helper:
-
-```python
-from meerkat import CapabilityChecker
-
-caps = await client.get_capabilities()
-checker = CapabilityChecker(caps)
-
-if checker.has("shell"):
-    print("Shell tool is available")
-
-checker.require("comms")  # raises CapabilityUnavailableError if unavailable
-
-print(checker.available)  # e.g. ["sessions", "streaming", "builtins"]
-```
-
-| Method | Description |
-|--------|-------------|
-| `has(capability_id)` | Returns `True` if status is `"Available"` |
-| `require(capability_id)` | Raises `CapabilityUnavailableError` if not available |
-| `available` | List of all available capability IDs |
-
----
-
-## SkillHelper
-
-Helpers for invoking Meerkat skills:
+### Usage patterns
 
 ```python
-from meerkat import SkillHelper
-
-helper = SkillHelper(client)
-
-if helper.is_available():
-    result = await helper.invoke(session_id, "/shell-patterns", "How do I run a background job?")
-    print(result.text)
-
-    result = await helper.invoke_new_session("/code-review", "Review this function", model="claude-sonnet-4-5")
+# Pattern matching on typed events
+async with session.stream("Explain monads") as events:
+    async for event in events:
+        match event:
+            case TextDelta(delta=chunk):
+                print(chunk, end="", flush=True)
+            case ToolCallRequested(name=name, args=args):
+                print(f"\nCalling tool: {name} with args: {args}")
+            case TurnCompleted(usage=u):
+                print(f"\nTokens: {u.input_tokens} in / {u.output_tokens} out")
+            case _:
+                pass
+    result = events.result
 ```
 
-| Method | Description |
-|--------|-------------|
-| `is_available()` | Returns `True` if `"skills"` capability is available |
-| `require_skills()` | Raises error if skills not available |
-| `invoke(session_id, skill_ref, prompt)` | Invoke skill in existing session |
-| `invoke_new_session(skill_ref, prompt, model?)` | Create session and invoke skill |
+```python
+# Consume silently, get RunResult
+result = await session.stream("prompt").collect()
+
+# Accumulate text, get (full_text, RunResult)
+text, result = await session.stream("prompt").collect_text()
+```
 
 ---
 
-## Streaming API
+## Typed events
 
-`StreamingTurn` provides real-time event streaming during agent execution. Events are yielded as raw dicts matching the Rust `AgentEvent` serde-tagged enum (e.g. `{"type": "text_delta", "delta": "..."}`).
-
-### create_session_streaming
+All events are frozen dataclasses. Import them from the top-level `meerkat` package.
 
 ```python
-async with client.create_session_streaming("Hello!") as stream:
-    async for event in stream:
-        if event["type"] == "text_delta":
-            print(event["delta"], end="", flush=True)
-    result = stream.result  # WireRunResult
-```
-
-Accepts all the same parameters as `create_session()` plus `preload_skills` and `skill_references`.
-
-### start_turn_streaming
-
-```python
-async with client.start_turn_streaming(session_id, "Follow up") as stream:
-    async for event in stream:
-        print(event)
-    result = stream.result
-```
-
-### Convenience methods
-
-```python
-# Consume all events, return result
-async with client.create_session_streaming("Hello!") as stream:
-    result = await stream.collect()
-
-# Accumulate text deltas
-async with client.create_session_streaming("Hello!") as stream:
-    full_text, result = await stream.collect_text()
-```
-
-### Event types
-
-Events have a `type` field discriminating the variant:
-
-| Type | Description |
-|------|-------------|
-| `run_started` | Agent run began |
-| `turn_started` | New LLM turn |
-| `text_delta` | Incremental text chunk (`delta` field) |
-| `text_complete` | Full text available |
-| `tool_call_requested` | Agent wants to call a tool |
-| `tool_result_received` | Tool returned a result |
-| `turn_completed` | LLM turn finished |
-| `run_completed` | Agent run finished |
-
-<Note>
-The streaming methods are synchronous (not `async def`) — they return a `StreamingTurn` directly. The request is sent when entering the `async with` block.
-</Note>
-
-### Skills parameters
-
-Both `create_session()` and `start_turn()` accept skill-related parameters:
-
-```python
-# Preload skills into the system prompt at session creation
-result = await client.create_session(
-    "Hello!",
-    preload_skills=["extraction/email", "formatting/markdown"],
-)
-
-# Inject skills for a specific turn
-result = await client.start_turn(
-    session_id,
-    "Extract emails from this text",
-    skill_references=["extraction/email"],
+from meerkat import (
+    Event,
+    RunStarted, RunCompleted, RunFailed,
+    TurnStarted, TurnCompleted,
+    TextDelta, TextComplete,
+    ToolCallRequested, ToolResultReceived,
+    ToolExecutionStarted, ToolExecutionCompleted, ToolExecutionTimedOut,
+    CompactionStarted, CompactionCompleted, CompactionFailed,
+    BudgetWarning,
+    Retrying,
+    HookStarted, HookCompleted, HookFailed, HookDenied,
+    HookRewriteApplied, HookPatchPublished,
+    SkillsResolved, SkillResolutionFailed,
+    InteractionComplete, InteractionFailed,
+    StreamTruncated,
+    UnknownEvent,
 )
 ```
+
+### Session lifecycle
+
+<Accordion title="RunStarted">
+Agent run has started.
+
+<ResponseField name="session_id" type="str">Session UUID.</ResponseField>
+<ResponseField name="prompt" type="str">The prompt that started this run.</ResponseField>
+</Accordion>
+
+<Accordion title="RunCompleted">
+Agent run completed successfully.
+
+<ResponseField name="session_id" type="str">Session UUID.</ResponseField>
+<ResponseField name="result" type="str">Final result text.</ResponseField>
+<ResponseField name="usage" type="Usage">Token usage for this run.</ResponseField>
+</Accordion>
+
+<Accordion title="RunFailed">
+Agent run failed.
+
+<ResponseField name="session_id" type="str">Session UUID.</ResponseField>
+<ResponseField name="error" type="str">Error description.</ResponseField>
+</Accordion>
+
+### LLM turn events
+
+<Accordion title="TurnStarted">
+A new LLM turn has begun.
+
+<ResponseField name="turn_number" type="int">1-based turn index within the current run.</ResponseField>
+</Accordion>
+
+<Accordion title="TextDelta">
+An incremental text chunk streamed from the LLM. Handle these to display output in real time.
+
+<ResponseField name="delta" type="str">The text chunk.</ResponseField>
+</Accordion>
+
+<Accordion title="TextComplete">
+Full assistant text for the current turn, emitted after streaming finishes.
+
+<ResponseField name="content" type="str">The complete text.</ResponseField>
+</Accordion>
+
+<Accordion title="ToolCallRequested">
+The LLM wants to invoke a tool.
+
+<ResponseField name="id" type="str">Tool call identifier.</ResponseField>
+<ResponseField name="name" type="str">Tool name.</ResponseField>
+<ResponseField name="args" type="Any">Parsed tool arguments.</ResponseField>
+</Accordion>
+
+<Accordion title="ToolResultReceived">
+A tool result was fed back to the LLM.
+
+<ResponseField name="id" type="str">Tool call identifier.</ResponseField>
+<ResponseField name="name" type="str">Tool name.</ResponseField>
+<ResponseField name="is_error" type="bool">`True` if the tool returned an error result.</ResponseField>
+</Accordion>
+
+<Accordion title="TurnCompleted">
+An LLM turn finished.
+
+<ResponseField name="stop_reason" type="str">The stop reason reported by the LLM provider (e.g. `"end_turn"`, `"tool_use"`).</ResponseField>
+<ResponseField name="usage" type="Usage">Token usage for this turn.</ResponseField>
+</Accordion>
+
+### Tool execution events
+
+<Accordion title="ToolExecutionStarted">
+<ResponseField name="id" type="str">Tool call identifier.</ResponseField>
+<ResponseField name="name" type="str">Tool name.</ResponseField>
+</Accordion>
+
+<Accordion title="ToolExecutionCompleted">
+<ResponseField name="id" type="str">Tool call identifier.</ResponseField>
+<ResponseField name="name" type="str">Tool name.</ResponseField>
+<ResponseField name="result" type="str">Tool output (truncated for large results).</ResponseField>
+<ResponseField name="is_error" type="bool">`True` if the tool execution resulted in an error.</ResponseField>
+<ResponseField name="duration_ms" type="int">Execution duration in milliseconds.</ResponseField>
+</Accordion>
+
+<Accordion title="ToolExecutionTimedOut">
+<ResponseField name="id" type="str">Tool call identifier.</ResponseField>
+<ResponseField name="name" type="str">Tool name.</ResponseField>
+<ResponseField name="timeout_ms" type="int">The configured timeout threshold in milliseconds.</ResponseField>
+</Accordion>
+
+### Compaction events
+
+<Accordion title="CompactionStarted">
+Context compaction has begun to free up context window space.
+
+<ResponseField name="input_tokens" type="int">Token count before compaction.</ResponseField>
+<ResponseField name="estimated_history_tokens" type="int">Estimated history tokens subject to compaction.</ResponseField>
+<ResponseField name="message_count" type="int">Number of messages before compaction.</ResponseField>
+</Accordion>
+
+<Accordion title="CompactionCompleted">
+<ResponseField name="summary_tokens" type="int">Tokens in the compacted summary.</ResponseField>
+<ResponseField name="messages_before" type="int">Message count before compaction.</ResponseField>
+<ResponseField name="messages_after" type="int">Message count after compaction.</ResponseField>
+</Accordion>
+
+<Accordion title="CompactionFailed">
+<ResponseField name="error" type="str">Failure description.</ResponseField>
+</Accordion>
+
+### Budget and retry events
+
+<Accordion title="BudgetWarning">
+A budget threshold has been crossed.
+
+<ResponseField name="budget_type" type="str">Budget category (e.g. `"tokens"`, `"turns"`).</ResponseField>
+<ResponseField name="used" type="int">Current usage.</ResponseField>
+<ResponseField name="limit" type="int">Configured limit.</ResponseField>
+<ResponseField name="percent" type="float">Usage as a percentage of the limit.</ResponseField>
+</Accordion>
+
+<Accordion title="Retrying">
+An LLM request is being retried after a transient failure.
+
+<ResponseField name="attempt" type="int">Current attempt number (1-based).</ResponseField>
+<ResponseField name="max_attempts" type="int">Maximum configured attempts.</ResponseField>
+<ResponseField name="error" type="str">The error that triggered the retry.</ResponseField>
+<ResponseField name="delay_ms" type="int">Backoff delay before this attempt in milliseconds.</ResponseField>
+</Accordion>
+
+### Hook events
+
+<Accordion title="HookStarted / HookCompleted / HookFailed">
+Lifecycle events for hook invocations.
+
+<ResponseField name="hook_id" type="str">Hook identifier.</ResponseField>
+<ResponseField name="point" type="str">Hook point (e.g. `"pre_turn"`, `"post_turn"`).</ResponseField>
+<ResponseField name="duration_ms" type="int">`HookCompleted` only — execution duration.</ResponseField>
+<ResponseField name="error" type="str">`HookFailed` only — failure description.</ResponseField>
+</Accordion>
+
+<Accordion title="HookDenied">
+A hook denied the current operation.
+
+<ResponseField name="hook_id" type="str">Hook identifier.</ResponseField>
+<ResponseField name="point" type="str">Hook point.</ResponseField>
+<ResponseField name="reason_code" type="str">Machine-readable denial reason.</ResponseField>
+<ResponseField name="message" type="str">Human-readable denial message.</ResponseField>
+<ResponseField name="payload" type="Any">Additional context from the hook.</ResponseField>
+</Accordion>
+
+<Accordion title="HookRewriteApplied / HookPatchPublished">
+Hook mutation events.
+
+<ResponseField name="hook_id" type="str">Hook identifier.</ResponseField>
+<ResponseField name="point" type="str">Hook point.</ResponseField>
+<ResponseField name="patch" type="dict">Applied patch (`HookRewriteApplied`) or published envelope (`HookPatchPublished`).</ResponseField>
+</Accordion>
+
+### Skill events
+
+<Accordion title="SkillsResolved">
+Skills were resolved and injected for this turn.
+
+<ResponseField name="skills" type="list[str]">List of resolved skill identifiers.</ResponseField>
+<ResponseField name="injection_bytes" type="int">Bytes of skill content injected into the context.</ResponseField>
+</Accordion>
+
+<Accordion title="SkillResolutionFailed">
+A skill reference could not be resolved.
+
+<ResponseField name="reference" type="str">The skill reference that failed.</ResponseField>
+<ResponseField name="error" type="str">Failure description.</ResponseField>
+</Accordion>
+
+### Comms events
+
+<Accordion title="InteractionComplete / InteractionFailed">
+Comms interaction lifecycle events.
+
+<ResponseField name="interaction_id" type="str">Interaction identifier.</ResponseField>
+<ResponseField name="result" type="str">`InteractionComplete` only — interaction result.</ResponseField>
+<ResponseField name="error" type="str">`InteractionFailed` only — failure description.</ResponseField>
+</Accordion>
+
+### Forward compatibility
+
+<Accordion title="UnknownEvent">
+Emitted when the server sends an event type not recognised by this SDK version. Inspect `type` and `data` to handle it manually.
+
+<ResponseField name="type" type="str">The wire discriminator string.</ResponseField>
+<ResponseField name="data" type="dict">The raw event payload.</ResponseField>
+</Accordion>
 
 ---
 
 ## Error handling
 
-All errors inherit from `MeerkatError`:
+All errors inherit from `MeerkatError`.
 
 ```python
 from meerkat import MeerkatError, CapabilityUnavailableError, SessionNotFoundError, SkillNotFoundError
@@ -230,11 +424,14 @@ from meerkat import MeerkatError, CapabilityUnavailableError, SessionNotFoundErr
 
 | Code | Description |
 |------|-------------|
-| `BINARY_NOT_FOUND` | `rkat-rpc` binary not found on PATH |
+| `BINARY_NOT_FOUND` | `rkat-rpc` binary not found on PATH and auto-download failed |
+| `BINARY_DOWNLOAD_FAILED` | Automatic binary download failed |
 | `NOT_CONNECTED` | Operation attempted before `connect()` |
 | `CONNECTION_CLOSED` | `rkat-rpc` process closed unexpectedly |
-| `VERSION_MISMATCH` | Server contract version incompatible |
-| `CAPABILITY_UNAVAILABLE` | Capability check failed |
+| `VERSION_MISMATCH` | Server contract version incompatible with SDK |
+| `CAPABILITY_UNAVAILABLE` | Capability check failed via `require_capability()` |
+| `STREAM_NOT_CONSUMED` | `EventStream.result` accessed before the stream was iterated |
+| `INVALID_ARGS` | Mutually exclusive options provided (e.g. `realm_id` + `isolated`) |
 
 ### Server-side error codes
 
@@ -251,11 +448,22 @@ from meerkat import MeerkatError, CapabilityUnavailableError, SessionNotFoundErr
 ### Example
 
 ```python
-try:
-    result = await client.start_turn("nonexistent-session-id", "hello")
-except MeerkatError as e:
-    print(f"Error code: {e.code}")
-    print(f"Message: {e.message}")
+from meerkat import MeerkatClient, MeerkatError, CapabilityUnavailableError
+
+async def main():
+    async with MeerkatClient() as client:
+        session = await client.create_session("Hello!")
+
+        try:
+            result = await session.turn("Follow up")
+        except MeerkatError as e:
+            print(f"Error code: {e.code}")
+            print(f"Message: {e.message}")
+
+        try:
+            client.require_capability("comms")
+        except CapabilityUnavailableError as e:
+            print(f"Comms not available: {e.message}")
 ```
 
 ---
@@ -269,7 +477,7 @@ The SDK negotiates version compatibility during `connect()`:
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # "0.2.0"
+print(CONTRACT_VERSION)  # e.g. "0.2.0"
 ```
 
 ---
@@ -293,6 +501,6 @@ pytest sdks/python/tests/test_e2e_smoke.py -v
 
 ## See also
 
-- [Python SDK overview](/sdks/python/overview) - getting started and MeerkatClient API
-- [TypeScript SDK](/sdks/typescript/overview) - TypeScript SDK
-- [RPC reference](/api/rpc) - JSON-RPC protocol specification
+- [Python SDK overview](/sdks/python/overview) — getting started, MeerkatClient, and Session API
+- [TypeScript SDK](/sdks/typescript/overview) — TypeScript SDK
+- [RPC reference](/api/rpc) — JSON-RPC protocol specification

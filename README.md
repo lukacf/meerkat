@@ -71,7 +71,7 @@ rkat run --enable-builtins --enable-shell \
 **Extract structured data** with schema validation and budget controls:
 
 ```bash
-rkat run --model claude-sonnet-4-6 --enable-builtins --enable-shell \
+rkat run --model claude-sonnet-4-5 --enable-builtins --enable-shell \
   --output-schema '{"type":"object","properties":{"issues":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"severity":{"type":"string","enum":["critical","high","medium","low"]},"description":{"type":"string"}},"required":["file","severity","description"]}}},"required":["issues"]}' \
   --max-tokens 4000 \
   "Audit the last 20 commits for security issues. Check each changed file."
@@ -169,7 +169,7 @@ let mut agent = AgentBuilder::new()
     .model("claude-sonnet-4-5")
     .system_prompt("You are an incident triage system.")
     .output_schema(OutputSchema::new(triage_schema)?)
-    .budget(BudgetLimits::new().max_tokens(2000).max_turns(1))
+    .budget(BudgetLimits::default().with_max_tokens(2000))
     .build(llm, tools, store)
     .await;
 

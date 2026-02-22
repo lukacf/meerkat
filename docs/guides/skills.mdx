@@ -101,13 +101,29 @@ The renderer produces two output formats:
 
 <Tabs>
   <Tab title="Inventory section">
-    Generates a `## Available Skills` section listing all available skills for the system prompt:
+    Generates an `<available_skills>` XML block listing all available skills for the system prompt:
 
-    ```text
-    ## Available Skills
+    ```xml
+    <available_skills>
+      <skill id="task-workflow">
+        <description>How to use task_create/task_update/task_list for structured work tracking</description>
+      </skill>
+      <skill id="shell-patterns">
+        <description>Background job patterns with shell and job management tools</description>
+      </skill>
+    </available_skills>
+    ```
 
-    - `/task-workflow` -- How to use task_create/task_update/task_list for structured work tracking
-    - `/shell-patterns` -- Background job patterns with shell and job management tools
+    When there are more than 12 skills, collection mode is used instead:
+
+    ```xml
+    <available_skills mode="collections">
+      <collection path="extraction" count="8">Entity extraction skills</collection>
+      <collection path="formatting" count="3">Output formatting skills</collection>
+
+      Use the browse_skills tool to list skills in a collection or search.
+      Use the load_skill tool or /collection/skill-name to activate a skill.
+    </available_skills>
     ```
 
     This section is injected into the system prompt via the `extra_sections` parameter of `assemble_system_prompt()` in `meerkat/src/prompt_assembly.rs`.
@@ -116,7 +132,7 @@ The renderer produces two output formats:
     Wraps the skill body in XML-style tags for per-turn injection:
 
     ```xml
-    <skill name="Shell Patterns">
+    <skill id="shell-patterns">
     # Shell Patterns
 
     When running background jobs...

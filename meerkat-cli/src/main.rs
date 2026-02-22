@@ -164,6 +164,10 @@ fn resolve_stream_policy(
     }
 }
 
+fn resolve_tooling_flags(enable_builtins: bool, enable_shell: bool) -> (bool, bool) {
+    (enable_builtins || enable_shell, enable_shell)
+}
+
 async fn init_project_config() -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let rkat_dir = cwd.join(".rkat");
@@ -212,7 +216,7 @@ async fn init_project_config() -> anyhow::Result<()> {
 #[command(about = "Meerkat - Rust Agentic Interface Kit")]
 struct Cli {
     /// Explicit realm ID (opaque). Reuse to share state across surfaces.
-    #[arg(long, global = true)]
+    #[arg(long, short = 'r', global = true)]
     realm: Option<String>,
     /// Start in isolated mode (new generated realm).
     #[arg(long, global = true)]
@@ -265,7 +269,7 @@ enum Commands {
         prompt: String,
 
         /// Model to use (defaults to config when omitted)
-        #[arg(long)]
+        #[arg(long, short = 'm')]
         model: Option<String>,
 
         /// LLM provider (anthropic, openai, gemini). Inferred from model name if not specified.
@@ -281,7 +285,7 @@ enum Commands {
         max_total_tokens: Option<u64>,
 
         /// Maximum duration for the run (e.g., "5m", "1h30m")
-        #[arg(long)]
+        #[arg(long, short = 'd')]
         max_duration: Option<String>,
 
         /// Maximum tool calls for the run
@@ -293,15 +297,15 @@ enum Commands {
         output: String,
 
         /// Stream LLM response tokens to stdout as they arrive
-        #[arg(long)]
+        #[arg(long, short = 's')]
         stream: bool,
 
         /// Streaming view policy (primary, mux, focus)
-        #[arg(long, value_enum, default_value = "primary")]
+        #[arg(long, short = 'w', value_enum, default_value = "primary")]
         stream_view: StreamView,
 
         /// Scope selector for `--stream-view focus`
-        #[arg(long)]
+        #[arg(long, short = 'f')]
         stream_focus: Option<String>,
 
         /// Provider-specific parameter (KEY=VALUE). Can be repeated.
@@ -365,15 +369,15 @@ enum Commands {
 
         // === Built-in tools flags ===
         /// Enable built-in tools (tasks, shell). Adds task management tools.
-        #[arg(long)]
+        #[arg(long, short = 'b')]
         enable_builtins: bool,
 
-        /// Enable shell tool (requires --enable-builtins). Allows executing shell commands.
-        #[arg(long, requires = "enable_builtins")]
+        /// Enable shell tool. Implies --enable-builtins.
+        #[arg(long, short = 'x')]
         enable_shell: bool,
 
         /// Disable sub-agent tools (agent_spawn, agent_fork, etc.). They are enabled by default.
-        #[arg(long)]
+        #[arg(long, short = 'N')]
         no_subagents: bool,
 
         // === Output verbosity ===
@@ -735,13 +739,13 @@ enum MobCommands {
         #[arg(long = "params")]
         params: Option<String>,
         /// Stream flow member outputs while the run is executing
-        #[arg(long)]
+        #[arg(long, short = 's')]
         stream: bool,
         /// Streaming view policy (primary, mux, focus)
-        #[arg(long, value_enum, default_value = "primary")]
+        #[arg(long, short = 'w', value_enum, default_value = "primary")]
         stream_view: StreamView,
         /// Scope selector for `--stream-view focus`
-        #[arg(long)]
+        #[arg(long, short = 'f')]
         stream_focus: Option<String>,
     },
     /// Show JSON status for a flow run.
@@ -1042,6 +1046,11 @@ async fn handle_run_command(
                 schema
             }
         });
+    let user_requested_builtins = enable_builtins;
+    let (enable_builtins, enable_shell) = resolve_tooling_flags(enable_builtins, enable_shell);
+    if enable_shell && !user_requested_builtins {
+        eprintln!("Info: enabling built-in tools because --enable-shell was requested");
+    }
 
     match (duration, provider_params, hook_run_overrides) {
         (Ok(dur), Ok(parsed_params), Ok(hooks_override)) => {
@@ -4319,6 +4328,82 @@ mod tests {
     fn test_resolve_host_mode_roundtrip() {
         assert!(resolve_host_mode(true).expect("host mode should be enabled"));
         assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
+    }
+
+    #[test]
+    fn test_resolve_tooling_flags_shell_implies_builtins() {
+        let (builtins, shell) = resolve_tooling_flags(false, true);
+        assert!(builtins, "shell should imply builtins");
+        assert!(shell, "shell should stay enabled");
+
+        let (builtins, shell) = resolve_tooling_flags(false, false);
+        assert!(!builtins);
+        assert!(!shell);
+    }
+
+    #[test]
+    fn test_run_short_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "run",
+            "hello",
+            "-s",
+            "-w",
+            "focus",
+            "-f",
+            "primary",
+            "-x",
+            "-d",
+            "5m",
+        ])
+        .expect("short flags should parse");
+
+        match cli.command {
+            Commands::Run {
+                stream,
+                stream_view,
+                stream_focus,
+                enable_shell,
+                max_duration,
+                ..
+            } => {
+                assert!(stream);
+                assert!(matches!(stream_view, StreamView::Focus));
+                assert_eq!(stream_focus.as_deref(), Some("primary"));
+                assert!(enable_shell);
+                assert_eq!(max_duration.as_deref(), Some("5m"));
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn test_mob_run_flow_short_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "run-flow",
+            "mob-1",
+            "--flow",
+            "f1",
+            "-s",
+            "-w",
+            "mux",
+        ])
+        .expect("mob run-flow short flags should parse");
+
+        match cli.command {
+            Commands::Mob {
+                command:
+                    MobCommands::RunFlow {
+                        stream, stream_view, ..
+                    },
+            } => {
+                assert!(stream);
+                assert!(matches!(stream_view, StreamView::Mux));
+            }
+            _ => panic!("expected mob run-flow command"),
+        }
     }
 
     #[test]

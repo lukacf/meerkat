@@ -1,0 +1,252 @@
+---
+title: "Design Philosophy"
+description: "Architectural principles and Rust implementation idioms that shape the Meerkat codebase."
+icon: "compass-drafting"
+---
+
+## Part I: Architectural Principles
+
+### The agent loop is infrastructure, not application
+
+Meerkat treats the LLM execution loop the way a database engine treats storage — as a composable, embeddable primitive with no opinions about what you build on top. The entire architecture flows from this.
+
+### Trait contracts own the architecture
+
+`meerkat-core` defines six trait contracts (`AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`) and contains zero I/O dependencies. Everything else — providers, storage backends, tool registries — lives in separate crates that implement these traits.
+
+This is a hard constraint, not an aspiration. The core agent loop is testable in-memory without mocks, embeddable in any Rust binary, and provably independent of any specific LLM provider or storage backend.
+
+### Surfaces are interchangeable skins
+
+CLI, REST, JSON-RPC, and MCP Server all follow the same path:
+
+```
+Surface → SessionService → AgentFactory::build_agent() → Agent<C, T, S>
+```
+
+No surface constructs agents directly. `AgentFactory` consolidates provider resolution, tool dispatch wiring, comms setup, hook resolution, and skill injection into a single construction pipeline. Adding a new surface requires zero changes to the agent loop or construction logic.
+
+### Composition over configuration
+
+Optional capabilities are genuinely optional — not feature-flagged defaults that are always present:
+
+- `CommsRuntime` is `Option<Arc<dyn CommsRuntime>>` — when `None`, the loop skips comms entirely
+- `HookEngine` is `Option<Arc<dyn HookEngine>>` — no hooks configured, no overhead
+- `Compactor`, `MemoryStore` — same pattern
+
+Nothing is embedded; everything is injected. The `Agent<C, T, S>` generic parameters make this explicit at the type level. Tool dispatch uses `CompositeDispatcher` to layer builtins, MCP, external, and policy filters — each layer is independently testable and swappable.
+
+### Sessions are first-class, persistence is optional
+
+Two paths share the same `SessionService` trait: `EphemeralSessionService` (in-memory, always available, suitable for CLI one-shots) and `PersistentSessionService` (event-sourced via `RedbEventStore`). The `.rkat/sessions/` files are derived projections materialized by `SessionProjector` — delete them and replay from the event store to get identical content.
+
+### Errors separate mechanism from policy
+
+Three-tier typed errors (`ToolError` → `AgentError` → `SessionError`) capture what happened without prescribing what to do about it. `LlmFailureReason` distinguishes retryable (`RateLimited { retry_after }`) from fatal (`AuthError`) at the type level. The agent loop implements retry logic; callers decide whether to resume or abort. Every error variant carries a stable `error_code() -> &'static str` for SDK wire formats.
+
+### Wire types and domain types are separate concerns
+
+`meerkat-contracts` owns the wire format (`WireRunResult`, `WireEvent`), emits JSON schemas via `schemars`, and feeds SDK codegen for Python and TypeScript. Domain types in `meerkat-core` are richer and not constrained by serialization compatibility. The conversion is explicit (`From` impls), lossy where appropriate, and version-locked — `ContractVersion::CURRENT` must equal `workspace.package.version`.
+
+### Configuration is layered and declarative
+
+Config resolution follows a strict precedence: `Config::default()` → file load → env overrides (API keys only) → per-request `SessionBuildOptions`. No cascading merges. No global mutable state. Running agents are not affected by config file changes mid-turn.
+
+### Testing is a design constraint, not an afterthought
+
+The three-tier test suite (unit/fast-integration in seconds, integration-real with spawned processes, e2e with live APIs) exists because the architecture makes it possible. Core has no I/O, so unit tests need no mocks. Every trait has a test implementation. The test tiers are named, aliased (`cargo rct`, `cargo unit`, `cargo int`), and enforced by pre-commit hooks.
+
+---
+
+## Part II: Rust Implementation Principles
+
+### Ownership topology
+
+The agent loop maintains a clear split: **shared immutable infrastructure** (`Arc<C>`, `Arc<T>`, `Arc<S>` for client, tools, store) vs **exclusively-owned mutable state** (session, budget, loop state). `Agent::run(&mut self)` needs no mutex — the RPC `SessionRuntime` spawns a dedicated tokio task per session that exclusively owns the `Agent`. Cancellation works via `&mut self` state transition, not shared atomics.
+
+### Copy-on-write session history
+
+Session messages live in `Arc<Vec<Message>>`. `Session::fork()` clones the `Arc` (O(1)), and `Arc::make_mut` triggers a copy only on first mutation when the refcount exceeds one. Sub-agents get independent session copies cheaply — no full history duplication at fork time.
+
+```rust
+pub fn fork(&self) -> Self {
+    Session {
+        messages: Arc::clone(&self.messages),  // O(1) — shared buffer
+        // ...
+    }
+}
+
+pub fn push(&mut self, message: Message) {
+    Arc::make_mut(&mut self.messages).push(message);  // CoW on mutation
+}
+```
+
+### Zero-allocation iteration
+
+`ToolCallView<'a>` is `Copy` — it borrows `&'a str` for id and name, `&'a RawValue` for args, all from the message buffer. `ToolCallIter` adapts a slice iterator, filtering for tool-use blocks on the fly. No `Vec<ToolCall>` is ever materialized. The trait contract returns `Arc<[Arc<ToolDef>]>` — an arc'd slice, not a `Vec` — so cloning the tool list is O(1).
+
+```rust
+#[derive(Debug, Clone, Copy)]
+pub struct ToolCallView<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub args: &'a RawValue,
+}
+
+pub struct ToolCallIter<'a> {
+    inner: std::slice::Iter<'a, AssistantBlock>,
+}
+
+impl<'a> Iterator for ToolCallIter<'a> {
+    type Item = ToolCallView<'a>;
+    // Filters on the fly — no intermediate collection
+}
+```
+
+### Deferred parsing via `Box<RawValue>`
+
+Tool arguments are preserved as unparsed JSON (`Box<RawValue>`) from provider response through the core loop to the dispatcher. Parsing happens at most once — when the dispatcher calls `parse_args::<T>()` — and only if the tool actually executes. A custom `deserialize_tool_use_args` handles the serde buffering quirk where `Box<RawValue>` can't deserialize directly from internally-tagged enum content.
+
+```rust
+ToolUse {
+    id: String,
+    name: String,
+    #[serde(deserialize_with = "deserialize_tool_use_args")]
+    args: Box<RawValue>,  // Untouched until dispatch
+}
+```
+
+### Typed enums over `serde_json::Value`
+
+Provider metadata is a typed enum, not `Option<serde_json::Value>`. The compiler enforces exhaustive matching. No runtime "does this object have a signature field?" checks.
+
+```rust
+#[non_exhaustive]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ProviderMeta {
+    Anthropic { signature: String },
+    AnthropicRedacted { data: String },
+    Gemini { thought_signature: String },
+    OpenAi { id: String, encrypted_content: Option<String> },
+}
+```
+
+`#[non_exhaustive]` allows future provider variants without breaking downstream consumers.
+
+### Newtype discipline
+
+Semantic types get their own newtypes even when wrapping primitives. `BlockKey(usize)` can't be confused with a message index. `OperationId(Uuid)` is distinct from `SessionId`. `SourceUuid` and `SkillName` are separate types in the skills system.
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockKey(usize);  // Can't mix with tool buffer index
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OperationId(pub Uuid);  // Distinct from SessionId
+```
+
+### Serde as a design tool
+
+Three distinct tagging strategies, each chosen for the data shape:
+
+- **Internally tagged** (`#[serde(tag = "role")]`) for `Message` — discriminant in its own field, enables two-stage parsing
+- **Adjacently tagged** (`#[serde(tag = "block_type", content = "data")]`) for `AssistantBlock` — compact, supports custom deserializers on nested fields
+- **Externally tagged** (`#[serde(tag = "provider")]`) for `ProviderMeta` — each variant carries different provider-specific fields
+
+`#[serde(skip_serializing_if = "Option::is_none")]` keeps wire payloads minimal. Custom `Default` impls provide semantic defaults (`structured_output_retries: 2`, not `0`). Custom `Debug` impls hide sensitive fields, showing `.is_some()` instead of session content.
+
+### Streaming block assembly
+
+The `BlockAssembler` handles out-of-order streaming events with a slot-based design. `Vec<BlockSlot>` is append-only — `Pending` placeholders inserted at start-time are overwritten with `Finalized` blocks on completion. `IndexMap<String, ToolCallBuffer>` preserves insertion order for deterministic assembly. The tool call ID is the map key only — never duplicated in the buffer value. Text deltas coalesce with the previous text block via `push_str` when possible.
+
+```rust
+enum BlockSlot {
+    Finalized(AssistantBlock),
+    Pending,
+}
+
+pub struct BlockAssembler {
+    slots: Vec<BlockSlot>,                          // Append-only, stable indices
+    tool_buffers: IndexMap<String, ToolCallBuffer>,  // ID is key, not in value
+}
+```
+
+Errors like `DuplicateToolStart` are returned to the caller — never swallowed.
+
+### Generic type erasure at boundaries
+
+`Agent<C, T, S>` keeps generics for monomorphization in tests and single-provider deployments. The core loop impl block uses `C: AgentLlmClient + ?Sized`, so it works with both concrete types and trait objects. Boxing to `DynAgent` happens only at surface boundaries — inside the agent loop, dispatch is direct.
+
+```rust
+// Concrete in tests — monomorphized, zero indirection
+let agent: Agent<TestClient, TestDispatcher, MemoryStore> = ...;
+
+// Erased at surface boundary — dynamic dispatch
+pub type DynAgent = Agent<
+    dyn AgentLlmClient,
+    dyn AgentToolDispatcher,
+    dyn AgentSessionStore,
+>;
+```
+
+### Async without interior mutability
+
+The agent loop runs as `&mut self` — exclusive ownership, no mutex. The RPC `SessionRuntime` achieves this by giving each session a dedicated tokio task that owns its `Agent`. Commands flow in via channels; events stream out as notifications. Cancellation is a state machine transition on `&mut self`, not a shared `AtomicBool`.
+
+The `emit_event!` macro broadcasts to both an `EventTap` (local subscribers) and an optional `mpsc::Sender<AgentEvent>` (external channel). When the receiver drops, it sets a local `event_stream_open` flag and logs once — no panics, no repeated error spam.
+
+### Feature gating at the type level
+
+Optional crates are `#[cfg(feature)]`-gated at the type level — `PersistentSessionService` exists only with `session-store`, `DefaultCompactor` only with `session-compaction`. The facade re-exports only what features enable, so downstream code can't accidentally depend on disabled components. Fallback implementations are always available.
+
+```rust
+#[cfg(feature = "session-store")]
+pub use service_factory::PersistentSessionService;
+
+#[cfg(feature = "session-compaction")]
+pub use meerkat_session::DefaultCompactor;
+```
+
+### Trait composition with graceful degradation
+
+Optional trait methods provide default implementations that return `Err(Unsupported(...))`. Required methods define the minimal contract. This is better than downcasting — the trait is the interface, and optional features degrade at the type level rather than at runtime.
+
+```rust
+#[async_trait]
+pub trait CommsRuntime: Send + Sync {
+    // Optional — defaults to Unsupported
+    async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
+        Err(SendError::Unsupported("...".to_string()))
+    }
+
+    // Required — defines the minimal contract
+    async fn drain_messages(&self) -> Vec<String>;
+    fn inbox_notify(&self) -> Arc<tokio::sync::Notify>;
+}
+```
+
+### Error propagation across crate boundaries
+
+Three-tier errors with `From` impls for ergonomic `?` chaining. Each tier captures minimal context — tool name, timeout duration, not full stack traces. `thiserror` generates `Display` implementations. Every variant has a stable `error_code()` for wire protocols.
+
+```rust
+// Tool layer
+#[derive(thiserror::Error)]
+pub enum ToolError {
+    #[error("Tool '{name}' timed out after {timeout_ms}ms")]
+    Timeout { name: String, timeout_ms: u64 },
+}
+
+// Agent layer wraps tool errors
+#[derive(thiserror::Error)]
+pub enum AgentError {
+    Llm { provider: &'static str, reason: LlmFailureReason, message: String },
+}
+
+// Session layer wraps agent errors
+#[derive(thiserror::Error)]
+pub enum SessionError {
+    Agent(#[from] AgentError),
+    NotFound { id: SessionId },
+}
+```

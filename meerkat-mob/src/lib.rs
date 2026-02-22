@@ -64,7 +64,7 @@ pub use run::{
     StepRunStatus,
 };
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
-pub use runtime::{MobBuilder, MobHandle, MobSessionService, MobState};
+pub use runtime::{MobBuilder, MobHandle, MobSessionService, MobState, SpawnMemberSpec};
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;

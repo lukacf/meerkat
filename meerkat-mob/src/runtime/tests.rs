@@ -296,6 +296,9 @@ struct MockSessionService {
     host_mode_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
+    create_session_delay_ms: AtomicU64,
+    create_session_in_flight: AtomicU64,
+    create_session_max_in_flight: AtomicU64,
     start_turn_delay_ms: AtomicU64,
     flow_turn_delay_ms: AtomicU64,
     flow_turn_never_terminal: std::sync::atomic::AtomicBool,
@@ -326,6 +329,9 @@ impl MockSessionService {
             host_mode_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
             inject_calls: Arc::new(AtomicU64::new(0)),
+            create_session_delay_ms: AtomicU64::new(0),
+            create_session_in_flight: AtomicU64::new(0),
+            create_session_max_in_flight: AtomicU64::new(0),
             start_turn_delay_ms: AtomicU64::new(0),
             flow_turn_delay_ms: AtomicU64::new(0),
             flow_turn_never_terminal: std::sync::atomic::AtomicBool::new(false),
@@ -451,6 +457,15 @@ impl MockSessionService {
         self.inject_calls.load(Ordering::Relaxed)
     }
 
+    fn set_create_session_delay_ms(&self, delay_ms: u64) {
+        self.create_session_delay_ms
+            .store(delay_ms, Ordering::Relaxed);
+    }
+
+    fn max_concurrent_create_session_calls(&self) -> u64 {
+        self.create_session_max_in_flight.load(Ordering::Relaxed)
+    }
+
     fn set_start_turn_delay_ms(&self, delay_ms: u64) {
         self.start_turn_delay_ms
             .store(delay_ms, std::sync::atomic::Ordering::Relaxed);
@@ -542,6 +557,33 @@ impl MockSessionService {
 #[async_trait]
 impl SessionService for MockSessionService {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+        let in_flight = self
+            .create_session_in_flight
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        loop {
+            let observed_max = self.create_session_max_in_flight.load(Ordering::Relaxed);
+            if in_flight <= observed_max {
+                break;
+            }
+            if self
+                .create_session_max_in_flight
+                .compare_exchange(
+                    observed_max,
+                    in_flight,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break;
+            }
+        }
+        let create_delay_ms = self.create_session_delay_ms.load(Ordering::Relaxed);
+        if create_delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(create_delay_ms)).await;
+        }
+
         let session_id = SessionId::new();
         let n = self.session_counter.fetch_add(1, Ordering::Relaxed);
 
@@ -624,6 +666,8 @@ impl SessionService for MockSessionService {
                 .insert(session_id.clone(), dispatcher);
         }
 
+        self.create_session_in_flight
+            .fetch_sub(1, Ordering::Relaxed);
         Ok(mock_run_result(session_id, "Session created".to_string()))
     }
 
@@ -5739,12 +5783,13 @@ async fn test_mob_created_definition_roundtrips_through_json() {
 }
 
 // -----------------------------------------------------------------------
-// CHOKE-MOB-005: MobHandle concurrent command serialization
+// CHOKE-MOB-005: MobHandle parallel spawn provisioning
 // -----------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_concurrent_spawns_serialized() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
+async fn test_concurrent_spawns_parallelize_provisioning() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_create_session_delay_ms(120);
 
     // Spawn 10 workers concurrently
     let mut join_handles = Vec::new();
@@ -5793,7 +5838,57 @@ async fn test_concurrent_spawns_serialized() {
         .count();
     assert_eq!(
         spawned_count, 10,
-        "actor serialization should emit exactly one MeerkatSpawned per request"
+        "parallel spawn path should emit exactly one MeerkatSpawned per request"
+    );
+    assert!(
+        service.max_concurrent_create_session_calls() > 1,
+        "spawn provisioning should run in parallel (max observed concurrent create_session calls: {})",
+        service.max_concurrent_create_session_calls()
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_many_member_refs_returns_results_in_input_order() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_create_session_delay_ms(100);
+
+    let specs = vec![
+        SpawnMemberSpec {
+            profile_name: ProfileName::from("worker"),
+            meerkat_id: MeerkatId::from("w-a"),
+            initial_message: None,
+            runtime_mode: None,
+            backend: None,
+        },
+        SpawnMemberSpec {
+            profile_name: ProfileName::from("worker"),
+            meerkat_id: MeerkatId::from("w-b"),
+            initial_message: None,
+            runtime_mode: None,
+            backend: None,
+        },
+        SpawnMemberSpec {
+            profile_name: ProfileName::from("worker"),
+            meerkat_id: MeerkatId::from("w-c"),
+            initial_message: None,
+            runtime_mode: None,
+            backend: None,
+        },
+    ];
+
+    let results = handle.spawn_many_member_refs(specs).await;
+    assert_eq!(results.len(), 3);
+    for (idx, result) in results.into_iter().enumerate() {
+        let member = result.expect("spawn_many result");
+        let session_id = member.session_id().expect("session-backed member");
+        assert!(
+            !session_id.to_string().is_empty(),
+            "spawn_many result {idx} should include session id"
+        );
+    }
+    assert!(
+        service.max_concurrent_create_session_calls() > 1,
+        "spawn_many should use parallel provisioning under the hood"
     );
 }
 
@@ -5816,6 +5911,73 @@ async fn test_concurrent_spawn_and_retire_same_meerkat_is_serialized() {
     assert!(
         roster.is_empty() || (roster.len() == 1 && roster[0].meerkat_id.as_str() == "w-1"),
         "serialized spawn/retire should never corrupt roster"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_rejects_duplicate_id_while_first_spawn_is_pending() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_create_session_delay_ms(180);
+
+    let first = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn(ProfileName::from("worker"), MeerkatId::from("w-dup"), None)
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    let duplicate = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-dup"), None)
+        .await
+        .expect_err("duplicate pending spawn should fail immediately");
+    assert!(matches!(duplicate, MobError::MeerkatAlreadyExists(_)));
+
+    first
+        .await
+        .expect("spawn join")
+        .expect("first spawn succeeds");
+    assert_eq!(service.active_session_count().await, 1);
+}
+
+#[tokio::test]
+async fn test_stop_fails_pending_spawns_and_cleans_up_provisioned_session() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_create_session_delay_ms(220);
+
+    let pending_spawn = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn(ProfileName::from("worker"), MeerkatId::from("w-stop"), None)
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    handle.stop().await.expect("stop should succeed");
+
+    let spawn_error = pending_spawn
+        .await
+        .expect("spawn join")
+        .expect_err("pending spawn should fail once stop begins");
+    match spawn_error {
+        MobError::Internal(message) => {
+            assert!(
+                message.contains("mob is stopping"),
+                "expected stop cancellation message, got: {message}"
+            );
+        }
+        other => panic!("expected internal pending-spawn cancellation, got: {other}"),
+    }
+
+    tokio::time::sleep(Duration::from_millis(260)).await;
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "canceled pending spawn should retire any provisioned session during cleanup"
     );
 }
 

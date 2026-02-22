@@ -86,28 +86,25 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         &self,
         mut req: CreateSessionRequest,
     ) -> Result<RunResult, SessionError> {
-        // Inject a checkpointer so host-mode agents persist after each interaction.
-        // The gate is shared with archive() for mutual exclusion.
-        let gate = if req.host_mode {
-            let gate = Arc::new(CheckpointerGate {
-                cancelled: Mutex::new(false),
+        // Inject a checkpointer for all sessions — the agent only calls it
+        // inside the host-mode loop, so non-host sessions pay zero cost.
+        // This must be unconditional because mob agents create sessions with
+        // host_mode=false and start the host loop explicitly later.
+        let gate = Arc::new(CheckpointerGate {
+            cancelled: Mutex::new(false),
+        });
+        let checkpointer: Arc<dyn meerkat_core::checkpoint::SessionCheckpointer> =
+            Arc::new(StoreCheckpointer {
+                store: Arc::clone(&self.store),
+                gate: Arc::clone(&gate),
             });
-            let checkpointer: Arc<dyn meerkat_core::checkpoint::SessionCheckpointer> =
-                Arc::new(StoreCheckpointer {
-                    store: Arc::clone(&self.store),
-                    gate: Arc::clone(&gate),
-                });
-            let build = req.build.get_or_insert_with(Default::default);
-            build.checkpointer = Some(checkpointer);
-            Some(gate)
-        } else {
-            None
-        };
+        let build = req.build.get_or_insert_with(Default::default);
+        build.checkpointer = Some(checkpointer);
 
         let result = self.inner.create_session(req).await?;
 
         // Track the gate so archive() can cancel checkpoint writes.
-        if let Some(gate) = gate {
+        {
             self.checkpointer_gates
                 .lock()
                 .await

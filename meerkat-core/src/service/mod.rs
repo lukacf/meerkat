@@ -122,6 +122,8 @@ pub struct SessionBuildOptions {
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
+    /// Optional session checkpointer for host-mode persistence.
+    pub checkpointer: Option<std::sync::Arc<dyn crate::checkpoint::SessionCheckpointer>>,
 }
 
 impl Default for SessionBuildOptions {
@@ -147,6 +149,7 @@ impl Default for SessionBuildOptions {
             instance_id: None,
             backend: None,
             config_generation: None,
+            checkpointer: None,
         }
     }
 }
@@ -174,6 +177,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("instance_id", &self.instance_id)
             .field("backend", &self.backend)
             .field("config_generation", &self.config_generation)
+            .field("checkpointer", &self.checkpointer.is_some())
             .finish()
     }
 }

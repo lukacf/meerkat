@@ -32,6 +32,7 @@ pub struct AgentBuilder {
     pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
+    pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
 }
@@ -53,6 +54,7 @@ impl AgentBuilder {
             compactor: None,
             memory_store: None,
             skill_engine: None,
+            checkpointer: None,
             event_tap: None,
             default_event_tx: None,
         }
@@ -206,12 +208,22 @@ impl AgentBuilder {
             memory_store: self.memory_store,
             skill_engine: self.skill_engine,
             pending_skill_references: None,
+            checkpointer: self.checkpointer,
             event_tap: self
                 .event_tap
                 .unwrap_or_else(crate::event_tap::new_event_tap),
             default_event_tx: self.default_event_tx,
             host_drain_active: false,
         }
+    }
+
+    /// Set the session checkpointer for host-mode persistence.
+    pub fn with_checkpointer(
+        mut self,
+        cp: Arc<dyn crate::checkpoint::SessionCheckpointer>,
+    ) -> Self {
+        self.checkpointer = Some(cp);
+        self
     }
 
     /// Set the skill engine for per-turn `/skill-ref` activation.

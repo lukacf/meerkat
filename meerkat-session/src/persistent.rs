@@ -20,6 +20,23 @@ use std::sync::Arc;
 
 use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
 
+/// Checkpointer that saves sessions to a [`SessionStore`].
+///
+/// Used by host-mode agents to persist the session after each interaction
+/// without going through `SessionService::start_turn()`.
+struct StoreCheckpointer {
+    store: Arc<dyn SessionStore>,
+}
+
+#[async_trait]
+impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
+    async fn checkpoint(&self, session: &Session) {
+        if let Err(e) = self.store.save(session).await {
+            tracing::warn!("Host-mode checkpoint failed: {e}");
+        }
+    }
+}
+
 /// Session service backed by persistent storage.
 ///
 /// Wraps `EphemeralSessionService` and saves session snapshots to a
@@ -42,7 +59,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
-    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+    async fn create_session(
+        &self,
+        mut req: CreateSessionRequest,
+    ) -> Result<RunResult, SessionError> {
+        // Inject a checkpointer so host-mode agents persist after each interaction.
+        if req.host_mode {
+            let checkpointer: Arc<dyn meerkat_core::checkpoint::SessionCheckpointer> =
+                Arc::new(StoreCheckpointer {
+                    store: Arc::clone(&self.store),
+                });
+            let build = req.build.get_or_insert_with(Default::default);
+            build.checkpointer = Some(checkpointer);
+        }
+
         let result = self.inner.create_session(req).await?;
 
         // Persist the full session snapshot (messages + metadata) after first turn.
@@ -278,6 +308,32 @@ mod tests {
 
         // Verify it's gone
         assert!(store.load(&id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_store_checkpointer_saves_session() {
+        use meerkat_core::checkpoint::SessionCheckpointer;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let checkpointer = super::StoreCheckpointer {
+            store: Arc::clone(&store),
+        };
+
+        let mut session = Session::new();
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage {
+                content: "hello".to_string(),
+            },
+        ));
+
+        // Checkpoint should persist the session
+        checkpointer.checkpoint(&session).await;
+
+        let loaded = store.load(session.id()).await.unwrap();
+        assert!(loaded.is_some(), "session should be persisted after checkpoint");
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.id(), session.id());
+        assert_eq!(loaded.messages().len(), session.messages().len());
     }
 
     #[tokio::test]

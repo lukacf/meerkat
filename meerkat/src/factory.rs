@@ -211,6 +211,8 @@ pub struct AgentBuildConfig {
     pub backend: Option<String>,
     /// Config generation used when this session was created/resumed.
     pub config_generation: Option<u64>,
+    /// Optional session checkpointer for host-mode persistence.
+    pub checkpointer: Option<Arc<dyn meerkat_core::checkpoint::SessionCheckpointer>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -278,6 +280,7 @@ impl AgentBuildConfig {
             instance_id: None,
             backend: None,
             config_generation: None,
+            checkpointer: None,
         }
     }
 
@@ -322,6 +325,7 @@ impl AgentBuildConfig {
         self.instance_id = build.instance_id.clone();
         self.backend = build.backend.clone();
         self.config_generation = build.config_generation;
+        self.checkpointer = build.checkpointer.clone();
     }
 
     /// Convert build options to the service transport representation.
@@ -350,6 +354,7 @@ impl AgentBuildConfig {
             instance_id: self.instance_id.clone(),
             backend: self.backend.clone(),
             config_generation: self.config_generation,
+            checkpointer: self.checkpointer.clone(),
         }
     }
 }
@@ -1280,6 +1285,11 @@ impl AgentFactory {
         builder = builder.with_event_tap(event_tap);
         if let Some(tx) = build_config.event_tx {
             builder = builder.with_default_event_tx(tx);
+        }
+
+        // 12f. Wire session checkpointer for host-mode persistence
+        if let Some(cp) = build_config.checkpointer {
+            builder = builder.with_checkpointer(cp);
         }
 
         // 13. Build agent

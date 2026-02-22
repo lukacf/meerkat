@@ -887,6 +887,7 @@ async fn handle_meerkat_run(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
+        checkpointer: None,
     };
 
     let req = CreateSessionRequest {
@@ -1040,6 +1041,7 @@ async fn handle_meerkat_resume(
             .and_then(|m| m.backend.clone())
             .or_else(|| Some(state.backend.clone())),
         config_generation: current_generation,
+        checkpointer: None,
     };
 
     // Try start_turn on the live session first (it may still be alive

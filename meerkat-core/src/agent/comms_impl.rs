@@ -275,6 +275,11 @@ where
 
                     // Clear tap after each interaction
                     self.event_tap.lock().take();
+
+                    // Checkpoint after each individual interaction
+                    if let Some(ref cp) = self.checkpointer {
+                        cp.checkpoint(&self.session).await;
+                    }
                 }
 
                 // Process batched messages as one run (no tap)
@@ -289,7 +294,13 @@ where
                         None => self.run(combined).await,
                     };
                     match batch_result {
-                        Ok(result) => last_result = result,
+                        Ok(result) => {
+                            last_result = result;
+                            // Checkpoint after batched messages
+                            if let Some(ref cp) = self.checkpointer {
+                                cp.checkpoint(&self.session).await;
+                            }
+                        }
                         Err(e) => {
                             if e.is_graceful() {
                                 tracing::info!("Host mode: graceful exit - {}", e);

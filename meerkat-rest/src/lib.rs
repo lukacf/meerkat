@@ -923,6 +923,7 @@ async fn create_session(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
+        checkpointer: None,
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -1108,6 +1109,7 @@ async fn continue_session(
                     .and_then(|m| m.backend.clone())
                     .or_else(|| Some(state.backend.clone())),
                 config_generation: current_generation,
+                checkpointer: None,
             };
 
             let svc_req = SvcCreateSessionRequest {

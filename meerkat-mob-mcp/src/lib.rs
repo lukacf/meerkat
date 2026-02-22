@@ -638,7 +638,7 @@ struct SpawnArgs {
     runtime_mode: Option<MobRuntimeMode>,
 }
 #[derive(Deserialize)]
-struct SpawnMeerkatArgs {
+struct MobSpawnMeerkatArgs {
     profile: String,
     meerkat_id: String,
     #[serde(default)]
@@ -651,7 +651,7 @@ struct SpawnMeerkatArgs {
 #[derive(Deserialize)]
 struct SpawnManyMeerkatsArgs {
     mob_id: String,
-    specs: Vec<SpawnMeerkatArgs>,
+    specs: Vec<MobSpawnMeerkatArgs>,
 }
 #[derive(Deserialize)]
 struct RetireArgs {

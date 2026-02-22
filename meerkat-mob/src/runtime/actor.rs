@@ -2396,6 +2396,8 @@ impl MobActor {
 
     async fn prune_wire_edge_locks_for_member(&self, meerkat_id: &MeerkatId) {
         let mut locks = self.wire_edge_locks.lock().await;
+        // Keep this parser aligned with `canonical_edge_key` ("left|right").
+        // If the canonical format changes, update both together.
         locks.retain(|edge_key, _| {
             let Some((left, right)) = edge_key.split_once('|') else {
                 return true;

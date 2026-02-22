@@ -624,6 +624,7 @@ impl MobBuilder {
             pending_spawns: BTreeMap::new(),
             pending_spawn_ids: HashSet::new(),
             pending_spawn_tasks: BTreeMap::new(),
+            wire_edge_locks: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
         };
         tokio::spawn(actor.run(command_rx));
 

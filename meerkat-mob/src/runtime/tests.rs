@@ -2417,6 +2417,7 @@ async fn test_mob_management_tools_dispatch_to_handle() {
     let tool_names = service.external_tool_names(&sid_1).await;
     for required in [
         "spawn_meerkat",
+        "spawn_many_meerkats",
         "retire_meerkat",
         "wire_peers",
         "unwire_peers",
@@ -2439,6 +2440,28 @@ async fn test_mob_management_tools_dispatch_to_handle() {
     assert!(
         handle.get_meerkat(&MeerkatId::from("w-2")).await.is_some(),
         "spawn_meerkat should create a new roster entry"
+    );
+
+    service
+        .dispatch_external_tool(
+            &sid_1,
+            "spawn_many_meerkats",
+            serde_json::json!({
+                "specs": [
+                    {"profile": "worker", "meerkat_id": "w-many-1"},
+                    {"profile": "worker", "meerkat_id": "w-many-2"}
+                ]
+            }),
+        )
+        .await
+        .expect("spawn_many_meerkats tool");
+    assert!(
+        handle.get_meerkat(&MeerkatId::from("w-many-1")).await.is_some(),
+        "spawn_many_meerkats should create first roster entry"
+    );
+    assert!(
+        handle.get_meerkat(&MeerkatId::from("w-many-2")).await.is_some(),
+        "spawn_many_meerkats should create second roster entry"
     );
 
     service
@@ -5938,6 +5961,51 @@ async fn test_spawn_many_member_refs_returns_results_in_input_order() {
     assert!(
         service.max_concurrent_create_session_calls() > 1,
         "spawn_many should use parallel provisioning under the hood"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_many_parallel_finalize_emits_single_worker_pair_wire_event() {
+    let (handle, service) = create_test_mob(sample_definition_with_role_wiring()).await;
+    service.set_create_session_delay_ms(120);
+
+    let specs = vec![
+        SpawnMemberSpec {
+            profile_name: ProfileName::from("worker"),
+            meerkat_id: MeerkatId::from("w-a"),
+            initial_message: None,
+            runtime_mode: None,
+            backend: None,
+        },
+        SpawnMemberSpec {
+            profile_name: ProfileName::from("worker"),
+            meerkat_id: MeerkatId::from("w-b"),
+            initial_message: None,
+            runtime_mode: None,
+            backend: None,
+        },
+    ];
+
+    let results = handle.spawn_many_member_refs(specs).await;
+    for result in results {
+        result.expect("spawn_many member ref");
+    }
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let mut pair_wire_events = 0usize;
+    for event in events {
+        if let MobEventKind::PeersWired { a, b } = event.kind {
+            let a_id = a.as_str();
+            let b_id = b.as_str();
+            if (a_id == "w-a" && b_id == "w-b") || (a_id == "w-b" && b_id == "w-a") {
+                pair_wire_events += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        pair_wire_events, 1,
+        "parallel spawn finalization must emit exactly one PeersWired event for w-a<->w-b"
     );
 }
 

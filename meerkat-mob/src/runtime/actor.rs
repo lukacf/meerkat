@@ -477,13 +477,8 @@ impl MobActor {
 
     /// Main actor loop: process commands sequentially until Shutdown.
     pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<MobCommand>) {
-        let mut deferred_commands = VecDeque::new();
         if matches!(self.state(), MobState::Running) {
-            let (mcp_result, loop_result) = tokio::join!(
-                self.start_mcp_servers(),
-                self.start_autonomous_host_loops_from_roster()
-            );
-            if let Err(error) = mcp_result {
+            if let Err(error) = self.start_mcp_servers().await {
                 tracing::error!(
                     mob_id = %self.definition.id,
                     error = %error,
@@ -504,7 +499,7 @@ impl MobActor {
                     );
                 }
                 self.state.store(MobState::Stopped as u8, Ordering::Release);
-            } else if let Err(error) = loop_result {
+            } else if let Err(error) = self.start_autonomous_host_loops_from_roster().await {
                 tracing::error!(
                     mob_id = %self.definition.id,
                     error = %error,
@@ -527,6 +522,7 @@ impl MobActor {
                 self.state.store(MobState::Stopped as u8, Ordering::Release);
             }
         }
+        let mut deferred_commands = VecDeque::new();
         loop {
             let cmd = if let Some(cmd) = deferred_commands.pop_front() {
                 cmd
@@ -571,7 +567,10 @@ impl MobActor {
                                 spawn_ticket,
                                 result,
                             }) => completions.push((spawn_ticket, result)),
-                            Ok(other) => deferred_commands.push_back(other),
+                            Ok(other) => {
+                                deferred_commands.push_back(other);
+                                break;
+                            }
                             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
                         }
@@ -712,43 +711,24 @@ impl MobActor {
                 MobCommand::ResumeLifecycle { reply_tx } => {
                     let result = match self.expect_state(&[MobState::Stopped], MobState::Running) {
                         Ok(()) => {
-                            let (mcp_result, loop_result) = tokio::join!(
-                                self.start_mcp_servers(),
-                                self.start_autonomous_host_loops_from_roster()
-                            );
-                            if let Err(error) = mcp_result {
-                                let (stop_mcp_result, stop_loop_result) = tokio::join!(
-                                    self.stop_mcp_servers(),
-                                    self.stop_all_autonomous_host_loops()
-                                );
-                                if let Err(stop_error) = stop_mcp_result {
+                            if let Err(error) = self.start_mcp_servers().await {
+                                if let Err(stop_error) = self.stop_mcp_servers().await {
                                     tracing::warn!(
                                         mob_id = %self.definition.id,
                                         error = %stop_error,
                                         "resume cleanup failed while stopping mcp servers"
                                     );
                                 }
-                                if let Err(stop_error) = stop_loop_result {
-                                    tracing::warn!(
-                                        mob_id = %self.definition.id,
-                                        error = %stop_error,
-                                        "resume cleanup failed while stopping autonomous loops"
-                                    );
-                                }
                                 Err(error)
-                            } else if let Err(error) = loop_result {
-                                let (stop_loop_result, stop_mcp_result) = tokio::join!(
-                                    self.stop_all_autonomous_host_loops(),
-                                    self.stop_mcp_servers()
-                                );
-                                if let Err(stop_error) = stop_loop_result {
+                            } else if let Err(error) = self.start_autonomous_host_loops_from_roster().await {
+                                if let Err(stop_error) = self.stop_all_autonomous_host_loops().await {
                                     tracing::warn!(
                                         mob_id = %self.definition.id,
                                         error = %stop_error,
                                         "resume cleanup failed while stopping autonomous loops"
                                     );
                                 }
-                                if let Err(stop_error) = stop_mcp_result {
+                                if let Err(stop_error) = self.stop_mcp_servers().await {
                                     tracing::warn!(
                                         mob_id = %self.definition.id,
                                         error = %stop_error,

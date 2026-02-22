@@ -1,7 +1,7 @@
 # CD and Distribution Rulebook
 
 This document captures the publication model for Meerkat binaries and SDKs
-(`rkat`, `meerkat-rpc`, `meerkat-rest`, `meerkat-mcp-server`, Python SDK,
+(`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`, Python SDK,
 and TypeScript SDK).
 
 ## Goals
@@ -39,9 +39,9 @@ Version and contract compatibility must already be in sync via:
 Release artifacts are built for each surface binary:
 
 - `rkat` (CLI)
-- `meerkat-rpc`
-- `meerkat-rest`
-- `meerkat-mcp-server`
+- `rkat-rpc`
+- `rkat-rest`
+- `rkat-mcp`
 
 Build targets:
 
@@ -52,8 +52,8 @@ Build targets:
 
 Publish as release assets, for example:
 
-- `meerkat-rpc-vX.Y.Z-x86_64-apple-darwin.tar.gz`
-- `meerkat-rest-vX.Y.Z-x86_64-unknown-linux-gnu.zip`
+- `rkat-rpc-vX.Y.Z-x86_64-apple-darwin.tar.gz`
+- `rkat-rest-vX.Y.Z-x86_64-unknown-linux-gnu.zip`
 
 Include a checksum manifest with all artifacts:
 
@@ -68,7 +68,7 @@ Package behavior should be pure-Python with optional runtime auto-download:
 - Package should not require Rust/toolchain locally
 - First connect:
   - If `MEERKAT_BIN_PATH` is set, use it
-  - Otherwise, download correct `meerkat-rpc` binary for platform/version from GitHub Releases
+  - Otherwise, download correct `rkat-rpc` binary for platform/version from GitHub Releases
   - Cache in user-local location (`~/.cache/meerkat/bin/...`)
 
 This gives users a true one-command install path for Python.
@@ -84,7 +84,7 @@ This gives users a true one-command install path for Python.
 For MCP-style tooling (`claude mcp add`, `npx`), provide a CLI entrypoint package:
 
 - `npx @meerkat/mcp` (or equivalent) launches the JS shim
-- shim resolves local override or downloaded `meerkat-mcp-server`
+- shim resolves local override or downloaded `rkat-mcp`
 
 ## GitHub Actions Design (single-release flow)
 

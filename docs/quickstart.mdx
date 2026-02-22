@@ -9,7 +9,7 @@ description: "Install Meerkat and run your first agent. Single binary, any provi
   <Tab title="Rust crate">
     ```toml Cargo.toml
     [dependencies]
-    meerkat = "0.2"
+    meerkat = "0.3"
     tokio = { version = "1", features = ["full"] }
     ```
   </Tab>
@@ -17,13 +17,13 @@ description: "Install Meerkat and run your first agent. Single binary, any provi
     ```bash
     pip install meerkat-sdk
     ```
-    <Note>Requires the `rkat` binary on your PATH.</Note>
+    <Note>Requires the `rkat-rpc` binary on your PATH.</Note>
   </Tab>
   <Tab title="TypeScript">
     ```bash
-    npm install @meerkat/sdk
+    npm install @rkat/sdk
     ```
-    <Note>Requires the `rkat` binary on your PATH.</Note>
+    <Note>Requires the `rkat-rpc` binary on your PATH.</Note>
   </Tab>
   <Tab title="CLI">
     ```bash
@@ -37,10 +37,28 @@ description: "Install Meerkat and run your first agent. Single binary, any provi
 <Tabs>
   <Tab title="Rust">
     ```rust
-    let result = meerkat::with_anthropic(std::env::var("ANTHROPIC_API_KEY")?)
+    use std::sync::Arc;
+    use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, JsonlStore};
+    use meerkat_store::StoreAdapter;
+
+    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    let store_dir = std::env::current_dir()?.join(".rkat").join("sessions");
+    std::fs::create_dir_all(&store_dir)?;
+
+    let factory = AgentFactory::new(store_dir.clone());
+    let client = Arc::new(AnthropicClient::new(api_key)?);
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-5").await;
+    let store = Arc::new(StoreAdapter::new(Arc::new(JsonlStore::new(store_dir))));
+    let tools = Arc::new(meerkat_tools::EmptyToolDispatcher);
+
+    let mut agent = AgentBuilder::new()
         .model("claude-sonnet-4-5")
-        .run("What is the capital of France?")
-        .await?;
+        .system_prompt("You are a helpful assistant.")
+        .max_tokens_per_turn(1024)
+        .build(Arc::new(llm), tools, store)
+        .await;
+
+    let result = agent.run("What is the capital of France?".to_string()).await?;
     println!("{}", result.text);
     ```
   </Tab>
@@ -57,11 +75,11 @@ description: "Install Meerkat and run your first agent. Single binary, any provi
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    import { MeerkatClient } from "@meerkat/sdk";
+    import { MeerkatClient } from "@rkat/sdk";
 
     const client = new MeerkatClient();
     await client.connect();
-    const result = await client.createSession({ prompt: "What is the capital of France?" });
+    const result = await client.createSession("What is the capital of France?");
     console.log(result.text);
     await client.close();
     ```

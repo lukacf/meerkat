@@ -1,243 +1,500 @@
 ---
 title: "TypeScript SDK reference"
-description: "Wire types, capability checking, skill helpers, event streaming, and error handling for the TypeScript SDK."
+description: "Types, events, error classes, and version compatibility for the @rkat/sdk TypeScript SDK."
 icon: "book"
 ---
 
-## Wire types
-
 <Note>
-`getConfig()` / `patchConfig()` return the RPC config envelope (`config`, `generation`, `realm_id`, `instance_id`, `backend`, `resolved_paths`). `setConfig()` forwards the payload you provide.
+All public types use camelCase field names. The SDK translates to and from the snake_case JSON-RPC wire format internally.
 </Note>
 
-<Accordion title="WireRunResult">
+## Imports
+
+Everything public is re-exported from the package root:
+
 ```typescript
-interface WireRunResult {
-  session_id: string;
-  text: string;
-  turns: number;
-  tool_calls: number;
-  usage: WireUsage;
-  structured_output?: unknown;
-  schema_warnings?: Array<{ provider: string; path: string; message: string }>;
-}
+import {
+  MeerkatClient,
+  Session,
+  EventStream,
+  MeerkatError,
+  CapabilityUnavailableError,
+  SessionNotFoundError,
+  SkillNotFoundError,
+  CONTRACT_VERSION,
+} from "@rkat/sdk";
+
+import type {
+  RunResult,
+  Usage,
+  SessionInfo,
+  SessionOptions,
+  Capability,
+  SkillKey,
+  SkillRef,
+  SkillRuntimeDiagnostics,
+  SchemaWarning,
+  AgentEvent,
+  TextDeltaEvent,
+  TurnCompletedEvent,
+  // ... all event types
+} from "@rkat/sdk";
 ```
-</Accordion>
-
-<Accordion title="WireUsage">
-```typescript
-interface WireUsage {
-  input_tokens: number;
-  output_tokens: number;
-  total_tokens: number;
-  cache_creation_tokens?: number;
-  cache_read_tokens?: number;
-}
-```
-</Accordion>
-
-<Accordion title="WireEvent">
-```typescript
-interface WireEvent {
-  session_id: string;
-  event: Record<string, unknown>;
-}
-```
-
-<Warning>
-The `sequence` and `contract_version` fields have been removed — they were never sent by the server. The streaming API uses raw event dicts directly.
-</Warning>
-</Accordion>
-
-<Accordion title="CapabilitiesResponse">
-```typescript
-interface CapabilitiesResponse {
-  contract_version: string;
-  capabilities: CapabilityEntry[];
-}
-
-interface CapabilityEntry {
-  id: string;
-  description: string;
-  status: string;  // "Available", "DisabledByPolicy", "NotCompiled", etc.
-}
-```
-</Accordion>
 
 ---
 
-## Domain run result types
+## Core types
 
-The public SDK surface uses camelCase domain types (`RunResult`) instead of wire types.
+### RunResult
 
-<Accordion title="SkillRuntimeDiagnostics">
+The result returned by `createSession()`, `session.turn()`, and `session.invokeSkill()`. Also available as `stream.result` after an `EventStream` is fully consumed.
+
+```typescript
+interface RunResult {
+  readonly sessionId: string;
+  readonly sessionRef?: string;
+  readonly text: string;
+  readonly turns: number;
+  readonly toolCalls: number;
+  readonly usage: Usage;
+  readonly structuredOutput?: unknown;
+  readonly schemaWarnings?: readonly SchemaWarning[];
+  readonly skillDiagnostics?: SkillRuntimeDiagnostics;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sessionId` | `string` | Stable UUID for this session |
+| `sessionRef` | `string \| undefined` | Optional human-readable reference |
+| `text` | `string` | Full assistant text from the last LLM turn |
+| `turns` | `number` | Number of LLM turns in this run |
+| `toolCalls` | `number` | Total tool calls executed in this run |
+| `usage` | `Usage` | Token usage for this run |
+| `structuredOutput` | `unknown \| undefined` | Parsed structured output when `outputSchema` was provided |
+| `schemaWarnings` | `SchemaWarning[] \| undefined` | Warnings emitted when structured output didn't fully match the schema |
+| `skillDiagnostics` | `SkillRuntimeDiagnostics \| undefined` | Runtime diagnostics from the skill subsystem |
+
+### Usage
+
+Token usage for a single run. All fields are camelCase — there is no `total_tokens` field.
+
+```typescript
+interface Usage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheCreationTokens?: number;
+  readonly cacheReadTokens?: number;
+}
+```
+
+### SessionInfo
+
+Summary returned by `client.listSessions()`.
+
+```typescript
+interface SessionInfo {
+  readonly sessionId: string;
+  readonly sessionRef?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly messageCount: number;
+  readonly totalTokens: number;
+  readonly isActive: boolean;
+}
+```
+
+### Capability
+
+A single runtime capability entry, as returned by `client.capabilities`.
+
+```typescript
+interface Capability {
+  readonly id: string;
+  readonly description: string;
+  readonly status: string;  // "Available", "DisabledByPolicy", "NotCompiled", etc.
+}
+```
+
+Status values may be emitted as externally-tagged Rust enum objects (e.g. `{ DisabledByPolicy: { ... } }`). The SDK normalizes these to the key string automatically.
+
+### SchemaWarning
+
+Emitted when a structured output response did not fully conform to the requested schema.
+
+```typescript
+interface SchemaWarning {
+  readonly provider: string;
+  readonly path: string;
+  readonly message: string;
+}
+```
+
+---
+
+## Skill types
+
+### SkillKey
+
+Structured skill identifier. Preferred over legacy string references.
+
+```typescript
+interface SkillKey {
+  readonly sourceUuid: string;
+  readonly skillName: string;
+}
+```
+
+### SkillRef
+
+A skill reference is either a `SkillKey` or a legacy string in the form `"<source_uuid>/<skill_name>"`. Legacy strings emit a deprecation warning.
+
+```typescript
+type SkillRef = SkillKey | string;
+```
+
+### SkillRuntimeDiagnostics
+
+Runtime diagnostics from the skill subsystem. Present on `RunResult.skillDiagnostics` when the server emits skill health data.
+
 ```typescript
 interface SkillRuntimeDiagnostics {
-  sourceHealth: {
-    state: string;
-    invalidRatio: number;
-    invalidCount: number;
-    totalCount: number;
-    failureStreak: number;
-    handshakeFailed: boolean;
-  };
-  quarantined: Array<{
-    sourceUuid: string;
-    skillId: string;
-    location: string;
-    errorCode: string;
-    errorClass: string;
-    message: string;
-    firstSeenUnixSecs: number;
-    lastSeenUnixSecs: number;
-  }>;
+  readonly sourceHealth: SourceHealthSnapshot;
+  readonly quarantined: readonly SkillQuarantineDiagnostic[];
+}
+
+interface SourceHealthSnapshot {
+  readonly state: string;
+  readonly invalidRatio: number;
+  readonly invalidCount: number;
+  readonly totalCount: number;
+  readonly failureStreak: number;
+  readonly handshakeFailed: boolean;
+}
+
+interface SkillQuarantineDiagnostic {
+  readonly sourceUuid: string;
+  readonly skillId: string;
+  readonly location: string;
+  readonly errorCode: string;
+  readonly errorClass: string;
+  readonly message: string;
+  readonly firstSeenUnixSecs: number;
+  readonly lastSeenUnixSecs: number;
 }
 ```
-</Accordion>
-
-<Note>
-`RunResult.skillDiagnostics` is `SkillRuntimeDiagnostics | undefined` on the TypeScript domain type.
-</Note>
 
 ---
 
-## CapabilityChecker
+## EventStream
 
-Standalone helper for checking runtime capabilities:
+`EventStream` is an `AsyncIterable<AgentEvent>` returned by `createSessionStreaming()` and `session.stream()`. It yields typed events as the agent runs, then makes the final `RunResult` available on `stream.result`.
 
 ```typescript
-import { MeerkatClient, CapabilityChecker } from "@meerkat/sdk";
+class EventStream implements AsyncIterable<AgentEvent> {
+  readonly sessionId: string;
+  readonly result: RunResult;  // throws if accessed before iteration completes
 
-const caps = await client.getCapabilities();
-const checker = new CapabilityChecker(caps);
+  [Symbol.asyncIterator](): AsyncGenerator<AgentEvent>;
 
-if (checker.has("comms")) {
-  console.log("Comms is available");
+  /** Consume all events and return the final RunResult. */
+  collect(): Promise<RunResult>;
+
+  /** Consume events, accumulate text deltas, return [fullText, result]. */
+  collectText(): Promise<[string, RunResult]>;
 }
-
-checker.require("skills");  // throws CapabilityUnavailableError if unavailable
-
-console.log(checker.available);  // ["sessions", "streaming", ...]
 ```
 
-| Method | Description |
-|--------|-------------|
-| `has(capabilityId)` | Returns `true` if status is `"Available"` |
-| `require(capabilityId)` | Throws if capability not available |
-| `available` | Getter returning all available capability IDs |
+### Iterating
 
-<Accordion title="Known capability IDs">
-| ID | Description |
-|---|-------------|
-| `sessions` | Session lifecycle |
-| `streaming` | Real-time event streaming |
-| `structured_output` | JSON schema structured output |
-| `hooks` | Lifecycle hooks |
-| `builtins` | Built-in tools |
-| `shell` | Shell tool |
-| `comms` | Inter-agent communication |
-| `sub_agents` | Sub-agent tools |
-| `memory_store` | Semantic memory |
-| `session_store` | Session persistence |
-| `session_compaction` | Context compaction |
-| `skills` | Skill loading |
-</Accordion>
+```typescript
+for await (const event of session.stream("Summarise this")) {
+  if (event.type === "text_delta") {
+    process.stdout.write(event.delta);
+  }
+}
+const result = stream.result;
+```
+
+### collect()
+
+Discards all events and returns the final result:
+
+```typescript
+const result = await stream.collect();
+```
+
+### collectText()
+
+Accumulates all `text_delta` events and returns the joined string alongside the result:
+
+```typescript
+const [fullText, result] = await stream.collectText();
+console.log(fullText);
+console.log("Output tokens:", result.usage.outputTokens);
+```
 
 ---
 
-## SkillHelper
+## Typed events
 
-Convenience wrapper for invoking Meerkat skills:
+All events are discriminated on the `type` field (snake_case, matching the wire protocol). All other fields are camelCase.
+
+### AgentEvent union
 
 ```typescript
-import { MeerkatClient, SkillHelper } from "@meerkat/sdk";
-
-const helper = new SkillHelper(client);
-
-if (helper.isAvailable()) {
-  const result = await helper.invoke(sessionId, "/shell-patterns", "How do I run a background job?");
-  console.log(result.text);
-}
-
-const result = await helper.invokeNewSession(
-  "/code-review",
-  "Review this function",
-  "claude-opus-4-6",
-);
+type AgentEvent =
+  | RunStartedEvent
+  | RunCompletedEvent
+  | RunFailedEvent
+  | TurnStartedEvent
+  | TextDeltaEvent
+  | TextCompleteEvent
+  | ToolCallRequestedEvent
+  | ToolResultReceivedEvent
+  | TurnCompletedEvent
+  | ToolExecutionStartedEvent
+  | ToolExecutionCompletedEvent
+  | ToolExecutionTimedOutEvent
+  | CompactionStartedEvent
+  | CompactionCompletedEvent
+  | CompactionFailedEvent
+  | BudgetWarningEvent
+  | RetryingEvent
+  | HookStartedEvent
+  | HookCompletedEvent
+  | HookFailedEvent
+  | HookDeniedEvent
+  | HookRewriteAppliedEvent
+  | HookPatchPublishedEvent
+  | SkillsResolvedEvent
+  | SkillResolutionFailedEvent
+  | InteractionCompleteEvent
+  | InteractionFailedEvent
+  | StreamTruncatedEvent
+  | UnknownEvent;
 ```
 
-| Method | Description |
-|--------|-------------|
-| `isAvailable()` | Returns `true` if `"skills"` capability is available |
-| `requireSkills()` | Throws if skills not available |
-| `invoke(sessionId, skillRef, prompt)` | Invoke skill in existing session |
-| `invokeNewSession(skillRef, prompt, model?)` | Create session and invoke skill |
+Unknown event types are surfaced as `UnknownEvent` for forward-compatibility.
 
----
-
-## Skills parameters
-
-Both `createSession()` and `startTurn()` accept skill-related parameters:
+### Session lifecycle events
 
 ```typescript
-// Preload skills into the system prompt at session creation
-const result = await client.createSession({
-  prompt: "Hello!",
-  preload_skills: ["extraction/email", "formatting/markdown"],
-});
+interface RunStartedEvent   { type: "run_started";   sessionId: string; prompt: string }
+interface RunCompletedEvent { type: "run_completed";  sessionId: string; result: string; usage: Usage }
+interface RunFailedEvent    { type: "run_failed";     sessionId: string; error: string }
+```
 
-// Inject skills for a specific turn
-const result = await client.startTurn(sessionId, "Extract emails", {
-  skill_references: ["extraction/email"],
-});
+### Turn and LLM events
+
+```typescript
+interface TurnStartedEvent        { type: "turn_started";         turnNumber: number }
+interface TextDeltaEvent          { type: "text_delta";            delta: string }
+interface TextCompleteEvent       { type: "text_complete";         content: string }
+interface ToolCallRequestedEvent  { type: "tool_call_requested";   id: string; name: string; args: unknown }
+interface ToolResultReceivedEvent { type: "tool_result_received";  id: string; name: string; isError: boolean }
+interface TurnCompletedEvent      { type: "turn_completed";        stopReason: StopReason; usage: Usage }
+```
+
+```typescript
+type StopReason =
+  | "end_turn"
+  | "tool_use"
+  | "max_tokens"
+  | "stop_sequence"
+  | "content_filter"
+  | "cancelled";
+```
+
+### Tool execution events
+
+```typescript
+interface ToolExecutionStartedEvent   { type: "tool_execution_started";    id: string; name: string }
+interface ToolExecutionCompletedEvent { type: "tool_execution_completed";   id: string; name: string; result: string; isError: boolean; durationMs: number }
+interface ToolExecutionTimedOutEvent  { type: "tool_execution_timed_out";   id: string; name: string; timeoutMs: number }
+```
+
+### Compaction events
+
+```typescript
+interface CompactionStartedEvent   { type: "compaction_started";   inputTokens: number; estimatedHistoryTokens: number; messageCount: number }
+interface CompactionCompletedEvent { type: "compaction_completed";  summaryTokens: number; messagesBefore: number; messagesAfter: number }
+interface CompactionFailedEvent    { type: "compaction_failed";     error: string }
+```
+
+### Budget events
+
+```typescript
+interface BudgetWarningEvent { type: "budget_warning"; budgetType: BudgetType; used: number; limit: number; percent: number }
+
+type BudgetType = "tokens" | "time" | "tool_calls";
+```
+
+### Retry events
+
+```typescript
+interface RetryingEvent { type: "retrying"; attempt: number; maxAttempts: number; error: string; delayMs: number }
+```
+
+### Hook events
+
+```typescript
+type HookPoint =
+  | "run_started" | "run_completed" | "run_failed"
+  | "pre_llm_request" | "post_llm_response"
+  | "pre_tool_execution" | "post_tool_execution"
+  | "turn_boundary";
+
+interface HookStartedEvent        { type: "hook_started";         hookId: string; point: HookPoint }
+interface HookCompletedEvent      { type: "hook_completed";        hookId: string; point: HookPoint; durationMs: number }
+interface HookFailedEvent         { type: "hook_failed";           hookId: string; point: HookPoint; error: string }
+interface HookDeniedEvent         { type: "hook_denied";           hookId: string; point: HookPoint; reasonCode: string; message: string; payload?: unknown }
+interface HookRewriteAppliedEvent { type: "hook_rewrite_applied";  hookId: string; point: HookPoint; patch: Record<string, unknown> }
+interface HookPatchPublishedEvent { type: "hook_patch_published";  hookId: string; point: HookPoint; envelope: Record<string, unknown> }
+```
+
+### Skill events
+
+```typescript
+interface SkillsResolvedEvent       { type: "skills_resolved";         skills: readonly string[]; injectionBytes: number }
+interface SkillResolutionFailedEvent { type: "skill_resolution_failed"; reference: string; error: string }
+```
+
+### Comms events
+
+```typescript
+interface InteractionCompleteEvent { type: "interaction_complete"; interactionId: string; result: string }
+interface InteractionFailedEvent   { type: "interaction_failed";   interactionId: string; error: string }
+```
+
+### Stream management
+
+```typescript
+interface StreamTruncatedEvent { type: "stream_truncated"; reason: string }
+```
+
+### Type guard utilities
+
+The SDK exports type guards for the most commonly used events:
+
+```typescript
+import {
+  isTextDelta,
+  isTextComplete,
+  isTurnCompleted,
+  isToolCallRequested,
+  isRunCompleted,
+  isRunFailed,
+} from "@rkat/sdk";
+
+for await (const event of session.stream("prompt")) {
+  if (isTextDelta(event)) {
+    process.stdout.write(event.delta);  // TypeScript knows event.delta exists
+  }
+  if (isTurnCompleted(event)) {
+    console.log(event.stopReason, event.usage.inputTokens);
+  }
+}
 ```
 
 ---
 
 ## Error handling
 
-All errors extend `MeerkatError`:
+All errors extend `MeerkatError`. Catch it as a base class or use the specific subclasses for targeted handling.
 
 ```typescript
-import { MeerkatError, CapabilityUnavailableError } from "@meerkat/sdk";
+import { MeerkatError, CapabilityUnavailableError } from "@rkat/sdk";
 
 try {
   await client.connect();
-  const result = await client.createSession({ prompt: "Hello" });
+  const session = await client.createSession("Hello");
+  await session.turn("Next");
 } catch (err) {
   if (err instanceof CapabilityUnavailableError) {
-    console.error("Missing capability:", err.message);
+    console.error("Missing capability:", err.message, err.capabilityHint);
   } else if (err instanceof MeerkatError) {
-    console.error(`[${err.code}]: ${err.message}`);
+    console.error(`[${err.code}] ${err.message}`);
   }
 } finally {
   await client.close();
 }
 ```
 
-| Class | Description |
+### Error classes
+
+```typescript
+class MeerkatError extends Error {
+  readonly code: string;
+  readonly details?: unknown;
+  readonly capabilityHint?: { capability_id: string; message: string };
+}
+
+class CapabilityUnavailableError extends MeerkatError {}
+class SessionNotFoundError extends MeerkatError {}
+class SkillNotFoundError extends MeerkatError {}
+```
+
+| Class | When thrown |
 |-------|-------------|
-| `MeerkatError` | Base error with `code`, `details`, `capabilityHint` |
-| `CapabilityUnavailableError` | Required capability not available |
-| `SessionNotFoundError` | Session ID does not exist |
-| `SkillNotFoundError` | Skill reference cannot be found |
+| `MeerkatError` | Base class for all SDK errors |
+| `CapabilityUnavailableError` | `client.requireCapability()` or `session.invokeSkill()` when the required capability is not available |
+| `SessionNotFoundError` | Server reports that the requested session does not exist |
+| `SkillNotFoundError` | Server reports that a skill reference cannot be resolved |
+
+### Common error codes
+
+| Code | Cause |
+|------|-------|
+| `NOT_CONNECTED` | Method called before `connect()` |
+| `VERSION_MISMATCH` | Server contract version incompatible with SDK |
+| `CAPABILITY_UNAVAILABLE` | Required capability not enabled in this build |
+| `CLIENT_CLOSED` | Method called after `close()` |
+| `STREAM_NOT_CONSUMED` | `stream.result` accessed before iteration completed |
+| `BINARY_NOT_FOUND` | `rkat-rpc` not found and auto-download failed |
+
+---
+
+## Skills
+
+Both `createSession()` and `session.turn()` accept skill parameters. Use `SkillKey` objects (preferred) or legacy strings.
+
+```typescript
+// Preload skills into the system prompt at session creation
+const session = await client.createSession("Hello!", {
+  preloadSkills: ["extraction/email", "formatting/markdown"],
+});
+
+// Inject a skill for a specific turn via session.turn()
+const result = await session.turn("Extract emails from this text", {
+  skillRefs: [{ sourceUuid: "abc123", skillName: "extraction-email" }],
+});
+
+// Convenience method on Session — wraps turn() with requireCapability check
+const result2 = await session.invokeSkill(
+  { sourceUuid: "abc123", skillName: "extraction-email" },
+  "Extract emails from this text",
+);
+```
 
 ---
 
 ## Version compatibility
 
 ```typescript
-import { CONTRACT_VERSION } from "@meerkat/sdk";
-console.log(CONTRACT_VERSION);  // "0.2.0"
+import { CONTRACT_VERSION } from "@rkat/sdk";
+console.log(CONTRACT_VERSION);  // e.g. "0.3.4"
 ```
 
-- While major version is `0`, minor versions must match exactly
-- Once `1.0.0` is reached, major versions must match (standard semver)
+- While the major version is `0`, minor versions must match exactly between SDK and server.
+- From `1.0.0` onwards, standard semver applies: major versions must match.
+
+Version checking happens automatically during `connect()`. A `MeerkatError` with code `VERSION_MISMATCH` is thrown if versions are incompatible.
 
 ---
 
 ## See also
 
-- [TypeScript SDK overview](/sdks/typescript/overview) - getting started and MeerkatClient API
+- [TypeScript SDK overview](/sdks/typescript/overview) - getting started, client and session API
 - [Python SDK](/sdks/python/overview) - Python SDK
 - [RPC reference](/api/rpc) - JSON-RPC protocol specification

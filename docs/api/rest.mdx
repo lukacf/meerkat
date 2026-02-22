@@ -136,7 +136,12 @@ Create and run a new session.
   "verbose": false,
   "host_mode": false,
   "comms_name": null,
-  "hooks_override": null
+  "peer_meta": null,
+  "hooks_override": null,
+  "enable_builtins": null,
+  "enable_shell": null,
+  "enable_subagents": null,
+  "enable_memory": null
 }
 ```
 
@@ -199,8 +204,28 @@ Create and run a new session.
   Agent name for inter-agent communication.
 </ParamField>
 
+<ParamField body="peer_meta" type="object | null" default="null">
+  Friendly metadata for peer discovery (name, description, labels).
+</ParamField>
+
 <ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
   Run-scoped hook overrides (see [Hooks](/guides/hooks)).
+</ParamField>
+
+<ParamField body="enable_builtins" type="bool | null" default="null (factory default)">
+  Enable built-in tools (task management, etc.). Omit to use factory defaults.
+</ParamField>
+
+<ParamField body="enable_shell" type="bool | null" default="null (factory default)">
+  Enable shell tool (requires `enable_builtins`). Omit to use factory defaults.
+</ParamField>
+
+<ParamField body="enable_subagents" type="bool | null" default="null (factory default)">
+  Enable sub-agent tools. Omit to use factory defaults.
+</ParamField>
+
+<ParamField body="enable_memory" type="bool | null" default="null (factory default)">
+  Enable semantic memory. Omit to use factory defaults.
 </ParamField>
 
 #### Response fields
@@ -543,13 +568,15 @@ If `expected_generation` is stale, the server returns `400` with a generation-co
 
 ### POST /comms/send
 
-Push a comms message into a running session. Requires the `comms` feature.
+Push a canonical comms command into a running session. Requires the `comms` feature.
 
 <CodeGroup>
 ```json Request
 {
   "session_id": "01936f8a-7b2c-7000-8000-000000000001",
-  "payload": {"alert": "build failed", "repo": "main"},
+  "kind": "peer_message",
+  "to": "reviewer",
+  "body": "Please review the latest diff",
   "source": "ci-pipeline"
 }
 ```
@@ -560,15 +587,51 @@ Push a comms message into a running session. Requires the `comms` feature.
 </CodeGroup>
 
 <ParamField body="session_id" type="string" required>
-  Session ID to push the event to.
+  Session ID to dispatch the comms command to.
 </ParamField>
 
-<ParamField body="payload" type="any JSON" required>
-  Any JSON value. Serialized and injected as event body.
+<ParamField body="kind" type="string" required>
+  Command kind: `"peer_message"`, `"peer_request"`, or `"peer_response"`.
 </ParamField>
 
-<ParamField body="source" type="string">
+<ParamField body="to" type="string | null">
+  Peer name to send to (required for `peer_message` and `peer_request`).
+</ParamField>
+
+<ParamField body="body" type="string | null">
+  Message body (required for `peer_message`).
+</ParamField>
+
+<ParamField body="intent" type="string | null">
+  Request intent (required for `peer_request`, e.g. `"review"`, `"delegate"`).
+</ParamField>
+
+<ParamField body="params" type="object | null">
+  Request parameters (optional for `peer_request`).
+</ParamField>
+
+<ParamField body="in_reply_to" type="string | null">
+  ID of the request being responded to (required for `peer_response`).
+</ParamField>
+
+<ParamField body="status" type="string | null">
+  Response status: `"accepted"`, `"completed"`, or `"failed"` (for `peer_response`).
+</ParamField>
+
+<ParamField body="result" type="object | null">
+  Response result data (optional for `peer_response`).
+</ParamField>
+
+<ParamField body="source" type="string | null">
   Optional source label.
+</ParamField>
+
+<ParamField body="stream" type="string | null">
+  Optional stream identifier.
+</ParamField>
+
+<ParamField body="allow_self_session" type="bool | null">
+  Allow the session to send a message to itself (default: false).
 </ParamField>
 
 <Note>
@@ -579,7 +642,11 @@ that already know the session ID.
 
 ### GET /comms/peers
 
-List discoverable peers. Requires the `comms` feature.
+List discoverable peers for a session. Requires the `comms` feature.
+
+<ParamField query="session_id" type="string" required>
+  Session ID to query peers for.
+</ParamField>
 
 ```json Response
 {
@@ -603,7 +670,7 @@ All errors are returned as JSON with an HTTP status code:
 
 | HTTP Status | Code | When |
 |-------------|------|------|
-| 400 | `INVALID_PARAMS` | Invalid parameters, session ID mismatch, host_mode without comms |
+| 400 | `BAD_REQUEST` | Invalid parameters, session ID mismatch, host_mode without comms |
 | 403 | `HOOK_DENIED` | Hook blocked the operation |
 | 404 | `SESSION_NOT_FOUND` | Session does not exist |
 | 404 | `SKILL_NOT_FOUND` | Requested skill does not exist |
@@ -627,7 +694,7 @@ All errors are returned as JSON with an HTTP status code:
 ```json Bad request
 {
   "error": "Session ID mismatch: path=abc body=def",
-  "code": "INVALID_PARAMS"
+  "code": "BAD_REQUEST"
 }
 ```
 </CodeGroup>

@@ -9,7 +9,7 @@ Meerkat is a library-first, modular agent engine built in Rust. It provides the 
 ## Design philosophy
 
 1. **Library-first** -- the Rust crate is the primary interface; surfaces (CLI, REST, RPC, MCP) are thin wrappers
-2. **Modular** -- twelve crates, all opt-in. Clean trait boundaries let you swap providers, stores, and dispatchers
+2. **Modular** -- eighteen crates, all opt-in. Clean trait boundaries let you swap providers, stores, and dispatchers
 3. **No I/O in core** -- `meerkat-core` has no network or filesystem dependencies; all I/O is in satellite crates
 4. **Streaming-first** -- all LLM interactions use streaming for responsive user experiences
 5. **Budget-aware** -- built-in resource tracking for tokens, time, and tool calls
@@ -32,6 +32,8 @@ graph TD
     COMMS["meerkat-comms<br/>Ed25519 / Transports / Trust"]
     CONTRACTS["meerkat-contracts<br/>Wire types / Capabilities / Error codes"]
     SKILLS["meerkat-skills<br/>Filesystem / Git / HTTP / Embedded"]
+    MOB["meerkat-mob<br/>Mob runtime / Flows / Tasks"]
+    MOBMCP["meerkat-mob-mcp<br/>MobMcpDispatcher / MobMcpState"]
 
     CORE["meerkat-core<br/>Traits, agent loop, types<br/>SessionService trait, SessionError"]
 
@@ -42,10 +44,14 @@ graph TD
     FACADE --> TOOLS
     FACADE --> MEMORY
     FACADE --> HOOKS
-    FACADE --> MCPSERVER
     FACADE --> COMMS
     FACADE --> CONTRACTS
     FACADE --> SKILLS
+
+    MCPSERVER --> FACADE
+    MOBMCP --> MOB
+    MOBMCP --> CORE
+    MOB --> CORE
 
     CLIENT --> CORE
     SESSION --> CORE
@@ -54,7 +60,6 @@ graph TD
     TOOLS --> CORE
     MEMORY --> CORE
     HOOKS --> CORE
-    MCPSERVER --> CORE
     COMMS --> CORE
     CONTRACTS --> CORE
     SKILLS --> CORE
@@ -104,6 +109,8 @@ graph TD
     SESSION["meerkat-session<br/>Ephemeral / Persistent / Compactor"]
     MEMORY["meerkat-memory<br/>HNSW / Simple"]
     MCP["meerkat-mcp<br/>McpRouter / Stdio / HTTP"]
+    MOB["meerkat-mob<br/>Mob runtime / Flows / Tasks"]
+    MOBMCP["meerkat-mob-mcp<br/>MobMcpDispatcher"]
 
     AGENT --> CLIENT
     AGENT --> TOOLS
@@ -111,6 +118,8 @@ graph TD
     AGENT --> SESSION
     AGENT --> MEMORY
     TOOLS --> MCP
+    MOBMCP --> MOB
+    TOOLS -.->|external_tools composition| MOBMCP
 ```
 
 ## Crate structure
@@ -160,14 +169,18 @@ All providers implement the `LlmClient` trait and normalize responses to `LlmEve
 pub trait LlmClient: Send + Sync {
     fn stream(&self, request: &LlmRequest) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send>>;
     fn provider(&self) -> &'static str;
+    async fn health_check(&self) -> Result<(), LlmError>;
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError>;
 }
 
 pub enum LlmEvent {
-    TextDelta { delta: String },
+    TextDelta { delta: String, meta: Option<Box<ProviderMeta>> },
+    ReasoningDelta { delta: String },
+    ReasoningComplete { text: String, meta: Option<Box<ProviderMeta>> },
     ToolCallDelta { id: String, name: Option<String>, args_delta: String },
-    ToolCallComplete { id: String, name: String, args: Value },
+    ToolCallComplete { id: String, name: String, args: Value, meta: Option<Box<ProviderMeta>> },
     UsageUpdate { usage: Usage },
-    Done { stop_reason: StopReason },
+    Done { outcome: LlmDoneOutcome },
 }
 ```
 </Accordion>
@@ -187,7 +200,6 @@ Session service orchestration:
 - **EphemeralSessionService**: in-memory session lifecycle (always available)
 - **PersistentSessionService**: durable session lifecycle over `SessionStore` backends
 - **DefaultCompactor**: context compaction implementation (feature: `session-compaction`)
-- **SessionRuntime**: per-session task ownership + turn concurrency coordination
 
 Feature gates: `session-store`, `session-compaction`.
 </Accordion>
@@ -247,7 +259,7 @@ Canonical wire types and capability model shared across all surfaces:
 - **Wire types**: `WireRunResult`, `WireSessionInfo`, `WireEvent`, `WireUsage`, `WireError`
 - **Capabilities**: `CapabilityId`, `CapabilityStatus`, `CapabilityRegistration`, `CapabilitiesResponse`
 - **Error codes**: `ErrorCode` with stable projections to JSON-RPC codes, HTTP status, and CLI exit codes
-- **Contract version**: semver versioning for API compatibility (`0.2.0`)
+- **Contract version**: semver versioning for API compatibility (`0.3.4`)
 - **Parameter types**: `CoreCreateParams`, `StructuredOutputParams`, `HookParams`, `CommsParams`, `SkillsParams`
 </Accordion>
 
@@ -261,6 +273,29 @@ Skill loading, resolution, and rendering:
 - **Discovery tools**: `browse_skills` and `load_skill` (when builtins enabled)
 
 Feature-gated behind `skills`.
+</Accordion>
+
+<Accordion title="meerkat-mob">
+Mob runtime for multi-agent coordination:
+
+- **MobBuilder**: construct or resume a mob runtime from a `MobDefinition` and `MobStorage`
+- **MobHandle**: runtime handle for lifecycle, membership, wiring, turns, flows, and tasks
+- **MobDefinition**: declarative mob structure (profiles, wiring, topology, limits, flows)
+- **MobStorage**: event/run/spec storage bundle (in-memory or redb)
+- **Flow engine**: `run_flow` / `flow_status` / `cancel_flow` for multi-step orchestration
+- **Task board**: shared `task_create` / `task_update` / `task_list` for structured work assignment
+- **Parallel spawn**: `spawn_many_member_refs` batches provisioning and wiring concurrently
+
+Feature-gated; depends on `meerkat-core` directly.
+</Accordion>
+
+<Accordion title="meerkat-mob-mcp">
+Tool-dispatch bridge that exposes mob capabilities to non-Rust-SDK surfaces:
+
+- **MobMcpState**: shared state handle wrapping the `MobSessionService`
+- **MobMcpDispatcher**: implements `AgentToolDispatcher`, routing `mob_*` tool calls into the mob runtime
+
+Composed via `SessionBuildOptions.external_tools` so CLI, REST, RPC, and MCP server surfaces all get mob tool capability through the same path.
 </Accordion>
 
 <Accordion title="meerkat-rpc">
@@ -382,7 +417,6 @@ Events emitted at turn boundaries:
 
 - `TurnCompleted`
 - `ToolResultReceived`
-- `CheckpointSaved`
 - `HookStarted` / `HookCompleted` / `HookFailed`
 - `HookDenied`
 - `HookRewriteApplied`

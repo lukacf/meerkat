@@ -66,6 +66,8 @@ meerkat-comms     → Inter-agent communication (Ed25519-signed messaging, trans
 meerkat-contracts → Wire types, capability registry, error codes (canonical over all surfaces)
 meerkat-skills    → Skill loading, resolution, rendering (filesystem, git, HTTP, embedded sources)
 meerkat-hooks     → Hook infrastructure (in-process, command, HTTP runtimes)
+meerkat-mob       → Multi-agent mob orchestration (spawn, provision, finalize)
+meerkat-mob-mcp   → Expose mob tools as MCP interface (MobMcpState, MobMcpDispatcher)
 meerkat-cli       → CLI binary (produces `rkat`)
 meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 ```
@@ -225,7 +227,7 @@ Installed via `make install-hooks`. Two stages:
 - Secret detection (gitleaks)
 - Trailing whitespace, YAML/TOML validation, merge conflict check, large file check
 - `make test` (fast tests: unit + integration-fast)
-- `cargo clippy` (workspace, all features, warnings as errors)
+- `cargo clippy` (workspace, warnings as errors)
 - `cargo doc` (workspace docs build)
 - `make audit` (cargo-deny security audit)
 
@@ -241,7 +243,7 @@ Five files must agree on the same version:
 | `sdks/typescript/package.json` | `version` |
 | `artifacts/schemas/version.json` | `contract_version` |
 
-Additionally, all 15 internal crate dependencies in `Cargo.toml` must match the workspace version.
+Additionally, all 17 internal crate dependencies in `Cargo.toml` must match the workspace version.
 
 **`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
 
@@ -339,7 +341,7 @@ See `docs/reference/design-philosophy.mdx` for the full treatment with code exam
 ### Architectural Principles
 
 - **Infrastructure, not application** — the agent loop is a composable primitive with no opinions about prompts, tools, or output
-- **Trait contracts own the architecture** — `meerkat-core` defines six trait contracts with zero I/O dependencies; implementations live in satellite crates
+- **Trait contracts own the architecture** — `meerkat-core` defines the core trait contracts (`AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`, `HookEngine`, `SkillEngine`/`SkillSource`) with zero I/O dependencies; implementations live in satellite crates
 - **Surfaces are interchangeable skins** — CLI, REST, RPC, MCP Server all route through `SessionService` → `AgentFactory::build_agent()`; no surface constructs agents directly
 - **Composition over configuration** — optional components (`CommsRuntime`, `HookEngine`, `Compactor`, `MemoryStore`) are `Option<Arc<dyn Trait>>`, not feature-flagged defaults
 - **Sessions are first-class, persistence is optional** — `EphemeralSessionService` (always available) and `PersistentSessionService` (event-sourced) share the same `SessionService` trait

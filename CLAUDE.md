@@ -332,6 +332,38 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 
 Do NOT use older model names like `gpt-4o-mini`, `gemini-2.0-flash`, or `claude-3-7-sonnet-20250219`.
 
+## Design Philosophy
+
+See `docs/reference/design-philosophy.mdx` for the full treatment with code examples.
+
+### Architectural Principles
+
+- **Infrastructure, not application** — the agent loop is a composable primitive with no opinions about prompts, tools, or output
+- **Trait contracts own the architecture** — `meerkat-core` defines six trait contracts with zero I/O dependencies; implementations live in satellite crates
+- **Surfaces are interchangeable skins** — CLI, REST, RPC, MCP Server all route through `SessionService` → `AgentFactory::build_agent()`; no surface constructs agents directly
+- **Composition over configuration** — optional components (`CommsRuntime`, `HookEngine`, `Compactor`, `MemoryStore`) are `Option<Arc<dyn Trait>>`, not feature-flagged defaults
+- **Sessions are first-class, persistence is optional** — `EphemeralSessionService` (always available) and `PersistentSessionService` (event-sourced) share the same `SessionService` trait
+- **Errors separate mechanism from policy** — typed three-tier errors (`ToolError` → `AgentError` → `SessionError`) with stable `error_code()` for wire formats; the loop retries, callers decide to resume or abort
+- **Wire types ≠ domain types** — `meerkat-contracts` owns wire format and feeds SDK codegen; domain types in `meerkat-core` are richer and version-locked
+- **Configuration is layered and declarative** — `Config::default()` → file → env (keys only) → per-request `SessionBuildOptions`; no cascading merges, no global mutable state
+- **Testing is a design constraint** — core has no I/O so unit tests need no mocks; three named tiers (`cargo rct`, `cargo int-real`, `cargo e2e`)
+
+### Rust Implementation Principles
+
+- **Ownership topology** — shared immutable infrastructure in `Arc`, exclusively-owned mutable state (session, budget); `Agent::run(&mut self)` needs no mutex
+- **Copy-on-write sessions** — `Arc<Vec<Message>>` with `Arc::make_mut` on mutation; `Session::fork()` is O(1)
+- **Zero-allocation iteration** — `ToolCallView<'a>` is `Copy` and borrowed; `ToolCallIter` filters a slice iterator; no `Vec<ToolCall>` materialized
+- **Deferred parsing** — tool args are `Box<RawValue>` from provider to dispatcher; parsed at most once, only if the tool executes
+- **Typed enums over `Value`** — `ProviderMeta`, `Message`, `AssistantBlock` are typed with `#[non_exhaustive]`; compiler enforces exhaustive matching
+- **Newtype discipline** — `BlockKey(usize)`, `OperationId(Uuid)`, `SessionId`, `SourceUuid`, `SkillName` prevent index/ID confusion at compile time
+- **Serde as a design tool** — internally/adjacently/externally tagged enums chosen per data shape; custom deserializers for edge cases; `skip_serializing_if` for minimal payloads
+- **Streaming block assembly** — append-only `Vec<BlockSlot>` with `Pending` → `Finalized` transitions; `IndexMap` for deterministic order; tool ID is map key only
+- **Generic type erasure at boundaries** — `Agent<C, T, S>` monomorphized in tests, boxed to `DynAgent` at surface boundaries via `?Sized` bounds
+- **Async without interior mutability** — dedicated tokio task per session owns the `Agent` exclusively; channels for commands, notifications for events
+- **Feature gating at the type level** — `#[cfg(feature)]` gates types, not logic; facade re-exports only what features enable; fallbacks always available
+- **Trait composition with graceful degradation** — optional methods default to `Err(Unsupported(...))`; required methods define the minimal contract
+- **Error propagation** — `thiserror` enums with `From` impls for `?` chaining; each tier captures minimal context; stable `error_code()` for SDKs
+
 ## Rust Design Guidelines
 
 This project follows strict Rust idioms. Code review will reject "JavaScript wearing a struct costume."

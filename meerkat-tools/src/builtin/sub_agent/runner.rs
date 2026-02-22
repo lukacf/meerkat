@@ -17,13 +17,17 @@ use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::session::Session;
 use meerkat_core::sub_agent::SubAgentManager;
 use meerkat_core::types::{Message, SystemMessage, UserMessage};
-use meerkat_core::{AgentBuilder, AgentSessionStore, AgentToolDispatcher, BudgetLimits};
+use meerkat_core::{
+    AgentBuilder, AgentEvent, AgentSessionStore, AgentToolDispatcher, BudgetLimits,
+    ScopedAgentEvent, StreamScopeFrame,
+};
 #[cfg(feature = "comms")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 #[cfg(feature = "comms")]
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 
 /// Configuration for spawning a sub-agent with comms
 #[cfg(feature = "comms")]
@@ -111,6 +115,31 @@ pub fn create_fork_session(parent_session: &Session, fork_prompt: &str) -> Sessi
     }));
 
     session
+}
+
+fn spawn_scoped_forwarder(
+    mut child_event_rx: mpsc::Receiver<AgentEvent>,
+    scoped_tx: mpsc::Sender<ScopedAgentEvent>,
+    parent_scope_path: Arc<Vec<StreamScopeFrame>>,
+    child_scope_frame: StreamScopeFrame,
+) -> tokio::task::JoinHandle<()> {
+    let mut base_scope_path = if parent_scope_path.is_empty() {
+        vec![StreamScopeFrame::Primary {
+            session_id: "unknown".to_string(),
+        }]
+    } else {
+        (*parent_scope_path).clone()
+    };
+    base_scope_path.push(child_scope_frame);
+
+    tokio::spawn(async move {
+        while let Some(event) = child_event_rx.recv().await {
+            let scoped = ScopedAgentEvent::new(base_scope_path.clone(), event);
+            if scoped_tx.send(scoped).await.is_err() {
+                break;
+            }
+        }
+    })
 }
 
 /// Set up the comms infrastructure for a child agent
@@ -243,6 +272,10 @@ pub struct DynSubAgentSpec {
     pub parent_trusted_peers: Option<Arc<RwLock<TrustedPeers>>>,
     /// Host mode - agent stays alive processing comms messages after initial prompt
     pub host_mode: bool,
+    /// Optional scoped stream sink for attributed child events.
+    pub scoped_event_tx: Option<tokio::sync::mpsc::Sender<ScopedAgentEvent>>,
+    /// Parent scope path used as the base for child attribution.
+    pub parent_scope_path: Vec<StreamScopeFrame>,
 }
 
 /// Spawn and run a sub-agent in a background task (trait object version)
@@ -265,6 +298,8 @@ pub async fn spawn_sub_agent_dyn(
     use meerkat_core::sub_agent::SubAgentCommsInfo;
 
     let started_at = Instant::now();
+    let scoped_event_tx = spec.scoped_event_tx.clone();
+    let parent_scope_path = spec.parent_scope_path.clone();
 
     // Create the LLM client adapter (bridges LlmClient -> AgentLlmClient)
     let client: Arc<dyn LlmClient> = spec.client;
@@ -358,16 +393,55 @@ pub async fn spawn_sub_agent_dyn(
     let _name_for_task = name.clone();
     let manager_for_task = manager.clone();
     let host_mode = spec.host_mode;
+    let child_agent_id = id.to_string();
+    let child_label = name.clone();
 
     // Spawn the agent execution task
     tokio::spawn(async move {
-        let result = if host_mode {
-            agent.run_host_mode(String::new()).await
+        let (result, forwarder_task) = if let Some(scoped_tx) = scoped_event_tx {
+            let (child_event_tx, child_event_rx) = mpsc::channel::<AgentEvent>(64);
+            let forwarder = spawn_scoped_forwarder(
+                child_event_rx,
+                scoped_tx,
+                Arc::new(parent_scope_path.clone()),
+                StreamScopeFrame::SubAgent {
+                    agent_id: child_agent_id.clone(),
+                    tool_call_id: None,
+                    label: Some(child_label.clone()),
+                },
+            );
+
+            let result = if host_mode {
+                #[cfg(feature = "comms")]
+                {
+                    agent
+                        .run_host_mode_with_events(String::new(), child_event_tx)
+                        .await
+                }
+                #[cfg(not(feature = "comms"))]
+                {
+                    agent.run_host_mode(String::new()).await
+                }
+            } else {
+                // The session already has the user prompt, so use run_pending()
+                // which runs from the existing session without adding a new message.
+                agent.run_pending_with_events(child_event_tx).await
+            };
+            (result, Some(forwarder))
         } else {
-            // The session already has the user prompt, so use run_pending()
-            // which runs from the existing session without adding a new message.
-            agent.run_pending().await
+            let result = if host_mode {
+                agent.run_host_mode(String::new()).await
+            } else {
+                // The session already has the user prompt, so use run_pending()
+                // which runs from the existing session without adding a new message.
+                agent.run_pending().await
+            };
+            (result, None)
         };
+
+        if let Some(forwarder) = forwarder_task {
+            let _ = forwarder.await;
+        }
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
 

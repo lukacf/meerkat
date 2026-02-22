@@ -56,6 +56,10 @@ export { CONTRACT_VERSION } from "./generated/types.js";
 // Typed events — discriminated union and all interfaces
 export type {
   AgentEvent,
+  CoreAgentEvent,
+  StreamEvent,
+  ScopedAgentEvent,
+  StreamScopeFrame,
   RunStartedEvent,
   RunCompletedEvent,
   RunFailedEvent,
@@ -93,6 +97,7 @@ export type {
 // Event utilities
 export {
   parseEvent,
+  parseCoreEvent,
   isTextDelta,
   isTextComplete,
   isTurnCompleted,

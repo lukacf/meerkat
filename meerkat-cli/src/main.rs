@@ -1,6 +1,7 @@
 //! meerkat-cli - Headless CLI for Meerkat
 
 mod mcp;
+mod stream_renderer;
 #[cfg(feature = "comms")]
 mod stdin_events;
 
@@ -13,7 +14,8 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionQuery, SessionService,
 };
 use meerkat_core::{
-    AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, format_verbose_event,
+    AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, ScopedAgentEvent,
+    StreamScopeFrame, format_verbose_event,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
@@ -84,30 +86,86 @@ fn parse_skill_ref_arg(s: &str) -> Result<SkillRef, String> {
     }
 }
 
-/// Spawn a task that handles verbose event output
-fn spawn_event_handler(
+/// Spawn a task that handles verbose event output.
+fn spawn_verbose_event_handler(
     mut agent_event_rx: mpsc::Receiver<AgentEvent>,
     verbose: bool,
-    stream: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        use std::io::Write;
-
         while let Some(event) = agent_event_rx.recv().await {
-            if stream && let AgentEvent::TextDelta { delta } = &event {
-                print!("{}", delta);
-                let _ = std::io::stdout().flush();
-            }
-
-            if !verbose {
-                continue;
-            }
-
-            if let Some(line) = format_verbose_event(&event) {
+            if verbose && let Some(line) = format_verbose_event(&event) {
                 eprintln!("{}", line);
             }
         }
     })
+}
+
+/// Spawn a task that renders scoped streaming output.
+fn spawn_scoped_event_handler(
+    mut scoped_event_rx: mpsc::Receiver<ScopedAgentEvent>,
+    policy: stream_renderer::StreamRenderPolicy,
+) -> tokio::task::JoinHandle<stream_renderer::StreamRenderSummary> {
+    tokio::spawn(async move {
+        let ansi = stream_renderer::stderr_is_tty();
+        let mut renderer = stream_renderer::StreamRenderer::new(ansi, policy);
+        while let Some(event) = scoped_event_rx.recv().await {
+            renderer.render(&event);
+        }
+        renderer.finish()
+    })
+}
+
+fn resolve_stream_policy(
+    stream: bool,
+    stream_view: StreamView,
+    stream_focus: Option<String>,
+) -> anyhow::Result<Option<stream_renderer::StreamRenderPolicy>> {
+    if !stream {
+        if stream_focus.is_some() {
+            return Err(anyhow::anyhow!(
+                "--stream-focus requires --stream and --stream-view focus"
+            ));
+        }
+        if stream_view != StreamView::Primary {
+            return Err(anyhow::anyhow!("--stream-view requires --stream"));
+        }
+        return Ok(None);
+    }
+
+    match stream_view {
+        StreamView::Primary => {
+            if stream_focus.is_some() {
+                return Err(anyhow::anyhow!(
+                    "--stream-focus is only valid with --stream-view focus"
+                ));
+            }
+            Ok(Some(stream_renderer::StreamRenderPolicy::PrimaryOnly))
+        }
+        StreamView::Mux => {
+            if stream_focus.is_some() {
+                return Err(anyhow::anyhow!(
+                    "--stream-focus is only valid with --stream-view focus"
+                ));
+            }
+            Ok(Some(stream_renderer::StreamRenderPolicy::MuxAll))
+        }
+        StreamView::Focus => {
+            let focus = stream_focus.ok_or_else(|| {
+                anyhow::anyhow!("--stream-focus is required when --stream-view focus is used")
+            })?;
+            if !stream_renderer::is_valid_scope_id(&focus) {
+                return Err(anyhow::anyhow!(
+                    "invalid --stream-focus scope '{}': expected primary, mob:<member>, primary/sub:<agent>, or mob:<member>/sub:<agent>",
+                    focus
+                ));
+            }
+            Ok(Some(stream_renderer::StreamRenderPolicy::Focus(focus)))
+        }
+    }
+}
+
+fn resolve_tooling_flags(enable_builtins: bool, enable_shell: bool) -> (bool, bool) {
+    (enable_builtins || enable_shell, enable_shell)
 }
 
 async fn init_project_config() -> anyhow::Result<()> {
@@ -158,7 +216,7 @@ async fn init_project_config() -> anyhow::Result<()> {
 #[command(about = "Meerkat - Rust Agentic Interface Kit")]
 struct Cli {
     /// Explicit realm ID (opaque). Reuse to share state across surfaces.
-    #[arg(long, global = true)]
+    #[arg(long, short = 'r', global = true)]
     realm: Option<String>,
     /// Start in isolated mode (new generated realm).
     #[arg(long, global = true)]
@@ -211,7 +269,7 @@ enum Commands {
         prompt: String,
 
         /// Model to use (defaults to config when omitted)
-        #[arg(long)]
+        #[arg(long, short = 'm')]
         model: Option<String>,
 
         /// LLM provider (anthropic, openai, gemini). Inferred from model name if not specified.
@@ -227,7 +285,7 @@ enum Commands {
         max_total_tokens: Option<u64>,
 
         /// Maximum duration for the run (e.g., "5m", "1h30m")
-        #[arg(long)]
+        #[arg(long, short = 'd')]
         max_duration: Option<String>,
 
         /// Maximum tool calls for the run
@@ -239,8 +297,16 @@ enum Commands {
         output: String,
 
         /// Stream LLM response tokens to stdout as they arrive
-        #[arg(long)]
+        #[arg(long, short = 's')]
         stream: bool,
+
+        /// Streaming view policy (primary, mux, focus)
+        #[arg(long, short = 'w', value_enum, default_value = "primary")]
+        stream_view: StreamView,
+
+        /// Scope selector for `--stream-view focus`
+        #[arg(long, short = 'f')]
+        stream_focus: Option<String>,
 
         /// Provider-specific parameter (KEY=VALUE). Can be repeated.
         #[arg(long = "param", value_name = "KEY=VALUE")]
@@ -303,15 +369,15 @@ enum Commands {
 
         // === Built-in tools flags ===
         /// Enable built-in tools (tasks, shell). Adds task management tools.
-        #[arg(long)]
+        #[arg(long, short = 'b')]
         enable_builtins: bool,
 
-        /// Enable shell tool (requires --enable-builtins). Allows executing shell commands.
-        #[arg(long, requires = "enable_builtins")]
+        /// Enable shell tool. Implies --enable-builtins.
+        #[arg(long, short = 'x')]
         enable_shell: bool,
 
         /// Disable sub-agent tools (agent_spawn, agent_fork, etc.). They are enabled by default.
-        #[arg(long)]
+        #[arg(long, short = 'N')]
         no_subagents: bool,
 
         // === Output verbosity ===
@@ -440,6 +506,13 @@ enum ConfigCommands {
 enum ConfigFormat {
     Toml,
     Json,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum StreamView {
+    Primary,
+    Mux,
+    Focus,
 }
 
 /// Schema compatibility mode for provider lowering.
@@ -665,6 +738,15 @@ enum MobCommands {
         flow: String,
         #[arg(long = "params")]
         params: Option<String>,
+        /// Stream flow member outputs while the run is executing
+        #[arg(long, short = 's')]
+        stream: bool,
+        /// Streaming view policy (primary, mux, focus)
+        #[arg(long, short = 'w', value_enum, default_value = "primary")]
+        stream_view: StreamView,
+        /// Scope selector for `--stream-view focus`
+        #[arg(long, short = 'f')]
+        stream_focus: Option<String>,
     },
     /// Show JSON status for a flow run.
     FlowStatus { mob_id: String, run_id: String },
@@ -714,6 +796,8 @@ async fn main() -> anyhow::Result<ExitCode> {
             max_tool_calls,
             output,
             stream,
+            stream_view,
+            stream_focus,
             params,
             output_schema,
             output_schema_compat,
@@ -759,6 +843,8 @@ async fn main() -> anyhow::Result<ExitCode> {
                 max_tool_calls,
                 output,
                 stream,
+                stream_view,
+                stream_focus,
                 params,
                 output_schema,
                 output_schema_compat,
@@ -789,6 +875,8 @@ async fn main() -> anyhow::Result<ExitCode> {
             max_tool_calls,
             output,
             stream,
+            stream_view,
+            stream_focus,
             params,
             output_schema,
             output_schema_compat,
@@ -812,6 +900,8 @@ async fn main() -> anyhow::Result<ExitCode> {
                 max_tool_calls,
                 output,
                 stream,
+                stream_view,
+                stream_focus,
                 params,
                 output_schema,
                 output_schema_compat,
@@ -913,6 +1003,8 @@ async fn handle_run_command(
     max_tool_calls: Option<usize>,
     output: String,
     stream: bool,
+    stream_view: StreamView,
+    stream_focus: Option<String>,
     params: Vec<String>,
     output_schema: Option<String>,
     output_schema_compat: Option<SchemaCompatArg>,
@@ -941,6 +1033,7 @@ async fn handle_run_command(
     let duration = max_duration.map(|s| parse_duration(&s)).transpose();
     let provider_params = parse_provider_params(&params);
     let hook_run_overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json);
+    let stream_policy = resolve_stream_policy(stream, stream_view, stream_focus.clone())?;
 
     let parsed_output_schema = output_schema
         .as_ref()
@@ -953,6 +1046,11 @@ async fn handle_run_command(
                 schema
             }
         });
+    let user_requested_builtins = enable_builtins;
+    let (enable_builtins, enable_shell) = resolve_tooling_flags(enable_builtins, enable_shell);
+    if enable_shell && !user_requested_builtins {
+        eprintln!("Info: enabling built-in tools because --enable-shell was requested");
+    }
 
     match (duration, provider_params, hook_run_overrides) {
         (Ok(dur), Ok(parsed_params), Ok(hooks_override)) => {
@@ -974,6 +1072,7 @@ async fn handle_run_command(
                 limits,
                 &output,
                 stream,
+                stream_policy.clone(),
                 parsed_params,
                 parsed_output_schema,
                 structured_output_retries,
@@ -2003,6 +2102,7 @@ async fn run_agent(
     limits: BudgetLimits,
     output: &str,
     stream: bool,
+    stream_policy: Option<stream_renderer::StreamRenderPolicy>,
     provider_params: Option<serde_json::Value>,
     output_schema: Option<OutputSchema>,
     structured_output_retries: u32,
@@ -2022,15 +2122,46 @@ async fn run_agent(
 ) -> anyhow::Result<()> {
     let host_mode = resolve_host_mode(host_mode)?;
     let canonical_skill_refs = canonical_skill_keys(config, skill_refs, skill_references)?;
+    let session = Session::new();
+    let primary_scope_path = vec![StreamScopeFrame::Primary {
+        session_id: session.id().to_string(),
+    }];
 
-    // Create event channel if streaming or verbose output is enabled
-    let (event_tx, event_task) = if stream || verbose {
+    // Create event channels:
+    // - primary AgentEvent channel for the running session turn
+    // - optional scoped stream path for mux/focus attribution
+    let mut event_tx: Option<mpsc::Sender<AgentEvent>> = None;
+    let mut scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>> = None;
+    let mut verbose_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>> =
+        None;
+    let mut primary_to_scoped_bridge_task: Option<tokio::task::JoinHandle<()>> = None;
+
+    if stream {
+        let policy = stream_policy
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("internal stream policy missing"))?;
+        let (primary_tx, mut primary_rx) = mpsc::channel::<AgentEvent>(100);
+        let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
+        let bridge_scoped_tx = scoped_tx.clone();
+        let scope_path_for_bridge = primary_scope_path.clone();
+        primary_to_scoped_bridge_task = Some(tokio::spawn(async move {
+            while let Some(event) = primary_rx.recv().await {
+                let scoped = ScopedAgentEvent::new(scope_path_for_bridge.clone(), event);
+                if bridge_scoped_tx.send(scoped).await.is_err() {
+                    break;
+                }
+            }
+        }));
+
+        event_tx = Some(primary_tx);
+        scoped_event_tx = Some(scoped_tx);
+        stream_task = Some(spawn_scoped_event_handler(scoped_rx, policy));
+    } else if verbose {
         let (tx, rx) = mpsc::channel::<AgentEvent>(100);
-        let task = spawn_event_handler(rx, verbose, stream);
-        (Some(tx), Some(task))
-    } else {
-        (None, None)
-    };
+        event_tx = Some(tx);
+        verbose_task = Some(spawn_verbose_event_handler(rx, verbose));
+    }
 
     // Load optional MCP tools; we compose these with CLI-local mob tools below.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope).await;
@@ -2099,9 +2230,6 @@ async fn run_agent(
     let mob_external_tools = Some(run_mob_tools.dispatcher());
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
-    // Pre-create session to claim the session_id
-    let session = Session::new();
-
     let build = SessionBuildOptions {
         provider: Some(provider.as_core()),
         output_schema,
@@ -2114,6 +2242,10 @@ async fn run_agent(
         provider_params,
         external_tools,
         llm_client_override: None,
+        scoped_event_tx: scoped_event_tx.clone(),
+        scoped_event_path: scoped_event_tx
+            .as_ref()
+            .map(|_| primary_scope_path.clone()),
         override_builtins: None,
         override_shell: None,
         override_subagents: None,
@@ -2207,8 +2339,9 @@ async fn run_agent(
         h.abort();
     }
 
-    // Drop the CLI-held sender clone; remaining senders are owned by session/runtime state.
+    // Drop CLI-held sender clones; remaining senders are owned by session/runtime state.
     drop(event_tx);
+    drop(scoped_event_tx);
 
     // Shutdown the session service and MCP connections gracefully.
     // This drops runtime-held event senders so the receiver can close cleanly.
@@ -2216,12 +2349,34 @@ async fn run_agent(
     shutdown_mcp(&mcp_adapter).await;
     run_mob_tools.persist(scope).await?;
 
-    // Wait for streaming task to complete (it will end when all senders are dropped)
-    if let Some(task) = event_task {
+    // Ensure the primary->scoped bridge is drained before final stream completion checks.
+    if let Some(task) = primary_to_scoped_bridge_task {
         let _ = task.await;
-        // Add newline after streaming output
-        if stream {
-            println!();
+    }
+
+    if let Some(task) = verbose_task {
+        let _ = task.await;
+    }
+
+    // Wait for scoped stream task (it ends when all scoped senders are dropped).
+    if let Some(task) = stream_task {
+        let summary = task
+            .await
+            .map_err(|e| anyhow::anyhow!("stream renderer task failed: {e}"))?;
+        println!();
+        if let Some(focus) = summary.focus_requested
+            && !summary.focus_seen
+        {
+            let discovered = if summary.discovered_scopes.is_empty() {
+                "<none>".to_string()
+            } else {
+                summary.discovered_scopes.join(", ")
+            };
+            return Err(anyhow::anyhow!(
+                "stream focus '{}' did not match any emitted scope (discovered scopes: {})",
+                focus,
+                discovered
+            ));
         }
     }
 
@@ -2437,7 +2592,7 @@ async fn resume_session_with_llm_override(
 
     let (event_tx, event_task) = if verbose {
         let (tx, rx) = mpsc::channel::<AgentEvent>(100);
-        (Some(tx), Some(spawn_event_handler(rx, true, false)))
+        (Some(tx), Some(spawn_verbose_event_handler(rx, true)))
     } else {
         (None, None)
     };
@@ -2453,6 +2608,8 @@ async fn resume_session_with_llm_override(
         provider_params: None,
         external_tools,
         llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
+        scoped_event_tx: None,
+        scoped_event_path: None,
         override_builtins: None,
         override_shell: None,
         override_subagents: None,
@@ -3637,13 +3794,25 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             mob_id,
             flow,
             params,
+            stream,
+            stream_view,
+            stream_focus,
         } => {
+            let stream_policy = resolve_stream_policy(stream, stream_view, stream_focus)?;
             let activation_params = parse_run_flow_params(params)?;
+            let (scoped_event_tx, stream_task) = if let Some(policy) = stream_policy {
+                let (tx, rx) = mpsc::channel::<ScopedAgentEvent>(200);
+                let task = spawn_scoped_event_handler(rx, policy);
+                (Some(tx), Some(task))
+            } else {
+                (None, None)
+            };
             let run_id = state
-                .mob_run_flow(
+                .mob_run_flow_with_stream(
                     &meerkat_mob::MobId::from(mob_id.clone()),
                     FlowId::from(flow),
                     activation_params,
+                    scoped_event_tx.clone(),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -3651,6 +3820,27 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             cache_run_snapshot(&mut registry, &mob_id, run)?;
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
+            drop(scoped_event_tx);
+            if let Some(task) = stream_task {
+                let summary = task
+                    .await
+                    .map_err(|e| anyhow::anyhow!("stream renderer task failed: {e}"))?;
+                println!();
+                if let Some(focus) = summary.focus_requested
+                    && !summary.focus_seen
+                {
+                    let discovered = if summary.discovered_scopes.is_empty() {
+                        "<none>".to_string()
+                    } else {
+                        summary.discovered_scopes.join(", ")
+                    };
+                    return Err(anyhow::anyhow!(
+                        "stream focus '{}' did not match any emitted scope (discovered scopes: {})",
+                        focus,
+                        discovered
+                    ));
+                }
+            }
             println!("{run_id}");
             Ok(())
         }
@@ -4138,6 +4328,82 @@ mod tests {
     fn test_resolve_host_mode_roundtrip() {
         assert!(resolve_host_mode(true).expect("host mode should be enabled"));
         assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
+    }
+
+    #[test]
+    fn test_resolve_tooling_flags_shell_implies_builtins() {
+        let (builtins, shell) = resolve_tooling_flags(false, true);
+        assert!(builtins, "shell should imply builtins");
+        assert!(shell, "shell should stay enabled");
+
+        let (builtins, shell) = resolve_tooling_flags(false, false);
+        assert!(!builtins);
+        assert!(!shell);
+    }
+
+    #[test]
+    fn test_run_short_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "run",
+            "hello",
+            "-s",
+            "-w",
+            "focus",
+            "-f",
+            "primary",
+            "-x",
+            "-d",
+            "5m",
+        ])
+        .expect("short flags should parse");
+
+        match cli.command {
+            Commands::Run {
+                stream,
+                stream_view,
+                stream_focus,
+                enable_shell,
+                max_duration,
+                ..
+            } => {
+                assert!(stream);
+                assert!(matches!(stream_view, StreamView::Focus));
+                assert_eq!(stream_focus.as_deref(), Some("primary"));
+                assert!(enable_shell);
+                assert_eq!(max_duration.as_deref(), Some("5m"));
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn test_mob_run_flow_short_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "run-flow",
+            "mob-1",
+            "--flow",
+            "f1",
+            "-s",
+            "-w",
+            "mux",
+        ])
+        .expect("mob run-flow short flags should parse");
+
+        match cli.command {
+            Commands::Mob {
+                command:
+                    MobCommands::RunFlow {
+                        stream, stream_view, ..
+                    },
+            } => {
+                assert!(stream);
+                assert!(matches!(stream_view, StreamView::Mux));
+            }
+            _ => panic!("expected mob run-flow command"),
+        }
     }
 
     #[test]
@@ -5539,6 +5805,9 @@ timeout_ms = 1000
                 mob_id: "flow-mob".to_string(),
                 flow: "demo".to_string(),
                 params: Some(r#"{"ticket":"REQ-019"}"#.to_string()),
+                stream: false,
+                stream_view: StreamView::Primary,
+                stream_focus: None,
             },
             &scope,
         )
@@ -5625,6 +5894,9 @@ timeout_ms = 1000
                 mob_id: "flow-mob".to_string(),
                 flow: "demo".to_string(),
                 params: Some(r#"{"ticket":"REQ-020"}"#.to_string()),
+                stream: false,
+                stream_view: StreamView::Primary,
+                stream_focus: None,
             },
             &scope,
         )
@@ -5724,6 +5996,9 @@ timeout_ms = 1000
                 mob_id: "flow-mob".to_string(),
                 flow: "missing".to_string(),
                 params: Some(r#"{"ticket":"REQ-019"}"#.to_string()),
+                stream: false,
+                stream_view: StreamView::Primary,
+                stream_focus: None,
             },
             &scope,
         )

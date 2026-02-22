@@ -313,6 +313,7 @@ impl AgentForkTool {
         let messages_inherited = parent_session.messages().len();
         let session = create_fork_session(&parent_session, &params.prompt);
         drop(parent_session);
+        let (scoped_event_tx, parent_scope_path) = self.state.scoped_stream().await;
 
         // Generate operation ID and name
         // Use first 12 hex chars (8 + 4 after dash) to avoid collision with UUIDv7
@@ -351,6 +352,8 @@ impl AgentForkTool {
             comms_config,
             parent_trusted_peers: self.state.parent_trusted_peers.clone(),
             host_mode: false, // Forked agents don't run in host mode
+            scoped_event_tx,
+            parent_scope_path,
         };
         #[cfg(not(feature = "comms"))]
         let spec = DynSubAgentSpec {
@@ -363,6 +366,8 @@ impl AgentForkTool {
             depth: self.state.depth() + 1,
             system_prompt: None, // Fork inherits system prompt from session
             host_mode: false,    // Forked agents don't run in host mode
+            scoped_event_tx,
+            parent_scope_path,
         };
 
         // Spawn the forked agent

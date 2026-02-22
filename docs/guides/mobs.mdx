@@ -368,11 +368,36 @@ CLI flow commands:
 
 ```bash
 rkat mob flows <mob_id>
-rkat mob run-flow <mob_id> --flow <flow_id> [--params '{"key":"value"}']
+rkat mob run-flow <mob_id> --flow <flow_id> [--params '{"key":"value"}'] [--stream] [--stream-view <primary|mux|focus>] [--stream-focus <scope_id>]
 rkat mob flow-status <mob_id> <run_id>
 ```
 
 Flow definitions live under `[flows.<flow_id>]` in the mob definition.
+
+Scoped streaming for flow runs:
+
+- `--stream-view primary` (default): show only the run primary member scope.
+- `--stream-view mux`: show all member and sub-agent scopes with `[<scope_id>]` prefixes.
+- `--stream-view focus --stream-focus <scope_id>`: show one exact scope.
+
+Scope selector format:
+
+- `primary`
+- `mob:<member_ref>`
+- `primary/sub:<agent_id>`
+- `mob:<member_ref>/sub:<agent_id>`
+
+Examples:
+
+```bash
+rkat mob run-flow team-mob --flow incident_response --stream --stream-view mux
+rkat mob run-flow team-mob --flow incident_response --stream --stream-view focus --stream-focus mob:lead-1
+```
+
+Troubleshooting:
+
+- Focus scope not seen: command exits non-zero and prints discovered scopes from the run.
+- Too much interleaving in `mux`: narrow output with `focus` on a member or nested sub-agent scope.
 
 ## See also
 

@@ -18,6 +18,8 @@ pub struct MobHandle {
     pub(super) state: Arc<AtomicU8>,
     pub(super) events: Arc<dyn MobEventStore>,
     pub(super) mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
+    pub(super) flow_streams:
+        Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
 }
 
 #[derive(Clone)]
@@ -125,11 +127,22 @@ impl MobHandle {
         flow_id: FlowId,
         params: serde_json::Value,
     ) -> Result<RunId, MobError> {
+        self.run_flow_with_stream(flow_id, params, None).await
+    }
+
+    /// Start a flow run with an optional scoped stream sink.
+    pub async fn run_flow_with_stream(
+        &self,
+        flow_id: FlowId,
+        params: serde_json::Value,
+        scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
+    ) -> Result<RunId, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::RunFlow {
                 flow_id,
                 activation_params: params,
+                scoped_event_tx,
                 reply_tx,
             })
             .await

@@ -432,6 +432,7 @@ impl AgentSpawnTool {
 
         // Create session with clean context (enriched prompt includes comms context)
         let session = create_spawn_session(&enriched_prompt, effective_system_prompt.as_deref());
+        let (scoped_event_tx, parent_scope_path) = self.state.scoped_stream().await;
 
         // Create the sub-agent specification
         #[cfg(feature = "comms")]
@@ -447,6 +448,8 @@ impl AgentSpawnTool {
             comms_config,
             parent_trusted_peers: self.state.parent_trusted_peers.clone(),
             host_mode: params.host_mode,
+            scoped_event_tx,
+            parent_scope_path,
         };
 
         #[cfg(not(feature = "comms"))]
@@ -460,6 +463,8 @@ impl AgentSpawnTool {
             depth: self.state.depth() + 1,
             system_prompt: effective_system_prompt,
             host_mode: params.host_mode,
+            scoped_event_tx,
+            parent_scope_path,
         };
 
         // Spawn the sub-agent (this registers it and starts execution in a background task)

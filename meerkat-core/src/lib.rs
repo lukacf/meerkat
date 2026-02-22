@@ -68,8 +68,8 @@ pub use config_store::{
 };
 pub use error::{AgentError, ToolError};
 pub use event::{
-    AgentEvent, BudgetType, VerboseEventConfig, format_verbose_event,
-    format_verbose_event_with_config,
+    AgentEvent, BudgetType, ScopedAgentEvent, StreamScopeFrame, VerboseEventConfig,
+    format_verbose_event, format_verbose_event_with_config,
 };
 pub use event_injector::{
     EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,

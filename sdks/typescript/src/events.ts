@@ -60,6 +60,35 @@ export type HookPoint =
   | "turn_boundary";
 
 // ---------------------------------------------------------------------------
+// Scoped streaming attribution
+// ---------------------------------------------------------------------------
+
+export type StreamScopeFrame =
+  | {
+      readonly scope: "primary";
+      readonly session_id: string;
+    }
+  | {
+      readonly scope: "mob_member";
+      readonly flow_run_id: string;
+      readonly member_ref: string;
+      readonly session_id: string;
+    }
+  | {
+      readonly scope: "sub_agent";
+      readonly agent_id: string;
+      readonly tool_call_id?: string;
+      readonly label?: string;
+    };
+
+export interface ScopedAgentEvent {
+  readonly type: "scoped_agent_event";
+  readonly scopeId: string;
+  readonly scopePath: readonly StreamScopeFrame[];
+  readonly event: AgentEvent;
+}
+
+// ---------------------------------------------------------------------------
 // Session lifecycle events
 // ---------------------------------------------------------------------------
 
@@ -327,31 +356,37 @@ export type AgentEvent =
   | StreamTruncatedEvent
   | UnknownEvent;
 
+/** Backward-compatible alias retained for SDK consumers. */
+export type CoreAgentEvent = AgentEvent;
+
+/** Known stream events including optional scoped wrappers. */
+export type StreamEvent = AgentEvent | ScopedAgentEvent;
+
 // ---------------------------------------------------------------------------
 // Type guards for the most commonly used events
 // ---------------------------------------------------------------------------
 
-export function isTextDelta(event: AgentEvent): event is TextDeltaEvent {
+export function isTextDelta(event: StreamEvent): event is TextDeltaEvent {
   return event.type === "text_delta";
 }
 
-export function isTextComplete(event: AgentEvent): event is TextCompleteEvent {
+export function isTextComplete(event: StreamEvent): event is TextCompleteEvent {
   return event.type === "text_complete";
 }
 
-export function isTurnCompleted(event: AgentEvent): event is TurnCompletedEvent {
+export function isTurnCompleted(event: StreamEvent): event is TurnCompletedEvent {
   return event.type === "turn_completed";
 }
 
-export function isToolCallRequested(event: AgentEvent): event is ToolCallRequestedEvent {
+export function isToolCallRequested(event: StreamEvent): event is ToolCallRequestedEvent {
   return event.type === "tool_call_requested";
 }
 
-export function isRunCompleted(event: AgentEvent): event is RunCompletedEvent {
+export function isRunCompleted(event: StreamEvent): event is RunCompletedEvent {
   return event.type === "run_completed";
 }
 
-export function isRunFailed(event: AgentEvent): event is RunFailedEvent {
+export function isRunFailed(event: StreamEvent): event is RunFailedEvent {
   return event.type === "run_failed";
 }
 
@@ -374,12 +409,32 @@ function parseUsage(raw: Record<string, unknown> | undefined): Usage {
 }
 
 /**
- * Parse a raw wire event dict into a typed {@link AgentEvent}.
+ * Parse a raw wire event dict into a typed {@link StreamEvent}.
  *
  * Unknown event types are returned as {@link UnknownEvent} for
  * forward-compatibility.
  */
-export function parseEvent(raw: Record<string, unknown>): AgentEvent {
+export function parseEvent(raw: Record<string, unknown>): StreamEvent {
+  if (
+    raw.event &&
+    (typeof raw.scope_id === "string" || Array.isArray(raw.scope_path))
+  ) {
+    const innerRaw = typeof raw.event === "object" && raw.event !== null
+      ? (raw.event as Record<string, unknown>)
+      : { type: "unknown" };
+    return {
+      type: "scoped_agent_event",
+      scopeId: String(raw.scope_id ?? ""),
+      scopePath: (raw.scope_path ?? []) as StreamScopeFrame[],
+      event: parseCoreEvent(innerRaw),
+    };
+  }
+
+  return parseCoreEvent(raw);
+}
+
+/** Parse a raw wire event as a core (non-wrapper) agent event. */
+export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
   const type = String(raw.type ?? "");
 
   switch (type) {

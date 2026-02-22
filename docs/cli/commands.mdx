@@ -47,18 +47,45 @@ rkat run [OPTIONS] <PROMPT>
 Frequently used options:
 
 - `--model <MODEL>`
+- `-m <MODEL>` (short for `--model`)
 - `--provider <anthropic|openai|gemini>`
 - `--stream`
+- `-s` (short for `--stream`)
+- `--stream-view <primary|mux|focus>` (default: `primary`)
+- `-w <primary|mux|focus>` (short for `--stream-view`)
+- `--stream-focus <scope_id>` (required when `--stream-view focus`)
+- `-f <scope_id>` (short for `--stream-focus`)
 - `--output <text|json>`
 - `--max-tokens <N>`
 - `--max-total-tokens <N>`
 - `--max-duration <DURATION>`
+- `-d <DURATION>` (short for `--max-duration`)
 - `--max-tool-calls <N>`
 - `--enable-builtins`
-- `--enable-shell` (requires `--enable-builtins`)
+- `-b` (short for `--enable-builtins`)
+- `--enable-shell` (implies `--enable-builtins`)
+- `-x` (short for `--enable-shell`)
 - `--no-subagents`
+- `-N` (short for `--no-subagents`)
 - `--hooks-override-json <JSON>`
 - `--hooks-override-file <FILE>`
+
+Scoped stream selectors:
+
+- `primary`
+- `mob:<member_ref>`
+- `primary/sub:<agent_id>`
+- `mob:<member_ref>/sub:<agent_id>`
+
+Stream view behavior:
+
+- `primary`: renders only the run primary scope.
+- `mux`: renders all scopes with a `[<scope_id>]` prefix.
+- `focus`: renders only the matching `--stream-focus` scope.
+
+Tooling convenience:
+
+- `--enable-shell` now implies `--enable-builtins`; you can use `-x` alone for common shell-enabled runs.
 
 `run` composes the mob tool surface (backed by `meerkat-mob-mcp`) into the agent tool list (`mob_create`, `mob_list`, `mob_status`, `mob_spawn`, `mob_retire`, `mob_wire`, `mob_unwire`, `mob_external_turn`, `mob_events`, `mob_list_meerkats`, `mob_stop`, `mob_resume`, `mob_complete`, `mob_destroy`).
 These are available even when built-ins are disabled.
@@ -106,7 +133,7 @@ rkat mob stop <MOB_ID>
 rkat mob resume <MOB_ID>
 rkat mob complete <MOB_ID>
 rkat mob flows <MOB_ID>
-rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON_OBJECT>]
+rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON_OBJECT>] [--stream|-s] [--stream-view|-w <primary|mux|focus>] [--stream-focus|-f <scope_id>]
 rkat mob flow-status <MOB_ID> <RUN_ID>
 rkat mob destroy <MOB_ID>
 ```
@@ -119,8 +146,22 @@ Flow commands:
 - `mob flows`: list configured flow IDs in a mob definition.
 - `mob run-flow`: starts a run and waits for terminal state before returning `run_id`.
 - `mob flow-status`: returns JSON `MobRun` (or `null`) for the run.
+- `mob run-flow --stream`: live flow events with scoped stream controls (`primary`, `mux`, `focus`).
 
 `mob run-flow` persists terminal status snapshots, and `mob flow-status` prefers live runtime status when available, then terminal snapshots as fallback.
+
+Streaming examples:
+
+```bash
+rkat run --stream --stream-view mux "Plan and execute release checklist"
+rkat run --stream --stream-view focus --stream-focus primary/sub:agent-42 "Draft and verify migration steps"
+rkat mob run-flow demo-mob --flow incident_response --stream --stream-view mux
+```
+
+Troubleshooting:
+
+- Focus scope not found: `focus` exits non-zero and prints discovered scope IDs.
+- Noisy mux output: switch to `--stream-view primary` or `--stream-view focus`.
 
 ## sessions
 

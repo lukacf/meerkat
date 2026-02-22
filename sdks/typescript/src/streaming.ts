@@ -1,7 +1,7 @@
 /**
  * Streaming API for the Meerkat TypeScript SDK.
  *
- * {@link EventStream} is an `AsyncIterable<AgentEvent>` that yields typed
+ * {@link EventStream} is an `AsyncIterable<StreamEvent>` that yields typed
  * events from a running turn, with access to the final {@link RunResult}
  * after iteration.
  *
@@ -16,7 +16,7 @@
  * ```
  */
 
-import type { AgentEvent } from "./events.js";
+import type { StreamEvent } from "./events.js";
 import { isTextDelta, parseEvent } from "./events.js";
 import type { RunResult } from "./types.js";
 import type { Session } from "./session.js";
@@ -66,12 +66,12 @@ class AsyncQueue<T> {
 const SENTINEL = Symbol("eos");
 
 /**
- * Typed async iterable of {@link AgentEvent} objects from a running turn.
+ * Typed async iterable of {@link StreamEvent} objects from a running turn.
  *
  * After iteration completes, the {@link result} getter returns the final
  * {@link RunResult}.
  */
-export class EventStream implements AsyncIterable<AgentEvent> {
+export class EventStream implements AsyncIterable<StreamEvent> {
   /** @internal */ _sessionId: string;
   private readonly _eventQueue: AsyncQueue<Record<string, unknown> | null>;
   private readonly _responsePromise: Promise<Record<string, unknown>>;
@@ -110,7 +110,7 @@ export class EventStream implements AsyncIterable<AgentEvent> {
     return this._result;
   }
 
-  async *[Symbol.asyncIterator](): AsyncGenerator<AgentEvent, void, undefined> {
+  async *[Symbol.asyncIterator](): AsyncGenerator<StreamEvent, void, undefined> {
     // Race event queue items against the response promise
     let responseDone = false;
     let responseResult: Record<string, unknown> | null = null;

@@ -288,6 +288,7 @@ impl MobBuilder {
             state: state.clone(),
             events: storage.events.clone(),
             mcp_running: mcp_running.clone(),
+            flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
         };
 
         if resumed_state == MobState::Running {
@@ -579,6 +580,7 @@ impl MobBuilder {
             state: state.clone(),
             events: events.clone(),
             mcp_running: mcp_running.clone(),
+            flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
         };
         let external_backend = definition.backend.external.clone();
         let provisioner: Arc<dyn MobProvisioner> = Arc::new(MultiBackendProvisioner::new(
@@ -613,6 +615,7 @@ impl MobBuilder {
             flow_engine,
             run_tasks: BTreeMap::new(),
             run_cancel_tokens: BTreeMap::new(),
+            flow_streams: handle.flow_streams.clone(),
             mcp_running,
             mcp_processes,
             command_tx,

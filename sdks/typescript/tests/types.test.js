@@ -212,6 +212,22 @@ describe("Typed Events", () => {
     const event = parseEvent({ delta: "oops" });
     assert.equal(event.type, "");
   });
+
+  it("should parse scoped wrapper events", () => {
+    const event = parseEvent({
+      scope_id: "primary/sub:op-1",
+      scope_path: [
+        { scope: "primary", session_id: "s1" },
+        { scope: "sub_agent", agent_id: "op-1", label: "spawn" },
+      ],
+      event: { type: "text_delta", delta: "hello" },
+    });
+    assert.equal(event.type, "scoped_agent_event");
+    if (event.type === "scoped_agent_event") {
+      assert.equal(event.scopeId, "primary/sub:op-1");
+      assert.equal(event.event.type, "text_delta");
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

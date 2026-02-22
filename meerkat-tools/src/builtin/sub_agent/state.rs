@@ -8,9 +8,9 @@ use meerkat_comms::TrustedPeers;
 use meerkat_comms::runtime::ParentCommsContext;
 use meerkat_core::session::Session;
 use meerkat_core::sub_agent::SubAgentManager;
-use meerkat_core::{AgentSessionStore, AgentToolDispatcher};
+use meerkat_core::{AgentSessionStore, AgentToolDispatcher, ScopedAgentEvent, StreamScopeFrame};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 
 /// Shared state for all sub-agent tools
 ///
@@ -50,6 +50,12 @@ pub struct SubAgentToolState {
     /// Tool usage instructions from parent (for inheriting system prompt)
     /// These explain how to use shell, task, and other tools.
     pub tool_usage_instructions: RwLock<Option<String>>,
+
+    /// Optional scoped event sink used for attributed child stream forwarding.
+    pub scoped_event_tx: RwLock<Option<mpsc::Sender<ScopedAgentEvent>>>,
+
+    /// Parent scope path used as base for child scope attribution.
+    pub scoped_event_path: RwLock<Vec<StreamScopeFrame>>,
 }
 
 impl SubAgentToolState {
@@ -76,6 +82,8 @@ impl SubAgentToolState {
             #[cfg(feature = "comms")]
             parent_trusted_peers: None,
             tool_usage_instructions: RwLock::new(None),
+            scoped_event_tx: RwLock::new(None),
+            scoped_event_path: RwLock::new(Vec::new()),
         }
     }
 
@@ -130,7 +138,33 @@ impl SubAgentToolState {
             parent_comms: Some(parent_comms),
             parent_trusted_peers: Some(parent_trusted_peers),
             tool_usage_instructions: RwLock::new(None),
+            scoped_event_tx: RwLock::new(None),
+            scoped_event_path: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Set scoped streaming context for child-agent event forwarding.
+    ///
+    /// This is configured by the parent factory at build time.
+    pub async fn set_scoped_stream(
+        &self,
+        scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+        scoped_event_path: Vec<StreamScopeFrame>,
+    ) {
+        let mut tx_guard = self.scoped_event_tx.write().await;
+        *tx_guard = scoped_event_tx;
+        drop(tx_guard);
+        let mut path_guard = self.scoped_event_path.write().await;
+        *path_guard = scoped_event_path;
+    }
+
+    /// Get current scoped streaming context.
+    pub async fn scoped_stream(
+        &self,
+    ) -> (Option<mpsc::Sender<ScopedAgentEvent>>, Vec<StreamScopeFrame>) {
+        let tx = self.scoped_event_tx.read().await.clone();
+        let path = self.scoped_event_path.read().await.clone();
+        (tx, path)
     }
 
     /// Check if we can spawn more sub-agents

@@ -2,7 +2,7 @@
 
 use crate::budget::Budget;
 use crate::error::AgentError;
-use crate::event::AgentEvent;
+use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use crate::hooks::{HookDecision, HookInvocation, HookPatch, HookPoint};
 use crate::ops::{
     ForkBranch, ForkBudgetPolicy, OperationId, OperationResult, SpawnSpec, ToolAccessPolicy,
@@ -19,6 +19,35 @@ use super::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     FilteredToolDispatcher,
 };
+
+fn spawn_scoped_forwarder(
+    mut child_event_rx: mpsc::Receiver<AgentEvent>,
+    scoped_tx: mpsc::Sender<ScopedAgentEvent>,
+    parent_scope_path: Arc<Vec<StreamScopeFrame>>,
+    child_scope_frame: StreamScopeFrame,
+) -> tokio::task::JoinHandle<()> {
+    let base_scope_path = if parent_scope_path.is_empty() {
+        vec![
+            StreamScopeFrame::Primary {
+                session_id: "unknown".to_string(),
+            },
+            child_scope_frame,
+        ]
+    } else {
+        let mut path = (*parent_scope_path).clone();
+        path.push(child_scope_frame);
+        path
+    };
+
+    tokio::spawn(async move {
+        while let Some(event) = child_event_rx.recv().await {
+            let scoped = ScopedAgentEvent::new(base_scope_path.clone(), event);
+            if scoped_tx.send(scoped).await.is_err() {
+                break;
+            }
+        }
+    })
+}
 
 /// Minimal runner interface for an Agent.
 #[async_trait]
@@ -144,6 +173,8 @@ where
         let depth = self.depth + 1;
         let model = self.config.model.clone();
         let max_tokens = self.config.max_tokens_per_turn;
+        let parent_scoped_event_tx = self.default_scoped_event_tx.clone();
+        let parent_scope_path = self.default_scope_path.clone();
 
         // Create filtered tools based on policy
         let allowed_tool_names: Vec<String> =
@@ -166,8 +197,29 @@ where
                 .build(client, filtered_tools, store)
                 .await;
 
-            // Run the sub-agent
-            let result = sub_agent.run(prompt).await;
+            let (result, forwarder_task) = if let Some(scoped_tx) = parent_scoped_event_tx {
+                let (child_event_tx, child_event_rx) = mpsc::channel::<AgentEvent>(64);
+                let child_scope_frame = StreamScopeFrame::SubAgent {
+                    agent_id: op_id_clone.to_string(),
+                    tool_call_id: None,
+                    label: Some("spawn".to_string()),
+                };
+                let forwarder = spawn_scoped_forwarder(
+                    child_event_rx,
+                    scoped_tx,
+                    Arc::new(parent_scope_path.clone()),
+                    child_scope_frame,
+                );
+                (
+                    sub_agent.run_with_events(prompt, child_event_tx).await,
+                    Some(forwarder),
+                )
+            } else {
+                (sub_agent.run(prompt).await, None)
+            };
+            if let Some(forwarder) = forwarder_task {
+                let _ = forwarder.await;
+            }
 
             // Report completion
             match result {
@@ -278,6 +330,8 @@ where
             let model = self.config.model.clone();
             let max_tokens = self.config.max_tokens_per_turn;
             let branch_name = branch.name.clone();
+            let parent_scoped_event_tx = self.default_scoped_event_tx.clone();
+            let parent_scope_path = self.default_scope_path.clone();
 
             // Create session with full history (fork uses FullHistory context)
             let mut fork_session = Session::new();
@@ -298,8 +352,29 @@ where
                     .build(client, filtered_tools, store)
                     .await;
 
-                // Run the sub-agent with the branch prompt
-                let result = sub_agent.run(prompt).await;
+                let (result, forwarder_task) = if let Some(scoped_tx) = parent_scoped_event_tx {
+                    let (child_event_tx, child_event_rx) = mpsc::channel::<AgentEvent>(64);
+                    let child_scope_frame = StreamScopeFrame::SubAgent {
+                        agent_id: op_id_clone.to_string(),
+                        tool_call_id: None,
+                        label: Some(branch_name.clone()),
+                    };
+                    let forwarder = spawn_scoped_forwarder(
+                        child_event_rx,
+                        scoped_tx,
+                        Arc::new(parent_scope_path.clone()),
+                        child_scope_frame,
+                    );
+                    (
+                        sub_agent.run_with_events(prompt, child_event_tx).await,
+                        Some(forwarder),
+                    )
+                } else {
+                    (sub_agent.run(prompt).await, None)
+                };
+                if let Some(forwarder) = forwarder_task {
+                    let _ = forwarder.await;
+                }
 
                 // Report completion
                 match result {

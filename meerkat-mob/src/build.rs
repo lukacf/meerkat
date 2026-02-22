@@ -48,7 +48,10 @@ pub async fn build_agent_config(
     // Realm ID for namespace isolation
     let realm_id = format!("mob:{}", mob_id);
 
-    // Assemble system prompt from skills + mob comms instructions
+    // Assemble system prompt from profile skills (inline/path-based).
+    // Mob comms instructions are loaded as an embedded skill via
+    // preload_skills, which survives any per-request system_prompt
+    // override.
     let system_prompt = assemble_system_prompt(profile, definition).await?;
 
     let mut config = AgentBuildConfig::new(profile.model.clone());
@@ -56,7 +59,15 @@ pub async fn build_agent_config(
     config.comms_name = Some(comms_name);
     config.peer_meta = Some(peer_meta);
     config.realm_id = Some(realm_id);
-    config.system_prompt = Some(system_prompt);
+    if !system_prompt.is_empty() {
+        config.system_prompt = Some(system_prompt);
+    }
+
+    // Preload mob-communication as an embedded skill so it survives
+    // any builder-level system_prompt override.
+    config.preload_skills = Some(vec![
+        meerkat_core::skills::SkillId::from("mob-communication"),
+    ]);
 
     // Map ToolConfig booleans to override flags
     config.override_builtins = Some(profile.tools.builtins);
@@ -98,7 +109,10 @@ pub fn to_create_session_request(
     }
 }
 
-/// Assemble the system prompt for a mob meerkat from skills and mob comms instructions.
+/// Assemble the system prompt for a mob meerkat from profile-defined skills.
+///
+/// Mob comms instructions are no longer baked in here — they're loaded as
+/// an embedded skill via `preload_skills` in `build_agent_config()`.
 async fn assemble_system_prompt(
     profile: &Profile,
     definition: &MobDefinition,
@@ -124,27 +138,8 @@ async fn assemble_system_prompt(
         }
     }
 
-    // Add mob comms instructions
-    sections.push(MOB_COMMS_INSTRUCTIONS.to_string());
-
     Ok(sections.join("\n\n"))
 }
-
-/// Standard instructions injected into every mob meerkat's system prompt
-/// explaining how to communicate with peers via comms.
-const MOB_COMMS_INSTRUCTIONS: &str = "\
-## Mob Communication
-
-You are a meerkat (agent) in a collaborative mob. You communicate with \
-other meerkats via the comms system:
-
-- Use `peers()` to discover other meerkats you are wired to.
-- Send requests via PeerRequest with an intent string and JSON params.
-- Respond to incoming PeerRequests with PeerResponse.
-- You will receive notifications when peers are added (mob.peer_added) \
-or removed (mob.peer_retired).
-- Handle mob.peer_added by acknowledging the new peer.
-- Handle mob.peer_retired by removing the peer from your working set.";
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -401,9 +396,32 @@ mod tests {
             prompt.contains("You are the team lead."),
             "prompt should contain resolved inline skill"
         );
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_preloads_mob_communication_skill() {
+        let def = sample_definition();
+        let lead = &def.profiles[&ProfileName::from("lead")];
+        let config = build_agent_config(
+            &def.id,
+            &ProfileName::from("lead"),
+            &MeerkatId::from("lead-1"),
+            lead,
+            &def,
+            None,
+        )
+        .await
+        .expect("build_agent_config");
+
+        let preload = config
+            .preload_skills
+            .as_ref()
+            .expect("preload_skills should be set");
         assert!(
-            prompt.contains("Mob Communication"),
-            "prompt should contain mob comms instructions"
+            preload
+                .iter()
+                .any(|id| id.0 == "mob-communication"),
+            "preload_skills should include mob-communication"
         );
     }
 

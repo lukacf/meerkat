@@ -121,8 +121,7 @@ fn spawn_scoped_forwarder(
     mut child_event_rx: mpsc::Receiver<AgentEvent>,
     scoped_tx: mpsc::Sender<ScopedAgentEvent>,
     parent_scope_path: Arc<Vec<StreamScopeFrame>>,
-    child_agent_id: String,
-    child_label: String,
+    child_scope_frame: StreamScopeFrame,
 ) -> tokio::task::JoinHandle<()> {
     let mut base_scope_path = if parent_scope_path.is_empty() {
         vec![StreamScopeFrame::Primary {
@@ -131,11 +130,7 @@ fn spawn_scoped_forwarder(
     } else {
         (*parent_scope_path).clone()
     };
-    base_scope_path.push(StreamScopeFrame::SubAgent {
-        agent_id: child_agent_id,
-        tool_call_id: None,
-        label: Some(child_label),
-    });
+    base_scope_path.push(child_scope_frame);
 
     tokio::spawn(async move {
         while let Some(event) = child_event_rx.recv().await {
@@ -409,8 +404,11 @@ pub async fn spawn_sub_agent_dyn(
                 child_event_rx,
                 scoped_tx,
                 Arc::new(parent_scope_path.clone()),
-                child_agent_id.clone(),
-                child_label.clone(),
+                StreamScopeFrame::SubAgent {
+                    agent_id: child_agent_id.clone(),
+                    tool_call_id: None,
+                    label: Some(child_label.clone()),
+                },
             );
 
             let result = if host_mode {

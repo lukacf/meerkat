@@ -2,6 +2,7 @@ use super::terminalization::{FlowTerminalizationAuthority, TerminalizationTarget
 use super::transaction::LifecycleRollback;
 use super::*;
 use futures::FutureExt;
+use futures::stream::{FuturesUnordered, StreamExt};
 
 type AutonomousHostLoopHandle = tokio::task::JoinHandle<Result<(), MobError>>;
 
@@ -1018,7 +1019,10 @@ impl MobActor {
 
         let planned_wiring_targets = self.spawn_wiring_targets(profile_name, meerkat_id).await;
 
-        if let Err(wiring_error) = self.apply_spawn_wiring(profile_name, meerkat_id).await {
+        if let Err(wiring_error) = self
+            .apply_spawn_wiring(meerkat_id, &planned_wiring_targets)
+            .await
+        {
             if let Err(rollback_error) = self
                 .rollback_failed_spawn(
                     meerkat_id,
@@ -1846,64 +1850,58 @@ impl MobActor {
     // -----------------------------------------------------------------------
 
     /// Apply auto/role wiring for a newly spawned meerkat.
+    ///
+    /// `wiring_targets` is expected to be deduplicated by `spawn_wiring_targets()`.
+    /// The actor keeps command ordering, but per-edge wire effects run with bounded
+    /// parallelism to reduce spawn fan-out latency.
     async fn apply_spawn_wiring(
         &self,
-        profile_name: &ProfileName,
         meerkat_id: &MeerkatId,
+        wiring_targets: &[MeerkatId],
     ) -> Result<(), MobError> {
-        // P1-T08: Auto-wire to orchestrator if configured
-        if self.definition.wiring.auto_wire_orchestrator
-            && let Some(ref orch) = self.definition.orchestrator
-        {
-            let orch_id = {
-                let roster = self.roster.read().await;
-                roster
-                    .by_profile(&orch.profile)
-                    .next()
-                    .map(|e| e.meerkat_id.clone())
+        if wiring_targets.is_empty() {
+            return Ok(());
+        }
+
+        const MAX_PARALLEL_SPAWN_WIRES: usize = 8;
+        let mut in_flight = FuturesUnordered::new();
+        let mut remaining = wiring_targets.iter().cloned();
+        let mut first_error: Option<MobError> = None;
+
+        for _ in 0..MAX_PARALLEL_SPAWN_WIRES {
+            let Some(target_id) = remaining.next() else {
+                break;
             };
-            if let Some(ref orch_meerkat_id) = orch_id
-                && *orch_meerkat_id != *meerkat_id
+            in_flight.push(self.wire_spawn_target(meerkat_id, target_id));
+        }
+
+        while let Some(result) = in_flight.next().await {
+            if let Err(error) = result
+                && first_error.is_none()
             {
-                self.do_wire(meerkat_id, orch_meerkat_id).await.map_err(|e| {
-                    MobError::WiringError(format!(
-                        "auto_wire_orchestrator failed for {meerkat_id} <-> {orch_meerkat_id}: {e}"
-                    ))
-                })?;
+                first_error = Some(error);
+            }
+            if let Some(target_id) = remaining.next() {
+                in_flight.push(self.wire_spawn_target(meerkat_id, target_id));
             }
         }
 
-        // P1-T09: Role-wiring fan-out
-        for rule in &self.definition.wiring.role_wiring {
-            let target_role = if *profile_name == rule.a {
-                Some(&rule.b)
-            } else if *profile_name == rule.b {
-                Some(&rule.a)
-            } else {
-                None
-            };
-
-            if let Some(target) = target_role {
-                let target_ids: Vec<MeerkatId> = {
-                    let roster = self.roster.read().await;
-                    roster
-                        .by_profile(target)
-                        .filter(|entry| entry.meerkat_id != *meerkat_id)
-                        .map(|entry| entry.meerkat_id.clone())
-                        .collect()
-                };
-
-                for target_id in target_ids {
-                    self.do_wire(meerkat_id, &target_id).await.map_err(|e| {
-                        MobError::WiringError(format!(
-                            "role_wiring fan-out failed for {meerkat_id} <-> {target_id}: {e}"
-                        ))
-                    })?;
-                }
-            }
+        if let Some(error) = first_error {
+            return Err(error);
         }
-
         Ok(())
+    }
+
+    async fn wire_spawn_target(
+        &self,
+        meerkat_id: &MeerkatId,
+        target_id: MeerkatId,
+    ) -> Result<(), MobError> {
+        self.do_wire(meerkat_id, &target_id).await.map_err(|e| {
+            MobError::WiringError(format!(
+                "role_wiring fan-out failed for {meerkat_id} <-> {target_id}: {e}"
+            ))
+        })
     }
 
     /// Compensate a failed spawn wiring path to avoid partial state.

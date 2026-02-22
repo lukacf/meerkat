@@ -17,7 +17,7 @@ categories.workspace = true
 meerkat-core = { workspace = true }
 meerkat-comms = { workspace = true }
 meerkat-skills = { workspace = true }
-meerkat = { workspace = true, features = ["comms", "session-compaction", "memory-store", "anthropic", "openai", "gemini"] }
+meerkat = { workspace = true, features = ["comms", "skills", "session-compaction", "memory-store", "anthropic", "openai", "gemini"] }
 meerkat-session = { workspace = true, features = ["session-compaction", "session-store"] }
 meerkat-client = { workspace = true }
 

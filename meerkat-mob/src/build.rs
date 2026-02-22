@@ -49,9 +49,6 @@ pub async fn build_agent_config(
     let realm_id = format!("mob:{}", mob_id);
 
     // Assemble system prompt from profile skills (inline/path-based).
-    // Mob comms instructions are loaded as an embedded skill via
-    // preload_skills, which survives any per-request system_prompt
-    // override.
     let system_prompt = assemble_system_prompt(profile, definition).await?;
 
     let mut config = AgentBuildConfig::new(profile.model.clone());
@@ -63,8 +60,12 @@ pub async fn build_agent_config(
         config.system_prompt = Some(system_prompt);
     }
 
-    // Preload mob-communication as an embedded skill so it survives
-    // any builder-level system_prompt override.
+    // Mob comms instructions are delivered as an embedded skill via
+    // preload_skills. The `skills` feature is required on the meerkat
+    // dependency (enforced in Cargo.toml) so the skill engine is
+    // always available. Skills are appended as extra_sections in
+    // prompt assembly, which survives per-request system_prompt
+    // overrides.
     config.preload_skills = Some(vec![
         meerkat_core::skills::SkillId::from("mob-communication"),
     ]);
@@ -111,8 +112,8 @@ pub fn to_create_session_request(
 
 /// Assemble the system prompt for a mob meerkat from profile-defined skills.
 ///
-/// Mob comms instructions are no longer baked in here — they're loaded as
-/// an embedded skill via `preload_skills` in `build_agent_config()`.
+/// Mob comms instructions are loaded separately as an embedded skill via
+/// `preload_skills` in `build_agent_config()` — not assembled here.
 async fn assemble_system_prompt(
     profile: &Profile,
     definition: &MobDefinition,
@@ -396,6 +397,9 @@ mod tests {
             prompt.contains("You are the team lead."),
             "prompt should contain resolved inline skill"
         );
+        // Mob comms instructions are delivered via preload_skills (embedded
+        // skill), not baked into system_prompt — verified in the separate
+        // test_build_agent_config_preloads_mob_communication_skill test.
     }
 
     #[tokio::test]

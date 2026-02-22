@@ -1284,6 +1284,12 @@ fn sample_definition_with_cross_role_wiring() -> MobDefinition {
     def
 }
 
+fn sample_definition_with_overlapping_orchestrator_and_role_wiring() -> MobDefinition {
+    let mut def = sample_definition_with_cross_role_wiring();
+    def.wiring.auto_wire_orchestrator = true;
+    def
+}
+
 fn sample_definition_with_tool_bundle(bundle_name: &str) -> MobDefinition {
     let mut def = sample_definition();
     let worker = def
@@ -5342,6 +5348,49 @@ async fn test_role_wiring_cross_role_fans_out_to_three_existing_targets() {
     assert_eq!(
         cross_role_wire_events, 3,
         "fan-out should execute three wire() operations for three existing role_y peers"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_wiring_deduplicates_overlapping_orchestrator_and_role_edges() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_overlapping_orchestrator_and_role_wiring()).await;
+
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let lead = handle
+        .get_meerkat(&MeerkatId::from("l-1"))
+        .await
+        .expect("lead should exist");
+    assert_eq!(
+        lead.wired_to.len(),
+        1,
+        "overlapping auto-wire + role rule should produce one trust edge"
+    );
+    assert!(lead.wired_to.contains(&MeerkatId::from("w-1")));
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let wires_for_pair = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::PeersWired { a, b }
+                    if (a == &MeerkatId::from("l-1") && b == &MeerkatId::from("w-1"))
+                        || (a == &MeerkatId::from("w-1") && b == &MeerkatId::from("l-1"))
+            )
+        })
+        .count();
+    assert_eq!(
+        wires_for_pair, 1,
+        "wiring overlap should emit a single PeersWired event for one logical edge"
     );
 }
 

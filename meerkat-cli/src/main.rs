@@ -93,10 +93,8 @@ fn spawn_verbose_event_handler(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(event) = agent_event_rx.recv().await {
-            if verbose {
-                if let Some(line) = format_verbose_event(&event) {
-                    eprintln!("{}", line);
-                }
+            if verbose && let Some(line) = format_verbose_event(&event) {
+                eprintln!("{}", line);
             }
         }
     })

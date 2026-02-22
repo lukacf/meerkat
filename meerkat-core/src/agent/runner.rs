@@ -20,6 +20,35 @@ use super::{
     FilteredToolDispatcher,
 };
 
+fn spawn_scoped_forwarder(
+    mut child_event_rx: mpsc::Receiver<AgentEvent>,
+    scoped_tx: mpsc::Sender<ScopedAgentEvent>,
+    parent_scope_path: Arc<Vec<StreamScopeFrame>>,
+    child_scope_frame: StreamScopeFrame,
+) -> tokio::task::JoinHandle<()> {
+    let base_scope_path = if parent_scope_path.is_empty() {
+        vec![
+            StreamScopeFrame::Primary {
+                session_id: "unknown".to_string(),
+            },
+            child_scope_frame,
+        ]
+    } else {
+        let mut path = (*parent_scope_path).clone();
+        path.push(child_scope_frame);
+        path
+    };
+
+    tokio::spawn(async move {
+        while let Some(event) = child_event_rx.recv().await {
+            let scoped = ScopedAgentEvent::new(base_scope_path.clone(), event);
+            if scoped_tx.send(scoped).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
 /// Minimal runner interface for an Agent.
 #[async_trait]
 pub trait AgentRunner: Send {
@@ -169,27 +198,22 @@ where
                 .await;
 
             let (result, forwarder_task) = if let Some(scoped_tx) = parent_scoped_event_tx {
-                let (child_event_tx, mut child_event_rx) = mpsc::channel::<AgentEvent>(64);
-                let parent_scope = parent_scope_path.clone();
+                let (child_event_tx, child_event_rx) = mpsc::channel::<AgentEvent>(64);
                 let child_scope_frame = StreamScopeFrame::SubAgent {
                     agent_id: op_id_clone.to_string(),
                     tool_call_id: None,
                     label: Some("spawn".to_string()),
                 };
-                let forwarder = tokio::spawn(async move {
-                    while let Some(event) = child_event_rx.recv().await {
-                        let mut scoped = if parent_scope.is_empty() {
-                            ScopedAgentEvent::from_agent_event_primary("unknown", event)
-                        } else {
-                            ScopedAgentEvent::new(parent_scope.clone(), event)
-                        };
-                        scoped = scoped.append_scope(child_scope_frame.clone());
-                        if scoped_tx.send(scoped).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-                (sub_agent.run_with_events(prompt, child_event_tx).await, Some(forwarder))
+                let forwarder = spawn_scoped_forwarder(
+                    child_event_rx,
+                    scoped_tx,
+                    Arc::new(parent_scope_path.clone()),
+                    child_scope_frame,
+                );
+                (
+                    sub_agent.run_with_events(prompt, child_event_tx).await,
+                    Some(forwarder),
+                )
             } else {
                 (sub_agent.run(prompt).await, None)
             };
@@ -329,26 +353,18 @@ where
                     .await;
 
                 let (result, forwarder_task) = if let Some(scoped_tx) = parent_scoped_event_tx {
-                    let (child_event_tx, mut child_event_rx) = mpsc::channel::<AgentEvent>(64);
-                    let parent_scope = parent_scope_path.clone();
+                    let (child_event_tx, child_event_rx) = mpsc::channel::<AgentEvent>(64);
                     let child_scope_frame = StreamScopeFrame::SubAgent {
                         agent_id: op_id_clone.to_string(),
                         tool_call_id: None,
                         label: Some(branch_name.clone()),
                     };
-                    let forwarder = tokio::spawn(async move {
-                        while let Some(event) = child_event_rx.recv().await {
-                            let mut scoped = if parent_scope.is_empty() {
-                                ScopedAgentEvent::from_agent_event_primary("unknown", event)
-                            } else {
-                                ScopedAgentEvent::new(parent_scope.clone(), event)
-                            };
-                            scoped = scoped.append_scope(child_scope_frame.clone());
-                            if scoped_tx.send(scoped).await.is_err() {
-                                break;
-                            }
-                        }
-                    });
+                    let forwarder = spawn_scoped_forwarder(
+                        child_event_rx,
+                        scoped_tx,
+                        Arc::new(parent_scope_path.clone()),
+                        child_scope_frame,
+                    );
                     (
                         sub_agent.run_with_events(prompt, child_event_tx).await,
                         Some(forwarder),

@@ -140,7 +140,9 @@ impl AgentLlmClient for LlmClientAdapter {
                             assembler.on_reasoning_start();
                             let _ = assembler.on_reasoning_delta(&text);
                         }
-                        // Collect the full reasoning text before completing.
+                        // Ordering is intentional: snapshot reasoning text before
+                        // `on_reasoning_complete(meta)` because completion may clear
+                        // the internal reasoning buffer.
                         let reasoning_text = assembler.current_reasoning_text();
                         assembler.on_reasoning_complete(meta);
                         reasoning_started = false;

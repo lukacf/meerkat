@@ -54,7 +54,6 @@ pub struct StreamRenderer {
     policy: StreamRenderPolicy,
     states: HashMap<String, ScopeRenderState>,
     discovered_scopes: BTreeSet<String>,
-    primary_scope: Option<String>,
     focus_seen: bool,
 }
 
@@ -66,7 +65,6 @@ impl StreamRenderer {
             policy,
             states: HashMap::new(),
             discovered_scopes: BTreeSet::new(),
-            primary_scope: None,
             focus_seen: false,
         }
     }
@@ -91,23 +89,14 @@ impl StreamRenderer {
                     false
                 }
             }
-            StreamRenderPolicy::PrimaryOnly => {
-                let primary = self
-                    .primary_scope
-                    .get_or_insert_with(|| scope_id.clone())
-                    .clone();
-                scope_id == primary
-            }
+            StreamRenderPolicy::PrimaryOnly => scope_id == "primary",
         };
 
         if !should_render {
             return;
         }
 
-        let state = self
-            .states
-            .entry(scope_id.clone())
-            .or_default();
+        let state = self.states.entry(scope_id.clone()).or_default();
         render_event(
             self.ansi,
             matches!(self.policy, StreamRenderPolicy::MuxAll),
@@ -124,7 +113,6 @@ impl StreamRenderer {
             if let Some(state) = self.states.get_mut(&scope_id) {
                 end_text_block(state);
                 end_thinking_block(
-                    self.ansi,
                     matches!(self.policy, StreamRenderPolicy::MuxAll),
                     &scope_id,
                     state,
@@ -156,11 +144,10 @@ fn render_event(
         // ── Turn lifecycle ──────────────────────────────────────────
         AgentEvent::TurnStarted { turn_number } => {
             end_text_block(state);
-            end_thinking_block(ansi, mux, scope_id, state);
+            end_thinking_block(mux, scope_id, state);
             let n = turn_number + 1;
             if n > 1 {
                 chrome_line(
-                    ansi,
                     mux,
                     scope_id,
                     &format!("\n{}━━━ Turn {} ━━━{}", style(ansi, DIM), n, reset(ansi)),
@@ -170,9 +157,8 @@ fn render_event(
 
         AgentEvent::TurnCompleted { stop_reason, usage } => {
             end_text_block(state);
-            end_thinking_block(ansi, mux, scope_id, state);
+            end_thinking_block(mux, scope_id, state);
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -194,7 +180,6 @@ fn render_event(
                 state.in_thinking = true;
                 state.reasoning_bytes = 0;
                 chrome_line(
-                    ansi,
                     mux,
                     scope_id,
                     &format!(
@@ -206,16 +191,20 @@ fn render_event(
                 );
             }
             state.reasoning_bytes += delta.len();
-            stderr_inline(ansi, mux, scope_id, &format!("{}{}{}", style(ansi, DIM), delta, reset(ansi)));
+            stderr_inline(
+                mux,
+                scope_id,
+                &format!("{}{}{}", style(ansi, DIM), delta, reset(ansi)),
+            );
         }
 
         AgentEvent::ReasoningComplete { .. } => {
-            end_thinking_block(ansi, mux, scope_id, state);
+            end_thinking_block(mux, scope_id, state);
         }
 
         // ── Text output ────────────────────────────────────────────
         AgentEvent::TextDelta { delta } => {
-            end_thinking_block(ansi, mux, scope_id, state);
+            end_thinking_block(mux, scope_id, state);
             if !state.in_text {
                 state.in_text = true;
                 stdout_inline(mux, scope_id, "\n");
@@ -230,11 +219,10 @@ fn render_event(
         // ── Tool calls ─────────────────────────────────────────────
         AgentEvent::ToolCallRequested { name, args, .. } => {
             end_text_block(state);
-            end_thinking_block(ansi, mux, scope_id, state);
+            end_thinking_block(mux, scope_id, state);
             let args_str = serde_json::to_string(args).unwrap_or_default();
             let args_preview = truncate_str(&args_str, MAX_TOOL_ARGS_PREVIEW);
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -252,7 +240,6 @@ fn render_event(
 
         AgentEvent::ToolExecutionStarted { name, .. } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!("{}  ▸ running {}...{}", style(ansi, DIM), name, reset(ansi)),
@@ -272,7 +259,6 @@ fn render_event(
                 ("✓", GREEN)
             };
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -292,7 +278,6 @@ fn render_event(
                 let show = lines.len().min(MAX_TOOL_RESULT_LINES);
                 for line in &lines[..show] {
                     chrome_line(
-                        ansi,
                         mux,
                         scope_id,
                         &format!("{}    {}{}", style(ansi, DIM), line, reset(ansi)),
@@ -300,7 +285,6 @@ fn render_event(
                 }
                 if lines.len() > MAX_TOOL_RESULT_LINES {
                     chrome_line(
-                        ansi,
                         mux,
                         scope_id,
                         &format!(
@@ -318,7 +302,6 @@ fn render_event(
             name, timeout_ms, ..
         } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -340,7 +323,6 @@ fn render_event(
         } => {
             end_text_block(state);
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -359,7 +341,6 @@ fn render_event(
             summary_tokens,
         } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -375,7 +356,6 @@ fn render_event(
 
         AgentEvent::CompactionFailed { error } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -396,7 +376,6 @@ fn render_event(
             percent,
         } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -419,7 +398,6 @@ fn render_event(
             delay_ms,
         } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -439,15 +417,13 @@ fn render_event(
 
         AgentEvent::RunCompleted { usage, .. } => {
             end_text_block(state);
-            end_thinking_block(ansi, mux, scope_id, state);
+            end_thinking_block(mux, scope_id, state);
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!("\n{}────────{}", style(ansi, DIM), reset(ansi)),
             );
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -463,9 +439,8 @@ fn render_event(
 
         AgentEvent::RunFailed { error, .. } => {
             end_text_block(state);
-            end_thinking_block(ansi, mux, scope_id, state);
+            end_thinking_block(mux, scope_id, state);
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -486,7 +461,6 @@ fn render_event(
             if !skills.is_empty() {
                 let names: Vec<String> = skills.iter().map(|s| s.to_string()).collect();
                 chrome_line(
-                    ansi,
                     mux,
                     scope_id,
                     &format!(
@@ -502,7 +476,6 @@ fn render_event(
 
         AgentEvent::SkillResolutionFailed { reference, error } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -519,7 +492,6 @@ fn render_event(
         // ── Hooks ──────────────────────────────────────────────────
         AgentEvent::HookStarted { hook_id, point } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -538,7 +510,6 @@ fn render_event(
             ..
         } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -553,11 +524,8 @@ fn render_event(
             );
         }
 
-        AgentEvent::HookFailed {
-            hook_id, error, ..
-        } => {
+        AgentEvent::HookFailed { hook_id, error, .. } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -575,7 +543,6 @@ fn render_event(
             hook_id, message, ..
         } => {
             chrome_line(
-                ansi,
                 mux,
                 scope_id,
                 &format!(
@@ -594,57 +561,48 @@ fn render_event(
     }
 }
 
-fn scope_prefix(mux: bool, scope_id: &str) -> String {
+fn chrome_line(mux: bool, scope_id: &str, msg: &str) {
+    let mut stderr = io::stderr().lock();
     if mux {
-        format!("[{scope_id}] ")
-    } else {
-        String::new()
+        let _ = write!(stderr, "[{scope_id}] ");
     }
+    let _ = writeln!(stderr, "{msg}");
+    let _ = stderr.flush();
 }
 
-fn chrome_line(ansi: bool, mux: bool, scope_id: &str, msg: &str) {
+fn stderr_inline(mux: bool, scope_id: &str, msg: &str) {
     let mut stderr = io::stderr().lock();
-    let _ = writeln!(stderr, "{}{}", scope_prefix(mux, scope_id), msg);
+    if mux {
+        let _ = write!(stderr, "[{scope_id}] ");
+    }
+    let _ = write!(stderr, "{msg}");
     let _ = stderr.flush();
-    let _ = ansi;
-}
-
-fn stderr_inline(ansi: bool, mux: bool, scope_id: &str, msg: &str) {
-    let mut stderr = io::stderr().lock();
-    let _ = write!(stderr, "{}{}", scope_prefix(mux, scope_id), msg);
-    let _ = stderr.flush();
-    let _ = ansi;
 }
 
 fn stdout_inline(mux: bool, scope_id: &str, msg: &str) {
     let mut stdout = io::stdout().lock();
-    let _ = write!(stdout, "{}{}", scope_prefix(mux, scope_id), msg);
+    if mux {
+        let _ = write!(stdout, "[{scope_id}] ");
+    }
+    let _ = write!(stdout, "{msg}");
     let _ = stdout.flush();
 }
 
 fn style(ansi: bool, code: &'static str) -> &'static str {
-    if ansi {
-        code
-    } else {
-        ""
-    }
+    if ansi { code } else { "" }
 }
 
 fn reset(ansi: bool) -> &'static str {
-    if ansi {
-        RESET
-    } else {
-        ""
-    }
+    if ansi { RESET } else { "" }
 }
 
-fn end_thinking_block(ansi: bool, mux: bool, scope_id: &str, state: &mut ScopeRenderState) {
+fn end_thinking_block(mux: bool, scope_id: &str, state: &mut ScopeRenderState) {
     if state.in_thinking {
         state.in_thinking = false;
         if state.reasoning_bytes > 0 {
             let mut stderr = io::stderr().lock();
             if mux {
-                let _ = writeln!(stderr, "{}", scope_prefix(true, scope_id));
+                let _ = writeln!(stderr, "[{scope_id}] ");
             } else {
                 let _ = writeln!(stderr);
             }
@@ -652,7 +610,6 @@ fn end_thinking_block(ansi: bool, mux: bool, scope_id: &str, state: &mut ScopeRe
         }
         state.reasoning_bytes = 0;
     }
-    let _ = ansi;
 }
 
 fn end_text_block(state: &mut ScopeRenderState) {
@@ -752,6 +709,32 @@ mod tests {
         let summary = renderer.finish();
         assert_eq!(summary.focus_requested, Some("mob:a".into()));
         assert!(summary.focus_seen);
-        assert_eq!(summary.discovered_scopes, vec!["mob:a".to_string(), "mob:b".to_string()]);
+        assert_eq!(
+            summary.discovered_scopes,
+            vec!["mob:a".to_string(), "mob:b".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_renderer_policy_primary_only_matches_literal_primary_scope() {
+        let mut renderer = StreamRenderer::new(false, StreamRenderPolicy::PrimaryOnly);
+        renderer.render(&ScopedAgentEvent {
+            scope_id: "primary/sub:child-1".into(),
+            scope_path: vec![],
+            event: AgentEvent::TextDelta {
+                delta: "child".into(),
+            },
+        });
+        renderer.render(&ScopedAgentEvent {
+            scope_id: "primary".into(),
+            scope_path: vec![],
+            event: AgentEvent::TextDelta {
+                delta: "parent".into(),
+            },
+        });
+        let summary = renderer.finish();
+        assert_eq!(summary.discovered_scopes.len(), 2);
+        assert!(renderer.states.contains_key("primary"));
+        assert!(!renderer.states.contains_key("primary/sub:child-1"));
     }
 }

@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 #[cfg(feature = "comms")]
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 
 /// Configuration for spawning a sub-agent with comms
 #[cfg(feature = "comms")]
@@ -114,6 +115,36 @@ pub fn create_fork_session(parent_session: &Session, fork_prompt: &str) -> Sessi
     }));
 
     session
+}
+
+fn spawn_scoped_forwarder(
+    mut child_event_rx: mpsc::Receiver<AgentEvent>,
+    scoped_tx: mpsc::Sender<ScopedAgentEvent>,
+    parent_scope_path: Arc<Vec<StreamScopeFrame>>,
+    child_agent_id: String,
+    child_label: String,
+) -> tokio::task::JoinHandle<()> {
+    let mut base_scope_path = if parent_scope_path.is_empty() {
+        vec![StreamScopeFrame::Primary {
+            session_id: "unknown".to_string(),
+        }]
+    } else {
+        (*parent_scope_path).clone()
+    };
+    base_scope_path.push(StreamScopeFrame::SubAgent {
+        agent_id: child_agent_id,
+        tool_call_id: None,
+        label: Some(child_label),
+    });
+
+    tokio::spawn(async move {
+        while let Some(event) = child_event_rx.recv().await {
+            let scoped = ScopedAgentEvent::new(base_scope_path.clone(), event);
+            if scoped_tx.send(scoped).await.is_err() {
+                break;
+            }
+        }
+    })
 }
 
 /// Set up the comms infrastructure for a child agent
@@ -373,27 +404,14 @@ pub async fn spawn_sub_agent_dyn(
     // Spawn the agent execution task
     tokio::spawn(async move {
         let (result, forwarder_task) = if let Some(scoped_tx) = scoped_event_tx {
-            let (child_event_tx, mut child_event_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
-            let parent_scope = parent_scope_path.clone();
-            let child_agent_id = child_agent_id.clone();
-            let child_label = child_label.clone();
-            let forwarder = tokio::spawn(async move {
-                while let Some(event) = child_event_rx.recv().await {
-                    let mut scoped = if parent_scope.is_empty() {
-                        ScopedAgentEvent::from_agent_event_primary("unknown", event)
-                    } else {
-                        ScopedAgentEvent::new(parent_scope.clone(), event)
-                    };
-                    scoped = scoped.append_scope(StreamScopeFrame::SubAgent {
-                        agent_id: child_agent_id.clone(),
-                        tool_call_id: None,
-                        label: Some(child_label.clone()),
-                    });
-                    if scoped_tx.send(scoped).await.is_err() {
-                        break;
-                    }
-                }
-            });
+            let (child_event_tx, child_event_rx) = mpsc::channel::<AgentEvent>(64);
+            let forwarder = spawn_scoped_forwarder(
+                child_event_rx,
+                scoped_tx,
+                Arc::new(parent_scope_path.clone()),
+                child_agent_id.clone(),
+                child_label.clone(),
+            );
 
             let result = if host_mode {
                 #[cfg(feature = "comms")]

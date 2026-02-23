@@ -797,8 +797,9 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
-        #[cfg_attr(not(feature = "skills"), allow(unused_variables))]
-        skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        #[cfg_attr(not(feature = "skills"), allow(unused_variables))] skill_engine: Option<
+            Arc<meerkat_core::skills::SkillRuntime>,
+        >,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         self.build_builtin_dispatcher_with_skills_internal(
             store,
@@ -825,8 +826,9 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
-        #[cfg_attr(not(feature = "skills"), allow(unused_variables))]
-        skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        #[cfg_attr(not(feature = "skills"), allow(unused_variables))] skill_engine: Option<
+            Arc<meerkat_core::skills::SkillRuntime>,
+        >,
         #[cfg_attr(not(feature = "sub-agents"), allow(unused_variables))]
         sub_agent_scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
         #[cfg_attr(not(feature = "sub-agents"), allow(unused_variables))]

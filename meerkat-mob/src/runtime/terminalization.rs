@@ -326,6 +326,17 @@ mod tests {
             Ok(self.events.read().await.clone())
         }
 
+        async fn append_batch(
+            &self,
+            events: Vec<NewMobEvent>,
+        ) -> Result<Vec<MobEvent>, crate::error::MobError> {
+            let mut results = Vec::with_capacity(events.len());
+            for event in events {
+                results.push(self.append(event).await?);
+            }
+            Ok(results)
+        }
+
         async fn clear(&self) -> Result<(), crate::error::MobError> {
             self.events.write().await.clear();
             Ok(())

@@ -119,6 +119,9 @@ Do not conflate the two: mob tool availability is a surface behavior, backend is
 rkat "What is Rust?"                     # "run" is the default subcommand
 rkat run "What is Rust?"                 # equivalent explicit form
 rkat --realm team-alpha run "Create a todo app" --enable-builtins --enable-shell --stream -v
+rkat resume last "keep going"             # resume most recent session
+rkat resume 019c8b99 "continue"          # resume by short prefix
+rkat continue "next step"                # shortcut for resume last
 rkat --realm team-alpha resume sid_abc123 "Now add error handling"
 # Batch context: pipe finite content as context
 cat document.txt | rkat run "Summarize this document"

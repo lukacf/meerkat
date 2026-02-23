@@ -267,6 +267,9 @@ jobs:
             meerkat-rpc
             meerkat-rest
             meerkat
+            meerkat-mob
+            meerkat-mob-mcp
+            rkat
           )
           tmp_cfg="$(mktemp)"
           cat > "$tmp_cfg" <<EOF
@@ -286,6 +289,9 @@ jobs:
           meerkat-rest = { path = "$GITHUB_WORKSPACE/meerkat-rest" }
           meerkat-contracts = { path = "$GITHUB_WORKSPACE/meerkat-contracts" }
           meerkat = { path = "$GITHUB_WORKSPACE/meerkat" }
+          meerkat-mob = { path = "$GITHUB_WORKSPACE/meerkat-mob" }
+          meerkat-mob-mcp = { path = "$GITHUB_WORKSPACE/meerkat-mob-mcp" }
+          rkat = { path = "$GITHUB_WORKSPACE/meerkat-cli" }
           EOF
           for c in "${crates[@]}"; do
             if [[ "$DRY_RUN" == "true" ]]; then

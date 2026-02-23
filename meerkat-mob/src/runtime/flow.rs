@@ -673,7 +673,7 @@ impl FlowEngine {
     async fn select_targets(&self, step: &FlowStepSpec) -> Vec<MeerkatId> {
         let mut matching = self
             .handle
-            .list_meerkats()
+            .list_members()
             .await
             .into_iter()
             .filter(|entry| entry.profile == step.role)

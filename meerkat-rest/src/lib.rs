@@ -980,6 +980,7 @@ async fn create_session(
         override_shell: req.enable_shell,
         override_subagents: req.enable_subagents,
         override_memory: req.enable_memory,
+        override_mob: None,
         preload_skills: None,
         realm_id: Some(state.realm_id.clone()),
         instance_id: state.instance_id.clone(),
@@ -1106,6 +1107,7 @@ async fn continue_session(
                     shell: state.enable_shell,
                     comms: false,
                     subagents: false,
+                    mob: false,
                     active_skills: None,
                 });
 
@@ -1157,6 +1159,7 @@ async fn continue_session(
                 override_shell: Some(tooling.shell),
                 override_subagents: Some(tooling.subagents),
                 override_memory: None,
+                override_mob: Some(tooling.mob),
                 preload_skills: None,
                 peer_meta: req
                     .peer_meta

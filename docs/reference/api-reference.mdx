@@ -85,13 +85,14 @@ Mob runtime APIs live primarily in:
 | Method | Purpose |
 |------|---------|
 | `status()` | Current lifecycle state |
-| `roster().await` / `list_meerkats().await` | Membership inspection |
-| `spawn_member_ref(...).await` | Spawn member |
-| `spawn_many_member_refs(Vec<SpawnMemberSpec>).await` | Batch spawn members in parallel (results preserve input order) |
-| `spawn_many(Vec<SpawnMemberSpec>).await` | Batch spawn compatibility API returning session IDs |
+| `roster().await` / `list_members().await` | Membership inspection |
+| `spawn(...).await` | Spawn member (returns `MemberRef`) |
+| `spawn_many(Vec<SpawnMemberSpec>).await` | Batch spawn members in parallel (results preserve input order) |
+| `spawn_with_backend(...).await` | Spawn member with explicit backend override |
+| `spawn_with_options(...).await` | Spawn member with runtime mode and backend overrides |
 | `retire(...).await` | Retire member |
 | `wire(...).await` / `unwire(...).await` | Peer graph mutation |
-| `external_turn(...).await` / `internal_turn(...).await` | Turn dispatch |
+| `send_message(...).await` / `internal_turn(...).await` | Turn dispatch |
 | `stop().await` / `resume().await` / `complete().await` / `destroy().await` | Lifecycle transitions |
 | `list_flows()` / `run_flow(...).await` / `flow_status(...).await` / `cancel_flow(...).await` | Flow runtime control |
 | `task_create(...).await` / `task_update(...).await` / `task_list().await` | Shared task board |
@@ -118,16 +119,16 @@ async fn orchestrate(
         .await?;
 
     handle
-        .spawn_member_ref(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
         .await?;
     handle
-        .spawn_member_ref(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
+        .spawn(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
         .await?;
     handle
         .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
         .await?;
     handle
-        .external_turn(MeerkatId::from("lead-1"), "Coordinate work.".to_string())
+        .send_message(MeerkatId::from("lead-1"), "Coordinate work.".to_string())
         .await?;
 
     let run_id = handle

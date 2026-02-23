@@ -132,16 +132,16 @@ async fn run_mob(
         .await?;
 
     handle
-        .spawn_member_ref(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
         .await?;
     handle
-        .spawn_member_ref(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
+        .spawn(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
         .await?;
     handle
         .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
         .await?;
     handle
-        .external_turn(
+        .send_message(
             MeerkatId::from("lead-1"),
             "Coordinate a short task plan.".to_string(),
         )
@@ -168,7 +168,7 @@ async fn in_memory_demo() -> Result<(), Box<dyn std::error::Error>> {
     let state = MobMcpState::new_in_memory();
     let mob_id = state.mob_create_prefab(Prefab::Pipeline).await?;
     state
-        .mob_spawn(
+        .mob_spawn_spec(
             &mob_id,
             ProfileName::from("lead"),
             MeerkatId::from("lead-1"),

@@ -33,7 +33,7 @@ impl Supervisor {
 
         let escalation_target = self
             .handle
-            .list_meerkats()
+            .list_members()
             .await
             .into_iter()
             .find(|entry| entry.profile == supervisor_role)
@@ -72,7 +72,7 @@ impl Supervisor {
     pub async fn force_reset(&self) -> Result<(), MobError> {
         let ids = self
             .handle
-            .list_meerkats()
+            .list_members()
             .await
             .into_iter()
             .map(|entry| entry.meerkat_id)

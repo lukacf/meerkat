@@ -281,6 +281,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             shell: false,
             comms: false,
             subagents: false,
+            mob: false,
             active_skills: None,
         },
         host_mode: false,

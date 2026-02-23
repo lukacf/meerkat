@@ -326,7 +326,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 let member_ref = self
                     .handle
-                    .spawn_member_ref_with_runtime_mode_and_backend(
+                    .spawn_with_options(
                         ProfileName::from(args.profile),
                         MeerkatId::from(args.meerkat_id),
                         args.initial_message,
@@ -360,7 +360,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                         )
                     })
                     .collect::<Vec<_>>();
-                let results = self.handle.spawn_many_member_refs(specs).await;
+                let results = self.handle.spawn_many(specs).await;
                 let results = results
                     .into_iter()
                     .map(|result| match result {
@@ -408,7 +408,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                 Self::encode_result(call, json!({"ok": true}))
             }
             TOOL_LIST_MEERKATS => {
-                let meerkats = self.handle.list_meerkats().await;
+                let meerkats = self.handle.list_members().await;
                 let meerkats = meerkats
                     .into_iter()
                     .map(|entry| {

@@ -92,10 +92,10 @@ Primary crates:
 
 ### `MobHandle` API
 
-- inspection: `status()`, `definition()`, `roster()`, `list_meerkats()`, `events()`
-- membership: `spawn_member_ref*`, `spawn_many*`, `retire`
+- inspection: `status()`, `definition()`, `roster()`, `list_members()`, `events()`
+- membership: `spawn()`, `spawn_with_backend()`, `spawn_with_options()`, `spawn_many()`, `retire`
 - graph: `wire`, `unwire`
-- turns: `external_turn`, `internal_turn`
+- turns: `send_message`, `internal_turn`
 - lifecycle: `stop`, `resume`, `complete`, `destroy`
 - flows: `list_flows`, `run_flow`, `flow_status`, `cancel_flow`
 - tasks: `task_create`, `task_update`, `task_list`, `task_get`
@@ -122,16 +122,16 @@ async fn run_mob(
         .await?;
 
     handle
-        .spawn_member_ref(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
         .await?;
     handle
-        .spawn_member_ref(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
+        .spawn(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
         .await?;
     handle
         .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
         .await?;
     handle
-        .external_turn(
+        .send_message(
             MeerkatId::from("lead-1"),
             "Coordinate a short execution plan.".to_string(),
         )
@@ -158,7 +158,7 @@ async fn in_memory() -> Result<(), Box<dyn std::error::Error>> {
     let mob_id = state.mob_create_prefab(Prefab::Pipeline).await?;
 
     state
-        .mob_spawn(
+        .mob_spawn_spec(
             &mob_id,
             ProfileName::from("lead"),
             MeerkatId::from("lead-1"),
@@ -219,7 +219,7 @@ Runtime-mode behavior is shared across these surfaces because dispatch comes fro
 - Autonomous members then start host loops explicitly from mob actor lifecycle control.
 - First model work is triggered by real dispatch (`external_turn`, peer message, or flow step).
 - Concurrent spawns provision in parallel; actor finalization stays serialized for deterministic state transitions.
-- `spawn_many_member_refs(Vec<SpawnMemberSpec>)` and `spawn_many(Vec<SpawnMemberSpec>)` expose this as first-class runtime API.
+- `spawn_many(Vec<SpawnMemberSpec>)` exposes this as first-class runtime API.
 
 ## Multi-surface examples
 
